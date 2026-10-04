@@ -497,6 +497,23 @@ def lane_pair_seed(ctx: Ctx) -> int:
         return 0
 
 
+def lane_handbets(ctx: Ctx) -> int:
+    """THE HAND-ORDER QUEUE (Oct 3 2026 — Rob: "everything runs on the box").
+    Bet Sheets enqueues create/cancel/repeg rows in `hand_orders`; this lane
+    claims each one atomically and runs it from the house IP. Engine
+    app._hand_orders_tick. Nothing here decides a bet — it only executes
+    what Rob tapped on the site."""
+    import app as _app
+    if ctx.dry_run:
+        return 0
+    stats = _app._hand_orders_tick(ctx.sb, ctx.now, worker="box") or {}
+    if stats.get("claimed"):
+        log.info("handbets: %s", stats)
+    if ctx.detail is not None and isinstance(stats, dict):
+        ctx.detail.update(stats)
+    return int(stats.get("claimed") or 0)
+
+
 REGISTRY: dict[str, Callable[[Ctx], int]] = {
     "pm_snapshot":    lane_pm_snapshot,
     "paperlog":       lane_paperlog,
@@ -512,6 +529,7 @@ REGISTRY: dict[str, Callable[[Ctx], int]] = {
     "scalp":          lane_scalp,
     "pair":           lane_pair,
     "pair_seed":      lane_pair_seed,
+    "handbets":       lane_handbets,
 }
 
 

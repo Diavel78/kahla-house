@@ -167,6 +167,7 @@
         .si .q { font-size: 11.5px; color: var(--muted); margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
         .si .q.bad { color: var(--red); }
         .si .q.ok { color: var(--green); }
+        .si .q.wait { color: var(--amber); }
         .si .x { background: none; border: 0; color: var(--muted); font-size: 16px; cursor: pointer; padding: 0 4px; }
         .slip-f { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 0 0; border-top: 1px solid var(--line); margin-top: 4px; }
         .slip-f label { color: var(--muted); font-size: 12px; }
@@ -397,7 +398,7 @@
     let _slipOpen = false;
     try { const s = JSON.parse(localStorage.getItem(SLIP_KEY) || '{}'); _slip = s.items || []; if (s.contracts) document.getElementById('contracts').value = s.contracts; } catch (e) {}
     function saveSlip() {
-        try { localStorage.setItem(SLIP_KEY, JSON.stringify({ items: _slip.map(i => ({ ...i, q: undefined })), contracts: document.getElementById('contracts').value })); } catch (e) {}
+        try { localStorage.setItem(SLIP_KEY, JSON.stringify({ items: _slip.map(i => ({ ...i, q: (i.q && i.q.queued) ? i.q : undefined })), contracts: document.getElementById('contracts').value })); } catch (e) {}
     }
     function toggleSlip(force) {
         _slipOpen = (force === undefined) ? !_slipOpen : !!force;
@@ -435,7 +436,8 @@
                     q = '<div class="q ok">' + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
                       + 'touch ' + i.q.price_c + '¢' + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + '</div>';
                     cost += n * i.q.price_c / 100; known++;
-                } else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
+                } else if (i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'queued on the box — placing…') + '</div>';
+                else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
             }
             return '<div class="si"><div class="lab"><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport) + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                  + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
@@ -473,11 +475,39 @@
             });
             saveSlip(); renderSlip(); renderGames();
             if (!preview) {
-                toast(placed ? ('Placed ' + placed + ' bet' + (placed === 1 ? '' : 's') + (_slip.length ? ' · ' + _slip.length + ' stayed on the slip' : '')) : 'Nothing placed — see the slip', !placed);
+                const qn = _slip.filter(i => i.q && i.q.queued).length;
+                toast(placed ? ('Placed ' + placed + ' bet' + (placed === 1 ? '' : 's') + (qn ? ' · ' + qn + ' still placing on the box' : '') + (_slip.length - qn ? ' · ' + (_slip.length - qn) + ' stayed on the slip' : ''))
+                             : (qn ? qn + ' queued on the box — placing…' : 'Nothing placed — see the slip'), !(placed || qn));
                 loadBets();
+                if (qn) pollQueue();
             }
         } catch (e) { toast('Failed: ' + e, true); }
         finally { _busy = false; bp.textContent = 'Place bets'; renderSlip(); }
+    }
+    // Queued items (the box is placing them): poll until done/failed.
+    let _pollT = null;
+    async function pollQueue() {
+        clearTimeout(_pollT);
+        const qi = _slip.filter(i => i.q && i.q.queued && i.q.queue_id);
+        if (!qi.length) return;
+        try {
+            const r = await authFetch('/api/bet-sheets/queue?ids=' + qi.map(i => i.q.queue_id).join(','));
+            const d = r ? await r.json().catch(() => null) : null;
+            if (d && d.ok) {
+                let placed = 0;
+                _slip = _slip.filter(i => {
+                    if (!(i.q && i.q.queued)) return true;
+                    const row = d.rows[String(i.q.queue_id)];
+                    if (!row) return true;
+                    if (row.state === 'done' && (row.result || {}).ok !== false) { placed++; return false; }
+                    if (row.state === 'failed') { i.q = { ok: false, reason: row.error || 'failed' }; }
+                    return true;
+                });
+                if (placed) { toast('Placed ' + placed + ' bet' + (placed === 1 ? '' : 's') + ' from the box'); loadBets(); }
+                saveSlip(); renderSlip(); renderGames();
+            }
+        } catch (e) {}
+        if (_slip.some(i => i.q && i.q.queued)) _pollT = setTimeout(pollQueue, 3000);
     }
     function quoteSlip() { postSlip(true); }
     function placeSlip() {
@@ -607,14 +637,14 @@
         if (!confirm('Cancel this resting order?')) return;
         const r = await authFetch('/api/bet-sheets/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pick_id: id }) });
         const d = r ? await r.json().catch(() => null) : null;
-        toast(d && d.ok ? (d.deleted ? 'Cancelled — nothing had filled' : 'Cancelled · ' + d.held + ' filled stays') : 'Cancel failed: ' + ((d && d.error) || (r && r.status)), !(d && d.ok));
-        loadBets();
+        toast(d && d.ok ? (d.queued ? 'Cancel queued on the box…' : d.deleted ? 'Cancelled — nothing had filled' : 'Cancelled · ' + d.held + ' filled stays') : 'Cancel failed: ' + ((d && d.error) || (r && r.status)), !(d && d.ok));
+        loadBets(); if (d && d.queued) setTimeout(loadBets, 12000);
     }
     async function repegBet(id) {
         const r = await authFetch('/api/bet-sheets/repeg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pick_id: id }) });
         const d = r ? await r.json().catch(() => null) : null;
-        toast(d && d.ok ? (d.moved ? 'Moved ' + d.from_c + '¢ → ' + d.price_c + '¢' : (d.note || 'no move')) : 'Re-peg failed: ' + ((d && d.error) || (r && r.status)), !(d && d.ok));
-        loadBets();
+        toast(d && d.ok ? (d.queued ? 'Re-peg queued on the box…' : d.moved ? 'Moved ' + d.from_c + '¢ → ' + d.price_c + '¢' : (d.note || 'no move')) : 'Re-peg failed: ' + ((d && d.error) || (r && r.status)), !(d && d.ok));
+        loadBets(); if (d && d.queued) setTimeout(loadBets, 12000);
     }
     // ---------- one compact row per market: PICK · model · edge (Rob, Oct 3
     // 2026: "picks and model on same line… less wasted space"), with the
@@ -808,6 +838,7 @@
         renderSlip();
         load();
         loadBets();
+        pollQueue();
         setInterval(load, 15 * 60 * 1000);
         setInterval(() => { if (!_busy) loadBets(); }, 90 * 1000);   // never race a submit for the venue's read budget
     });

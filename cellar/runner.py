@@ -64,6 +64,7 @@ class Runner:
         self._threads: dict[str, threading.Thread] = {}
         self._started: dict[str, float] = {}     # lane -> t0 of the live run
         self._stuck: set[str] = set()            # lanes already reported stuck
+        self._quiet_last: dict[str, float] = {}  # quiet lanes: last idle tick recorded
         self._renewer: threading.Thread | None = None
         self._wsfeed = None                      # cellar.wsfeed.WsFeed | None
 
@@ -194,7 +195,15 @@ class Runner:
         try:
             work = int(fn(ctx) or 0)
             ms = int((time.time() - t0) * 1000)
-            log.info("lane %s ok work=%d %dms", name, work, ms)
+            if spec.quiet and work == 0:
+                # a quiet lane's idle ticks: one tick row a minute, so the
+                # health card still sees a heartbeat without the flood
+                last = self._quiet_last.get(name, 0.0)
+                if time.time() - last < 60.0:
+                    return
+                self._quiet_last[name] = time.time()
+            else:
+                log.info("lane %s ok work=%d %dms", name, work, ms)
             self.record(name, claimed=True, ok=True, work=work, ms=ms,
                         detail=_clip(ctx.detail))
         except Exception as e:

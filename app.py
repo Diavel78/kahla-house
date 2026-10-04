@@ -12331,10 +12331,13 @@ def api_bet_sheets_place():
     """body {items:[{key, sport, away, home, event_start, market_type
     ml|spread|total, side, line, label}], contracts, preview}. Resolves each
     item to its venue rung + touch; preview=true stops there. Otherwise
-    places a post-only MANUAL order at the touch per item, SERIALLY, and
-    logs each placed bet as a bot_picks row. Per-item results — a failure
-    carries `reason` and the slip keeps the item (Rob: "if it fails, it
-    stays on the betslip with a reason")."""
+    every resolved item is QUEUED in `hand_orders` and the BOX places it
+    from the house IP (Rob, Oct 3 2026: "everything runs on the box" — the
+    venue geo-checks the order sender and flagged a Vercel IP as a proxy);
+    this request waits for the results, and an item the box has not
+    finished by the deadline comes back `queued` for the page to poll.
+    Per-item results — a failure carries `reason` and the slip keeps the
+    item (Rob: "if it fails, it stays on the betslip with a reason")."""
     body = request.get_json(silent=True) or {}
     items = body.get("items") or []
     preview = bool(body.get("preview"))
@@ -12351,72 +12354,356 @@ def api_bet_sheets_place():
     except Exception as e:
         return jsonify({"ok": False, "error": f"client: {e}"}), 500
     sb = get_supabase()
-    results, placed = [], 0
-    t_end = _time.monotonic() + 55.0          # under the Vercel function budget
+    results, queued = [], []
+    t_end = _time.monotonic() + 50.0          # under the Vercel function budget
     for n, it in enumerate(items):
         key = (it or {}).get("key")
-        if _time.monotonic() > t_end:
+        if _time.monotonic() > t_end - 15.0:
             results.append({"key": key, "ok": False, "reason": "out of time — submit again"})
             continue
         if n:
             _time.sleep(0.6)                  # pace the venue reads — a burst earns a 429
         res = _bet_sheet_resolve(client, it or {})
-        book = res.pop("_book", None)
+        res.pop("_book", None)
         res["key"] = key
         if not res.get("ok") or preview:
             results.append(res)
             continue
-        out, _st = _manual_order_place(client, res["slug"], res["synthetic"],
-                                       res["price_c"], contracts, it.get("event_start"),
-                                       book=book)
-        if not out.get("ok"):
-            res.update({"ok": False, "reason": out.get("error") or "order failed"})
+        if sb is None:
+            res.update({"ok": False, "reason": "database unavailable"})
             results.append(res)
             continue
-        res.update({"order_id": out.get("order_id"), "state": out.get("state"),
-                    "resting": out.get("resting"), "cost": out.get("cost"),
-                    "contracts": contracts})
-        if not out.get("resting"):
-            res["warning"] = f"order sent but not resting (state {out.get('state') or 'unknown'}) — check the app"
-        placed += 1
-        # log it — the book must know about the bet from second one
-        pick_id = None
-        if sb is not None:
-            try:
-                mt = it.get("market_type")
-                mid = _bet_sheet_market_id(sb, str(it.get("sport")).upper(),
-                                           it.get("away"), it.get("home"), it.get("event_start"))
-                amer = _cents_to_american_py(res["price_c"])
-                blob = {"bet_sheet": True, "manual_web_bet": True,
-                        "pmm_slug": res["slug"], "pmm_synthetic": res["synthetic"],
-                        "order_id": out.get("order_id"), "contracts": contracts,
-                        "price_c": res["price_c"], "sheet_line": it.get("line"),
-                        "rung_line": res.get("rung_line"), "rung_why": res.get("rung_why"),
-                        "label": it.get("label"), "sport": str(it.get("sport")).upper(),
-                        "placed_at": datetime.now(timezone.utc).isoformat()}
-                row = {"asked_by": g.uid, "query_text": "bet sheet",
-                       "market_id": mid, "sport": str(it.get("sport")).upper(),
-                       "event_name": f"{it.get('away')} @ {it.get('home')}",
-                       "event_start": it.get("event_start"),
-                       "market_type": "moneyline" if mt == "ml" else mt,
-                       "side": it.get("side"), "entry_book": "POLYMARKET",
-                       "entry_price": amer,
-                       "entry_line": (float(res["rung_line"]) if mt != "ml"
-                                      and res.get("rung_line") is not None else None),
-                       "units": 1, "confidence": "low",
-                       "reasons": [f"Bet sheet — {contracts} contracts resting at {res['price_c']:g}¢"],
-                       "signal_blob": blob}
-                if mid is None:
-                    raise RuntimeError("no markets row")
-                ins = sb.table("bot_picks").insert(row).execute()
-                pick_id = (ins.data or [{}])[0].get("id")
-            except Exception as e:
-                res["warning"] = (res.get("warning") or "") + f" · pick log failed: {e}"[:160]
-                app.logger.warning("bet sheet pick log failed: %s", e)
-        res["pick_id"] = pick_id
+        row = {"op": "create", "slug": res["slug"], "synthetic": bool(res["synthetic"]),
+               "price_c": None,               # the placer joins the touch at placement time
+               "contracts": contracts, "event_start": it.get("event_start"),
+               "payload": {"item": it, "asked_by": g.uid, "contracts": contracts,
+                           "resolve": {k: res.get(k) for k in
+                                       ("slug", "synthetic", "rung_line", "rung_why",
+                                        "price_c", "ask_c", "event_title")}}}
+        try:
+            rid = _hand_order_enqueue(sb, row)
+        except Exception as e:
+            res.update({"ok": False, "reason": f"queue write failed: {e}"[:160]})
+            results.append(res)
+            continue
+        res["queue_id"] = rid
+        queued.append((rid, res))
+    # wait for the box (or run them here if no box claims them)
+    done = _hand_orders_wait(sb, [rid for rid, _ in queued], t_end) if queued else {}
+    placed = 0
+    for rid, res in queued:
+        out = done.get(rid)
+        if out is None:
+            res.update({"ok": False, "queued": True,
+                        "reason": "queued on the box — placing…"})
+        elif not out.get("ok"):
+            res.update({"ok": False, "reason": out.get("error") or "order failed"})
+        else:
+            res.update({k: out.get(k) for k in ("order_id", "state", "resting", "cost",
+                                                  "price_c", "pick_id", "warning", "via")
+                        if out.get(k) is not None})
+            res["contracts"] = contracts
+            placed += 1
         results.append(res)
     return jsonify({"ok": True, "preview": preview, "placed": placed,
                     "contracts": contracts, "results": results})
+
+
+# ══════════════════════════════════════════════════════════════════════
+# THE HAND-ORDER QUEUE (Oct 3 2026 — Rob: "They SHOULD be routed through
+# the box… everything runs on the box"). Polymarket's ORDER endpoint
+# geo-checks the sender; one create in six from Vercel that night came
+# back 403 "Your connection looks like a VPN or proxy". The box places
+# thousands of orders from the house IP and never sees it. So: the site
+# writes a `hand_orders` row (create / cancel / repeg), the box's
+# `handbets` lane claims it atomically (UPDATE … WHERE state='pending')
+# and runs it; the page's request waits for the result. If NO box claims
+# within _HAND_CLAIM_WAIT_S, Vercel claims the row itself and runs it —
+# the fallback, same atomic claim, so a row can never run twice. The
+# shared executor `_hand_order_execute` is the ONLY path that places a
+# hand bet, cancels one, or re-pegs one, whichever side runs it.
+# ══════════════════════════════════════════════════════════════════════
+_HAND_CLAIM_WAIT_S = 12.0     # the box lane polls every 10s
+_HAND_EXPIRE_S = 900.0        # a pending row nobody ran in 15 min fails, never places late
+_HAND_ENSURED = {"ok": False, "at": 0.0}
+
+
+def _hand_orders_ensure(sb) -> bool:
+    """The table exists? On the BOX, apply the DDL with psql when it does
+    not (the only machine with a direct Postgres); elsewhere just report."""
+    if _HAND_ENSURED["ok"]:
+        return True
+    if _time.monotonic() - _HAND_ENSURED["at"] < 30.0:
+        return False
+    _HAND_ENSURED["at"] = _time.monotonic()
+    try:
+        sb.table("hand_orders").select("id").limit(1).execute()
+        _HAND_ENSURED["ok"] = True
+        return True
+    except Exception as e:
+        msg = str(e)
+    if _CELLAR_SIDE == "cellar" and ("hand_orders" in msg or "PGRST205" in msg
+                                     or "schema cache" in msg):
+        ddl = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "kahla-scanner", "supabase", "hand_orders.sql")
+        psql = (os.environ.get("KAHLA_PSQL")
+                or "/Applications/Postgres.app/Contents/Versions/latest/bin/psql")
+        try:
+            import subprocess
+            r = subprocess.run([psql, os.environ.get("KAHLA_PGDB") or "kahla",
+                                "-v", "ON_ERROR_STOP=1", "-f", ddl],
+                               capture_output=True, text=True, timeout=30)
+            app.logger.warning("hand_orders: applied DDL rc=%s %s", r.returncode,
+                               (r.stderr or r.stdout or "")[-200:])
+            _time.sleep(2.0)
+            sb.table("hand_orders").select("id").limit(1).execute()
+            _HAND_ENSURED["ok"] = True
+            return True
+        except Exception as e2:
+            app.logger.warning("hand_orders: DDL apply failed: %s", e2)
+    else:
+        app.logger.warning("hand_orders: table probe failed: %s", msg[:160])
+    return False
+
+
+def _hand_order_enqueue(sb, row: dict) -> int:
+    r = {"op": row["op"], "state": "pending", "slug": row.get("slug"),
+         "synthetic": bool(row.get("synthetic")), "price_c": row.get("price_c"),
+         "contracts": row.get("contracts"), "event_start": row.get("event_start"),
+         "order_id": row.get("order_id"), "pick_id": row.get("pick_id"),
+         "payload": row.get("payload") or {}}
+    ins = sb.table("hand_orders").insert(r).execute()
+    return (ins.data or [{}])[0].get("id")
+
+
+def _hand_order_claim(sb, row_id, worker: str) -> bool:
+    """Atomic: UPDATE … WHERE id AND state='pending'. The returned rows say
+    whether WE won it (0 rows = someone else did)."""
+    try:
+        r = (sb.table("hand_orders")
+             .update({"state": "claimed", "worker": worker,
+                      "claimed_at": datetime.now(timezone.utc).isoformat()})
+             .eq("id", row_id).eq("state", "pending").execute())
+        return bool(r.data)
+    except Exception as e:
+        app.logger.warning("hand_orders: claim %s failed: %s", row_id, e)
+        return False
+
+
+def _hand_order_finish(sb, row_id, res: dict) -> None:
+    try:
+        sb.table("hand_orders").update({
+            "state": "done" if res.get("ok") else "failed",
+            "result": res, "error": (None if res.get("ok") else str(res.get("error") or "")[:300]),
+            "done_at": datetime.now(timezone.utc).isoformat()}).eq("id", row_id).execute()
+    except Exception as e:
+        app.logger.warning("hand_orders: finish %s failed: %s", row_id, e)
+
+
+def _hand_order_read(sb, ids: list) -> dict:
+    if not ids:
+        return {}
+    try:
+        rows = (sb.table("hand_orders").select("id,state,result,error,worker")
+                .in_("id", list(ids)).execute().data or [])
+    except Exception:
+        return {}
+    return {r["id"]: r for r in rows}
+
+
+def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int):
+    """The placed hand bet → a bot_picks row (so the resolver grades it and
+    the My bets strip shows it). Returns (pick_id, warning)."""
+    try:
+        mt = it.get("market_type")
+        sport = str(it.get("sport") or "").upper()
+        price_c = out.get("price_c")
+        mid = _bet_sheet_market_id(sb, sport, it.get("away"), it.get("home"), it.get("event_start"))
+        if mid is None:
+            raise RuntimeError("no markets row")
+        blob = {"bet_sheet": True, "manual_web_bet": True,
+                "pmm_slug": rs.get("slug"), "pmm_synthetic": bool(rs.get("synthetic")),
+                "order_id": out.get("order_id"), "contracts": contracts,
+                "price_c": price_c, "quoted_c": rs.get("price_c"),
+                "sheet_line": it.get("line"), "rung_line": rs.get("rung_line"),
+                "rung_why": rs.get("rung_why"), "label": it.get("label"), "sport": sport,
+                "placed_via": out.get("via"),
+                "placed_at": datetime.now(timezone.utc).isoformat()}
+        row = {"asked_by": uid, "query_text": "bet sheet",
+               "market_id": mid, "sport": sport,
+               "event_name": f"{it.get('away')} @ {it.get('home')}",
+               "event_start": it.get("event_start"),
+               "market_type": "moneyline" if mt == "ml" else mt,
+               "side": it.get("side"), "entry_book": "POLYMARKET",
+               "entry_price": _cents_to_american_py(price_c),
+               "entry_line": (float(rs["rung_line"]) if mt != "ml"
+                              and rs.get("rung_line") is not None else None),
+               "units": 1, "confidence": "low",
+               "reasons": [f"Bet sheet — {contracts} contracts resting at {price_c:g}¢"],
+               "signal_blob": blob}
+        ins = sb.table("bot_picks").insert(row).execute()
+        return (ins.data or [{}])[0].get("id"), None
+    except Exception as e:
+        app.logger.warning("bet sheet pick log failed: %s", e)
+        return None, f"pick log failed: {e}"[:160]
+
+
+def _hand_order_execute(sb, client, row: dict, worker: str) -> dict:
+    """Run one queued hand order. THE ONLY placement path for Bet Sheets,
+    box or Vercel. A create with price_c=None joins the touch NOW."""
+    op = row.get("op")
+    pl = row.get("payload") or {}
+    if op == "create":
+        slug, syn = row.get("slug"), bool(row.get("synthetic"))
+        price_c = row.get("price_c")
+        book = _bet_sheet_book(client, slug)
+        if book is None:
+            return {"ok": False, "error": "book unreadable — try again"}
+        if price_c is None:
+            s_bid, _s_ask = _manual_side_book(book, syn)
+            if s_bid is None:
+                return {"ok": False, "error": "no bids on this market yet"}
+            price_c = s_bid
+        out, _st = _manual_order_place(client, slug, syn, price_c, row.get("contracts"),
+                                       row.get("event_start"), book=book)
+        if not out.get("ok"):
+            return {"ok": False, "error": out.get("error") or "order failed"}
+        res = {"ok": True, "via": worker, "order_id": out.get("order_id"),
+               "state": out.get("state"), "resting": out.get("resting"),
+               "cost": out.get("cost"), "price_c": out.get("price_c")}
+        if not out.get("resting"):
+            res["warning"] = (f"order sent but not resting (state {out.get('state') or 'unknown'})"
+                              " — check the app")
+        contracts = int(row.get("contracts") or pl.get("contracts") or 0)
+        pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), pl.get("item") or {},
+                                            pl.get("resolve") or {}, res, contracts)
+        res["pick_id"] = pick_id
+        if warn:
+            res["warning"] = ((res.get("warning") or "") + " · " + warn).strip(" ·")
+        return res
+    if op == "cancel":
+        out, _st = _bet_sheet_cancel_exec(sb, client, row.get("pick_id"))
+        out["via"] = worker
+        return out
+    if op == "repeg":
+        out, _st = _bet_sheet_repeg_exec(sb, client, row.get("pick_id"))
+        out["via"] = worker
+        return out
+    return {"ok": False, "error": f"unknown op {op}"}
+
+
+def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
+    """THE BOX LANE: claim pending rows oldest-first and run them. Rows
+    older than _HAND_EXPIRE_S are failed, never placed late."""
+    stats = {"claimed": 0, "done": 0, "failed": 0, "expired": 0}
+    if not _hand_orders_ensure(sb):
+        stats["gate"] = "no_table"
+        return stats
+    try:
+        rows = (sb.table("hand_orders").select("*").eq("state", "pending")
+                .order("created_at").limit(max_n).execute().data or [])
+    except Exception as e:
+        stats["gate"] = f"read_failed: {e}"[:120]
+        return stats
+    client = None
+    for row in rows:
+        try:
+            age = (now - datetime.fromisoformat(
+                str(row.get("created_at")).replace("Z", "+00:00"))).total_seconds()
+        except Exception:
+            age = 0.0
+        if age > _HAND_EXPIRE_S:
+            if _hand_order_claim(sb, row["id"], worker):
+                _hand_order_finish(sb, row["id"], {"ok": False, "error": "expired — nobody ran it in 15 min"})
+                stats["expired"] += 1
+            continue
+        if not _hand_order_claim(sb, row["id"], worker):
+            continue
+        stats["claimed"] += 1
+        try:
+            if client is None:
+                client = get_client()
+            res = _hand_order_execute(sb, client, row, worker)
+        except Exception as e:
+            res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
+        _hand_order_finish(sb, row["id"], res)
+        stats["done" if res.get("ok") else "failed"] += 1
+        _time.sleep(0.5)
+    return stats
+
+
+def _hand_orders_wait(sb, ids: list, deadline: float) -> dict:
+    """VERCEL'S SIDE: wait for the box to claim + finish the rows. Rows no
+    box has claimed after _HAND_CLAIM_WAIT_S are claimed and run HERE (the
+    fallback). Returns {id: result} for every row that finished in time."""
+    done: dict = {}
+    if not ids:
+        return done
+    pending = set(ids)
+    t_claim = _time.monotonic() + _HAND_CLAIM_WAIT_S
+    client = None
+    while pending and _time.monotonic() < deadline:
+        rows = _hand_order_read(sb, list(pending))
+        for rid in list(pending):
+            r = rows.get(rid)
+            if r and r.get("state") in ("done", "failed"):
+                res = dict(r.get("result") or {})
+                res.setdefault("ok", r["state"] == "done")
+                if r["state"] == "failed" and not res.get("error"):
+                    res["error"] = r.get("error") or "failed"
+                res.setdefault("via", r.get("worker"))
+                done[rid] = res
+                pending.discard(rid)
+        if not pending:
+            break
+        if _time.monotonic() >= t_claim:
+            # nobody on the box took them — run them here, claim-first
+            for rid in list(pending):
+                r = rows.get(rid)
+                if r and r.get("state") != "pending":
+                    continue                  # the box has it; keep waiting
+                if not _hand_order_claim(sb, rid, "vercel"):
+                    continue
+                full = None
+                try:
+                    full = (sb.table("hand_orders").select("*").eq("id", rid)
+                            .limit(1).execute().data or [None])[0]
+                except Exception:
+                    pass
+                try:
+                    if client is None:
+                        client = get_client()
+                    res = _hand_order_execute(sb, client, full or {"op": "create"}, "vercel")
+                except Exception as e:
+                    res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
+                _hand_order_finish(sb, rid, res)
+                done[rid] = res
+                pending.discard(rid)
+            if not pending:
+                break
+        _time.sleep(1.0)
+    return done
+
+
+@app.route("/api/bet-sheets/queue")
+@admin_required
+def api_bet_sheets_queue():
+    """The page polls queued items here: ?ids=1,2,3 → {id: {state, result,
+    error, via}}."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    try:
+        ids = [int(x) for x in (request.args.get("ids") or "").split(",") if x.strip()]
+    except ValueError:
+        return jsonify({"ok": False, "error": "bad ids"}), 400
+    rows = _hand_order_read(sb, ids[:50])
+    out = {}
+    for rid, r in rows.items():
+        res = dict(r.get("result") or {})
+        out[str(rid)] = {"state": r.get("state"), "result": res,
+                         "error": r.get("error") or res.get("error"), "via": r.get("worker")}
+    return jsonify({"ok": True, "rows": out})
 
 
 _BS_CUR_C: dict = {}          # slug -> (mono_ts, our-side mid c) — the My bets poll's price cache
@@ -12583,65 +12870,48 @@ def _bet_sheet_pick(sb, pick_id):
     return r, blob
 
 
-@app.route("/api/bet-sheets/cancel", methods=["POST"])
-@admin_required
-def api_bet_sheets_cancel():
+def _bet_sheet_cancel_exec(sb, client, pick_id):
     """Cancel a resting sheet order. Nothing filled → the pick row goes too;
-    a partial fill keeps the pick at the held size."""
-    body = request.get_json(silent=True) or {}
-    sb = get_supabase()
-    r, blob = _bet_sheet_pick(sb, body.get("pick_id")) if sb else (None, None)
+    a partial fill keeps the pick at the held size. (payload, status)."""
+    r, blob = _bet_sheet_pick(sb, pick_id)
     if not r:
-        return jsonify({"ok": False, "error": "pick not found"}), 404
+        return {"ok": False, "error": "pick not found"}, 404
     oid, slug, syn = blob.get("order_id"), blob.get("pmm_slug"), bool(blob.get("pmm_synthetic"))
-    try:
-        client = get_client()
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"client: {e}"}), 500
     gone = True
     if oid:
         gone, _ = _bet_sheet_cancel(client, oid, slug)
         if not gone:
-            return jsonify({"ok": False, "error": "venue did not cancel it — check the app"}), 502
+            return {"ok": False, "error": "venue did not cancel it — check the app"}, 502
     pos = _pmm_positions_raw(client, fresh=True)
     held = _bet_sheet_pick_side_held((pos or {}).get(slug), syn) if pos is not None else None
     if held is not None and held <= 0.0 and r.get("status") == "pending":
         sb.table("bot_picks").delete().eq("id", r["id"]).execute()
         _probe_log({"bet_sheet_cancel": True, "pick_id": r["id"], "slug": slug, "deleted": True})
-        return jsonify({"ok": True, "deleted": True})
+        return {"ok": True, "deleted": True}, 200
     nb = {**blob, "cancelled_at": datetime.now(timezone.utc).isoformat(), "order_id": None}
     if held:
         nb["filled_qty"] = round(held, 2)
     sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
     _probe_log({"bet_sheet_cancel": True, "pick_id": r["id"], "slug": slug, "held": held})
-    return jsonify({"ok": True, "deleted": False, "held": held})
+    return {"ok": True, "deleted": False, "held": held}, 200
 
 
-@app.route("/api/bet-sheets/repeg", methods=["POST"])
-@admin_required
-def api_bet_sheets_repeg():
+def _bet_sheet_repeg_exec(sb, client, pick_id):
     """Move a resting sheet order back to the touch: cancel → verify →
     create fresh at the current best bid (never orders.modify — the Aug 2/16
     landmine). A failed re-create is reported loud and stamped on the pick."""
-    body = request.get_json(silent=True) or {}
-    sb = get_supabase()
-    r, blob = _bet_sheet_pick(sb, body.get("pick_id")) if sb else (None, None)
+    r, blob = _bet_sheet_pick(sb, pick_id)
     if not r:
-        return jsonify({"ok": False, "error": "pick not found"}), 404
+        return {"ok": False, "error": "pick not found"}, 404
     oid, slug, syn = blob.get("order_id"), blob.get("pmm_slug"), bool(blob.get("pmm_synthetic"))
     if not oid or not slug:
-        return jsonify({"ok": False, "error": "no resting order on this bet"}), 400
-    try:
-        client = get_client()
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"client: {e}"}), 500
-    book = _pmm_book(client, slug)
+        return {"ok": False, "error": "no resting order on this bet"}, 400
+    book = _bet_sheet_book(client, slug)
     if book is None:
-        return jsonify({"ok": False, "error": "book unreadable — try again"}), 503
+        return {"ok": False, "error": "book unreadable — try again"}, 503
     s_bid, s_ask = _manual_side_book(book, syn)
     if s_bid is None:
-        return jsonify({"ok": False, "error": "no bids on this market — nothing to join"}), 409
-    # size = what is still unfilled on the resting order
+        return {"ok": False, "error": "no bids on this market — nothing to join"}, 409
     leaves = None
     for o in (_pmm_open_orders_raw(client, fresh=True) or []):
         if o.get("id") == oid:
@@ -12649,26 +12919,63 @@ def api_bet_sheets_repeg():
             break
     qty = int(round(float(leaves))) if leaves else int(blob.get("contracts") or 0)
     if qty < 1:
-        return jsonify({"ok": False, "error": "nothing left unfilled to move"}), 409
+        return {"ok": False, "error": "nothing left unfilled to move"}, 409
     if abs(float(blob.get("price_c") or -1) - s_bid) < 0.01:
-        return jsonify({"ok": True, "moved": False, "price_c": s_bid, "note": "already at the touch"})
+        return {"ok": True, "moved": False, "price_c": s_bid, "note": "already at the touch"}, 200
     gone, _ = _bet_sheet_cancel(client, oid, slug)
     if not gone:
-        return jsonify({"ok": False, "error": "venue did not cancel the old order — nothing moved"}), 502
+        return {"ok": False, "error": "venue did not cancel the old order — nothing moved"}, 502
     out, _st = _manual_order_place(client, slug, syn, s_bid, qty, r.get("event_start"), book=book)
     if not out.get("ok"):
         nb = {**blob, "order_id": None, "order_lost": True,
               "repeg_error": out.get("error"), "repeg_at": datetime.now(timezone.utc).isoformat()}
         sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
-        return jsonify({"ok": False, "error": "old order cancelled but the new one failed: "
-                        + str(out.get("error")) + " — the bet is OFF the book"}), 502
+        return {"ok": False, "error": "old order cancelled but the new one failed: "
+                + str(out.get("error")) + " — the bet is OFF the book"}, 502
     nb = {**blob, "order_id": out.get("order_id"), "price_c": s_bid, "contracts": qty,
           "repegged_from_c": blob.get("price_c"),
           "repeg_at": datetime.now(timezone.utc).isoformat()}
     sb.table("bot_picks").update({"signal_blob": nb,
                                   "entry_price": _cents_to_american_py(s_bid)}).eq("id", r["id"]).execute()
-    return jsonify({"ok": True, "moved": True, "price_c": s_bid, "from_c": blob.get("price_c"),
-                    "order_id": out.get("order_id"), "resting": out.get("resting")})
+    return {"ok": True, "moved": True, "price_c": s_bid, "from_c": blob.get("price_c"),
+            "order_id": out.get("order_id"), "resting": out.get("resting")}, 200
+
+
+def _bet_sheet_queue_op(op: str):
+    """cancel / repeg routes: validate the pick, queue the op for the box,
+    wait (Vercel fallback after _HAND_CLAIM_WAIT_S), answer."""
+    body = request.get_json(silent=True) or {}
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    r, blob = _bet_sheet_pick(sb, body.get("pick_id"))
+    if not r:
+        return jsonify({"ok": False, "error": "pick not found"}), 404
+    row = {"op": op, "pick_id": r["id"], "slug": blob.get("pmm_slug"),
+           "synthetic": bool(blob.get("pmm_synthetic")), "order_id": blob.get("order_id"),
+           "payload": {"asked_by": g.uid}}
+    try:
+        rid = _hand_order_enqueue(sb, row)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"queue write failed: {e}"[:160]}), 500
+    done = _hand_orders_wait(sb, [rid], _time.monotonic() + 45.0)
+    out = done.get(rid)
+    if out is None:
+        return jsonify({"ok": True, "queued": True, "queue_id": rid,
+                        "note": "queued on the box — it will run shortly"})
+    return jsonify(out), (200 if out.get("ok") else 502)
+
+
+@app.route("/api/bet-sheets/cancel", methods=["POST"])
+@admin_required
+def api_bet_sheets_cancel():
+    return _bet_sheet_queue_op("cancel")
+
+
+@app.route("/api/bet-sheets/repeg", methods=["POST"])
+@admin_required
+def api_bet_sheets_repeg():
+    return _bet_sheet_queue_op("repeg")
 
 
 @app.route("/api/polymarket/cancel-gridiron")
@@ -29373,6 +29680,9 @@ _CELLAR_LEASE_ENFORCED = (os.environ.get("CELLAR_LEASE_ENFORCED") or "").strip()
 #                Vercel twin; every pair converges every lap, one account read)
 #   "pair_seed" -> _pair_seed_tick (Sep 26 2026 — the seeder on its OWN lane
 #                and clock; DRY until machine_flags `pair_seed_enabled`)
+#   "handbets" -> _hand_orders_tick (Oct 3 2026 — Bet Sheets' orders, queued
+#                by the site, placed from the house IP; box-only, Vercel is
+#                the claim-first fallback)
 # NOT YET GATED (all on the "alerts" lane, all in the paperlog route body):
 #   _tg_flush, _bet_alerts, _opener_watchdog. Each is individually near-
 #   idempotent (per-bet markers, send-and-mark, cooldowns) so double-running

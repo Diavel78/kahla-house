@@ -134,6 +134,10 @@ class Lane:
     # ttl_s, which is right for every lane whose ticks are short.
     stuck_s: int | None = None
     note: str = ""
+    # QUIET (Oct 3 2026): a fast poll lane (the hand-order queue, every 10s)
+    # would write ~8,600 idle tick rows a day. A quiet lane records its idle
+    # ticks at most once a minute; work and failures are always recorded.
+    quiet: bool = False
 
 
 # The full roster. Cadences match today's Vercel behavior:
@@ -215,6 +219,15 @@ ALL_LANES: dict[str, Lane] = {
         # seconds is why pair laps overran 300s all week. Own lane, own clock.
         Lane("pair_seed",      300,   900, writes_money=True, stuck_s=600,
              note="middle-pair seeder — prices the board, seats new pairs"),
+        # THE HAND-ORDER QUEUE (Oct 3 2026 — Rob: "everything runs on the
+        # box"): Bet Sheets on Vercel enqueues create/cancel/repeg rows in
+        # `hand_orders`; this lane claims and places them from the house IP
+        # (the venue geo-checks the order sender and flags some Vercel IPs
+        # as a proxy). 10s poll; Vercel waits ~12s for a claim before it
+        # falls back to placing itself. Add `handbets` to CELLAR_LANES in
+        # the money daemon's .env.
+        Lane("handbets",        10,    60, writes_money=True, stuck_s=120,
+             quiet=True, note="hand bets queued by the site — placed from the box"),
     ]
 }
 

@@ -156,8 +156,8 @@ def test_lane_registry_matches_config() -> None:
     extra = [n for n in lanes.REGISTRY if n not in config.ALL_LANES]
     check("no orphan lane implementations", not extra, f"orphans {extra}")
     money = {n for n, l in config.ALL_LANES.items() if l.writes_money}
-    check("money lanes are exactly opener/repeg/harvest/scalp/pair/pair_seed",
-          money == {"opener", "repeg", "harvest", "scalp", "pair", "pair_seed"},
+    check("money lanes are exactly opener/repeg/harvest/scalp/pair/pair_seed/handbets",
+          money == {"opener", "repeg", "harvest", "scalp", "pair", "pair_seed", "handbets"},
           f"got {sorted(money)}")
     bad = [n for n, l in config.ALL_LANES.items() if l.ttl_s <= l.every_s]
     check("every TTL exceeds its cadence", not bad, f"too tight: {bad}")
@@ -2501,6 +2501,74 @@ def test_bet_sheet_rung() -> None:
     check("empty ladder → reason, no crash", e is None and why)
 
 
+def test_hand_orders_queue() -> None:
+    """THE HAND-ORDER QUEUE (Oct 3 2026): Vercel enqueues, the box claims
+    atomically; with no box, Vercel claims the row itself (claim-first, so
+    a row never runs twice) and the executor runs exactly once."""
+    import app as _app
+
+    class _Q:
+        def __init__(self, db, table): self.db, self.t, self.f, self.op, self.payload = db, table, [], None, None
+        def select(self, *a): self.op = "select"; return self
+        def insert(self, row): self.op, self.payload = "insert", row; return self
+        def update(self, row): self.op, self.payload = "update", row; return self
+        def eq(self, k, v): self.f.append((k, v)); return self
+        def in_(self, k, vs): self.f.append((k, set(vs))); return self
+        def order(self, *a, **k): return self
+        def limit(self, n): return self
+        def _match(self, r):
+            return all((r.get(k) in v) if isinstance(v, set) else (r.get(k) == v) for k, v in self.f)
+        def execute(self):
+            rows = self.db.setdefault(self.t, [])
+            class R: pass
+            out = R()
+            if self.op == "insert":
+                row = dict(self.payload); row["id"] = len(rows) + 1; rows.append(row); out.data = [row]
+            elif self.op == "update":
+                hit = [r for r in rows if self._match(r)]
+                for r in hit: r.update(self.payload)
+                out.data = [dict(r) for r in hit]
+            else:
+                out.data = [dict(r) for r in rows if self._match(r)]
+            return out
+
+    class _SB:
+        def __init__(self): self.db = {}
+        def table(self, t): return _Q(self.db, t)
+
+    sb = _SB()
+    sb.db["hand_orders"] = []
+    saved = (_app._HAND_ENSURED["ok"], _app._HAND_CLAIM_WAIT_S, _app.get_client, _app._hand_order_execute)
+    ran = []
+    try:
+        _app._HAND_ENSURED["ok"] = True
+        _app._HAND_CLAIM_WAIT_S = 0.0
+        _app.get_client = lambda: object()
+        _app._hand_order_execute = lambda sb_, c, row, worker: (ran.append((row.get("id"), worker)) or {"ok": True, "order_id": "X1"})
+        rid = _app._hand_order_enqueue(sb, {"op": "create", "slug": "s", "synthetic": False,
+                                            "contracts": 1, "payload": {"asked_by": "u"}})
+        check("enqueue returns an id", rid == 1)
+        check("row starts pending", sb.db["hand_orders"][0]["state"] == "pending")
+        import time as _t
+        done = _app._hand_orders_wait(sb, [rid], _t.monotonic() + 5.0)
+        check("no box → Vercel claims and runs it", done.get(rid, {}).get("ok") is True and ran == [(1, "vercel")])
+        check("row is done with the result", sb.db["hand_orders"][0]["state"] == "done"
+              and (sb.db["hand_orders"][0]["result"] or {}).get("order_id") == "X1")
+        # a row the box already claimed: Vercel must NOT run it
+        rid2 = _app._hand_order_enqueue(sb, {"op": "create", "slug": "s2", "contracts": 1})
+        check("box claim wins the atomic update", _app._hand_order_claim(sb, rid2, "box") is True)
+        check("second claim loses", _app._hand_order_claim(sb, rid2, "vercel") is False)
+        done2 = _app._hand_orders_wait(sb, [rid2], _t.monotonic() + 1.5)
+        check("Vercel waits on a box-claimed row and never runs it", rid2 not in done2 and ran == [(1, "vercel")])
+        # the box lane: claims pending rows and runs them
+        rid3 = _app._hand_order_enqueue(sb, {"op": "create", "slug": "s3", "contracts": 1, "created_at": "2099-01-01T00:00:00+00:00"})
+        from datetime import datetime as _dt, timezone as _tz
+        st = _app._hand_orders_tick(sb, _dt.now(_tz.utc), worker="box")
+        check("box tick claims + runs the pending row", st.get("claimed") == 1 and st.get("done") == 1 and ran[-1] == (3, "box"))
+    finally:
+        _app._HAND_ENSURED["ok"], _app._HAND_CLAIM_WAIT_S, _app.get_client, _app._hand_order_execute = saved
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
@@ -2517,7 +2585,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_orders_queue):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
