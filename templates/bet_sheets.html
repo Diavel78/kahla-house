@@ -445,8 +445,9 @@
             if (i.op) {
                 const b = _betsById[i.pick_id], o = (b && b.order) || {};
                 const rest = (o.price_c != null ? o.price_c : i.resting_c), tch = (b && b.touch_c != null) ? b.touch_c : i.touch_c;
+                const lv = (o.leaves != null) ? o.leaves : i.leaves;
                 let line = i.op === 'repeg'
-                    ? ('resting' + (rest != null ? ' @ ' + rest + '¢' : '') + (tch != null ? ' → touch ' + tch + '¢' : '') + (rest != null && tch != null && Math.abs(rest - tch) < 0.01 ? ' (already there)' : ''))
+                    ? ('move ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + (tch != null ? ' → touch ' + tch + '¢' : '') + (rest != null && tch != null && Math.abs(rest - tch) < 0.01 ? ' (already there)' : '') + ' · keeps its size')
                     : ('pull the resting order' + (o.leaves != null ? ' · ' + Math.round(o.leaves) + ' unfilled' : ''));
                 if (i.q && i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'queued on the box…') + '</div>';
                 else if (i.q && i.q.ok === false) q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
@@ -466,7 +467,7 @@
                  + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
         }).join('');
         const nb = _slip.filter(i => !i.op).length, no = _slip.length - nb;
-        document.getElementById('slipCost').textContent = nb ? (known ? '$' + cost.toFixed(2) + (known < nb ? ' (' + known + '/' + nb + ' quoted)' : '') : n + ' contracts each') : (no ? no + ' action' + (no === 1 ? '' : 's') : '');
+        document.getElementById('slipCost').textContent = nb ? (known ? '$' + cost.toFixed(2) + (known < nb ? ' (' + known + '/' + nb + ' quoted)' : '') : n + ' contracts each (new bets only)') : (no ? no + ' action' + (no === 1 ? '' : 's') + ' · own sizes' : '');
         document.getElementById('btnPlace').disabled = !_slip.length;
         document.getElementById('btnQuote').disabled = !nb;
         if (!_busy) document.getElementById('btnPlace').textContent = submitLabel();
