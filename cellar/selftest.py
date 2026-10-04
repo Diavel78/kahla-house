@@ -2618,6 +2618,8 @@ def test_slug_side_line() -> None:
     assert f("aec-nfl-tb-sea-2026-10-05", False) == ("moneyline", "away", None)
     assert f("aec-nfl-tb-sea-2026-10-05", True) == ("moneyline", "home", None)
     assert f("astatc-nfl-foo-2026-10-05-pyd-abc-gte250", False) is None
+    assert _app._intent_short("ORDER_INTENT_BUY_SHORT") == "BUY_SHORT" and _app._intent_short("BUY_LONG") == "BUY_LONG"
+    assert _app._intent_short("ORDER_INTENT_SELL_LONG").startswith("SELL") and _app._intent_short(None) == ""
     e = _app._event_slug_from_market
     assert e("aec-cfb-nevada-ndkst-2026-10-17") == "cfb-nevada-ndkst-2026-10-17"
     assert e("asc-cfb-neb-ind-2026-10-04-neg-9pt5") == "cfb-neb-ind-2026-10-04"
