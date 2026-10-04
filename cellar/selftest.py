@@ -2557,11 +2557,39 @@ def test_hand_move_plan() -> None:
     assert ours[0][5] == 180000 and ours[1][5] == 40000, ours
     assert abs(ours[1][1] - 54.0) < 1e-9 and abs(ours[1][3] - 54.5) < 1e-9, ours[1]
     assert orient(yes, False)[0][5] == 130000
+    # PER-RUNG (Rob: "watch four rungs below the departure rung… which rung
+    # has the biggest increase, that's our rejoin spot"): rows carry the
+    # our-side ladder as element 6; relocation is measured over P-0.5..P-2.0.
+    def lrow(ts, lad, ac=55.5, aq=100000):
+        return (ts, lad[0][0], lad[0][1], ac, aq, sum(q for _, q in lad[:3]), lad)
+    L0 = [(55.0, 150000), (54.5, 20000), (54.0, 10000), (53.5, 5000), (53.0, 40000)]
+    lbase = [lrow(N - 80, L0), lrow(N - 50, L0), lrow(N - 20, L0)]
+    # 10% to 54.5, 70% to 54, 10% to 53.5 → move, rejoin at 54
+    L1 = [(54.5, 35000), (54.0, 115000), (53.5, 20000), (53.0, 40000)]
+    v, d = f(lbase + [lrow(N - 2, L1)], 55.0, 1.0, N, 70)
+    assert v == "cancel" and d["why"] == "move" and d["rejoin_c"] == 54.0, (v, d)
+    assert d["below_before_q"] == 75000 and d["below_now_q"] == 210000, d
+    # the size went FOUR rungs down (53.0 = 2¢ under 55) — still inside the window
+    L2 = [(54.5, 20000), (54.0, 10000), (53.5, 5000), (53.0, 140000)]
+    v, d = f(lbase + [lrow(N - 2, L2)], 55.0, 1.0, N, 70)
+    assert v == "cancel" and d["rejoin_c"] == 53.0, (v, d)
+    # the size reappeared 3¢ down (52.0) — outside the four-rung window → vanish
+    L3 = [(54.5, 20000), (54.0, 10000), (53.5, 5000), (53.0, 40000), (52.0, 140000)]
+    v, d = f(lbase + [lrow(N - 2, L3)], 55.0, 1.0, N, 70)
+    assert v == "stay" and d["why"] == "vanish" and d["rejoin_c"] is None, (v, d)
+    # stragglers (us) still at 55, size relocated → move, rejoin at the gaining rung not the touch
+    L4 = [(55.0, 10), (54.5, 25000), (54.0, 120000), (53.5, 5000), (53.0, 40000)]
+    v, d = f(lbase + [lrow(N - 2, L4)], 55.0, 10.0, N, 70)
+    assert v == "cancel" and d["rejoin_c"] == 54.0, (v, d)
+    # synthetic NO ladder: YES asks become our bids, inverted
+    yes_l = (N - 2, 44.0, 1000, 45.0, 90000, 1000, 95000, [(44.0, 1000)], [(45.0, 90000), (45.5, 20000)])
+    o = orient([yes_l], True)[0]
+    assert abs(o[1] - 55.0) < 1e-9 and o[6] == [(55.0, 90000), (54.5, 20000)], o
     # calm: mid held a tick for the window; moving mid is not calm; empty window is not calm
     assert calm([row(N - 50, 55.0, 1, 55.5, 1), row(N - 20, 55.0, 1, 55.5, 1), row(N - 2, 55.0, 1, 55.5, 1)], N)
     assert not calm([row(N - 50, 55.0, 1, 55.5, 1), row(N - 2, 54.0, 1, 54.5, 1)], N)
     assert not calm([row(N - 500, 55.0, 1, 55.5, 1)], N)
-    print("  PASS  hand line-move planner (collapse + relocation → cancel; vanish stays) + calm")
+    print("  PASS  hand line-move planner (collapse + 4-rung relocation → cancel at the gaining rung; vanish stays) + calm")
 
 
 def test_hand_start_plan() -> None:
