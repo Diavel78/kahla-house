@@ -12786,10 +12786,10 @@ def api_bet_sheets_mine():
             started = ev_dt <= now
         except Exception:
             started = False
-        cur_c = None
+        cur_c, touch_c = None, None
         _cc = _BS_CUR_C.get(slug) if slug else None
         if _cc and _time.monotonic() - _cc[0] < _BS_CUR_C_TTL_S:
-            cur_c = _cc[1]                    # a fresh read this minute — don't re-ask the venue
+            cur_c, touch_c = _cc[1], _cc[2]   # a fresh read this minute — don't re-ask the venue
         elif (r.get("status") == "pending" and slug and client is not None
                 and venue_ok and reads < 30 and not _venue_rl_active()):
             if reads:
@@ -12798,13 +12798,14 @@ def api_bet_sheets_mine():
             reads += 1
             if book:
                 b, a = _manual_side_book(book, syn)
+                touch_c = b                   # our-side best bid = the touch a resting bid must match
                 if b is not None and a is not None:
                     cur_c = round((b + a) / 2.0, 1)
                 else:
                     cur_c = b if b is not None else a
-                _BS_CUR_C[slug] = (_time.monotonic(), cur_c)
+                _BS_CUR_C[slug] = (_time.monotonic(), cur_c, touch_c)
             elif _cc:
-                cur_c = _cc[1]                # stale beats blank while the venue is cranky
+                cur_c, touch_c = _cc[1], _cc[2]   # stale beats blank while the venue is cranky
         price_c = blob.get("price_c")
         contracts = blob.get("contracts")
         st = r.get("status") or "pending"
@@ -12833,7 +12834,13 @@ def api_bet_sheets_mine():
                        if o.get("price_yes") is not None else None}
                       if resting else {"resting": False}),
             "held": round(held, 2), "filled_qty": filled_qty,
-            "cur_c": cur_c, "status": st, "pnl_units": r.get("pnl_units"),
+            "cur_c": cur_c, "touch_c": touch_c,
+            # OUTBID = someone bid past our resting price (Rob, Oct 3 2026:
+            # "does it show if they aren't at touch? or do I just have to guess")
+            "outbid": bool(resting and touch_c is not None and o.get("price_yes") is not None
+                           and ((100 - float(o["price_yes"]) * 100) if syn else float(o["price_yes"]) * 100)
+                           < float(touch_c) - 0.01),
+            "status": st, "pnl_units": r.get("pnl_units"),
             "pnl_usd": pnl_usd, "result_score": r.get("result_score"),
             "venue_ok": venue_ok,
         })

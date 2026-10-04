@@ -621,7 +621,11 @@
                 l2 = (b.pnl_usd != null ? money(b.pnl_usd) + ' · ' : '') + (b.filled_qty != null ? b.filled_qty : (b.contracts || '?')) + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price));
             } else {
                 const held = b.held || 0;
-                if (o.resting) chip += '<span class="chip c-rest">RESTING ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '') + '</span>';
+                if (o.resting) {
+                    chip += '<span class="chip c-rest">RESTING ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '') + '</span>';
+                    if (b.outbid) chip += '<span class="chip c-lost">OUTBID · touch ' + b.touch_c + '¢</span>';
+                    else if (b.touch_c != null && o.price_c != null && Math.abs(o.price_c - b.touch_c) < 0.01) chip += '<span class="chip c-fill">AT TOUCH</span>';
+                }
                 if (held > 0) chip += '<span class="chip c-fill">FILLED ' + held + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price)) + '</span>';
                 if (!o.resting && !(held > 0)) chip += '<span class="chip c-off">' + (b.started ? 'IN PLAY' : 'OFF THE BOOK') + '</span>';
                 l2 = (b.cur_c != null ? 'now ' + b.cur_c + '¢ (' + am(_probToAmer(b.cur_c / 100)) + ')' : 'no live quote') + (b.started ? ' · in play' : '');
