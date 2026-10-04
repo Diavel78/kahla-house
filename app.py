@@ -12890,6 +12890,7 @@ from collections import deque as _deque
 TOUCH_TAPE: dict = {}
 TOUCH_WATCH_SLUGS: set = set()
 _TOUCH_TAPE_KEY = "touch_tape"
+_TOUCH_TAPE_LEVELS = 6                 # per-rung ladder depth kept on each tape row (the relocation read)
 _TOUCH_TAPE_MAX = 900
 
 
@@ -12901,7 +12902,9 @@ def _touch_tape_record(slug: str, bids: list, asks: list) -> None:
         bb = bids[0] if bids else (None, 0.0)
         ba = asks[0] if asks else (None, 0.0)
         row = (round(_time.time(), 2), bb[0], round(bb[1], 1), ba[0], round(ba[1], 1),
-               round(sum(q for _, q in bids[:3]), 1), round(sum(q for _, q in asks[:3]), 1))
+               round(sum(q for _, q in bids[:3]), 1), round(sum(q for _, q in asks[:3]), 1),
+               [(p, round(q, 1)) for p, q in bids[:_TOUCH_TAPE_LEVELS]],   # 7: bid ladder
+               [(p, round(q, 1)) for p, q in asks[:_TOUCH_TAPE_LEVELS]])   # 8: ask ladder
         dq = TOUCH_TAPE.get(slug)
         if dq is None:
             dq = TOUCH_TAPE[slug] = _deque(maxlen=_TOUCH_TAPE_MAX)
@@ -13078,6 +13081,7 @@ _HAND_MOVE_COLLAPSE_PCT = 70.0     # our-side bid size at the touch, off its 60-
 _HAND_MOVE_BASE_S = 90.0           # baseline window [now-90, now-10]
 _HAND_MOVE_RECENT_S = 10.0
 _HAND_MOVE_STALE_S = 30.0          # the newest frame must be this fresh
+_HAND_MOVE_WINDOW_C = 2.0           # the relocation window: this far under the departure rung (4 half-cent rungs)
 _HAND_MOVE_RELOCATE_PCT = 60.0     # …and at least this much of it must re-post BELOW the old touch (Rob: "I'm the 10% that gets fucked" — lean loose, get off the book)
 _HAND_MOVE_CALM_S = 300.0          # sit out this long before rejoining
 _HAND_MOVE_CALM_WIN_S = 60.0       # …and the mid must have held ±1 tick this long
@@ -13101,11 +13105,14 @@ def _hand_side_rows(samples, syn: bool):
         # tape's bids[:3] / asks[:3] sums) — the relocation read.
         b3 = r[5] if len(r) > 5 and r[5] is not None else (bq or 0.0)
         a3 = r[6] if len(r) > 6 and r[6] is not None else (aq or 0.0)
+        bl = r[7] if len(r) > 7 and r[7] else None
+        al = r[8] if len(r) > 8 and r[8] else None
         if syn:
+            lad = [((100.0 - p), q) for p, q in al] if al else None   # YES asks = our bids, inverted
             out.append((ts, (100.0 - ac) if ac is not None else None, aq or 0.0,
-                        (100.0 - bc) if bc is not None else None, bq or 0.0, a3 or 0.0))
+                        (100.0 - bc) if bc is not None else None, bq or 0.0, a3 or 0.0, lad))
         else:
-            out.append((ts, bc, bq or 0.0, ac, aq or 0.0, b3 or 0.0))
+            out.append((ts, bc, bq or 0.0, ac, aq or 0.0, b3 or 0.0, list(bl) if bl else None))
     return out
 
 
@@ -13135,6 +13142,20 @@ def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: flo
     def d3(r):
         return (r[5] if len(r) > 5 and r[5] is not None else r[2]) or 0.0
 
+    def lad(r):
+        return r[6] if len(r) > 6 and r[6] else None
+
+    def rungs_below(r, P):
+        """{rung: qty} for the rungs within _HAND_MOVE_WINDOW_C under P (four
+        half-cent rungs: 49.5/49/48.5/48 off a 50 departure)."""
+        out = {}
+        for p, q in (lad(r) or []):
+            if p is None or P is None:
+                continue
+            if P - _HAND_MOVE_WINDOW_C - 1e-9 <= p < P - 1e-9:
+                out[round(float(p), 3)] = out.get(round(float(p), 3), 0.0) + (q or 0.0)
+        return out
+
     def ours_excl(r):
         q = r[2] or 0.0
         if our_price_c is not None and r[1] is not None and abs(r[1] - our_price_c) < 0.01:
@@ -13143,14 +13164,36 @@ def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: flo
     hi_row = max(base, key=ours_excl)
     hi = ours_excl(hi_row)
     P = hi_row[1]
-    below_before = max(0.0, d3(hi_row) - (hi_row[2] or 0.0))
     bc = last[1]
+    rejoin_c, rung_inc = None, {}
+    if lad(hi_row) is not None and lad(last) is not None and P is not None:
+        # PER-RUNG (Rob, Oct 4 2026: "watch four rungs below the departure
+        # rung… see which rung has the biggest increase, and that's our
+        # rejoin spot"). Relocation = growth across those rungs; the rung
+        # that gained the most is where we sit back down.
+        bef, now_ = rungs_below(hi_row, P), rungs_below(last, P)
+        below_before, below_now = sum(bef.values()), sum(now_.values())
+        for p in set(bef) | set(now_):
+            rung_inc[p] = round(now_.get(p, 0.0) - bef.get(p, 0.0), 1)
+        gains = {p: v for p, v in rung_inc.items() if v > 0}
+        if gains:
+            rejoin_c = max(gains, key=gains.get)
+    else:                                   # legacy rows: top-three sums only
+        below_before = max(0.0, d3(hi_row) - (hi_row[2] or 0.0))
+        if bc is None or P is None:
+            below_now = d3(last)
+        elif abs(bc - P) < 0.01:
+            below_now = max(0.0, d3(last) - (last[2] or 0.0))
+        elif bc < P:
+            below_now = d3(last)
+        else:
+            below_now = 0.0
     if bc is None or P is None:
-        cur, below_now = 0.0, d3(last)
+        cur = 0.0
     elif abs(bc - P) < 0.01:
-        cur, below_now = ours_excl(last), max(0.0, d3(last) - (last[2] or 0.0))
+        cur = ours_excl(last)
     elif bc < P:
-        cur, below_now = 0.0, d3(last)
+        cur = 0.0
     else:                                   # the touch IMPROVED — no collapse at P
         cur, below_now = hi, 0.0
     asks = [r[3] for r in base if r[3] is not None]
@@ -13164,6 +13207,7 @@ def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: flo
            "drop_pct": round(100.0 * (1.0 - cur / hi), 1) if hi > 0 else None,
            "below_before_q": round(below_before, 1), "below_now_q": round(below_now, 1),
            "relocated_pct": round(100.0 * moved / hi, 1) if hi > 0 else None,
+           "rejoin_c": rejoin_c, "rung_inc": dict(sorted(rung_inc.items(), reverse=True)),
            "ask_lo": ask_lo, "ask_now": ask_now, "bid_now": bc, "ask_down": ask_down}
     # THE MOVE IS COLLAPSE + RELOCATION (Rob, Oct 4 2026): "Bids don't just
     # go away. The bid size needs to collapse AND go back up one rung below
@@ -13271,6 +13315,16 @@ def _hand_move_tick(sb, client, now) -> dict:
                     touch, _a = _manual_side_book(bk, syn)
             if touch is None:
                 continue
+            # THE REJOIN SPOT is the rung the departed size moved TO (stamped
+            # at the cancel) — never above the current touch (we join, we
+            # don't lead), so a straggler bid left at 49.5 can't pull us up
+            # to be the next straggler.
+            dest = hold.get("rejoin_c")
+            if dest is not None:
+                try:
+                    touch = min(touch, float(dest))
+                except (TypeError, ValueError):
+                    pass
             anchor = blob.get("anchor_c", blob.get("price_c"))
             if anchor is not None and touch > float(anchor) + leash + 1e-9:
                 # the market ran away while we sat out — Rob's leash owns it
@@ -13287,6 +13341,7 @@ def _hand_move_tick(sb, client, now) -> dict:
                 out, code = {"ok": False, "error": str(e)[:160]}, 500
             acts += 1
             stamp = {"hand_move_rejoin": True, "pick_id": r["id"], "slug": slug, "touch_c": touch,
+                     "dest_c": dest,
                      "contracts": contracts, "sat_out_s": round(since, 1), "forced": forced,
                      "result": out, "http": code, "at": now.isoformat()}
             if out.get("ok") and out.get("order_id") and out.get("resting", True):
@@ -13344,7 +13399,7 @@ def _hand_move_tick(sb, client, now) -> dict:
             resume = datetime.fromtimestamp(now_ts + calm_s, tz=timezone.utc)
             nb = {**blob, "order_id": None,
                   "line_hold": {"at": now.isoformat(), "resume_at": resume.isoformat(),
-                                "from_c": price_c, "detail": det},
+                                "from_c": price_c, "rejoin_c": det.get("rejoin_c"), "detail": det},
                   "line_cancels": int(blob.get("line_cancels") or 0) + 1}
             nb.pop("chase_hold", None)
             sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
