@@ -2888,7 +2888,7 @@ def api_poly_touch():
                     continue
                 v2 = str(md.get("sportsMarketTypeV2") or "")
                 v1 = str(md.get("sportsMarketType") or "").lower()
-                if any(k in v1 for k in ("half", "quarter", "player", "first", "period", "team")):
+                if any(k in v1 for k in ("half", "quarter", "player", "first", "period")):
                     continue
                 if "-tt-" in sl:          # team total, not the game total
                     continue
