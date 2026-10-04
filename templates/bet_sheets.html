@@ -686,11 +686,12 @@
                 l2 = (b.pnl_usd != null ? money(b.pnl_usd) + ' · ' : '') + (b.filled_qty != null ? b.filled_qty : (b.contracts || '?')) + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price));
             } else {
                 const held = b.held || 0;
+                if (b.app) chip += '<span class="chip c-rest" title="placed in the Polymarket app; adopted off the account socket so it shows here' + (b.in_play ? ' — placed in-play: display only, re-peg it in the app' : '') + '">APP' + (b.in_play ? ' · LIVE' : '') + '</span>';
                 if (o.resting) {
                     chip += '<span class="chip c-rest">RESTING ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '') + '</span>';
                     const ch = b.chase || {}, hold = ch.hold;
                     if (hold && hold.touch_c != null) chip += '<span class="chip c-lost" title="the touch moved more than ' + (hold.leash_c != null ? hold.leash_c : 2) + '¢ past your last hand price — the box stopped chasing; re-peg to take the new price">MANUAL RE-PEG · touch ' + (b.touch_c != null ? b.touch_c : hold.touch_c) + '¢ · ' + (ch.anchor_c != null ? Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : 'past the leash') + '</span>';
-                    else if (b.outbid) chip += '<span class="chip c-lost">OUTBID · touch ' + b.touch_c + '¢ · chasing</span>';
+                    else if (b.outbid) chip += '<span class="chip c-lost">OUTBID · touch ' + b.touch_c + '¢ · ' + (b.in_play ? 're-peg in the app' : 'chasing') + '</span>';
                     else if (b.touch_c != null && o.price_c != null && Math.abs(o.price_c - b.touch_c) < 0.01) chip += '<span class="chip c-fill">AT TOUCH</span>';
                 }
                 if (!o.resting && b.line_hold) {

@@ -2592,6 +2592,24 @@ def test_hand_move_plan() -> None:
     print("  PASS  hand line-move planner (collapse + 4-rung relocation → cancel at the gaining rung; vanish stays) + calm")
 
 
+def test_slug_side_line() -> None:
+    """App adoption (Oct 4 2026): side/line off the venue slug convention
+    when the market question can't be read."""
+    import app as _app
+    f = _app._slug_side_line
+    assert f("asc-cfb-neb-ind-2026-10-04-neg-9pt5", False) == ("spread", "away", -9.5)
+    assert f("asc-cfb-neb-ind-2026-10-04-neg-9pt5", True) == ("spread", "home", 9.5)
+    assert f("asc-nfl-dal-hou-2026-10-04-pos-2pt5", False) == ("spread", "away", 2.5)
+    assert f("tsc-nfl-ne-buf-2026-10-04-total-49pt5", False) == ("total", "over", 49.5)
+    assert f("tsc-nhl-pit-phi-2026-09-30-6pt5", True) is None or f("tsc-nhl-pit-phi-2026-09-30-6pt5", True)[1] == "under"
+    assert f("aec-nfl-tb-sea-2026-10-05", False) == ("moneyline", "away", None)
+    assert f("aec-nfl-tb-sea-2026-10-05", True) == ("moneyline", "home", None)
+    assert f("astatc-nfl-foo-2026-10-05-pyd-abc-gte250", False) is None
+    assert _app._slug_sport("asc-cfb-neb-ind-2026-10-04-neg-9pt5") == "NCAAF"
+    assert _app._slug_sport("aec-nfl-tb-sea-2026-10-05") == "NFL"
+    print("  PASS  app-adoption slug side/line")
+
+
 def test_hand_start_plan() -> None:
     """The 'game started' rule (Oct 4 2026): both-side touch size 70% off
     its pre-start high, at or after the listed start, two frames, cancel."""
@@ -2741,7 +2759,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_start_plan, test_hand_move_plan, test_hand_orders_queue):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_hand_orders_queue):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

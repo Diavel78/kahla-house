@@ -13022,6 +13022,8 @@ def _hand_start_tick(sb, client, now) -> dict:
     for r in rows:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         slug, oid = blob.get("pmm_slug"), blob.get("order_id")
+        if blob.get("in_play"):
+            continue                                      # placed live in the app — not ours to cancel
         o = by_id.get(oid) if oid else None
         if not (slug and o and o.get("state") in _OPEN_ORDER_STATES):
             continue
@@ -13417,6 +13419,289 @@ def _hand_move_tick(sb, client, now) -> dict:
     return st
 
 
+# ── APP ADOPTION (Oct 4 2026, Rob: "I like to use the website to add my
+# bets, but for live betting I like to use the app… is there any way you can
+# show my bets on the bet sheet even if I make them on the app?") ──
+# The private socket is ACCOUNT-level (ORDER + POSITION), so an app-placed
+# order lands in the venue mirror like any other, flagged MANUAL. Every
+# handbets tick, each resting MANUAL BUY on a slug with NO pending pick
+# becomes a bet_sheet pick (`app_adopted`), priced at the app price (= the
+# anchor), so the My-bets strip shows it with OUTBID/leading, the Re-peg /
+# Cancel slip items work on it, and pre-game the chase + line-move rules
+# treat it exactly like a sheet bet. An order placed AFTER the listed start
+# is `in_play`: display + slip only (no chase, no start-cancel — the live
+# book has no pre-start tape and no maker-exit signature to read).
+# RETIRE: an adopted pick whose order is gone from the mirror with nothing
+# held on two consecutive ticks (fresh venue read on the second) was
+# cancelled in the app → the pick is deleted (the sheet cancel's rule).
+# Never a MANUAL order the pair engine owns, never an AUTOMATIC one (those
+# are the machine's or a sheet bet already carrying a pick).
+HAND_APP_ADOPT_ENABLED = True
+_HAND_APP_ADOPT_MAX = 3            # adoptions per tick (each is 1-2 venue reads)
+_HAND_APP_MISS: dict = {}          # pick_id -> monotonic of the first order-gone sighting
+_HAND_APP_MISS_S = 20.0            # second strike must be this much later
+
+
+def _slug_side_line(slug: str, syn: bool):
+    """(market_type, side, line) from the venue's slug convention alone:
+    asc = spread (pos-X = away +X, neg-X = away −X; a SHORT mirrors to home),
+    tsc = total (YES = over), aec = moneyline (YES = away). None when the
+    family is unknown. The venue question (`_classify_market`) is tried
+    FIRST by the caller — this is the fallback."""
+    m = re.match(r"^(asc|tsc|aec)-", slug or "")
+    if not m:
+        return None
+    fam = m.group(1)
+    if fam == "aec":
+        return "moneyline", ("home" if syn else "away"), None
+    sfx = _RUNG_SUFFIX_RE.search(slug)
+    if not sfx:
+        return None
+    v = float(sfx.group(2)) + (float(sfx.group(3)) / 10.0 if sfx.group(3) else 0.0)
+    if fam == "tsc":
+        return "total", ("under" if syn else "over"), v
+    if sfx.group(1) == "total":
+        return None
+    away_line = v if sfx.group(1) == "pos" else -v
+    return "spread", ("home" if syn else "away"), (-away_line if syn else away_line)
+
+
+def _slug_sport(slug: str):
+    for tok, sp in _SLUG_SPORT_TOKENS:
+        if tok in (slug or ""):
+            return sp
+    return None
+
+
+def _hand_app_market(sb, client, o: dict):
+    """The markets row an app order's game joins on: the football/UFC rent
+    key map first (no venue read), else the venue EVENT (title 'Away vs
+    Home' + startTime) → `_bet_sheet_market_id` (exact / fuzzy / mint).
+    Returns (market_row_dict, away, home) or (None, None, None)."""
+    slug = o.get("slug") or ""
+    mk = None
+    try:
+        mk = _football_slug_market(sb, slug)
+    except Exception:
+        mk = None
+    if mk and " @ " in (mk.get("event_name") or ""):
+        a, h = [x.strip() for x in mk["event_name"].split(" @ ", 1)]
+        return mk, a, h
+    ev_slug = o.get("event_slug")
+    sport = _slug_sport(slug)
+    if not (ev_slug and sport and client):
+        return None, None, None
+    try:
+        if _venue_rl_active() or not _venue_read_gate():
+            return None, None, None
+        import pmm_markets as _pmk
+        try:
+            ev = client.events.retrieve_by_slug(ev_slug)
+        except Exception as _e:
+            _venue_rl_trip(_e)
+            return None, None, None
+        ev = (ev or {}).get("event") if isinstance(ev, dict) and "event" in (ev or {}) else ev
+        title = str(_pmk._ev_get(ev, "title") or "")
+        start_raw = str(_pmk._ev_get(ev, "startTime") or "")
+        m_vs = re.split(r"\s+vs\.?\s+", title, maxsplit=1, flags=re.I)
+        if len(m_vs) != 2 or not start_raw:
+            return None, None, None
+        away, home = m_vs[0].strip(), m_vs[1].strip()
+        mid = _bet_sheet_market_id(sb, sport, away, home, start_raw)
+        if not mid:
+            return None, None, None
+        rows = (sb.table("markets").select("id,sport,event_name,event_start")
+                .eq("id", mid).limit(1).execute().data) or []
+        return (rows[0] if rows else None), away, home
+    except Exception as e:
+        app.logger.warning("app adopt: market resolve %s failed: %s", slug, str(e)[:80])
+        return None, None, None
+
+
+def _hand_app_pick_row(sb, client, owner_uid, o: dict, now) -> dict | None:
+    """bot_picks row for a resting MANUAL app order. None = can't book it
+    safely (unknown game / side) — leave it, retry next tick."""
+    slug = o.get("slug") or ""
+    syn = (o.get("intent") or "") == "BUY_SHORT"
+    py = o.get("price_yes")
+    if py is None:
+        return None
+    price_c = round(((1.0 - float(py)) if syn else float(py)) * 100.0, 1)
+    if not (0.5 <= price_c <= 99.5):
+        return None
+    mk, away, home = _hand_app_market(sb, client, o)
+    if not mk:
+        return None
+    mt = side = line = None
+    try:                                     # venue truth first (one read)
+        import pmm_markets as _pm
+        if not _venue_rl_active() and _venue_read_gate():
+            md = client.markets.retrieve_by_slug(slug)
+            md = (md or {}).get("market") if isinstance(md, dict) and "market" in (md or {}) else md
+            cl = _pm._classify_market(md, away, home) if md else None
+            if cl:
+                _mt, line, side = cl
+                if syn:
+                    side, line = _pm._inverse_side(_mt, side, line)
+                mt = "moneyline" if _mt == "ml" else _mt
+    except Exception as _e:
+        _venue_rl_trip(_e)
+        mt = side = line = None
+    if side is None:
+        sl = _slug_side_line(slug, syn)
+        if not sl:
+            return None
+        mt, side, line = sl
+    qty = float(o.get("qty") or 0.0) or float(o.get("leaves") or 0.0)
+    try:
+        ev_dt = datetime.fromisoformat(str(mk.get("event_start")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        ev_dt = None
+    in_play = bool(ev_dt and ev_dt.astimezone(timezone.utc) <= now)
+    title = o.get("title") or ""
+    label = title or (f"{(home if side == 'home' else away) if mt != 'total' else side} "
+                      f"{'' if line is None else ('%+g' % line if mt == 'spread' else '%g' % line)}").strip()
+    blob = {"bet_sheet": True, "app_adopted": True, "manual_app_bet": True,
+            "pmm_slug": slug, "pmm_synthetic": syn, "order_id": o.get("id"),
+            "contracts": qty, "price_c": price_c, "anchor_c": price_c,
+            "label": label, "sport": mk.get("sport"), "placed_via": "app",
+            "in_play": in_play, "venue_flag": "MANUAL",
+            "adopted_at": now.isoformat(), "order_created": o.get("created")}
+    amer = _cents_to_american_py(price_c)
+    return {"asked_by": owner_uid, "query_text": "app bet (adopted)",
+            "market_id": mk["id"], "sport": mk.get("sport"),
+            "event_name": mk.get("event_name"), "event_start": mk.get("event_start"),
+            "market_type": mt, "side": side, "entry_book": "POLYMARKET",
+            "entry_price": amer, "entry_line": line, "units": 1, "confidence": "low",
+            "reasons": [f"App bet — {qty:g} contracts resting at {price_c:g}¢"
+                        + (" (placed in-play)" if in_play else "")],
+            "signal_blob": blob}
+
+
+def _hand_app_adopt_tick(sb, client, now) -> dict:
+    """Every handbets tick: adopt resting MANUAL buys with no pick; retire
+    adopted picks whose order is gone with nothing held."""
+    st = {"cands": 0, "adopted": 0, "retired": 0, "skipped": {}}
+    if not (HAND_APP_ADOPT_ENABLED and _machine_flag("hand_app_adopt", True)):
+        st["gate"] = "disabled"
+        return st
+    owner = _kalshi_owner_uid()
+    if not owner:
+        st["gate"] = "needs_owner"
+        return st
+    t0 = _time.monotonic()
+    orders = _pmm_open_orders_raw(client, fresh=False) or []
+    by_id = {o["id"]: o for o in orders if o.get("id")}
+    try:
+        picks = (sb.table("bot_picks").select("id,signal_blob")
+                 .eq("status", "pending").limit(800).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    pending_slugs = set()
+    adopted_rows = []
+    for r in picks:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if b.get("pmm_slug"):
+            pending_slugs.add(b["pmm_slug"])
+        if b.get("app_adopted") and b.get("bet_sheet"):
+            adopted_rows.append((r, b))
+    try:
+        pair = _pair_slugs(sb)
+    except Exception:
+        pair = set()
+
+    def _skip(k):
+        st["skipped"][k] = st["skipped"].get(k, 0) + 1
+
+    # ── adopt ──
+    for o in orders:
+        if st["adopted"] >= _HAND_APP_ADOPT_MAX or _time.monotonic() - t0 > 20.0:
+            break
+        slug = o.get("slug") or ""
+        if not slug or o.get("state") not in _OPEN_ORDER_STATES:
+            continue
+        if not str(o.get("intent") or "").startswith("BUY"):
+            continue
+        if o.get("auto"):
+            continue                                   # API order — machine's or a sheet bet's
+        st["cands"] += 1
+        if slug in pending_slugs:
+            _skip("has_pick"); continue
+        if slug in pair:
+            _skip("pair_owned"); continue
+        row = _hand_app_pick_row(sb, client, owner, o, now)
+        if not row:
+            _skip("unresolved"); continue
+        try:
+            ins = sb.table("bot_picks").insert(row).execute()
+            pid = (ins.data or [{}])[0].get("id")
+        except Exception as e:
+            _skip("insert_failed")
+            app.logger.warning("app adopt insert %s failed: %s", slug, str(e)[:120])
+            continue
+        st["adopted"] += 1
+        pending_slugs.add(slug)
+        HAND_LIVE_SLUGS.add(slug)
+        try:
+            _probe_log({"hand_app_adopt": True, "pick_id": pid, "slug": slug,
+                        "order_id": o.get("id"), "price_c": row["signal_blob"]["price_c"],
+                        "contracts": row["signal_blob"]["contracts"],
+                        "in_play": row["signal_blob"]["in_play"], "label": row["signal_blob"]["label"],
+                        "at": now.isoformat()})
+        except Exception:
+            pass
+        app.logger.warning("hand app-adopt %s pick %s %s @%.1f¢ x%g in_play=%s", slug, pid,
+                           row["signal_blob"]["label"], row["signal_blob"]["price_c"],
+                           row["signal_blob"]["contracts"], row["signal_blob"]["in_play"])
+
+    # ── retire (two strikes, fresh read on the second) ──
+    positions = None
+    for r, b in adopted_rows:
+        if b.get("line_hold"):
+            continue                                   # sitting out by design — no order is expected
+        oid = b.get("order_id")
+        if oid and oid in by_id and by_id[oid].get("state") in _OPEN_ORDER_STATES:
+            _HAND_APP_MISS.pop(r["id"], None)
+            continue
+        first = _HAND_APP_MISS.get(r["id"])
+        if first is None:
+            _HAND_APP_MISS[r["id"]] = _time.monotonic()
+            continue
+        if _time.monotonic() - first < _HAND_APP_MISS_S:
+            continue
+        # second strike: venue truth, fresh, before anything is deleted
+        try:
+            fo = _pmm_open_orders_raw(client, fresh=True) or []
+            if any(x.get("id") == oid and x.get("state") in _OPEN_ORDER_STATES for x in fo):
+                _HAND_APP_MISS.pop(r["id"], None)
+                continue
+            if positions is None:
+                positions = _pmm_positions_raw(client, fresh=True) or {}
+        except Exception as e:
+            st["skipped"]["retire_read"] = str(e)[:60]
+            continue
+        held = _bet_sheet_pick_side_held(positions.get(b.get("pmm_slug")), bool(b.get("pmm_synthetic")))
+        if held > 0.0:
+            _HAND_APP_MISS.pop(r["id"], None)      # it filled — the pick rides, the resolver grades it
+            if not b.get("filled_qty"):
+                try:
+                    sb.table("bot_picks").update({"signal_blob": {**b, "filled_qty": round(held, 2)}}).eq("id", r["id"]).execute()
+                except Exception:
+                    pass
+            continue
+        try:
+            sb.table("bot_picks").delete().eq("id", r["id"]).execute()
+            st["retired"] += 1
+            _HAND_APP_MISS.pop(r["id"], None)
+            _probe_log({"hand_app_retire": True, "pick_id": r["id"], "slug": b.get("pmm_slug"),
+                        "order_id": oid, "at": now.isoformat()})
+            app.logger.warning("hand app-retire pick %s %s: order gone, nothing held", r["id"], b.get("pmm_slug"))
+        except Exception as e:
+            st["skipped"]["retire_del"] = str(e)[:60]
+    return st
+
+
 def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
     """THE BOX LANE: claim pending rows oldest-first and run them. Rows
     older than _HAND_EXPIRE_S are failed, never placed late."""
@@ -13433,6 +13718,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
     client = None
     try:
         client = get_client()
+        try:
+            stats["adopt"] = _hand_app_adopt_tick(sb, client, now)   # app bets → sheet picks
+        except Exception as e:
+            stats["adopt"] = {"err": str(e)[:80]}
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
         try:
             stats["tape"] = _touch_tape_publish(sb)
@@ -13697,6 +13986,7 @@ def api_bet_sheets_mine():
             "entry_price": r.get("entry_price"), "price_c": price_c,
             "contracts": contracts, "slug": slug, "synthetic": syn,
             "order_id": oid,
+            "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
             "order": (bx.get("order") if bx is not None else
                       ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
                         "price_c": (round((1 - float(o["price_yes"])) * 100, 1) if syn
