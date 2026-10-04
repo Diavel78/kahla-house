@@ -13843,12 +13843,19 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
     for r, b in adopted_rows:
         if b.get("line_hold"):
             continue                                   # sitting out by design — no order is expected
+        started = False
         try:                                           # a started game is the RESOLVER's — a position
             _ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
-            if _ev.astimezone(timezone.utc) <= now:   # that vanished at settlement is a grade, not a cancel
-                continue
+            started = _ev.astimezone(timezone.utc) <= now   # that vanished at settlement is a grade
         except (TypeError, ValueError):
             pass
+        if started and (b.get("filled") or b.get("filled_qty")):
+            continue                                   # a held lot: the venue grades it
+        # THE KC LIVE ORDER (Oct 4 2026): an in-play app order Rob cancelled in
+        # the app had no fill, no position, and a started game — the old skip
+        # left it to the resolver, which would have graded a bet that never
+        # existed off the final score. A never-filled order that is gone is a
+        # cancel at any clock; the trade tape (below) is the fill backstop.
         oid = b.get("order_id")
         if oid and oid in by_id and by_id[oid].get("state") in _OPEN_ORDER_STATES:
             _HAND_APP_MISS.pop(r["id"], None)
@@ -13879,6 +13886,18 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
                 except Exception:
                     pass
             continue
+        if started:
+            # nothing held on a started game: filled-then-settled (keep, the
+            # resolver grades it off the venue) or never filled (cancelled in
+            # the app, delete). The trade tape decides — a MANUAL buy on the
+            # lot means it filled; no buy at all means it never did.
+            try:
+                v = _hand_fill_verdict(sb, b.get("pmm_slug"), bool(b.get("pmm_synthetic")))
+            except Exception:
+                v = True
+            if v is not None:
+                _HAND_APP_MISS.pop(r["id"], None)
+                continue
         try:
             sb.table("bot_picks").delete().eq("id", r["id"]).execute()
             st["retired"] += 1
