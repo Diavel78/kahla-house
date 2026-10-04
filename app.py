@@ -2836,6 +2836,23 @@ def api_poly_touch():
                  "rows": [], "lines": []}
     try:
         client = get_client()
+        if request.args.get("slate"):
+            # The venue IS the schedule: list its events for this league
+            # in the next N hours so the watch can name real game codes.
+            hrs = float(request.args.get("hours") or 8)
+            now_u = datetime.now(timezone.utc)
+            tag = _pmk._SPORT_TAG_SLUG.get(lg.upper(), lg)
+            resp = client.events.list({
+                "tagSlug": tag, "closed": False,
+                "startTimeMin": (now_u - timedelta(hours=4)).isoformat().replace("+00:00", "Z"),
+                "startTimeMax": (now_u + timedelta(hours=hrs)).isoformat().replace("+00:00", "Z"),
+                "limit": 100})
+            evs = (resp.get("events") if isinstance(resp, dict)
+                   else getattr(resp, "events", None)) or []
+            out["slate"] = sorted(
+                [{"slug": _pmk._ev_get(e, "slug"), "start": _pmk._ev_get(e, "startTime"),
+                  "title": _pmk._ev_get(e, "title")} for e in evs],
+                key=lambda r: str(r.get("start")))
         for g in games[:4]:
             ev_slug = f"{lg}-{g}-{day}"
             try:
@@ -2887,7 +2904,13 @@ def api_poly_touch():
             if sl in seen:
                 continue
             seen.add(sl)
-            bk = _pmm_book(client, sl) or {}
+            bk = _pmm_book(client, sl)
+            if bk is None:
+                # Our own breaker/gate or a venue 429 — NOT an empty book.
+                out["rows"].append({"slug": sl, "no_read": True,
+                                    "rl": bool(_venue_rl_active())})
+                out["lines"].append(f"{out['at']} {sl[-34:]:>34} NO READ (rl={_venue_rl_active()})")
+                continue
             bids, asks = bk.get("bids") or [], bk.get("asks") or []
             bb = bids[0] if bids else (None, 0.0)
             ba = asks[0] if asks else (None, 0.0)
