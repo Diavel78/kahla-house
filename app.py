@@ -12101,12 +12101,32 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
               "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
               "participateDontInitiate": True,
               "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_MANUAL"}
-    try:
-        cr = client.orders.create(params)
-        oid = (cr.get("id") if isinstance(cr, dict)
-               else getattr(cr, "id", None))
-    except Exception as e:
-        return {"ok": False, "error": f"create failed: {e}"[:200]}, 502
+    # THE GEO-CHECK (Oct 3 2026, Troy −9.5): the venue's order endpoint
+    # sometimes answers a Vercel egress IP with 403 "Your connection looks
+    # like a VPN or proxy" — one create in six that night, five fine. The
+    # same instance tends to keep its IP, so retry a couple of times, then
+    # say plainly that a re-tap (a fresh server) is the fix.
+    oid, last_err = None, None
+    for _try in range(3):
+        try:
+            cr = client.orders.create(params)
+            oid = (cr.get("id") if isinstance(cr, dict)
+                   else getattr(cr, "id", None))
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+            if not any(k in msg for k in ("VPN", "proxy", "verify your location")):
+                break
+            _time.sleep(2.0)
+    if last_err is not None:
+        msg = str(last_err)
+        if any(k in msg for k in ("VPN", "proxy", "verify your location")):
+            app.logger.warning("manual order: venue geo-check rejected the cloud IP (%s)", slug)
+            return {"ok": False, "error": "Polymarket's geo-check rejected the server's "
+                    "cloud IP (not you). Tap Place again — a fresh server usually clears it."}, 502
+        return {"ok": False, "error": f"create failed: {msg}"[:200]}, 502
     # orders.list is the only truthful read (retrieve 404s on live
     # orders — the probe-proven landmine). Post-only rejections show up
     # here as a missing/rejected order rather than a resting one.
