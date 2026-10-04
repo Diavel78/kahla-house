@@ -13980,6 +13980,7 @@ def api_bet_sheets_mine():
                 pnl_usd = 0.0
         out.append({
             "id": r["id"], "sport": r.get("sport"), "event_name": r.get("event_name"),
+            "market_id": r.get("market_id"),
             "event_start": r.get("event_start"), "started": started,
             "market_type": r.get("market_type"), "side": r.get("side"),
             "line": r.get("entry_line"), "label": blob.get("label"),

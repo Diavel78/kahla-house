@@ -146,6 +146,8 @@
         .sb:hover { border-color: var(--cyan); }
         .sb.in { background: #0e3b2e; border-color: var(--green); color: var(--green); }
         .sb.dis { opacity: .35; cursor: default; }
+        .sb.have { border-color: var(--amber); box-shadow: inset 0 0 0 1px rgba(245,158,11,.35); }
+        .sb .have-chip { display: block; color: var(--amber); font-weight: 600; font-size: 10px; margin-top: 2px; }
         .sb .ml { color: var(--muted); font-weight: 400; font-size: 10.5px; }
         .mline { color: var(--amber); font-size: 10px; margin-left: 4px; }
         .slip {
@@ -582,12 +584,42 @@
     }
 
     // ───────────────────────── side buttons ─────────────────────────
+    // MY BET ON THIS SIDE (Rob, Oct 4 2026: "if I have a bet on it… put it next
+    // to it… so it knows like, hey, don't rebet this"): the strip's pending
+    // rows indexed by (market_id | event_name) + market type + side; the side
+    // button carries the order under its label. Still tappable (adding is
+    // your call) — the chip is the warning.
+    let _haveByKey = {};
+    function _haveKeys(b) {
+        const mt = b.market_type === 'moneyline' ? 'ml' : b.market_type;
+        const ks = [];
+        if (b.market_id) ks.push('m|' + b.market_id + '|' + mt + '|' + b.side);
+        if (b.event_name) ks.push('e|' + (b.sport || '') + '|' + b.event_name + '|' + mt + '|' + b.side);
+        return ks;
+    }
+    function myBetOn(g, mt, side) {
+        return _haveByKey['m|' + (g.market_id || '') + '|' + mt + '|' + side]
+            || _haveByKey['e|' + _sport + '|' + g.event_name + '|' + mt + '|' + side] || null;
+    }
+    function haveChip(b, line) {
+        const o = b.order || {};
+        const held = b.held || 0;
+        let s;
+        if (o.resting) s = 'RESTING ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '') + (b.outbid ? ' · OUTBID' : '');
+        else if (held > 0) s = 'FILLED ' + held + (b.price_c != null ? ' @ ' + b.price_c + '¢' : '');
+        else if (b.line_hold) s = 'SITTING OUT';
+        else s = 'PENDING' + (b.price_c != null ? ' @ ' + b.price_c + '¢' : '');
+        if (b.line != null && line != null && Math.abs(Number(b.line) - Number(line)) > 0.01) s += ' · yours ' + (b.market_type === 'total' ? Number(b.line) : sgn(Number(b.line), 1));
+        if (b.app) s += ' · app';
+        return '<span class="have-chip">✓ ' + esc(s) + '</span>';
+    }
     function sideBtn(gi, g, mt, side, line, label, fromModel) {
         if (line === null || line === undefined) return '<span class="sb dis">' + esc(label) + '</span>';
         const key = slipKey(g, mt, side);
         const on = inSlip(key);
+        const mine = myBetOn(g, mt, side);
         const args = [JSON.stringify(key), JSON.stringify(mt), JSON.stringify(side), line == null ? 'null' : Number(line), JSON.stringify(label), gi].join(',');
-        return '<button class="sb' + (on ? ' in' : '') + '" onclick=\'toggleSide(' + args.replace(/'/g, '&#39;') + ')\'>' + esc(label) + (fromModel ? '<span class="mline">model</span>' : '') + '</button>';
+        return '<button class="sb' + (on ? ' in' : '') + (mine ? ' have' : '') + '" onclick=\'toggleSide(' + args.replace(/'/g, '&#39;') + ')\'>' + esc(label) + (fromModel ? '<span class="mline">model</span>' : '') + (mine ? haveChip(mine, line) : '') + '</button>';
     }
     // football: spread both sides at the market line (else the model's), total over/under
     function footballSides(gi, g) {
@@ -665,6 +697,11 @@
     function renderBets(d) {
         const bets = d.bets || [];
         _betsById = {}; bets.forEach(b => { _betsById[b.id] = b; });
+        const hk = {};
+        bets.filter(b => b.status === 'pending').forEach(b => { _haveKeys(b).forEach(k => { if (!hk[k]) hk[k] = b; }); });
+        const changed = JSON.stringify(Object.keys(hk).sort()) !== JSON.stringify(Object.keys(_haveByKey).sort());
+        _haveByKey = hk;
+        if (changed && typeof _games !== 'undefined' && _games && _games.length) { try { renderGames(); } catch (e) {} }
         const open = bets.filter(b => b.status === 'pending');
         const done = bets.filter(b => b.status !== 'pending');
         let usd = 0, w = 0, l = 0, p = 0;
