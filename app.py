@@ -12238,6 +12238,22 @@ def _manual_side_book(book: dict, synthetic: bool):
     return s_bid, s_ask
 
 
+# ── HAND-BET GTD = listed start + slack (Oct 4 2026). The venue used to
+# expire every hand bet AT the listed start, which is exactly when the
+# makers pull (measured 10:00:02 on three 10am games) — so the "game
+# started" rule below could never act. The socket rule is the cancel; the
+# GTD is the backstop for a dead socket. `machine_flags hand_gtd_slack_min`.
+_HAND_GTD_SLACK_MIN = 45
+
+
+def _hand_gtt(dt) -> str:
+    try:
+        slack = float(_machine_flag_val("hand_gtd_slack_min", _HAND_GTD_SLACK_MIN))
+    except (TypeError, ValueError):
+        slack = _HAND_GTD_SLACK_MIN
+    return (dt.astimezone(timezone.utc) + timedelta(minutes=slack)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
                         event_start, book: dict | None = None):
     """THE HAND BET — one post-only MANUAL order (Aug 22 2026 rails, lifted
@@ -12273,7 +12289,7 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
     try:
         dt = datetime.fromisoformat(
             str(event_start).replace("Z", "+00:00"))
-        gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        gtt = _hand_gtt(dt)
     except (TypeError, ValueError):
         return {"ok": False, "error": "event_start (ISO) required — orders "
                 "expire at kickoff"}, 400
@@ -12901,6 +12917,7 @@ def _touch_tape_publish(sb) -> dict:
     try:
         cfg = _machine_flag_val("touch_watch", {}) or {}
         want = set(str(x) for x in (cfg.get("slugs") or []) if x)
+        want |= set(HAND_LIVE_SLUGS)                   # every resting hand bet is on the tape
         if want != TOUCH_WATCH_SLUGS:
             TOUCH_WATCH_SLUGS = want
             for s in list(TOUCH_TAPE):
@@ -12925,6 +12942,126 @@ def _touch_tape_publish(sb) -> dict:
     return out
 
 
+# ── "GAME STARTED" = THE MAKERS LEFT (Rob, Oct 4 2026, watching three 10am
+# books on the tape: "70% drop off at start time or later and we cancel as
+# game started"). Measured: every touch on NE@BUF / NYJ@CHI / DAL@HOU lost
+# 80-99% of its size at 10:00:02 AZ, two seconds after the listed start,
+# and bled to 1-3% over the next ninety seconds. No clock, no ESPN: the
+# depth socket's touch size, both sides, against its own pre-start high.
+HAND_START_CANCEL_ENABLED = True
+_HAND_START_DROP_PCT = 70.0
+_HAND_START_BASE_S = 90.0          # pre-start window the baseline high comes from
+_HAND_START_BASE_FALLBACK_S = 600.0
+_HAND_START_FRAMES = 2             # consecutive post-start samples under the line
+_HAND_START_STALE_S = 90.0         # the newest sample must be this fresh
+_HAND_START_DONE: dict = {}
+
+
+def _hand_start_plan(samples, start_ts: float, now_ts: float, drop_pct: float):
+    """samples = tape rows (ts, bid_c, bid_q, ask_c, ask_q, bid3, ask3).
+    -> (verdict, baseline_q, touch_q, drop_pct_seen) with verdict in
+    'pre' (listed start not reached), 'no_baseline', 'wait', 'started'.
+    Baseline = the HIGH of both-side touch size in the 90s before the listed
+    start (else the 10 minutes before it) — the pre-pull size, since the
+    pull itself can begin ~30s early. 'started' = the last N post-start
+    samples ALL sit at or under (100-drop)% of that high and the newest is
+    fresh. Pure; selftest `test_hand_start_plan`."""
+    if now_ts < start_ts:
+        return ("pre", None, None, None)
+    rows = [r for r in (samples or []) if r and r[0] is not None]
+    pre = [r[2] + r[4] for r in rows if start_ts - _HAND_START_BASE_S <= r[0] < start_ts]
+    if not pre:
+        pre = [r[2] + r[4] for r in rows if start_ts - _HAND_START_BASE_FALLBACK_S <= r[0] < start_ts]
+    if not pre or max(pre) <= 0:
+        return ("no_baseline", None, None, None)
+    base = max(pre)
+    post = [r for r in rows if r[0] >= start_ts]
+    if len(post) < _HAND_START_FRAMES:
+        return ("wait", base, (post[-1][2] + post[-1][4]) if post else None, None)
+    tail = post[-_HAND_START_FRAMES:]
+    if now_ts - tail[-1][0] > _HAND_START_STALE_S:
+        return ("wait", base, tail[-1][2] + tail[-1][4], None)
+    line = base * (1.0 - drop_pct / 100.0)
+    cur = tail[-1][2] + tail[-1][4]
+    seen = round(100.0 * (1.0 - cur / base), 1)
+    if all((r[2] + r[4]) <= line for r in tail):
+        return ("started", base, cur, seen)
+    return ("wait", base, cur, seen)
+
+
+def _hand_start_tick(sb, client, now) -> dict:
+    """Pending sheet bets with a resting order whose listed start has passed:
+    cancel the unfilled remainder the moment the tape says the makers left.
+    A partial fill keeps the pick at the held size (the slip's own cancel
+    semantics, `_bet_sheet_cancel_exec`). Stamps `exec_probe_runs`
+    hand_start_cancel with the sizes so the rule can be re-measured."""
+    st = {"cands": 0, "started": 0, "wait": 0, "no_baseline": 0, "errors": 0}
+    if not (HAND_START_CANCEL_ENABLED and _machine_flag("hand_start_cancel", True)):
+        st["gate"] = "off"
+        return st
+    try:
+        drop = float(_machine_flag_val("hand_start_drop_pct", _HAND_START_DROP_PCT))
+    except (TypeError, ValueError):
+        drop = _HAND_START_DROP_PCT
+    try:
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .lte("event_start", now.isoformat()).limit(200).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    if not rows:
+        return st
+    orders = _pmm_open_orders_raw(client, fresh=False) or []
+    by_id = {o["id"]: o for o in orders if o.get("id")}
+    now_ts = _time.time()
+    for r in rows:
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        slug, oid = blob.get("pmm_slug"), blob.get("order_id")
+        o = by_id.get(oid) if oid else None
+        if not (slug and o and o.get("state") in _OPEN_ORDER_STATES):
+            continue
+        try:
+            ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        start_ts = ev.astimezone(timezone.utc).timestamp()
+        st["cands"] += 1
+        verdict, base, cur, seen = _hand_start_plan(list(TOUCH_TAPE.get(slug) or []), start_ts, now_ts, drop)
+        if verdict != "started":
+            st["wait" if verdict in ("wait", "pre") else "no_baseline"] += 1
+            continue
+        last = _HAND_START_DONE.get(r["id"], 0.0)
+        if _time.monotonic() - last < 20.0:
+            continue
+        _HAND_START_DONE[r["id"]] = _time.monotonic()
+        stamp = {"hand_start_cancel": True, "pick_id": r["id"], "slug": slug, "order_id": oid,
+                 "baseline_q": round(base, 1), "touch_q": round(cur, 1), "drop_pct": seen,
+                 "rule_pct": drop, "start": ev.astimezone(timezone.utc).isoformat(),
+                 "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1)}
+        try:
+            # remember the verdict on the pick first — a partial fill keeps the row
+            sb.table("bot_picks").update({"signal_blob": {**blob, "game_started": {
+                "at": now.isoformat(), "baseline_q": round(base, 1), "touch_q": round(cur, 1),
+                "drop_pct": seen}}}).eq("id", r["id"]).execute()
+            out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
+            stamp["result"], stamp["http"] = out, code
+            if out.get("ok"):
+                st["started"] += 1
+            else:
+                st["errors"] += 1
+        except Exception as e:
+            st["errors"] += 1
+            stamp["error"] = str(e)[:160]
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        app.logger.warning("hand start-cancel %s pick %s touch %.0f/%.0f (-%.0f%%) %+.0fs after start → %s",
+                           slug, r["id"], cur, base, seen or 0, now_ts - start_ts, stamp.get("result"))
+    return st
+
+
 def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
     """THE BOX LANE: claim pending rows oldest-first and run them. Rows
     older than _HAND_EXPIRE_S are failed, never placed late."""
@@ -12946,6 +13083,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
             stats["tape"] = _touch_tape_publish(sb)
         except Exception as e:
             stats["tape"] = {"err": str(e)[:80]}
+        try:
+            stats["start"] = _hand_start_tick(sb, client, now)
+        except Exception as e:
+            stats["start"] = {"err": str(e)[:80]}
     except Exception as e:
         stats["status"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     try:
@@ -13334,7 +13475,7 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
         return {"ok": True, "moved": False, "price_c": s_bid, "note": "already at the touch"}, 200
     try:
         dt = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
-        gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        gtt = _hand_gtt(dt)
     except (TypeError, ValueError):
         return {"ok": False, "error": "bad event_start on the pick"}, 400
     if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
@@ -13444,9 +13585,9 @@ def _hand_chase_tick(sb, client, now) -> dict:
             ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
         except (TypeError, ValueError):
             continue
+        live.add(slug)                                  # the start rule reads these frames too
         if ev.astimezone(timezone.utc) <= now:
-            continue                                    # pre-game only
-        live.add(slug)
+            continue                                    # chase is pre-game only
         st["cands"] += 1
         py = float(o["price_yes"]) * 100.0
         price_c = round((100.0 - py) if syn else py, 1)
@@ -13495,7 +13636,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
         qty_total = _amend_total(cur.get("leaves"), cur.get("cum"))
         if qty_total < 1:
             continue
-        gtt = ev.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        gtt = _hand_gtt(ev)
         canon = (100.0 - target) / 100.0 if syn else target / 100.0
         v = _repeg_amend(client, oid, slug, canon, qty_total, gtt)
         nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c}

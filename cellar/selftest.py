@@ -2501,6 +2501,41 @@ def test_bet_sheet_rung() -> None:
     check("empty ladder → reason, no crash", e is None and why)
 
 
+def test_hand_start_plan() -> None:
+    """The 'game started' rule (Oct 4 2026): both-side touch size 70% off
+    its pre-start high, at or after the listed start, two frames, cancel."""
+    import app as _app
+    f = _app._hand_start_plan
+    S = 1000.0
+    def row(ts, bq, aq):
+        return (ts, 47.0, bq, 47.5, aq, bq, aq)
+    pre = [row(S - 60, 150000, 120000), row(S - 30, 140000, 125000), row(S - 5, 60000, 30000)]
+    # pre-start: never fires whatever the sizes
+    assert f(pre + [row(S - 2, 1000, 1000)], S, S - 1, 70)[0] == "pre"
+    # no tape before the start → no baseline
+    assert f([row(S + 1, 100, 100), row(S + 2, 100, 100)], S, S + 3, 70)[0] == "no_baseline"
+    # one post-start frame is not enough
+    assert f(pre + [row(S + 2, 5000, 4000)], S, S + 3, 70)[0] == "wait"
+    # two frames under 30% of the 270k high → started (baseline is the HIGH, not the last pre-start size)
+    v = f(pre + [row(S + 2, 5000, 4000), row(S + 3, 6000, 3000)], S, S + 4, 70)
+    assert v[0] == "started" and v[1] == 270000 and v[2] == 9000 and v[3] > 96, v
+    # a bounce above the line on the newest frame → wait
+    assert f(pre + [row(S + 2, 5000, 4000), row(S + 3, 90000, 60000)], S, S + 4, 70)[0] == "wait"
+    # 60% off is not 70% off
+    assert f(pre + [row(S + 2, 60000, 50000), row(S + 3, 60000, 50000)], S, S + 4, 70)[0] == "wait"
+    # stale newest frame → wait (the socket may be dead; the GTD backstop owns it)
+    assert f(pre + [row(S + 2, 5000, 4000), row(S + 3, 6000, 3000)], S, S + 400, 70)[0] == "wait"
+    # pre-pull up to 30s early still measures against the real high (DAL total read 29% at T-26s)
+    early = [row(S - 80, 100000, 128000), row(S - 26, 50000, 15000)]
+    v = f(early + [row(S + 2, 2600, 14700), row(S + 9, 2900, 12700)], S, S + 10, 70)
+    assert v[0] == "started" and v[1] == 228000, v
+    # GTD slack is a positive offset from the listed start
+    from datetime import datetime, timezone
+    g = _app._hand_gtt(datetime(2026, 10, 4, 17, 0, tzinfo=timezone.utc))
+    assert g > "2026-10-04T17:00:00Z" and g.endswith("Z"), g
+    print("  PASS  hand start-cancel planner + GTD slack")
+
+
 def test_hand_chase_plan() -> None:
     """The hand-bet chase (Oct 4 2026): JOIN the touch, only UP, and a
     touch more than the leash past Rob's anchor is a HOLD, not a move."""
@@ -2615,7 +2650,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_orders_queue):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_start_plan, test_hand_orders_queue):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
