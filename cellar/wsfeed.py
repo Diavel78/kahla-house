@@ -1673,6 +1673,14 @@ class MarketsFeed:
                         _pls = None
                     if not _pls or (isinstance(_sl, str) and _sl in _pls):
                         self._wake("pair", "mkts", WAKE_MKTS_MIN_S)
+                    # THE HAND-BET CHASE WAKES FOR ITS OWN SLUGS (Oct 4 2026):
+                    # app.HAND_LIVE_SLUGS = slugs with a resting sheet bet.
+                    try:
+                        _hls = getattr(_app_pair, "HAND_LIVE_SLUGS", None)
+                    except Exception:
+                        _hls = None
+                    if _hls and isinstance(_sl, str) and _sl in _hls:
+                        self._wake("handbets", "mkts", WAKE_MKTS_MIN_S)
             except Exception as e:
                 _mkts_presence(up=False, conn=self.conn)  # readers fall back to the age rule
                 if self.stop.is_set():

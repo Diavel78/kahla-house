@@ -2501,6 +2501,28 @@ def test_bet_sheet_rung() -> None:
     check("empty ladder → reason, no crash", e is None and why)
 
 
+def test_hand_chase_plan() -> None:
+    """The hand-bet chase (Oct 4 2026): JOIN the touch, only UP, and a
+    touch more than the leash past Rob's anchor is a HOLD, not a move."""
+    import app as _app
+    plan = _app._hand_chase_plan
+    check("at touch → stay", plan(47.0, 47.0, 47.0, 2.0)[0] == "stay")
+    check("we ARE the best bid → stay", plan(47.5, 47.0, 47.0, 2.0)[0] == "stay")
+    v, tgt, note = plan(51.0, 52.0, 51.0, 2.0)
+    check("one tick behind, inside the leash → move to the touch", v == "move" and tgt == 52.0)
+    v, tgt, note = plan(49.0, 49.5, 49.0, 2.0)
+    check("half a tick behind → move", v == "move" and tgt == 49.5)
+    v, tgt, note = plan(47.0, 49.0, 47.0, 2.0)
+    check("exactly the leash (2¢) still moves", v == "move" and tgt == 49.0)
+    v, tgt, note = plan(47.0, 49.5, 47.0, 2.0)
+    check("past the leash → hold with the touch recorded", v == "hold" and tgt == 49.5 and note == "leash")
+    v, _t, _n = plan(49.0, 49.5, 47.0, 2.0)
+    check("leash is measured from the ANCHOR, not the current price", v == "hold")
+    check("no anchor → the current price is the anchor", plan(47.0, 48.0, None, 2.0)[0] == "move")
+    check("no quote → stay", plan(47.0, None, 47.0, 2.0)[0] == "stay")
+    check("touch at 99 → stay", plan(47.0, 99.0, 47.0, 60.0)[0] == "stay")
+
+
 def test_hand_orders_queue() -> None:
     """THE HAND-ORDER QUEUE (Oct 3 2026): Vercel enqueues, the box claims
     atomically; with no box, Vercel claims the row itself (claim-first, so
@@ -2593,7 +2615,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_orders_queue):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_orders_queue):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

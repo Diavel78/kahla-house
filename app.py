@@ -12638,7 +12638,9 @@ def _hand_status_publish(sb, client) -> dict:
                       if resting else {"resting": False}),
             "held": round(held, 2), "cur_c": cur_c, "touch_c": touch_c,
             "outbid": bool(resting and touch_c is not None and price_c is not None
-                           and price_c < float(touch_c) - 0.01)}
+                           and price_c < float(touch_c) - 0.01),
+            "chase": {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
+                      "moves": blob.get("chase_moves") or 0}}
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
         sb.table("lookup_cache").upsert({
@@ -12689,6 +12691,12 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
     except Exception as e:
         stats["status"] = {"err": f"{type(e).__name__}: {e}"[:120]}
+    try:
+        if client is None:
+            client = get_client()
+        stats["chase"] = _hand_chase_tick(sb, client, now)
+    except Exception as e:
+        stats["chase"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     for row in rows:
         try:
             age = (now - datetime.fromisoformat(
@@ -12949,6 +12957,9 @@ def api_bet_sheets_mine():
             "status": st, "pnl_units": r.get("pnl_units"),
             "pnl_usd": pnl_usd, "result_score": r.get("result_score"),
             "venue_ok": venue_ok,
+            "chase": (bx.get("chase") if (bx is not None and bx.get("chase") is not None) else
+                      {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
+                       "moves": blob.get("chase_moves") or 0}),
         })
     return jsonify({"ok": True, "bets": out, "venue_ok": venue_ok,
                     "src": ("box" if box is not None else "vercel"),
@@ -13076,7 +13087,9 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
     now_iso = datetime.now(timezone.utc).isoformat()
     if verdict == "amended":
         nb = {**blob, "price_c": s_bid, "repegged_from_c": from_c, "repeg_at": now_iso,
-              "amended": True, "contracts": qty_total}
+              "amended": True, "contracts": qty_total,
+              "anchor_c": s_bid}                   # a HAND re-peg is the new anchor for the chase
+        nb.pop("chase_hold", None)
         sb.table("bot_picks").update({"signal_blob": nb,
                                       "entry_price": _cents_to_american_py(s_bid)}).eq("id", r["id"]).execute()
         _probe_log({"bet_sheet_repeg": True, "pick_id": r["id"], "slug": slug, "amend": True,
@@ -13094,6 +13107,159 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
     _probe_log({"bet_sheet_repeg": True, "pick_id": r["id"], "slug": slug, "amend": "unverified"})
     return {"ok": False, "error": "amend sent but the verify read failed — check My bets "
             "before trying again (the order may already be at the touch)"}, 502
+
+
+# ── THE HAND-BET CHASE (Oct 4 2026, Rob: "why would I want to manually
+# watch these, when we have the box that can chase repegs on my bet for
+# me… a guardrail, like 2 cents move on my bet and it would show 'Manual
+# repeg required'"). Rides every handbets tick + the markets-socket wake
+# for our own hand-bet slugs. Rule: JOIN the touch, never lead it; only a
+# bid BELOW the touch moves (down-moves are the volume rule, not built);
+# a touch more than `leash` past the ANCHOR — Rob's last hand price, set
+# at placement and reset by a slip Re-peg, never by a chase move — is a
+# HOLD: the strip reads MANUAL RE-PEG and the box does nothing until Rob
+# re-pegs (new anchor) or the touch comes back inside the leash. Moves
+# are the amend (`_repeg_amend`, same order id, total quantity). Kill
+# switch machine_flags hand_chase_enabled; leash machine_flags
+# hand_chase_leash_c (cents).
+HAND_CHASE_ENABLED = True
+_HAND_CHASE_LEASH_C = 2.0
+_HAND_CHASE_MAX_MOVES = 4            # amends per tick
+_HAND_CHASE_DEBOUNCE_S = 20.0        # per bet between write attempts
+_HAND_CHASE_BUDGET_S = 25.0
+_HAND_CHASE_REST_READS = 3           # book reads per tick when the quote table is blank
+_HAND_CHASE_LAST: dict = {}          # pick_id → monotonic of the last write attempt
+HAND_LIVE_SLUGS: set = set()         # slugs with a resting hand bet — the socket wakes handbets for these
+
+
+def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c):
+    """Pure. ('stay'|'move'|'hold', target_c, note). Our-side cents in,
+    our-side cents out. `anchor_c` None → the current price is the anchor."""
+    if price_c is None or touch_c is None:
+        return "stay", None, "no_quote"
+    try:
+        price_c, touch_c = float(price_c), float(touch_c)
+    except (TypeError, ValueError):
+        return "stay", None, "bad_input"
+    if touch_c >= 99.0:
+        return "stay", None, "touch_99"
+    if price_c >= touch_c - 0.01:
+        return "stay", None, "at_touch"
+    a = float(anchor_c) if anchor_c is not None else price_c
+    if touch_c - a > float(leash_c) + 1e-9:
+        return "hold", touch_c, "leash"
+    return "move", touch_c, "join"
+
+
+def _hand_chase_tick(sb, client, now) -> dict:
+    """One pass over the pending sheet bets with a resting order."""
+    global HAND_LIVE_SLUGS
+    st = {"cands": 0, "moved": 0, "held": 0, "at_touch": 0, "no_quote": 0, "errors": 0, "rest": 0}
+    if not (HAND_CHASE_ENABLED and _machine_flag("hand_chase_enabled", True)):
+        st["gate"] = "off"
+        return st
+    try:
+        leash = float(_machine_flag_val("hand_chase_leash_c", _HAND_CHASE_LEASH_C))
+    except (TypeError, ValueError):
+        leash = _HAND_CHASE_LEASH_C
+    t0 = _time.monotonic()
+    try:
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .limit(300).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    orders = _pmm_open_orders_raw(client, fresh=False) or []
+    by_id = {o["id"]: o for o in orders if o.get("id")}
+    live = set()
+    fresh_orders = None
+    for r in rows:
+        if _time.monotonic() - t0 > _HAND_CHASE_BUDGET_S:
+            st["gate"] = "budget"
+            break
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        slug, syn, oid = blob.get("pmm_slug"), bool(blob.get("pmm_synthetic")), blob.get("order_id")
+        o = by_id.get(oid) if oid else None
+        if not (slug and o and o.get("state") in _OPEN_ORDER_STATES and o.get("price_yes") is not None):
+            continue
+        try:
+            ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if ev.astimezone(timezone.utc) <= now:
+            continue                                    # pre-game only
+        live.add(slug)
+        st["cands"] += 1
+        py = float(o["price_yes"]) * 100.0
+        price_c = round((100.0 - py) if syn else py, 1)
+        touch_c = None
+        q = _ws_quote(slug)
+        if q:
+            yb, ya = q
+            touch_c = ((100 - ya) if ya is not None else None) if syn else yb
+        elif st["rest"] < _HAND_CHASE_REST_READS:
+            st["rest"] += 1
+            bk = _bet_sheet_book(client, slug, tries=1)
+            if bk:
+                touch_c, _a = _manual_side_book(bk, syn)
+        anchor_c = blob.get("anchor_c", blob.get("price_c"))
+        verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash)
+        hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
+        if verdict == "stay":
+            st["at_touch" if note == "at_touch" else "no_quote"] += 1
+            if hold and note == "at_touch":
+                nb = {k: v for k, v in blob.items() if k != "chase_hold"}
+                sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            continue
+        if verdict == "hold":
+            st["held"] += 1
+            if not hold or abs(float(hold.get("touch_c") or -1) - target) >= 0.49:
+                nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c,
+                      "chase_hold": {"touch_c": target, "price_c": price_c, "leash_c": leash,
+                                     "at": now.isoformat()}}
+                sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            continue
+        # move — JOIN the touch via the amend
+        if st["moved"] >= _HAND_CHASE_MAX_MOVES:
+            continue
+        last = _HAND_CHASE_LAST.get(r["id"], 0.0)
+        if _time.monotonic() - last < _HAND_CHASE_DEBOUNCE_S:
+            continue
+        _HAND_CHASE_LAST[r["id"]] = _time.monotonic()
+        if fresh_orders is None:
+            fresh_orders = _pmm_open_orders_raw(client, fresh=True)
+            if fresh_orders is None:
+                st["errors"] += 1
+                break
+        cur = next((x for x in fresh_orders if x.get("id") == oid), None)
+        if cur is None or cur.get("state") not in _OPEN_ORDER_STATES:
+            continue                                    # filled/killed since the mirror — the strip will say
+        qty_total = _amend_total(cur.get("leaves"), cur.get("cum"))
+        if qty_total < 1:
+            continue
+        gtt = ev.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        canon = (100.0 - target) / 100.0 if syn else target / 100.0
+        v = _repeg_amend(client, oid, slug, canon, qty_total, gtt)
+        nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c}
+        nb.pop("chase_hold", None)
+        if v == "amended":
+            st["moved"] += 1
+            nb.update({"price_c": target, "chase_from_c": price_c, "chase_at": now.isoformat(),
+                       "chase_moves": int(blob.get("chase_moves") or 0) + 1, "amended": True,
+                       "contracts": qty_total})
+            sb.table("bot_picks").update({"signal_blob": nb,
+                                          "entry_price": _cents_to_american_py(target)}).eq("id", r["id"]).execute()
+            _probe_log({"hand_chase": True, "pick_id": r["id"], "slug": slug, "from_c": price_c,
+                        "to_c": target, "anchor_c": nb["anchor_c"], "qty_total": qty_total})
+            app.logger.info("hand chase: %s %s→%s (anchor %s)", slug, price_c, target, nb["anchor_c"])
+        else:
+            st["errors"] += 1
+            nb["chase_err"] = {"verdict": v, "at": now.isoformat(), "target_c": target}
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            app.logger.warning("hand chase %s: amend %s", slug, v)
+    HAND_LIVE_SLUGS = live
+    return st
 
 
 def _bet_sheet_queue_op(op: str):
