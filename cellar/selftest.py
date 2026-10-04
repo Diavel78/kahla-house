@@ -2503,49 +2503,62 @@ def test_bet_sheet_rung() -> None:
 
 def test_hand_move_plan() -> None:
     """Line-movement cancel (Oct 4 2026): our-side touch size 70% off its
-    60-90s high → cancel. The ask is recorded, not required (the venue's ask
-    lags the pull); `need_ask=True` restores the two-condition rule."""
+    60-90s high AND re-posted a rung or two lower (depth below the old touch
+    grew by ≥70% of the high) → cancel. A pure vanish (makers leaving) stays.
+    The ask is recorded, not required; `need_ask=True` restores it."""
     import app as _app
     f, calm, orient = _app._hand_move_plan, _app._hand_calm, _app._hand_side_rows
     N = 10000.0
-    def row(ts, bc, bq, ac, aq):
-        return (ts, bc, bq, ac, aq)
-    base = [row(N - 80, 55.0, 150000, 55.5, 120000), row(N - 50, 55.0, 148000, 55.5, 121000),
-            row(N - 20, 55.0, 151000, 55.5, 119000)]
-    # a real move: bid level empties AND the ask steps down → cancel
-    v, d = f(base + [row(N - 2, 54.0, 30000, 54.5, 90000)], 55.0, 1.0, N, 70)
-    assert v == "cancel" and d["why"] == "move", (v, d)
-    # THE PULL IS A CANCEL TOO (Rob: the ask lags on this venue — nobody
-    # takes at these fees, so the bid collapses first and the straggler gets
-    # hit before the ask ever moves). NYJ@CHI total 09:55:49 shape.
-    v, d = f(base + [row(N - 2, 55.0, 190, 55.5, 119000)], 55.0, 1.0, N, 70)
-    assert v == "cancel" and d["why"] == "collapse" and d["ask_down"] is False, (v, d)
-    # …unless the ask confirmation is switched back on
-    v, d = f(base + [row(N - 2, 55.0, 190, 55.5, 119000)], 55.0, 1.0, N, 70, need_ask=True)
+    def row(ts, bc, bq, ac, aq, d3=None):
+        return (ts, bc, bq, ac, aq, d3 if d3 is not None else bq)
+    # 150k at 55, 20k at 54.5, 10k at 54 behind it
+    base = [row(N - 80, 55.0, 150000, 55.5, 120000, 180000), row(N - 50, 55.0, 148000, 55.5, 121000, 178000),
+            row(N - 20, 55.0, 151000, 55.5, 119000, 181000)]
+    # THE MOVE: the 55 level empties and the size re-posts at 54 (touch moves) → cancel
+    v, d = f(base + [row(N - 2, 54.0, 140000, 54.5, 90000, 170000)], 55.0, 1.0, N, 70)
+    assert v == "cancel" and d["why"] == "move" and d["relocated_pct"] > 70, (v, d)
+    # the same move with a straggler (us) still holding the touch at 55 → cancel
+    v, d = f(base + [row(N - 2, 55.0, 190, 55.5, 119000, 155190)], 55.0, 1.0, N, 70)
+    assert v == "cancel" and d["why"] == "move" and d["ask_down"] is False, (v, d)
+    # THE VANISH (Rob: "if they just went away because institutional money
+    # left the game, that's not really a book movement") → stay
+    v, d = f(base + [row(N - 2, 55.0, 190, 55.5, 119000, 30190)], 55.0, 1.0, N, 70)
+    assert v == "stay" and d["why"] == "vanish", (v, d)
+    # relocated but the ask hasn't moved, with the ask confirmation on → stay
+    v, d = f(base + [row(N - 2, 55.0, 190, 55.5, 119000, 155190)], 55.0, 1.0, N, 70, need_ask=True)
     assert v == "stay" and d["why"] == "pull", (v, d)
     # ask down but size intact → stay (not a collapse)
-    v, d = f(base + [row(N - 2, 55.0, 140000, 55.0, 90000)], 55.0, 1.0, N, 70)
+    v, d = f(base + [row(N - 2, 55.0, 140000, 55.0, 90000, 170000)], 55.0, 1.0, N, 70)
     assert v == "stay" and d["why"] == "quiet", (v, d)
-    # 60% off is not 70% off
-    v, d = f(base + [row(N - 2, 54.5, 60000, 54.5, 90000)], 55.0, 1.0, N, 70)
-    assert v == "stay", (v, d)
+    # 60% off at the touch is not 70% off, however much sits below
+    v, d = f(base + [row(N - 2, 55.0, 60000, 55.5, 90000, 200000)], 55.0, 1.0, N, 70)
+    assert v == "stay" and d["why"] == "quiet", (v, d)
+    # a smaller relocation (half the size came back lower) is not a move at 70
+    v, d = f(base + [row(N - 2, 54.5, 75000, 55.0, 90000, 95000)], 55.0, 1.0, N, 70)
+    assert v == "stay" and d["why"] == "vanish", (v, d)
+    assert f(base + [row(N - 2, 54.5, 75000, 55.0, 90000, 95000)], 55.0, 1.0, N, 70, relocate_pct=40)[0] == "cancel"
+    # the touch IMPROVED (bids above us) → nothing collapsed at P
+    v, d = f(base + [row(N - 2, 55.5, 90000, 56.0, 90000, 200000)], 55.0, 1.0, N, 70)
+    assert v == "stay" and d["why"] == "quiet", (v, d)
     # our own contracts never count toward the baseline or the collapse
     lone = [row(N - 80, 55.0, 5.0, 55.5, 120000), row(N - 50, 55.0, 5.0, 55.5, 120000)]
     v, d = f(lone + [row(N - 2, 55.0, 5.0, 54.5, 90000)], 55.0, 5.0, N, 70)
     assert v == "stay" and d["why"] == "quiet", (v, d)
     # stale newest frame / no baseline → stay
-    assert f(base + [row(N - 2, 54.0, 30000, 54.5, 90000)], 55.0, 1.0, N + 400, 70)[0] == "stay"
-    assert f([row(N - 2, 54.0, 30000, 54.5, 90000)], 55.0, 1.0, N, 70)[0] == "stay"
-    # synthetic NO orientation: YES ask is our bid, YES bid is our ask
-    yes = [(N - 50, 44.5, 120000, 45.0, 150000), (N - 2, 45.5, 90000, 46.0, 30000)]
+    assert f(base + [row(N - 2, 54.0, 140000, 54.5, 90000, 170000)], 55.0, 1.0, N + 400, 70)[0] == "stay"
+    assert f([row(N - 2, 54.0, 140000, 54.5, 90000, 170000)], 55.0, 1.0, N, 70)[0] == "stay"
+    # synthetic NO orientation: YES ask is our bid, YES bid is our ask, YES ask depth is our bid depth
+    yes = [(N - 50, 44.5, 120000, 45.0, 150000, 130000, 180000), (N - 2, 45.5, 90000, 46.0, 30000, 95000, 40000)]
     ours = orient(yes, True)
     assert abs(ours[0][1] - 55.0) < 1e-9 and ours[0][2] == 150000 and abs(ours[0][3] - 55.5) < 1e-9, ours[0]
+    assert ours[0][5] == 180000 and ours[1][5] == 40000, ours
     assert abs(ours[1][1] - 54.0) < 1e-9 and abs(ours[1][3] - 54.5) < 1e-9, ours[1]
+    assert orient(yes, False)[0][5] == 130000
     # calm: mid held a tick for the window; moving mid is not calm; empty window is not calm
     assert calm([row(N - 50, 55.0, 1, 55.5, 1), row(N - 20, 55.0, 1, 55.5, 1), row(N - 2, 55.0, 1, 55.5, 1)], N)
     assert not calm([row(N - 50, 55.0, 1, 55.5, 1), row(N - 2, 54.0, 1, 54.5, 1)], N)
     assert not calm([row(N - 500, 55.0, 1, 55.5, 1)], N)
-    print("  PASS  hand line-move planner (collapse → cancel; ask recorded, not required) + calm")
+    print("  PASS  hand line-move planner (collapse + relocation → cancel; vanish stays) + calm")
 
 
 def test_hand_start_plan() -> None:

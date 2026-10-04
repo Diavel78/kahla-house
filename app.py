@@ -13078,6 +13078,7 @@ _HAND_MOVE_COLLAPSE_PCT = 70.0     # our-side bid size at the touch, off its 60-
 _HAND_MOVE_BASE_S = 90.0           # baseline window [now-90, now-10]
 _HAND_MOVE_RECENT_S = 10.0
 _HAND_MOVE_STALE_S = 30.0          # the newest frame must be this fresh
+_HAND_MOVE_RELOCATE_PCT = 70.0     # …and at least this much of it must re-post BELOW the old touch
 _HAND_MOVE_CALM_S = 300.0          # sit out this long before rejoining
 _HAND_MOVE_CALM_WIN_S = 60.0       # …and the mid must have held ±1 tick this long
 _HAND_MOVE_MAX_WAIT_S = 900.0      # never sit out longer than this
@@ -13096,23 +13097,30 @@ def _hand_side_rows(samples, syn: bool):
             ts, bc, bq, ac, aq = r[0], r[1], r[2], r[3], r[4]
         except (TypeError, IndexError):
             continue
+        # 6th element: OUR-side bid depth over the top three levels (the
+        # tape's bids[:3] / asks[:3] sums) — the relocation read.
+        b3 = r[5] if len(r) > 5 and r[5] is not None else (bq or 0.0)
+        a3 = r[6] if len(r) > 6 and r[6] is not None else (aq or 0.0)
         if syn:
             out.append((ts, (100.0 - ac) if ac is not None else None, aq or 0.0,
-                        (100.0 - bc) if bc is not None else None, bq or 0.0))
+                        (100.0 - bc) if bc is not None else None, bq or 0.0, a3 or 0.0))
         else:
-            out.append((ts, bc, bq or 0.0, ac, aq or 0.0))
+            out.append((ts, bc, bq or 0.0, ac, aq or 0.0, b3 or 0.0))
     return out
 
 
 def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: float,
-                    need_ask: bool = False):
-    """rows = OUR-side book samples (ts, bid_c, bid_q, ask_c, ask_q), oldest
-    first. -> (verdict, detail) with verdict 'stay' | 'cancel'.
-    cancel ⇔ our-side bid size at the touch, minus our own contracts when we
-    are the touch, is ≥ collapse_pct off its high over the baseline window
-    [now-90s, now-10s]. The ask side is RECORDED (ask_down = a new low by a
-    tick) but only required when need_ask is set — on this venue the ask
-    lags the pull, and a bid left alone above the market is the bite.
+                    relocate_pct: float = 70.0, need_ask: bool = False):
+    """rows = OUR-side book samples (ts, bid_c, bid_q, ask_c, ask_q[, bid_depth3]),
+    oldest first. -> (verdict, detail) with verdict 'stay' | 'cancel'.
+    P = the touch price at the baseline high (window [now-90s, now-10s]).
+    cancel ⇔ (1) COLLAPSE: our-side size still at P, minus our own
+    contracts, is ≥ collapse_pct off that high — AND (2) RELOCATION: the
+    depth BELOW P (top-three-level depth minus the P level) grew by at least
+    relocate_pct of the high, i.e. the bids re-posted a rung or two lower.
+    A collapse with no relocation is makers LEAVING, not a line move —
+    verdict 'vanish', stay. The ask side is RECORDED (ask_down) and only
+    required when need_ask is set — the ask lags the bids on this venue.
     Pure; selftest `test_hand_move_plan`."""
     rows = [r for r in (rows or []) if r and r[0] is not None]
     if not rows:
@@ -13124,34 +13132,52 @@ def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: flo
     if len(base) < 2:
         return "stay", {"why": "no_base"}
 
+    def d3(r):
+        return (r[5] if len(r) > 5 and r[5] is not None else r[2]) or 0.0
+
     def ours_excl(r):
         q = r[2] or 0.0
         if our_price_c is not None and r[1] is not None and abs(r[1] - our_price_c) < 0.01:
             q = max(0.0, q - (our_qty or 0.0))
         return q
-    hi = max(ours_excl(r) for r in base)
-    cur = ours_excl(last)
+    hi_row = max(base, key=ours_excl)
+    hi = ours_excl(hi_row)
+    P = hi_row[1]
+    below_before = max(0.0, d3(hi_row) - (hi_row[2] or 0.0))
+    bc = last[1]
+    if bc is None or P is None:
+        cur, below_now = 0.0, d3(last)
+    elif abs(bc - P) < 0.01:
+        cur, below_now = ours_excl(last), max(0.0, d3(last) - (last[2] or 0.0))
+    elif bc < P:
+        cur, below_now = 0.0, d3(last)
+    else:                                   # the touch IMPROVED — no collapse at P
+        cur, below_now = hi, 0.0
     asks = [r[3] for r in base if r[3] is not None]
     ask_lo = min(asks) if asks else None
     ask_now = last[3]
     collapse = hi > 0 and cur <= hi * (1.0 - collapse_pct / 100.0)
+    moved = below_now - below_before
+    relocated = hi > 0 and moved >= hi * relocate_pct / 100.0
     ask_down = ask_now is not None and ask_lo is not None and ask_now <= ask_lo - 0.49
-    det = {"hi_q": round(hi, 1), "cur_q": round(cur, 1),
+    det = {"p_c": P, "hi_q": round(hi, 1), "cur_q": round(cur, 1),
            "drop_pct": round(100.0 * (1.0 - cur / hi), 1) if hi > 0 else None,
-           "ask_lo": ask_lo, "ask_now": ask_now, "bid_now": last[1], "ask_down": ask_down}
-    # THE COLLAPSE ALONE DECIDES (Rob, Oct 4 2026, killing the ask
-    # confirmation an hour after it shipped): "no one is doing a take on
-    # these things because the take fees are so astronomical. The ask side
-    # won't move in conjunction with the bid side. The bid side will
-    # collapse first and then the ask side will have to come down. Us
-    # stragglers who are left out there will get taken." Waiting for the
-    # ask is waiting past the bite. A false positive costs five minutes
-    # off the book on a game days out. `ask_down` is recorded, not required
-    # (`hand_move_need_ask` flips it back on).
-    if collapse and (ask_down or not need_ask):
-        det["why"] = "move" if ask_down else "collapse"
+           "below_before_q": round(below_before, 1), "below_now_q": round(below_now, 1),
+           "relocated_pct": round(100.0 * moved / hi, 1) if hi > 0 else None,
+           "ask_lo": ask_lo, "ask_now": ask_now, "bid_now": bc, "ask_down": ask_down}
+    # THE MOVE IS COLLAPSE + RELOCATION (Rob, Oct 4 2026): "Bids don't just
+    # go away. The bid size needs to collapse AND go back up one rung below
+    # it or two rungs below it… if there's 100,000 bids at 50 and those
+    # 100,000 disappear, they should all reappear at 49. If they just went
+    # away because institutional money left the game, that's not a book
+    # movement." The ask is not consulted ("the bid side will collapse
+    # first and then the ask side will have to come down; us stragglers
+    # left out there will get taken") — `ask_down` is recorded only, and
+    # `hand_move_need_ask` restores the ask confirmation.
+    if collapse and relocated and (ask_down or not need_ask):
+        det["why"] = "move"
         return "cancel", det
-    det["why"] = "pull" if collapse else "quiet"
+    det["why"] = ("vanish" if not relocated else "pull") if collapse else "quiet"
     return "stay", det
 
 
@@ -13265,7 +13291,11 @@ def _hand_move_tick(sb, client, now) -> dict:
                      "result": out, "http": code, "at": now.isoformat()}
             if out.get("ok") and out.get("order_id") and out.get("resting", True):
                 nb = {k: v for k, v in blob.items() if k not in ("line_hold", "chase_hold")}
-                nb.update({"order_id": out["order_id"], "price_c": touch, "amended": False,
+                # THE REJOIN IS THE NEW ANCHOR (Rob, Oct 4 2026): the market
+                # re-priced and we sat back down at its touch — the leash
+                # measures from here now, not from the pre-move hand price.
+                nb.update({"order_id": out["order_id"], "price_c": touch, "anchor_c": touch,
+                           "amended": False,
                            "line_rejoins": int(blob.get("line_rejoins") or 0) + 1,
                            "rejoined_at": now.isoformat()})
                 sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
@@ -13298,6 +13328,7 @@ def _hand_move_tick(sb, client, now) -> dict:
         except (TypeError, ValueError):
             leaves = 0.0
         verdict, det = _hand_move_plan(side_rows, price_c, leaves, now_ts, pct,
+                                       relocate_pct=_fl("hand_move_relocate_pct", _HAND_MOVE_RELOCATE_PCT),
                                        need_ask=bool(_machine_flag("hand_move_need_ask", False)))
         if verdict != "cancel":
             continue
