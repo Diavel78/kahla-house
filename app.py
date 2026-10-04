@@ -13011,9 +13011,17 @@ def _bet_sheet_cancel_exec(sb, client, pick_id):
 
 
 def _bet_sheet_repeg_exec(sb, client, pick_id):
-    """Move a resting sheet order back to the touch: cancel → verify →
-    create fresh at the current best bid (never orders.modify — the Aug 2/16
-    landmine). A failed re-create is reported loud and stamped on the pick."""
+    """Move a resting sheet order to the touch by AMENDING IT IN PLACE (Oct 4
+    2026, Rob: "that is NOT today's functionality on repegs, we amend on the
+    websocket… use websocket to amend") — `_repeg_amend`, the buy sniper's
+    call: one `orders.modify` with FULL params on the SAME order id, quantity
+    = the venue's leaves + cum (the TOTAL — `_amend_total`), verified on the
+    re-listed book. No cancel, no gap, no second order, no ORDER LOST class.
+    The venue marks the order REPLACED, which the APP hides but the API, the
+    public book and our strip all see live (`_OPEN_ORDER_STATES`). Never
+    falls back to cancel→create: an order that is 'gone' after the modify may
+    have FILLED during it (the Sep 26 pair finding), so it is reported, not
+    re-created."""
     r, blob = _bet_sheet_pick(sb, pick_id)
     if not r:
         return {"ok": False, "error": "pick not found"}, 404
@@ -13026,33 +13034,66 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
     s_bid, s_ask = _manual_side_book(book, syn)
     if s_bid is None:
         return {"ok": False, "error": "no bids on this market — nothing to join"}, 409
-    leaves = None
-    for o in (_pmm_open_orders_raw(client, fresh=True) or []):
+    cur = None
+    ords = _pmm_open_orders_raw(client, fresh=True)
+    if ords is None:
+        return {"ok": False, "error": "orders unreadable — try again"}, 503
+    for o in ords:
         if o.get("id") == oid:
-            leaves = o.get("leaves")
+            cur = o
             break
-    qty = int(round(float(leaves))) if leaves else int(blob.get("contracts") or 0)
-    if qty < 1:
-        return {"ok": False, "error": "nothing left unfilled to move"}, 409
-    if abs(float(blob.get("price_c") or -1) - s_bid) < 0.01:
-        return {"ok": True, "moved": False, "price_c": s_bid, "note": "already at the touch"}, 200
-    gone, _ = _bet_sheet_cancel(client, oid, slug)
-    if not gone:
-        return {"ok": False, "error": "venue did not cancel the old order — nothing moved"}, 502
-    out, _st = _manual_order_place(client, slug, syn, s_bid, qty, r.get("event_start"), book=book)
-    if not out.get("ok"):
-        nb = {**blob, "order_id": None, "order_lost": True,
-              "repeg_error": out.get("error"), "repeg_at": datetime.now(timezone.utc).isoformat()}
+    if cur is None:
+        # Not on the book: filled, expired or killed. Venue truth on the
+        # strip; nothing to amend and nothing to re-create blind.
+        nb = {**blob, "repeg_gone_at": datetime.now(timezone.utc).isoformat()}
         sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
-        return {"ok": False, "error": "old order cancelled but the new one failed: "
-                + str(out.get("error")) + " — the bet is OFF the book"}, 502
-    nb = {**blob, "order_id": out.get("order_id"), "price_c": s_bid, "contracts": qty,
-          "repegged_from_c": blob.get("price_c"),
-          "repeg_at": datetime.now(timezone.utc).isoformat()}
-    sb.table("bot_picks").update({"signal_blob": nb,
-                                  "entry_price": _cents_to_american_py(s_bid)}).eq("id", r["id"]).execute()
-    return {"ok": True, "moved": True, "price_c": s_bid, "from_c": blob.get("price_c"),
-            "order_id": out.get("order_id"), "resting": out.get("resting")}, 200
+        return {"ok": False, "error": "order is not on the book (filled or expired?) — "
+                "check My bets"}, 409
+    leaves = cur.get("leaves")
+    qty_total = _amend_total(leaves, cur.get("cum"))
+    try:
+        unfilled = int(round(float(leaves or 0)))
+    except (TypeError, ValueError):
+        unfilled = 0
+    if unfilled < 1 or qty_total < 1:
+        return {"ok": False, "error": "nothing left unfilled to move"}, 409
+    cur_c = None
+    if cur.get("price_yes") is not None:
+        py = float(cur["price_yes"]) * 100.0
+        cur_c = round((100.0 - py) if syn else py, 1)
+    from_c = cur_c if cur_c is not None else blob.get("price_c")
+    if from_c is not None and abs(float(from_c) - s_bid) < 0.01:
+        return {"ok": True, "moved": False, "price_c": s_bid, "note": "already at the touch"}, 200
+    try:
+        dt = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+        gtt = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad event_start on the pick"}, 400
+    if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return {"ok": False, "error": "game already started — pre-game only"}, 400
+    canon = (100.0 - s_bid) / 100.0 if syn else s_bid / 100.0
+    verdict = _repeg_amend(client, oid, slug, canon, qty_total, gtt)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if verdict == "amended":
+        nb = {**blob, "price_c": s_bid, "repegged_from_c": from_c, "repeg_at": now_iso,
+              "amended": True, "contracts": qty_total}
+        sb.table("bot_picks").update({"signal_blob": nb,
+                                      "entry_price": _cents_to_american_py(s_bid)}).eq("id", r["id"]).execute()
+        _probe_log({"bet_sheet_repeg": True, "pick_id": r["id"], "slug": slug, "amend": True,
+                    "from_c": from_c, "to_c": s_bid, "leaves": leaves, "qty_total": qty_total})
+        return {"ok": True, "moved": True, "price_c": s_bid, "from_c": from_c,
+                "order_id": oid, "resting": True, "amended": True, "leaves": unfilled}, 200
+    if verdict == "gone":
+        nb = {**blob, "repeg_gone_at": now_iso, "repeg_error": "gone after modify"}
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+        _probe_log({"bet_sheet_repeg": True, "pick_id": r["id"], "slug": slug, "amend": "gone"})
+        return {"ok": False, "error": "order left the book during the move (filled?) — "
+                "check My bets"}, 502
+    nb = {**blob, "repeg_unverified_at": now_iso}
+    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+    _probe_log({"bet_sheet_repeg": True, "pick_id": r["id"], "slug": slug, "amend": "unverified"})
+    return {"ok": False, "error": "amend sent but the verify read failed — check My bets "
+            "before trying again (the order may already be at the touch)"}, 502
 
 
 def _bet_sheet_queue_op(op: str):
