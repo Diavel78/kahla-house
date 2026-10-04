@@ -605,7 +605,8 @@
         const done = bets.filter(b => b.status !== 'pending');
         let usd = 0, w = 0, l = 0, p = 0;
         done.forEach(b => { if (b.pnl_usd != null) usd += b.pnl_usd; if (b.status === 'won') w++; else if (b.status === 'lost') l++; else p++; });
-        document.getElementById('betsMeta').textContent = (open.length + ' open') + (done.length ? ' · settled ' + w + '-' + l + (p ? '-' + p : '') + ' ' + money(usd) : '') + (d.venue_ok ? '' : ' · ⚠ venue unreadable');
+        document.getElementById('betsMeta').textContent = (open.length + ' open') + (done.length ? ' · settled ' + w + '-' + l + (p ? '-' + p : '') + ' ' + money(usd) : '')
+            + (d.src === 'box' ? ' · live from the box' : ' · ⚠ box not publishing — venue read from Vercel') + (d.venue_ok ? '' : ' · ⚠ venue unreadable');
         if (!bets.length) { document.getElementById('bets').innerHTML = '<div class="empty" style="padding:14px 0">No bets yet. Build a slip below.</div>'; return; }
         const rows = open.concat(done.slice().reverse());
         document.getElementById('bets').innerHTML = rows.map(b => {
@@ -844,7 +845,7 @@
         loadBets();
         pollQueue();
         setInterval(load, 15 * 60 * 1000);
-        setInterval(() => { if (!_busy) loadBets(); }, 90 * 1000);   // never race a submit for the venue's read budget
+        setInterval(() => { if (!_busy) loadBets(); }, 30 * 1000);   // reads the box's socket-fed blob — no venue call
     });
 </script>
 </body>

@@ -12592,6 +12592,84 @@ def _hand_order_execute(sb, client, row: dict, worker: str) -> dict:
     return {"ok": False, "error": f"unknown op {op}"}
 
 
+_HAND_STATUS_KEY = "bet_sheet_status"
+_HAND_STATUS_FRESH_S = 45.0
+
+
+def _hand_status_publish(sb, client) -> dict:
+    """THE BOX PUBLISHES, VERCEL READS (Rob, Oct 3 2026: "why don't you use
+    the web socket for that… every time we push all this through Vercel we
+    run out of memory"). Every handbets tick: for each pending sheet bet,
+    resting/leaves/price off the socket-fed orders mirror, held off the
+    positions mirror, touch + mid off the quote table (`_ws_quote` — the
+    private feed's watch list carries every slug we have an order on, hand
+    bets included), OUTBID = our bid under the touch. One `lookup_cache`
+    row, key bet_sheet_status; no REST read on either side."""
+    try:
+        rows = (sb.table("bot_picks").select("id,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .limit(300).execute().data or [])
+    except Exception as e:
+        return {"err": f"picks: {e}"[:120]}
+    orders = _pmm_open_orders_raw(client, fresh=False) or []
+    positions = _pmm_positions_raw(client, fresh=False) or {}
+    by_id = {o["id"]: o for o in orders if o.get("id")}
+    out, quoted = {}, 0
+    for r in rows:
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        slug, syn, oid = blob.get("pmm_slug"), bool(blob.get("pmm_synthetic")), blob.get("order_id")
+        o = by_id.get(oid) if oid else None
+        resting = bool(o and o.get("state") in _OPEN_ORDER_STATES)
+        price_c = None
+        if resting and o.get("price_yes") is not None:
+            price_c = round((1 - float(o["price_yes"])) * 100, 1) if syn else round(float(o["price_yes"]) * 100, 1)
+        held = _bet_sheet_pick_side_held(positions.get(slug), syn) if slug else 0.0
+        touch_c = cur_c = None
+        q = _ws_quote(slug) if slug else None
+        if q:
+            yb, ya = q
+            b = ((100 - ya) if ya is not None else None) if syn else yb
+            a = ((100 - yb) if yb is not None else None) if syn else ya
+            touch_c = b
+            cur_c = round((b + a) / 2.0, 1) if (b is not None and a is not None) else (b if b is not None else a)
+            quoted += 1
+        out[str(r["id"])] = {
+            "order": ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"), "price_c": price_c}
+                      if resting else {"resting": False}),
+            "held": round(held, 2), "cur_c": cur_c, "touch_c": touch_c,
+            "outbid": bool(resting and touch_c is not None and price_c is not None
+                           and price_c < float(touch_c) - 0.01)}
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        sb.table("lookup_cache").upsert({
+            "key": _HAND_STATUS_KEY, "sport": "ANY", "fetched_at": now_iso,
+            "payload": {"at": now_iso, "rows": out, "n": len(out), "quoted": quoted,
+                        "orders": len(orders), "positions": len(positions)}}).execute()
+    except Exception as e:
+        return {"err": f"publish: {e}"[:120]}
+    return {"n": len(out), "quoted": quoted}
+
+
+def _hand_status_read(sb):
+    """Vercel: the box's blob when fresh, else None (→ the REST fallback)."""
+    try:
+        r = (sb.table("lookup_cache").select("fetched_at,payload")
+             .eq("key", _HAND_STATUS_KEY).limit(1).execute().data or [])
+    except Exception:
+        return None
+    if not r:
+        return None
+    try:
+        age = (datetime.now(timezone.utc) - _parse_iso(r[0]["fetched_at"])).total_seconds()
+    except Exception:
+        return None
+    if age > _HAND_STATUS_FRESH_S:
+        return None
+    pl = r[0].get("payload") or {}
+    pl["age_s"] = round(age, 1)
+    return pl
+
+
 def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
     """THE BOX LANE: claim pending rows oldest-first and run them. Rows
     older than _HAND_EXPIRE_S are failed, never placed late."""
@@ -12606,6 +12684,11 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
         stats["gate"] = f"read_failed: {e}"[:120]
         return stats
     client = None
+    try:
+        client = get_client()
+        stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
+    except Exception as e:
+        stats["status"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     for row in rows:
         try:
             age = (now - datetime.fromisoformat(
@@ -12750,29 +12833,40 @@ def api_bet_sheets_mine():
             rows[r["id"]] = r
     except Exception as e:
         return jsonify({"ok": False, "error": f"picks read failed: {e}"}), 500
+    # THE BOX'S BLOB FIRST (Oct 3 2026): sockets → memory → one DB row;
+    # Vercel calls the venue only when the box has not published in 45s.
+    box = _hand_status_read(sb)
+    box_rows = (box or {}).get("rows") or {}
     orders_by_id, positions, venue_ok = {}, {}, True
     client = None
-    try:
-        client = get_client()
-        ords = _pmm_open_orders_raw(client, fresh=True)
-        pos = _pmm_positions_raw(client, fresh=True)
-        if ords is None or pos is None:
+    if box is None:
+        try:
+            client = get_client()
+            ords = _pmm_open_orders_raw(client, fresh=True)
+            pos = _pmm_positions_raw(client, fresh=True)
+            if ords is None or pos is None:
+                venue_ok = False
+            for o in (ords or []):
+                if o.get("id"):
+                    orders_by_id[o["id"]] = o
+            positions = pos or {}
+        except Exception:
             venue_ok = False
-        for o in (ords or []):
-            if o.get("id"):
-                orders_by_id[o["id"]] = o
-        positions = pos or {}
-    except Exception:
-        venue_ok = False
     out, reads = [], 0
     for r in sorted(rows.values(), key=lambda x: x.get("event_start") or ""):
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         slug = blob.get("pmm_slug")
         syn = bool(blob.get("pmm_synthetic"))
         oid = blob.get("order_id")
-        o = orders_by_id.get(oid) if oid else None
-        resting = bool(o and o.get("state") in _OPEN_ORDER_STATES)
-        held = _bet_sheet_pick_side_held(positions.get(slug), syn) if slug else 0.0
+        bx = box_rows.get(str(r["id"])) if box is not None else None
+        if bx is not None:
+            o = None
+            resting = bool((bx.get("order") or {}).get("resting"))
+            held = float(bx.get("held") or 0.0)
+        else:
+            o = orders_by_id.get(oid) if oid else None
+            resting = bool(o and o.get("state") in _OPEN_ORDER_STATES)
+            held = _bet_sheet_pick_side_held(positions.get(slug), syn) if slug else 0.0
         filled_qty = blob.get("filled_qty")
         if held > 0 and (filled_qty is None or abs(float(filled_qty) - held) > 0.01):
             filled_qty = round(held, 2)
@@ -12788,7 +12882,9 @@ def api_bet_sheets_mine():
             started = False
         cur_c, touch_c = None, None
         _cc = _BS_CUR_C.get(slug) if slug else None
-        if _cc and _time.monotonic() - _cc[0] < _BS_CUR_C_TTL_S:
+        if bx is not None:
+            cur_c, touch_c = bx.get("cur_c"), bx.get("touch_c")
+        elif _cc and _time.monotonic() - _cc[0] < _BS_CUR_C_TTL_S:
             cur_c, touch_c = _cc[1], _cc[2]   # a fresh read this minute — don't re-ask the venue
         elif (r.get("status") == "pending" and slug and client is not None
                 and venue_ok and reads < 30 and not _venue_rl_active()):
@@ -12812,6 +12908,8 @@ def api_bet_sheets_mine():
         pnl_usd = None
         qty = filled_qty if filled_qty is not None else (
             (float(o.get("cum") or 0.0) if o else None))
+        if qty is None and bx is not None and (bx.get("order") or {}).get("cum") is not None:
+            qty = float(bx["order"]["cum"] or 0.0)
         if st in ("won", "lost", "push") and price_c is not None:
             q = float(qty) if qty is not None else float(contracts or 0)
             if st == "won":
@@ -12828,24 +12926,27 @@ def api_bet_sheets_mine():
             "entry_price": r.get("entry_price"), "price_c": price_c,
             "contracts": contracts, "slug": slug, "synthetic": syn,
             "order_id": oid,
-            "order": ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
-                       "price_c": (round((1 - float(o["price_yes"])) * 100, 1) if syn
-                                   else round(float(o["price_yes"]) * 100, 1))
-                       if o.get("price_yes") is not None else None}
-                      if resting else {"resting": False}),
+            "order": (bx.get("order") if bx is not None else
+                      ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
+                        "price_c": (round((1 - float(o["price_yes"])) * 100, 1) if syn
+                                    else round(float(o["price_yes"]) * 100, 1))
+                        if o.get("price_yes") is not None else None}
+                       if resting else {"resting": False})),
             "held": round(held, 2), "filled_qty": filled_qty,
             "cur_c": cur_c, "touch_c": touch_c,
             # OUTBID = someone bid past our resting price (Rob, Oct 3 2026:
             # "does it show if they aren't at touch? or do I just have to guess")
-            "outbid": bool(resting and touch_c is not None and o.get("price_yes") is not None
-                           and ((100 - float(o["price_yes"]) * 100) if syn else float(o["price_yes"]) * 100)
-                           < float(touch_c) - 0.01),
+            "outbid": (bool(bx.get("outbid")) if bx is not None else
+                       bool(resting and touch_c is not None and o is not None and o.get("price_yes") is not None
+                            and ((100 - float(o["price_yes"]) * 100) if syn else float(o["price_yes"]) * 100)
+                            < float(touch_c) - 0.01)),
             "status": st, "pnl_units": r.get("pnl_units"),
             "pnl_usd": pnl_usd, "result_score": r.get("result_score"),
             "venue_ok": venue_ok,
         })
     return jsonify({"ok": True, "bets": out, "venue_ok": venue_ok,
-                    "at": now.isoformat()})
+                    "src": ("box" if box is not None else "vercel"),
+                    "box_age_s": (box or {}).get("age_s"), "at": now.isoformat()})
 
 
 def _bet_sheet_cancel(client, oid: str, slug: str):
