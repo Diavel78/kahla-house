@@ -310,6 +310,7 @@
         _sport = s;
         document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.sport === s));
         load();
+        try { loadBetsRender(); } catch (e) {}          // the My-bets strip follows the tab
     }
 
     function fmtTime(iso) {
@@ -721,13 +722,19 @@
         const changed = JSON.stringify(Object.keys(hk).sort()) !== JSON.stringify(Object.keys(_haveByKey).sort());
         _haveByKey = hk;
         if (changed && typeof _games !== 'undefined' && _games && _games.length) { try { renderGames(); } catch (e) {} }
-        const open = bets.filter(b => b.status === 'pending');
-        const done = bets.filter(b => b.status !== 'pending');
+        // The strip follows the sport tab (Rob, Oct 4 2026: "NFL shows NFL
+        // bets, college just shows college") — the have-chips above still
+        // read EVERY bet; only the rows and the per-tab count are filtered.
+        const tabBets = bets.filter(b => String(b.sport || '').toUpperCase() === String(_sport || '').toUpperCase());
+        const openAll = bets.filter(b => b.status === 'pending').length;
+        const open = tabBets.filter(b => b.status === 'pending');
+        const done = tabBets.filter(b => b.status !== 'pending');
         let usd = 0, w = 0, l = 0, p = 0;
         done.forEach(b => { if (b.pnl_usd != null) usd += b.pnl_usd; if (b.status === 'won') w++; else if (b.status === 'lost') l++; else p++; });
-        document.getElementById('betsMeta').textContent = (open.length + ' open') + (done.length ? ' · settled ' + w + '-' + l + (p ? '-' + p : '') + ' ' + money(usd) : '')
+        document.getElementById('betsMeta').textContent = (_sport + ' ' + open.length + ' open') + (done.length ? ' · settled ' + w + '-' + l + (p ? '-' + p : '') + ' ' + money(usd) : '')
+            + (openAll !== open.length ? ' · ' + openAll + ' open all tabs' : '')
             + (d.src === 'box' ? ' · live from the box' : ' · ⚠ box not publishing — venue read from Vercel') + (d.venue_ok ? '' : ' · ⚠ venue unreadable');
-        if (!bets.length) { document.getElementById('bets').innerHTML = '<div class="empty" style="padding:14px 0">No bets yet. Build a slip below.</div>'; return; }
+        if (!tabBets.length) { document.getElementById('bets').innerHTML = '<div class="empty" style="padding:14px 0">No ' + esc(_sport) + ' bets' + (bets.length ? ' — ' + openAll + ' open on other tabs' : '') + '. Build a slip below.</div>'; return; }
         const rows = open.concat(done.slice().reverse());
         document.getElementById('bets').innerHTML = rows.map(b => {
             const entryP = b.price_c != null ? b.price_c / 100 : impl(b.entry_price);
