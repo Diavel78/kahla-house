@@ -194,6 +194,10 @@
         .sec-h h2 { font-size: 15px; margin: 0; }
         .sec-h .sub { color: var(--muted); font-size: 12px; }
         .bets { margin-bottom: 18px; }
+        .bets .sec-h { cursor: pointer; user-select: none; }
+        .bets .sec-h .chev { color: var(--muted); font-size: 11px; display: inline-block; transition: transform .15s; margin-left: auto; }
+        .bets.collapsed .sec-h .chev { transform: rotate(-90deg); }
+        .bets.collapsed #bets { display: none; }
         .bet { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
         .bet .info { flex: 1; min-width: 0; }
         .bet .info .l1 { font-size: 13.5px; font-weight: 600; }
@@ -233,7 +237,7 @@
             <h1>Bet Sheets</h1>
 
             <div class="bets" id="betsSec">
-                <div class="sec-h"><h2>My bets</h2><span class="sub" id="betsMeta">loading…</span></div>
+                <div class="sec-h" onclick="toggleBets()" title="Show / hide my bets"><h2>My bets</h2><span class="sub" id="betsMeta">loading…</span><span class="chev" id="betsChev">▼</span></div>
                 <div id="bets"></div>
             </div>
 
@@ -401,6 +405,21 @@
 
     // ───────────────────────── the slip ─────────────────────────
     const SLIP_KEY = 'kh_betslip_v1';
+    // My-bets strip collapse (Oct 4 2026, Rob: "put that in a collapsible box so I can hide them while looking
+    // for bets"). Purely visual: renderBets keeps running while collapsed so the sheet's have-chips and the
+    // meta line stay live; only #bets is hidden. State persists per browser.
+    const BETS_COLLAPSE_KEY = 'kh_bets_collapsed_v1';
+    function _applyBetsCollapse() {
+        let c = false; try { c = localStorage.getItem(BETS_COLLAPSE_KEY) === '1'; } catch (e) {}
+        document.getElementById('betsSec').classList.toggle('collapsed', c);
+    }
+    function toggleBets() {
+        const sec = document.getElementById('betsSec');
+        const c = !sec.classList.contains('collapsed');
+        sec.classList.toggle('collapsed', c);
+        try { localStorage.setItem(BETS_COLLAPSE_KEY, c ? '1' : '0'); } catch (e) {}
+    }
+    _applyBetsCollapse();
     let _slip = [];          // [{key, sport, away, home, event_start, market_type, side, line, label, game, q}]
     let _slipOpen = false;
     try { const s = JSON.parse(localStorage.getItem(SLIP_KEY) || '{}'); _slip = s.items || []; if (s.contracts) document.getElementById('contracts').value = s.contracts; } catch (e) {}
