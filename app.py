@@ -13459,6 +13459,12 @@ _HAND_APP_MISS: dict = {}          # pick_id -> monotonic of the first order-gon
 _HAND_APP_MISS_S = 20.0            # second strike must be this much later
 
 
+def _intent_short(intent) -> str:
+    """'ORDER_INTENT_BUY_SHORT' (the mirror's raw venue string) → 'BUY_SHORT';
+    a bare 'BUY_SHORT' passes through."""
+    return str(intent or "").split("ORDER_INTENT_")[-1]
+
+
 def _slug_side_line(slug: str, syn: bool):
     """(market_type, side, line) from the venue's slug convention alone:
     asc = spread (pos-X = away +X, neg-X = away −X; a SHORT mirrors to home),
@@ -13553,7 +13559,7 @@ def _hand_app_pick_row(sb, client, owner_uid, o: dict, now) -> dict | None:
     """bot_picks row for a resting MANUAL app order. None = can't book it
     safely (unknown game / side) — leave it, retry next tick."""
     slug = o.get("slug") or ""
-    syn = (o.get("intent") or "") == "BUY_SHORT"
+    syn = _intent_short(o.get("intent")) == "BUY_SHORT"
     py = o.get("price_yes")
     if py is None:
         return None
@@ -13658,7 +13664,7 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
         slug = o.get("slug") or ""
         if not slug or o.get("state") not in _OPEN_ORDER_STATES:
             continue
-        if not str(o.get("intent") or "").startswith("BUY"):
+        if not _intent_short(o.get("intent")).startswith("BUY"):   # ORDER_INTENT_BUY_LONG / _SHORT
             continue
         if o.get("auto"):
             continue                                   # API order — machine's or a sheet bet's
