@@ -13078,7 +13078,7 @@ _HAND_MOVE_COLLAPSE_PCT = 70.0     # our-side bid size at the touch, off its 60-
 _HAND_MOVE_BASE_S = 90.0           # baseline window [now-90, now-10]
 _HAND_MOVE_RECENT_S = 10.0
 _HAND_MOVE_STALE_S = 30.0          # the newest frame must be this fresh
-_HAND_MOVE_RELOCATE_PCT = 70.0     # …and at least this much of it must re-post BELOW the old touch
+_HAND_MOVE_RELOCATE_PCT = 60.0     # …and at least this much of it must re-post BELOW the old touch (Rob: "I'm the 10% that gets fucked" — lean loose, get off the book)
 _HAND_MOVE_CALM_S = 300.0          # sit out this long before rejoining
 _HAND_MOVE_CALM_WIN_S = 60.0       # …and the mid must have held ±1 tick this long
 _HAND_MOVE_MAX_WAIT_S = 900.0      # never sit out longer than this
@@ -13110,7 +13110,7 @@ def _hand_side_rows(samples, syn: bool):
 
 
 def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: float,
-                    relocate_pct: float = 70.0, need_ask: bool = False):
+                    relocate_pct: float = 60.0, need_ask: bool = False):
     """rows = OUR-side book samples (ts, bid_c, bid_q, ask_c, ask_q[, bid_depth3]),
     oldest first. -> (verdict, detail) with verdict 'stay' | 'cancel'.
     P = the touch price at the baseline high (window [now-90s, now-10s]).

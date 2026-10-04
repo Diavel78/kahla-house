@@ -2533,9 +2533,12 @@ def test_hand_move_plan() -> None:
     # 60% off at the touch is not 70% off, however much sits below
     v, d = f(base + [row(N - 2, 55.0, 60000, 55.5, 90000, 200000)], 55.0, 1.0, N, 70)
     assert v == "stay" and d["why"] == "quiet", (v, d)
-    # a smaller relocation (half the size came back lower) is not a move at 70
+    # a smaller relocation (half the size came back lower) is not a move at the default 60…
     v, d = f(base + [row(N - 2, 54.5, 75000, 55.0, 90000, 95000)], 55.0, 1.0, N, 70)
     assert v == "stay" and d["why"] == "vanish", (v, d)
+    # …but 65% of it coming back lower IS (Rob: "I'm the 10% that gets fucked" — 60, not 90)
+    v, d = f(base + [row(N - 2, 54.5, 100000, 55.0, 90000, 130000)], 55.0, 1.0, N, 70)
+    assert v == "cancel" and d["why"] == "move", (v, d)
     assert f(base + [row(N - 2, 54.5, 75000, 55.0, 90000, 95000)], 55.0, 1.0, N, 70, relocate_pct=40)[0] == "cancel"
     # the touch IMPROVED (bids above us) → nothing collapsed at P
     v, d = f(base + [row(N - 2, 55.5, 90000, 56.0, 90000, 200000)], 55.0, 1.0, N, 70)
