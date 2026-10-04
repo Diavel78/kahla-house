@@ -2567,6 +2567,14 @@ def test_hand_orders_queue() -> None:
         check("box tick claims + runs the pending row", st.get("claimed") == 1 and st.get("done") == 1 and ran[-1] == (3, "box"))
     finally:
         _app._HAND_ENSURED["ok"], _app._HAND_CLAIM_WAIT_S, _app.get_client, _app._hand_order_execute = saved
+    # THE END STATE (Rob, Oct 3 2026: the box "is wrapping down everything it
+    # does… betting nothing new"): the hand executor must boot ALONE, with no
+    # machine lane beside it and no owner uid.
+    from cellar import config as _cfg
+    from cellar.runner import Runner as _Runner
+    check("the daemon boots with CELLAR_LANES=handbets alone", _Runner.validate(["handbets"]) == [])
+    check("handbets needs no owner uid", not _cfg.ALL_LANES["handbets"].needs_owner)
+    check("handbets is quiet (no idle tick flood)", _cfg.ALL_LANES["handbets"].quiet)
 
 
 def main() -> int:
