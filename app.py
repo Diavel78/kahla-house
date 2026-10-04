@@ -13181,7 +13181,7 @@ _HAND_MOVE_CALM_S = 300.0          # sit out this long before rejoining
 _HAND_MOVE_CALM_WIN_S = 60.0       # …and the mid must have held ±1 tick this long
 _HAND_MOVE_MAX_WAIT_S = 900.0      # never sit out longer than this
 _HAND_MOVE_MIN_LEAD_MIN = 30.0     # inside this the rule is OFF — that's noise, not news
-_HAND_MOVE_REJOIN_HOLD_S = 600.0   # after a rejoin the chase may not climb off the rejoin rung for this long (the Oct 4 flap loop)
+_HAND_MOVE_REJOIN_HOLD_S = 1800.0  # after a rejoin the chase may not climb off the rejoin rung for this long (Rob, Oct 4 2026: "pause the repeg on any bet that has been cancelled for 30 minutes after rejoin")
 _HAND_MOVE_MAX_ACTS = 3
 _HAND_MOVE_LAST: dict = {}
 
