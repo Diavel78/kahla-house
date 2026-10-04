@@ -2863,7 +2863,8 @@ def api_poly_touch():
             ev_slug = f"{lg}-{g}-{day}"
             _cached = _TOUCH_GAME_CACHE.get(ev_slug)
             if _cached and _time.monotonic() - _cached[0] < 900:
-                slugs.extend(_cached[1].values())
+                _kinds = [k for k in (request.args.get("kinds") or "ml,spread,total").split(",") if k]
+                slugs.extend(v for k, v in _cached[1].items() if k in _kinds)
                 out.setdefault("games", {})[ev_slug] = dict(_cached[1])
                 continue
             try:
@@ -2909,8 +2910,9 @@ def api_poly_touch():
                 cur = picks.get(kind)
                 if cur is None or dist < cur[0]:
                     picks[kind] = (dist, sl)
+            _kinds = [k for k in (request.args.get("kinds") or "ml,spread,total").split(",") if k]
             for kind in ("ml", "spread", "total"):
-                if kind in picks:
+                if kind in picks and kind in _kinds:
                     slugs.append(picks[kind][1])
             _res = {k: v[1] for k, v in picks.items()}
             if _res:
