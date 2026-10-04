@@ -3094,6 +3094,19 @@ def api_bet_sheets_picks():
         return jsonify({"ok": False, "error": "forbidden"}), 403
     slug = (request.args.get("slug") or "").strip()
     out: dict = {"ok": True, "slug": slug}
+    kinds = [k.strip() for k in (request.args.get("stamps") or "").split(",") if k.strip()]
+    if kinds:                                          # e.g. stamps=hand_move_cancel,hand_move_rejoin
+        try:
+            st = (get_supabase().table("exec_probe_runs").select("at,result")
+                  .order("at", desc=True).limit(int(request.args.get("n") or 600)).execute().data) or []
+        except Exception as e:
+            st = []
+            out["stamps_err"] = str(e)[:160]
+        out["kind_stamps"] = [{"at": x.get("at"), "r": x.get("result")} for x in st
+                              if isinstance(x.get("result"), dict)
+                              and any(x["result"].get(k) for k in kinds)
+                              and (not slug or slug in str(x["result"].get("slug") or ""))][:60]
+        out["scanned"] = len(st)
     sb = get_supabase()
     ids = [x for x in (request.args.get("delete_ids") or "").split(",") if x.strip().isdigit()]
     if ids:                                            # explicit ids, app-adopted rows ONLY
