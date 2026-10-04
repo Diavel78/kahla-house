@@ -2501,6 +2501,48 @@ def test_bet_sheet_rung() -> None:
     check("empty ladder → reason, no crash", e is None and why)
 
 
+def test_hand_move_plan() -> None:
+    """Line-movement cancel (Oct 4 2026): our-side touch size 70% off its
+    60-90s high AND the ask making a new low = the line moved → cancel. A
+    bare size collapse with the ask steady is a maker pulling orders → stay."""
+    import app as _app
+    f, calm, orient = _app._hand_move_plan, _app._hand_calm, _app._hand_side_rows
+    N = 10000.0
+    def row(ts, bc, bq, ac, aq):
+        return (ts, bc, bq, ac, aq)
+    base = [row(N - 80, 55.0, 150000, 55.5, 120000), row(N - 50, 55.0, 148000, 55.5, 121000),
+            row(N - 20, 55.0, 151000, 55.5, 119000)]
+    # a real move: bid level empties AND the ask steps down → cancel
+    v, d = f(base + [row(N - 2, 54.0, 30000, 54.5, 90000)], 55.0, 1.0, N, 70)
+    assert v == "cancel" and d["why"] == "move", (v, d)
+    # the pull: bid size gone, ask unchanged → stay (NYJ@CHI total 09:55:49)
+    v, d = f(base + [row(N - 2, 55.0, 190, 55.5, 119000)], 55.0, 1.0, N, 70)
+    assert v == "stay" and d["why"] == "pull", (v, d)
+    # ask down but size intact → stay (not a collapse)
+    v, d = f(base + [row(N - 2, 55.0, 140000, 55.0, 90000)], 55.0, 1.0, N, 70)
+    assert v == "stay" and d["why"] == "quiet", (v, d)
+    # 60% off is not 70% off
+    v, d = f(base + [row(N - 2, 54.5, 60000, 54.5, 90000)], 55.0, 1.0, N, 70)
+    assert v == "stay", (v, d)
+    # our own contracts never count toward the baseline or the collapse
+    lone = [row(N - 80, 55.0, 5.0, 55.5, 120000), row(N - 50, 55.0, 5.0, 55.5, 120000)]
+    v, d = f(lone + [row(N - 2, 55.0, 5.0, 54.5, 90000)], 55.0, 5.0, N, 70)
+    assert v == "stay" and d["why"] == "quiet", (v, d)
+    # stale newest frame / no baseline → stay
+    assert f(base + [row(N - 2, 54.0, 30000, 54.5, 90000)], 55.0, 1.0, N + 400, 70)[0] == "stay"
+    assert f([row(N - 2, 54.0, 30000, 54.5, 90000)], 55.0, 1.0, N, 70)[0] == "stay"
+    # synthetic NO orientation: YES ask is our bid, YES bid is our ask
+    yes = [(N - 50, 44.5, 120000, 45.0, 150000), (N - 2, 45.5, 90000, 46.0, 30000)]
+    ours = orient(yes, True)
+    assert abs(ours[0][1] - 55.0) < 1e-9 and ours[0][2] == 150000 and abs(ours[0][3] - 55.5) < 1e-9, ours[0]
+    assert abs(ours[1][1] - 54.0) < 1e-9 and abs(ours[1][3] - 54.5) < 1e-9, ours[1]
+    # calm: mid held a tick for the window; moving mid is not calm; empty window is not calm
+    assert calm([row(N - 50, 55.0, 1, 55.5, 1), row(N - 20, 55.0, 1, 55.5, 1), row(N - 2, 55.0, 1, 55.5, 1)], N)
+    assert not calm([row(N - 50, 55.0, 1, 55.5, 1), row(N - 2, 54.0, 1, 54.5, 1)], N)
+    assert not calm([row(N - 500, 55.0, 1, 55.5, 1)], N)
+    print("  PASS  hand line-move planner (collapse AND ask-down → cancel; pull → stay) + calm")
+
+
 def test_hand_start_plan() -> None:
     """The 'game started' rule (Oct 4 2026): both-side touch size 70% off
     its pre-start high, at or after the listed start, two frames, cancel."""
@@ -2650,7 +2692,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_start_plan, test_hand_orders_queue):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_start_plan, test_hand_move_plan, test_hand_orders_queue):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
