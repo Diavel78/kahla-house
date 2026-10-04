@@ -3095,6 +3095,20 @@ def api_bet_sheets_picks():
     slug = (request.args.get("slug") or "").strip()
     out: dict = {"ok": True, "slug": slug}
     sb = get_supabase()
+    ids = [x for x in (request.args.get("delete_ids") or "").split(",") if x.strip().isdigit()]
+    if ids:                                            # explicit ids, app-adopted rows ONLY
+        deleted = []
+        for pid in ids:
+            try:
+                r = (sb.table("bot_picks").select("id,signal_blob").eq("id", int(pid))
+                     .limit(1).execute().data or [None])[0]
+                b = (r or {}).get("signal_blob") or {}
+                if r and b.get("app_adopted") and b.get("bet_sheet"):
+                    sb.table("bot_picks").delete().eq("id", int(pid)).execute()
+                    deleted.append(int(pid))
+            except Exception as e:
+                out.setdefault("delete_err", []).append(f"{pid}: {e}"[:120])
+        out["deleted"] = deleted
     try:
         out["pending_total"] = (sb.table("bot_picks").select("id", count="exact")
                                 .eq("status", "pending").limit(1).execute().count) or 0
@@ -13699,6 +13713,23 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
             pending_slugs.add(b["pmm_slug"])
         if b.get("app_adopted") and b.get("bet_sheet"):
             adopted_rows.append((r, b))
+    # THE BILLS LOOP (Oct 4 2026): a held 1-lot was adopted at 12:11, the game
+    # went final at ~13:12, the resolver graded the pick LOST, and the next
+    # tick saw a position with no PENDING pick on the slug — and booked it
+    # again, once a minute, seven times, until the venue cleared the lot.
+    # A slug that carries ANY sheet/app pick, settled or not, is booked.
+    try:
+        _done = (sb.table("bot_picks").select("id,signal_blob")
+                 .eq("signal_blob->>bet_sheet", "true").neq("status", "pending")
+                 .gte("event_start", (now - timedelta(days=3)).isoformat())
+                 .limit(500).execute().data or [])
+        for r in _done:
+            b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+            if b.get("pmm_slug"):
+                pending_slugs.add(b["pmm_slug"])
+    except Exception as e:
+        st["gate"] = f"settled: {e}"[:120]
+        return st                                      # can't prove a lot unbooked → adopt nothing
     try:
         pair = _pair_slugs(sb)
     except Exception:
