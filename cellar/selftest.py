@@ -2503,8 +2503,8 @@ def test_bet_sheet_rung() -> None:
 
 def test_hand_move_plan() -> None:
     """Line-movement cancel (Oct 4 2026): our-side touch size 70% off its
-    60-90s high AND the ask making a new low = the line moved → cancel. A
-    bare size collapse with the ask steady is a maker pulling orders → stay."""
+    60-90s high → cancel. The ask is recorded, not required (the venue's ask
+    lags the pull); `need_ask=True` restores the two-condition rule."""
     import app as _app
     f, calm, orient = _app._hand_move_plan, _app._hand_calm, _app._hand_side_rows
     N = 10000.0
@@ -2515,8 +2515,13 @@ def test_hand_move_plan() -> None:
     # a real move: bid level empties AND the ask steps down → cancel
     v, d = f(base + [row(N - 2, 54.0, 30000, 54.5, 90000)], 55.0, 1.0, N, 70)
     assert v == "cancel" and d["why"] == "move", (v, d)
-    # the pull: bid size gone, ask unchanged → stay (NYJ@CHI total 09:55:49)
+    # THE PULL IS A CANCEL TOO (Rob: the ask lags on this venue — nobody
+    # takes at these fees, so the bid collapses first and the straggler gets
+    # hit before the ask ever moves). NYJ@CHI total 09:55:49 shape.
     v, d = f(base + [row(N - 2, 55.0, 190, 55.5, 119000)], 55.0, 1.0, N, 70)
+    assert v == "cancel" and d["why"] == "collapse" and d["ask_down"] is False, (v, d)
+    # …unless the ask confirmation is switched back on
+    v, d = f(base + [row(N - 2, 55.0, 190, 55.5, 119000)], 55.0, 1.0, N, 70, need_ask=True)
     assert v == "stay" and d["why"] == "pull", (v, d)
     # ask down but size intact → stay (not a collapse)
     v, d = f(base + [row(N - 2, 55.0, 140000, 55.0, 90000)], 55.0, 1.0, N, 70)
@@ -2540,7 +2545,7 @@ def test_hand_move_plan() -> None:
     assert calm([row(N - 50, 55.0, 1, 55.5, 1), row(N - 20, 55.0, 1, 55.5, 1), row(N - 2, 55.0, 1, 55.5, 1)], N)
     assert not calm([row(N - 50, 55.0, 1, 55.5, 1), row(N - 2, 54.0, 1, 54.5, 1)], N)
     assert not calm([row(N - 500, 55.0, 1, 55.5, 1)], N)
-    print("  PASS  hand line-move planner (collapse AND ask-down → cancel; pull → stay) + calm")
+    print("  PASS  hand line-move planner (collapse → cancel; ask recorded, not required) + calm")
 
 
 def test_hand_start_plan() -> None:
