@@ -2803,6 +2803,110 @@ def api_poly_orders():
     return jsonify(out)
 
 
+@app.route("/api/polymarket/touch")
+def api_poly_touch():
+    """READ-ONLY: the TOUCH with SIZES on several slugs in one call.
+
+    Built Oct 4 2026 for the kickoff watch (Rob: "you can tell me the
+    volume drop and tell me when you think the game started"): the thesis
+    behind the volume rule is that resting size at the touch, BOTH sides,
+    craters the moment live play starts. Nothing persists sizes, so this
+    is the eyeball tool — one line per slug, AZ-stamped, bid/ask best
+    price + size + the top-3 size on each side.
+
+    ?slugs=a,b,c reads exact markets. ?games=ne-buf,nyg-chi expands each
+    `nfl-<away>-<home>-<date>` event (date = ?date=, default today AZ)
+    into its moneyline + the at-the-money spread rung + the at-the-money
+    total rung (nearest 50c YES bid), via the event's own market list.
+    Shared-secret, no writes.
+    """
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    import pmm_markets as _pmk
+    slugs = [s.strip() for s in (request.args.get("slugs") or "").split(",")
+             if s.strip()]
+    games = [g.strip().lower() for g in (request.args.get("games") or "").split(",")
+             if g.strip()]
+    lg = (request.args.get("lg") or "nfl").strip().lower()
+    day = (request.args.get("date") or
+           datetime.now(ZoneInfo("America/Phoenix")).strftime("%Y-%m-%d"))
+    out: dict = {"ok": True, "at": datetime.now(ZoneInfo("America/Phoenix")).strftime("%H:%M:%S"),
+                 "rows": [], "lines": []}
+    try:
+        client = get_client()
+        for g in games[:4]:
+            ev_slug = f"{lg}-{g}-{day}"
+            try:
+                full = client.events.retrieve_by_slug(ev_slug)
+                evf = (full.get("event") if isinstance(full, dict)
+                       else getattr(full, "event", None)) or full
+                ms = (_pmk._event_to_dict(evf) or {}).get("markets") or []
+                if not ms:
+                    mresp = client.markets.list({"eventSlug": [ev_slug],
+                                                 "closed": False, "limit": 200})
+                    ms = (mresp.get("markets") if isinstance(mresp, dict)
+                          else getattr(mresp, "markets", None)) or []
+                    ms = [_pmk._market_to_dict(m) for m in ms]
+            except Exception as e:
+                out.setdefault("game_err", {})[ev_slug] = f"{type(e).__name__}: {e}"[:160]
+                continue
+            picks: dict = {}
+            for md in ms:
+                sl = str(md.get("slug") or "")
+                if not sl or ev_slug.split("-", 1)[1] not in sl:
+                    continue
+                v2 = str(md.get("sportsMarketTypeV2") or "")
+                v1 = str(md.get("sportsMarketType") or "").lower()
+                if any(k in v1 for k in ("half", "quarter", "player", "first", "period")):
+                    continue
+                bq = md.get("bestBidQuote")
+                try:
+                    bid = float(bq.get("value") if isinstance(bq, dict) else bq) * 100
+                except Exception:
+                    bid = None
+                if "MONEYLINE" in v2:
+                    kind = "ml"
+                elif "SPREAD" in v2:
+                    kind = "spread"
+                elif "TOTAL" in v2:
+                    kind = "total"
+                else:
+                    continue
+                dist = abs((bid if bid is not None else 999) - 50)
+                cur = picks.get(kind)
+                if cur is None or dist < cur[0]:
+                    picks[kind] = (dist, sl)
+            for kind in ("ml", "spread", "total"):
+                if kind in picks:
+                    slugs.append(picks[kind][1])
+            out.setdefault("games", {})[ev_slug] = {k: v[1] for k, v in picks.items()}
+        seen = set()
+        for sl in slugs[:16]:
+            if sl in seen:
+                continue
+            seen.add(sl)
+            bk = _pmm_book(client, sl) or {}
+            bids, asks = bk.get("bids") or [], bk.get("asks") or []
+            bb = bids[0] if bids else (None, 0.0)
+            ba = asks[0] if asks else (None, 0.0)
+            row = {"slug": sl, "bid_c": bb[0], "bid_q": round(bb[1], 1),
+                   "ask_c": ba[0], "ask_q": round(ba[1], 1),
+                   "touch_q": round(bb[1] + ba[1], 1),
+                   "bid3_q": round(sum(q for _, q in bids[:3]), 1),
+                   "ask3_q": round(sum(q for _, q in asks[:3]), 1),
+                   "spread_c": (round(ba[0] - bb[0], 1)
+                                if bb[0] is not None and ba[0] is not None else None)}
+            out["rows"].append(row)
+            out["lines"].append(
+                f"{out['at']} {sl[-34:]:>34} bid {bb[0]}x{row['bid_q']} ask {ba[0]}x{row['ask_q']}"
+                f" touch {row['touch_q']} top3 {row['bid3_q']}/{row['ask3_q']} spr {row['spread_c']}")
+    except Exception as e:
+        out.update(ok=False, error=f"{type(e).__name__}: {e}"[:220])
+    return jsonify(out)
+
+
 @app.route("/api/pair/status")
 def api_pair_status():
     """READ-ONLY: pair_hedges rows for a game + a DRY re-rung verdict.
