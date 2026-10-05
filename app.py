@@ -14547,6 +14547,24 @@ def _hand_side_ladder(slug: str, syn: bool):
     return None
 
 
+def _hand_ladder_from_book(book, syn: bool):
+    """Pure. OUR-side bid ladder off a REST `_pmm_book` dict (the boot
+    fallback: right after a kick the depth socket is empty and the tape is
+    wiped, and Oct 4 2026 the chase joined a 57-over-450 touch 28s after a
+    boot because "no ladder" read as "not thin"). None when unreadable."""
+    if not isinstance(book, dict):
+        return None
+    try:
+        if syn:
+            lad = [(round(100.0 - float(p), 3), float(q)) for p, q in (book.get("asks") or [])]
+        else:
+            lad = [(float(p), float(q)) for p, q in (book.get("bids") or [])]
+    except (TypeError, ValueError):
+        return None
+    lad.sort(key=lambda x: -x[0])
+    return lad or None
+
+
 def _hand_thin_touch(ladder, our_price_c, our_qty, min_pct: float):
     """Pure. (thin, detail). thin ⇔ the touch rung's size, minus our own
     contracts if we sit there, is under min_pct% of the next rung down
@@ -14654,6 +14672,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
         py = float(o["price_yes"]) * 100.0
         price_c = round((100.0 - py) if syn else py, 2)
         touch_c = None
+        bk = None
         q = _ws_quote(slug)
         if q:
             yb, ya = q
@@ -14690,7 +14709,23 @@ def _hand_chase_tick(sb, client, now) -> dict:
                 leaves_q = float(o.get("leaves") or 0.0)
             except (TypeError, ValueError):
                 leaves_q = 0.0
-            thin, tdet = _hand_thin_touch(_hand_side_ladder(slug, syn), price_c, leaves_q, thin_pct)
+            lad = _hand_side_ladder(slug, syn)
+            if lad is None:
+                # no depth row and no tape (a fresh boot) → one REST book,
+                # and if that fails too the guard fails CLOSED: never climb
+                # onto a touch we cannot see the size of.
+                if bk is None and st["rest"] < _HAND_CHASE_REST_READS:
+                    st["rest"] += 1
+                    bk = _bet_sheet_book(client, slug, tries=1)
+                lad = _hand_ladder_from_book(bk, syn)
+                if lad is None:
+                    st["thin"] += 1
+                    if not thin_hold or thin_hold.get("why") != "no_ladder":
+                        nb = {**blob, "thin_hold": {"why": "no_ladder", "touch_c": target, "price_c": price_c,
+                                                    "at": now.isoformat()}}
+                        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                    continue
+            thin, tdet = _hand_thin_touch(lad, price_c, leaves_q, thin_pct)
             if thin:
                 st["thin"] += 1
                 try:

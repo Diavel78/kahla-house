@@ -2747,6 +2747,15 @@ def test_hand_thin_touch() -> None:
     check("empty → ok", f(None, 51.0, 5, 20.0)[0] is False)
     # the chase plan itself is unchanged: the guard sits in the tick between 'move' and the amend
     check("plan still says move", _app._hand_chase_plan(51.0, 52.0, 51.0, 2.0)[0] == "move")
+    # the boot fallback: a REST book → our-side ladder (Oct 4 2026, the 28s-after-boot join)
+    g = _app._hand_ladder_from_book
+    bk = {"bids": [(46.0, 3409.0), (45.5, 784.0)], "asks": [(46.5, 57.0), (47.0, 450.0)],
+          "best_bid": 46.0, "best_ask": 46.5}
+    lad = g(bk, True)
+    check("synthetic NO ladder = inverted asks, best-first", lad == [(53.5, 57.0), (53.0, 450.0)])
+    check("…and that touch reads thin", f(lad, 51.5, 10, 20.0)[0] is True)
+    check("YES ladder = the bids", g(bk, False) == [(46.0, 3409.0), (45.5, 784.0)])
+    check("no book → None (the tick holds)", g(None, True) is None and g({"asks": []}, True) is None)
 
 
 def test_hand_orders_queue() -> None:
