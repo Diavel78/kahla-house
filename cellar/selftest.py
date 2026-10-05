@@ -2756,6 +2756,25 @@ def test_hand_thin_touch() -> None:
     check("…and that touch reads thin", f(lad, 51.5, 10, 20.0)[0] is True)
     check("YES ladder = the bids", g(bk, False) == [(46.0, 3409.0), (45.5, 784.0)])
     check("no book → None (the tick holds)", g(None, True) is None and g({"asks": []}, True) is None)
+    # ONE SEAT RULE for quote / place / re-peg / chase (Rob, Oct 4 2026: "the
+    # original bet's the problem on half of these… We're on the thin rung.
+    # It's fat under me. Should fucking work")
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    sp = _app._hand_seat_price
+    now = _dt(2026, 10, 4, 21, 0, tzinfo=_tz.utc)
+    far = (now + _td(days=5)).isoformat()
+    near = (now + _td(hours=3)).isoformat()
+    pc, d = sp(bk, True, far, now, 20.0, 6.0)
+    check("far out, thin touch → the fat rung under it (53.0)", pc == 53.0 and d["thin"] and d["why"] == "thin_touch")
+    pc, d = sp(bk, True, near, now, 20.0, 6.0)
+    check("inside T-6h → the touch (53.5), guard off", pc == 53.5 and not d["thin"])
+    fat = {"asks": [(46.5, 400.0), (47.0, 450.0)], "bids": [], "best_bid": None, "best_ask": 46.5}
+    pc, d = sp(fat, True, far, now, 20.0, 6.0)
+    check("fat touch → the touch", pc == 53.5 and not d["thin"])
+    pc, d = sp(bk, True, far, now, 20.0, 6.0, our_price_c=53.5, our_qty=10)
+    check("our own 10 on the touch are not its company → still the rung under", pc == 53.0 and d["thin"])
+    check("pct 0 → the touch", sp(bk, True, far, now, 0, 6.0)[0] == 53.5)
+    check("no bids → None", sp({"asks": [], "bids": []}, True, far, now, 20.0, 6.0)[0] is None)
 
 
 def test_hand_orders_queue() -> None:

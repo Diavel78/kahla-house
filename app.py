@@ -12567,9 +12567,14 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
     if s_bid is None:
         return {"ok": False, "reason": "no bids on this market yet", "slug": slug,
                 "rung_line": entry.get("line")}
+    mp, oh = _hand_thin_cfg()
+    seat, sdet = _hand_seat_price(book, synthetic, es, datetime.now(timezone.utc), mp, oh)
+    if seat is None:
+        seat = s_bid
     return {"ok": True, "slug": slug, "synthetic": synthetic,
             "rung_line": entry.get("line"), "rung_why": why,
-            "price_c": s_bid, "ask_c": s_ask,
+            "price_c": seat, "touch_c": s_bid, "ask_c": s_ask,
+            "thin": (sdet if sdet.get("thin") else None),
             "event_slug": pmm.get("event_slug"), "event_title": pmm.get("event_title"),
             "_book": book}
 
@@ -12854,11 +12859,14 @@ def _hand_order_execute(sb, client, row: dict, worker: str) -> dict:
         book = _bet_sheet_book(client, slug)
         if book is None:
             return {"ok": False, "error": "book unreadable — try again"}
+        seat_det = None
         if price_c is None:
             s_bid, _s_ask = _manual_side_book(book, syn)
             if s_bid is None:
                 return {"ok": False, "error": "no bids on this market yet"}
-            price_c = s_bid
+            mp, oh = _hand_thin_cfg()
+            seat, seat_det = _hand_seat_price(book, syn, row.get("event_start"), datetime.now(timezone.utc), mp, oh)
+            price_c = seat if seat is not None else s_bid
         out, _st = _manual_order_place(client, slug, syn, price_c, row.get("contracts"),
                                        row.get("event_start"), book=book)
         if not out.get("ok"):
@@ -12866,6 +12874,8 @@ def _hand_order_execute(sb, client, row: dict, worker: str) -> dict:
         res = {"ok": True, "via": worker, "order_id": out.get("order_id"),
                "state": out.get("state"), "resting": out.get("resting"),
                "cost": out.get("cost"), "price_c": out.get("price_c")}
+        if seat_det and seat_det.get("thin"):
+            res["thin"] = {k: seat_det.get(k) for k in ("touch_c", "touch_q", "below_c", "below_q", "pct")}
         if not out.get("resting"):
             res["warning"] = (f"order sent but not resting (state {out.get('state') or 'unknown'})"
                               " — check the app")
@@ -14438,6 +14448,11 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
     s_bid, s_ask = _manual_side_book(book, syn)
     if s_bid is None:
         return {"ok": False, "error": "no bids on this market — nothing to join"}, 409
+    touch_c = s_bid
+    mp, oh = _hand_thin_cfg()
+    _seat, _sdet = _hand_seat_price(book, syn, r.get("event_start"), datetime.now(timezone.utc), mp, oh)
+    if _seat is not None:
+        s_bid = _seat                                   # the seat: the touch, or the fat rung under a thin one
     cur = None
     ords = _pmm_open_orders_raw(client, fresh=True)
     if ords is None:
@@ -14467,7 +14482,9 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
         cur_c = round((100.0 - py) if syn else py, 2)
     from_c = cur_c if cur_c is not None else blob.get("price_c")
     if from_c is not None and abs(float(from_c) - s_bid) < 0.01:
-        return {"ok": True, "moved": False, "price_c": s_bid, "note": "already at the touch"}, 200
+        return {"ok": True, "moved": False, "price_c": s_bid,
+                "note": "already at the touch" if abs(s_bid - touch_c) < 0.01
+                else f"already seated under the thin touch ({touch_c}¢)"}, 200
     try:
         dt = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
         gtt = _hand_gtt(dt)
@@ -14563,6 +14580,47 @@ def _hand_ladder_from_book(book, syn: bool):
         return None
     lad.sort(key=lambda x: -x[0])
     return lad or None
+
+
+def _hand_thin_cfg():
+    """(min_pct, off_h) off machine_flags — the thin-touch guard's dials."""
+    def _fl(key, dflt):
+        try:
+            return float(_machine_flag_val(key, dflt))
+        except (TypeError, ValueError):
+            return dflt
+    return _fl("hand_join_min_pct", _HAND_JOIN_MIN_PCT), _fl("hand_join_thin_off_h", _HAND_JOIN_THIN_OFF_H)
+
+
+def _hand_seat_price(book, syn: bool, event_start, now, min_pct, off_h, our_price_c=None, our_qty=0.0):
+    """Pure. WHERE A HAND BET SITS (Rob, Oct 4 2026: "it sounds to me like the
+    original bet's the problem on half of these… We're on the thin rung.
+    It's fat under me. Should fucking work"): the touch, unless the touch
+    is a thin sliver of the rung under it and we are more than `off_h`
+    from the start — then the rung under it. One rule for the slip quote,
+    the placement, the slip re-peg and the chase. Returns (price_c, det);
+    price None when the book has no bids."""
+    lad = _hand_ladder_from_book(book, syn)
+    if not lad:
+        return None, {"why": "no_bids"}
+    touch = lad[0][0]
+    det = {"touch_c": touch, "thin": False, "why": "touch"}
+    try:
+        ev = datetime.fromisoformat(str(event_start).replace("Z", "+00:00")) if not isinstance(event_start, datetime) else event_start
+        far = (ev.astimezone(timezone.utc) - now).total_seconds() > float(off_h) * 3600.0
+    except (TypeError, ValueError):
+        far = False
+    if not far or not min_pct or float(min_pct) <= 0:
+        det["why"] = "touch" if far else "inside_off_h"
+        return touch, det
+    thin, td = _hand_thin_touch(lad, our_price_c, our_qty, min_pct)
+    det.update(td)
+    det["thin"] = bool(thin)
+    if thin and td.get("below_c") is not None:
+        det["why"] = "thin_touch"
+        return float(td["below_c"]), det
+    det["why"] = "touch"
+    return touch, det
 
 
 def _hand_thin_touch(ladder, our_price_c, our_qty, min_pct: float):
@@ -14695,36 +14753,60 @@ def _hand_chase_tick(sb, client, now) -> dict:
         hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
         thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
         thin_join = None                                # set when the guard retargets us to the rung under a thin touch
+        guard_on = thin_pct > 0 and (ev.astimezone(timezone.utc) - now).total_seconds() > thin_off_h * 3600.0
+        try:
+            leaves_q = float(o.get("leaves") or 0.0)
+        except (TypeError, ValueError):
+            leaves_q = 0.0
+
+        def _ladder():
+            # depth row, else the tape, else ONE REST book (a fresh boot has neither)
+            nonlocal bk
+            lad = _hand_side_ladder(slug, syn)
+            if lad is None:
+                if bk is None and st["rest"] < _HAND_CHASE_REST_READS:
+                    st["rest"] += 1
+                    bk = _bet_sheet_book(client, slug, tries=1)
+                lad = _hand_ladder_from_book(bk, syn)
+            return lad
+        if verdict == "stay" and note == "at_touch" and guard_on:
+            # SITTING ON A THIN TOUCH (Rob, Oct 4 2026: "We're on the thin rung.
+            # It's fat under me. Should fucking work"): however we got here —
+            # a chase, an app bet, a boot-blind join — the seat is the fat rung
+            # under the touch. Drop to it. (His declined rule was the OTHER
+            # case: the rung UNDER us thinning out.)
+            lad = _ladder()
+            if lad is not None:
+                thin, tdet = _hand_thin_touch(lad, price_c, leaves_q, thin_pct)
+                try:
+                    below_c = float(tdet.get("below_c"))
+                except (TypeError, ValueError):
+                    below_c = None
+                if thin and below_c is not None and below_c < price_c - 0.01:
+                    st["thin"] += 1
+                    verdict, target, note = "move", below_c, "thin_drop"
+                    thin_join = {**tdet, "price_c": below_c, "joined_c": below_c, "drop": True, "at": now.isoformat()}
         if verdict == "stay":
             st["at_touch" if note == "at_touch" else ("rejoin_hold" if note == "rejoin_hold" else "no_quote")] += 1
             if (hold or thin_hold) and note == "at_touch":
                 nb = {k: v for k, v in blob.items() if k not in ("chase_hold", "thin_hold")}
                 sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
             continue
-        if verdict == "move" and thin_pct > 0 and (ev.astimezone(timezone.utc) - now).total_seconds() > thin_off_h * 3600.0:
+        if verdict == "move" and note == "join" and guard_on:
             # THE THIN-TOUCH GUARD: a touch rung that is a sliver of the rung
-            # under it is a straggler rung — the one the hit lands on. Stay a
-            # rung back until it has company; inside T-6h the goal is the bet.
-            try:
-                leaves_q = float(o.get("leaves") or 0.0)
-            except (TypeError, ValueError):
-                leaves_q = 0.0
-            lad = _hand_side_ladder(slug, syn)
+            # under it is a straggler rung — the one the hit lands on. Sit on
+            # the rung under it until it has company; inside T-6h the goal is
+            # the bet.
+            lad = _ladder()
             if lad is None:
-                # no depth row and no tape (a fresh boot) → one REST book,
-                # and if that fails too the guard fails CLOSED: never climb
-                # onto a touch we cannot see the size of.
-                if bk is None and st["rest"] < _HAND_CHASE_REST_READS:
-                    st["rest"] += 1
-                    bk = _bet_sheet_book(client, slug, tries=1)
-                lad = _hand_ladder_from_book(bk, syn)
-                if lad is None:
-                    st["thin"] += 1
-                    if not thin_hold or thin_hold.get("why") != "no_ladder":
-                        nb = {**blob, "thin_hold": {"why": "no_ladder", "touch_c": target, "price_c": price_c,
-                                                    "at": now.isoformat()}}
-                        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
-                    continue
+                # no depth row, no tape, no readable book → the guard fails
+                # CLOSED: never climb onto a touch we cannot see the size of.
+                st["thin"] += 1
+                if not thin_hold or thin_hold.get("why") != "no_ladder":
+                    nb = {**blob, "thin_hold": {"why": "no_ladder", "touch_c": target, "price_c": price_c,
+                                                "at": now.isoformat()}}
+                    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                continue
             thin, tdet = _hand_thin_touch(lad, price_c, leaves_q, thin_pct)
             if thin:
                 st["thin"] += 1
@@ -14791,7 +14873,8 @@ def _hand_chase_tick(sb, client, now) -> dict:
                                           "entry_price": _cents_to_american_py(target)}).eq("id", r["id"]).execute()
             _probe_log({"hand_chase": True, "pick_id": r["id"], "slug": slug, "from_c": price_c,
                         "to_c": target, "anchor_c": nb["anchor_c"], "qty_total": qty_total,
-                        **({"thin_join": True, "touch_c": thin_join.get("touch_c")} if thin_join else {})})
+                        **({"thin_join": True, "thin_drop": bool(thin_join.get("drop")),
+                            "touch_c": thin_join.get("touch_c")} if thin_join else {})})
             app.logger.info("hand chase: %s %s→%s (anchor %s)", slug, price_c, target, nb["anchor_c"])
         else:
             st["errors"] += 1
