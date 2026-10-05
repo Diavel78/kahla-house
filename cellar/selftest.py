@@ -2700,6 +2700,29 @@ def test_hand_chase_plan() -> None:
     check("no cap → the old rule", plan(51.0, 51.5, 51.0, 2.0)[0] == "move")
 
 
+def test_hand_thin_touch() -> None:
+    """THE THIN-TOUCH GUARD (Oct 4 2026): don't join a touch rung that is a
+    sliver of the rung under it — that rung is the straggler's."""
+    import app as _app
+    f = _app._hand_thin_touch
+    thin, d = f([(52.0, 150.0), (51.5, 1800.0), (51.0, 900.0)], 51.0, 5, 20.0)
+    check("150 over 1800 (8%) → thin", thin and d["why"] == "thin" and d["touch_c"] == 52.0)
+    thin, d = f([(52.0, 600.0), (51.5, 1800.0)], 51.0, 5, 20.0)
+    check("600 over 1800 (33%) → ok", not thin and d["why"] == "ok")
+    thin, d = f([(52.0, 365.0), (51.5, 1800.0)], 51.5, 5, 20.0)
+    check("our 5 at the rung below are not its company (365 vs 1795 = 20.3%) → ok", not thin)
+    thin, d = f([(52.0, 358.0), (51.5, 1800.0)], 51.5, 5, 20.0)
+    check("a hair under 20% (358 vs 1795) → thin", thin)
+    thin, d = f([(52.0, 5.0), (51.5, 1800.0)], 52.0, 5, 20.0)
+    check("we ARE the whole touch rung → 0 over 1800 → thin", thin and d["touch_q"] == 0.0)
+    check("one rung → nothing to compare → ok", f([(52.0, 10.0)], 51.0, 5, 20.0)[0] is False)
+    check("pct 0 → off", f([(52.0, 1.0), (51.5, 1800.0)], 51.0, 5, 0)[0] is False)
+    check("unsorted ladder is sorted best-first", f([(51.5, 1800.0), (52.0, 10.0)], 51.0, 5, 20.0)[0] is True)
+    check("empty → ok", f(None, 51.0, 5, 20.0)[0] is False)
+    # the chase plan itself is unchanged: the guard sits in the tick between 'move' and the amend
+    check("plan still says move", _app._hand_chase_plan(51.0, 52.0, 51.0, 2.0)[0] == "move")
+
+
 def test_hand_orders_queue() -> None:
     """THE HAND-ORDER QUEUE (Oct 3 2026): Vercel enqueues, the box claims
     atomically; with no box, Vercel claims the row itself (claim-first, so
@@ -2792,7 +2815,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_hand_orders_queue):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_hand_orders_queue):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

@@ -12921,6 +12921,22 @@ def _hand_status_publish(sb, client) -> dict:
         held = _bet_sheet_pick_side_held(positions.get(slug), syn) if slug else 0.0
         touch_c = cur_c = None
         q = _ws_quote(slug) if slug else None
+        if slug and held >= 1.0 and not blob.get("fill_seen") and not blob.get("filled"):
+            # THE FILL IS STAMPED WITH ITS BOOK (Oct 4 2026 — the Missouri −4.5
+            # fill at 52 left no record of the 52 rung in the seconds before
+            # the hit: the slug fell off the tape the moment it filled). One
+            # stamp per pick, first tick the venue shows the lot: the order,
+            # the quote, and the last 40 tape frames with their ladders.
+            try:
+                fs = {"at": datetime.now(timezone.utc).isoformat(), "held": round(held, 2), "price_c": blob.get("price_c"),
+                      "resting": resting, "leaves": (o or {}).get("leaves"), "cum": (o or {}).get("cum")}
+                _probe_log({"hand_fill": True, "pick_id": r["id"], "slug": slug, "syn": syn, **fs,
+                            "quote": list(q) if q else None,
+                            "tape": [list(x) for x in list(TOUCH_TAPE.get(slug) or [])[-40:]]})
+                sb.table("bot_picks").update({"signal_blob": {**blob, "fill_seen": fs}}).eq("id", r["id"]).execute()
+                blob = {**blob, "fill_seen": fs}
+            except Exception as e:
+                app.logger.warning("hand fill stamp %s: %s", slug, e)
         if q:
             yb, ya = q
             b = ((100 - ya) if ya is not None else None) if syn else yb
@@ -12935,7 +12951,8 @@ def _hand_status_publish(sb, client) -> dict:
             "outbid": bool(resting and touch_c is not None and price_c is not None
                            and price_c < float(touch_c) - 0.01),
             "chase": {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
-                      "moves": blob.get("chase_moves") or 0, "rejoin_hold": blob.get("rejoin_hold")},
+                      "moves": blob.get("chase_moves") or 0, "rejoin_hold": blob.get("rejoin_hold"),
+                      "thin_hold": blob.get("thin_hold")},
             "line_hold": blob.get("line_hold")}
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
@@ -12980,6 +12997,11 @@ def _hand_status_read(sb):
 from collections import deque as _deque
 TOUCH_TAPE: dict = {}
 TOUCH_WATCH_SLUGS: set = set()
+# A slug that leaves the watch set (a hand bet FILLED, so it left
+# HAND_LIVE_SLUGS) keeps recording for this long — the fill forensics and
+# the post-fill move both live in those minutes (Oct 4 2026).
+_TOUCH_TAPE_LINGER_S = 900.0
+_TOUCH_LINGER: dict = {}               # slug → expiry (time.time())
 _TOUCH_TAPE_KEY = "touch_tape"
 _TOUCH_TAPE_LEVELS = 6                 # per-rung ladder depth kept on each tape row (the relocation read)
 _TOUCH_TAPE_MAX = 900
@@ -13013,6 +13035,16 @@ def _touch_tape_publish(sb) -> dict:
         cfg = _machine_flag_val("touch_watch", {}) or {}
         want = set(str(x) for x in (cfg.get("slugs") or []) if x)
         want |= set(HAND_LIVE_SLUGS)                   # every resting hand bet is on the tape
+        now_t = _time.time()
+        for s_ in TOUCH_WATCH_SLUGS - want:            # just left: linger, keep recording
+            _TOUCH_LINGER.setdefault(s_, now_t + _TOUCH_TAPE_LINGER_S)
+        for s_ in list(_TOUCH_LINGER):
+            if s_ in want:
+                _TOUCH_LINGER.pop(s_, None)            # back on the list for real
+            elif _TOUCH_LINGER[s_] <= now_t:
+                _TOUCH_LINGER.pop(s_, None)
+        want |= set(_TOUCH_LINGER)
+        out["linger"] = len(_TOUCH_LINGER)
         if want != TOUCH_WATCH_SLUGS:
             TOUCH_WATCH_SLUGS = want
             for s in list(TOUCH_TAPE):
@@ -14239,7 +14271,8 @@ def api_bet_sheets_mine():
             "venue_ok": venue_ok,
             "chase": (bx.get("chase") if (bx is not None and bx.get("chase") is not None) else
                       {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
-                       "moves": blob.get("chase_moves") or 0, "rejoin_hold": blob.get("rejoin_hold")}),
+                       "moves": blob.get("chase_moves") or 0, "rejoin_hold": blob.get("rejoin_hold"),
+                       "thin_hold": blob.get("thin_hold")}),
             "line_hold": (bx.get("line_hold") if bx is not None else blob.get("line_hold")),
         })
     return jsonify({"ok": True, "bets": out, "venue_ok": venue_ok,
@@ -14409,6 +14442,56 @@ _HAND_CHASE_MAX_MOVES = 4            # amends per tick
 _HAND_CHASE_DEBOUNCE_S = 20.0        # per bet between write attempts
 _HAND_CHASE_BUDGET_S = 25.0
 _HAND_CHASE_REST_READS = 3           # book reads per tick when the quote table is blank
+# THE THIN-TOUCH GUARD (Rob, Oct 4 2026, after the Missouri −4.5 fill: the chase
+# joined 52 because 52 was the touch, 52 was a straggler rung, the hit came 57
+# min later — "love this, until we get to like T-6 hours… the goal is to bet,
+# so eventually we'll have to be at touch"). Don't JOIN a touch whose size,
+# minus ours, is under this % of the rung beneath it; stay a rung back and
+# wait for the touch to have company. OFF inside `hand_join_thin_off_h` of
+# the start. machine_flags `hand_join_min_pct` (≤0 = off), `hand_join_thin_off_h`.
+_HAND_JOIN_MIN_PCT = 20.0
+_HAND_JOIN_THIN_OFF_H = 6.0
+
+
+def _hand_side_ladder(slug: str, syn: bool):
+    """OUR-side bid ladder [(price_c, qty)] best-first: the depth table
+    first (a synthetic NO's bids = the YES asks inverted), else the newest
+    tape row's ladder, else None."""
+    d = _ws_depth(slug)
+    if d:
+        if syn:
+            return [(round(100.0 - p, 3), q) for p, q in (d.get("asks") or [])]
+        return [(p, q) for p, q in (d.get("bids") or [])]
+    rows = _hand_side_rows(TOUCH_TAPE.get(slug), syn)
+    if rows and len(rows[-1]) > 6 and rows[-1][6]:
+        return [(p, q) for p, q in rows[-1][6]]
+    return None
+
+
+def _hand_thin_touch(ladder, our_price_c, our_qty, min_pct: float):
+    """Pure. (thin, detail). thin ⇔ the touch rung's size, minus our own
+    contracts if we sit there, is under min_pct% of the next rung down
+    (also minus ours). One rung or no second rung → not thin (nothing to
+    compare against). Selftest `test_hand_thin_touch`."""
+    try:
+        lad = [(float(p), float(q)) for p, q in (ladder or []) if p is not None and q is not None]
+    except (TypeError, ValueError):
+        return False, {"why": "bad_ladder"}
+    if len(lad) < 2 or min_pct is None or float(min_pct) <= 0:
+        return False, {"why": "no_second_rung" if len(lad) < 2 else "off"}
+    lad.sort(key=lambda x: -x[0])
+
+    def excl(p, q):
+        if our_price_c is not None and abs(p - float(our_price_c)) < 0.01:
+            return max(0.0, q - float(our_qty or 0.0))
+        return q
+    tc, tq = lad[0][0], excl(*lad[0])
+    bc, bq = lad[1][0], excl(*lad[1])
+    det = {"touch_c": tc, "touch_q": round(tq, 1), "below_c": bc, "below_q": round(bq, 1),
+           "pct": round(100.0 * tq / bq, 1) if bq > 0 else None, "min_pct": float(min_pct)}
+    thin = bq > 0 and tq < bq * float(min_pct) / 100.0
+    det["why"] = "thin" if thin else "ok"
+    return thin, det
 _HAND_CHASE_LAST: dict = {}          # pick_id → monotonic of the last write attempt
 HAND_LIVE_SLUGS: set = set()         # slugs with a resting hand bet — the socket wakes handbets for these
 
@@ -14442,7 +14525,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
     """One pass over the pending sheet bets with a resting order."""
     global HAND_LIVE_SLUGS
     st = {"cands": 0, "moved": 0, "held": 0, "at_touch": 0, "no_quote": 0, "errors": 0, "rest": 0,
-          "rejoin_hold": 0}
+          "rejoin_hold": 0, "thin": 0}
     if not (HAND_CHASE_ENABLED and _machine_flag("hand_chase_enabled", True)):
         st["gate"] = "off"
         return st
@@ -14450,6 +14533,14 @@ def _hand_chase_tick(sb, client, now) -> dict:
         leash = float(_machine_flag_val("hand_chase_leash_c", _HAND_CHASE_LEASH_C))
     except (TypeError, ValueError):
         leash = _HAND_CHASE_LEASH_C
+
+    def _fl(key, dflt):
+        try:
+            return float(_machine_flag_val(key, dflt))
+        except (TypeError, ValueError):
+            return dflt
+    thin_pct = _fl("hand_join_min_pct", _HAND_JOIN_MIN_PCT)
+    thin_off_h = _fl("hand_join_thin_off_h", _HAND_JOIN_THIN_OFF_H)
     t0 = _time.monotonic()
     try:
         rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
@@ -14504,18 +14595,36 @@ def _hand_chase_tick(sb, client, now) -> dict:
                 pass
         verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash, cap_c=cap_c)
         hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
+        thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
         if verdict == "stay":
             st["at_touch" if note == "at_touch" else ("rejoin_hold" if note == "rejoin_hold" else "no_quote")] += 1
-            if hold and note == "at_touch":
-                nb = {k: v for k, v in blob.items() if k != "chase_hold"}
+            if (hold or thin_hold) and note == "at_touch":
+                nb = {k: v for k, v in blob.items() if k not in ("chase_hold", "thin_hold")}
                 sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
             continue
+        if verdict == "move" and thin_pct > 0 and (ev.astimezone(timezone.utc) - now).total_seconds() > thin_off_h * 3600.0:
+            # THE THIN-TOUCH GUARD: a touch rung that is a sliver of the rung
+            # under it is a straggler rung — the one the hit lands on. Stay a
+            # rung back until it has company; inside T-6h the goal is the bet.
+            try:
+                leaves_q = float(o.get("leaves") or 0.0)
+            except (TypeError, ValueError):
+                leaves_q = 0.0
+            thin, tdet = _hand_thin_touch(_hand_side_ladder(slug, syn), price_c, leaves_q, thin_pct)
+            if thin:
+                st["thin"] += 1
+                if (not thin_hold or abs(float(thin_hold.get("touch_c") or -1) - target) >= 0.49
+                        or abs(float(thin_hold.get("touch_q") or -1) - float(tdet.get("touch_q") or 0)) >= 1.0):
+                    nb = {**blob, "thin_hold": {**tdet, "price_c": price_c, "at": now.isoformat()}}
+                    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                continue
         if verdict == "hold":
             st["held"] += 1
-            if not hold or abs(float(hold.get("touch_c") or -1) - target) >= 0.49:
+            if not hold or thin_hold or abs(float(hold.get("touch_c") or -1) - target) >= 0.49:
                 nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c,
                       "chase_hold": {"touch_c": target, "price_c": price_c, "leash_c": leash,
                                      "at": now.isoformat()}}
+                nb.pop("thin_hold", None)
                 sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
             continue
         # move — JOIN the touch via the amend
@@ -14541,6 +14650,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
         v = _repeg_amend(client, oid, slug, canon, qty_total, gtt)
         nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c}
         nb.pop("chase_hold", None)
+        nb.pop("thin_hold", None)
         if v == "amended":
             st["moved"] += 1
             nb.update({"price_c": target, "chase_from_c": price_c, "chase_at": now.isoformat(),
