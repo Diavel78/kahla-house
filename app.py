@@ -14675,6 +14675,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
         verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash, cap_c=cap_c)
         hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
         thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
+        thin_join = None                                # set when the guard retargets us to the rung under a thin touch
         if verdict == "stay":
             st["at_touch" if note == "at_touch" else ("rejoin_hold" if note == "rejoin_hold" else "no_quote")] += 1
             if (hold or thin_hold) and note == "at_touch":
@@ -14692,11 +14693,24 @@ def _hand_chase_tick(sb, client, now) -> dict:
             thin, tdet = _hand_thin_touch(_hand_side_ladder(slug, syn), price_c, leaves_q, thin_pct)
             if thin:
                 st["thin"] += 1
-                if (not thin_hold or abs(float(thin_hold.get("touch_c") or -1) - target) >= 0.49
-                        or abs(float(thin_hold.get("touch_q") or -1) - float(tdet.get("touch_q") or 0)) >= 1.0):
-                    nb = {**blob, "thin_hold": {**tdet, "price_c": price_c, "at": now.isoformat()}}
-                    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
-                continue
+                try:
+                    below_c = float(tdet.get("below_c"))
+                except (TypeError, ValueError):
+                    below_c = None
+                if below_c is not None and below_c > price_c + 0.01:
+                    # "a rung back" means AT the rung under the touch, joined —
+                    # not wherever we happen to sit (Oct 4 2026 night, Oregon
+                    # −10.5: a vanish drop parked us at 51.5, the 450 flapped
+                    # back to 53.0, the guard refused the 57-lot 53.5 touch and
+                    # left us ALONE at 51.5 — the straggler it exists to avoid).
+                    target = below_c
+                    thin_join = {**tdet, "price_c": below_c, "joined_c": below_c, "at": now.isoformat()}
+                else:
+                    if (not thin_hold or abs(float(thin_hold.get("touch_c") or -1) - target) >= 0.49
+                            or abs(float(thin_hold.get("touch_q") or -1) - float(tdet.get("touch_q") or 0)) >= 1.0):
+                        nb = {**blob, "thin_hold": {**tdet, "price_c": price_c, "at": now.isoformat()}}
+                        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                    continue
         if verdict == "hold":
             st["held"] += 1
             if not hold or thin_hold or abs(float(hold.get("touch_c") or -1) - target) >= 0.49:
@@ -14729,7 +14743,10 @@ def _hand_chase_tick(sb, client, now) -> dict:
         v = _repeg_amend(client, oid, slug, canon, qty_total, gtt)
         nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c}
         nb.pop("chase_hold", None)
-        nb.pop("thin_hold", None)
+        if thin_join:
+            nb["thin_hold"] = thin_join                 # the chip keeps saying why we sit one rung under the touch
+        else:
+            nb.pop("thin_hold", None)
         if v == "amended":
             st["moved"] += 1
             nb.update({"price_c": target, "chase_from_c": price_c, "chase_at": now.isoformat(),
@@ -14738,7 +14755,8 @@ def _hand_chase_tick(sb, client, now) -> dict:
             sb.table("bot_picks").update({"signal_blob": nb,
                                           "entry_price": _cents_to_american_py(target)}).eq("id", r["id"]).execute()
             _probe_log({"hand_chase": True, "pick_id": r["id"], "slug": slug, "from_c": price_c,
-                        "to_c": target, "anchor_c": nb["anchor_c"], "qty_total": qty_total})
+                        "to_c": target, "anchor_c": nb["anchor_c"], "qty_total": qty_total,
+                        **({"thin_join": True, "touch_c": thin_join.get("touch_c")} if thin_join else {})})
             app.logger.info("hand chase: %s %s→%s (anchor %s)", slug, price_c, target, nb["anchor_c"])
         else:
             st["errors"] += 1
