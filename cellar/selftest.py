@@ -2555,6 +2555,32 @@ def test_hand_move_plan() -> None:
     # stale newest frame / no baseline → stay
     assert f(base + [row(N - 2, 54.0, 140000, 54.5, 90000, 170000)], 55.0, 1.0, N + 400, 70)[0] == "stay"
     assert f([row(N - 2, 54.0, 140000, 54.5, 90000, 170000)], 55.0, 1.0, N, 70)[0] == "stay"
+    # THE VANISH DROP (Rob, Oct 4 2026: "I probably don't want to be out
+    # there alone… instead of cancel we drop a rung to the new fat rung"):
+    # 70% off at 55 with NOTHING re-posted below → amend down to the first
+    # rung beneath us that has company. Needs the ladder (element 6).
+    def lrow(ts, bc, bq, ac, aq, ladder):
+        return (ts, bc, bq, ac, aq, sum(q for _, q in ladder[:3]), ladder)
+    lbase = [lrow(N - 80, 55.0, 150000, 55.5, 120000, [(55.0, 150000), (54.5, 20000), (54.0, 10000)]),
+             lrow(N - 50, 55.0, 148000, 55.5, 121000, [(55.0, 148000), (54.5, 20000), (54.0, 10000)]),
+             lrow(N - 20, 55.0, 151000, 55.5, 119000, [(55.0, 151000), (54.5, 20000), (54.0, 10000)])]
+    v, d = f(lbase + [lrow(N - 2, 55.0, 190, 55.5, 119000, [(55.0, 190), (54.5, 20000), (54.0, 10000)])], 55.0, 5.0, N, 70)
+    check("vanish with a fat rung below → drop to 54.5", v == "drop" and d["why"] == "vanish_drop" and d["drop_c"] == 54.5)
+    # the first rung below is itself a sliver (300 over 10000) → skip it, drop to 54
+    v, d = f(lbase + [lrow(N - 2, 55.0, 190, 55.5, 119000, [(55.0, 190), (54.5, 300), (54.0, 10000)])], 55.0, 5.0, N, 70)
+    check("vanish: sliver rung skipped → drop to 54", v == "drop" and d["drop_c"] == 54.0)
+    # nothing below at all → stay (nowhere to go)
+    v, d = f(lbase + [lrow(N - 2, 55.0, 190, 55.5, 119000, [(55.0, 190)])], 55.0, 5.0, N, 70)
+    check("vanish with nothing below → stay", v == "stay" and d["why"] == "vanish")
+    # drop switched off → the old vanish verdict
+    v, d = f(lbase + [lrow(N - 2, 55.0, 190, 55.5, 119000, [(55.0, 190), (54.5, 20000)])], 55.0, 5.0, N, 70, drop=False)
+    check("drop off → stay/vanish", v == "stay" and d["why"] == "vanish")
+    # a RELOCATION still cancels (the move rule is untouched by the drop)
+    v, d = f(lbase + [lrow(N - 2, 55.0, 190, 55.5, 119000, [(55.0, 190), (54.5, 140000), (54.0, 10000)])], 55.0, 5.0, N, 70)
+    check("relocation still cancels", v == "cancel" and d["why"] == "move")
+    # legacy rows (no ladder) keep the old vanish → stay
+    v, d = f(base + [row(N - 2, 55.0, 190, 55.5, 119000, 30190)], 55.0, 1.0, N, 70)
+    check("no ladder → stay/vanish (nowhere known to drop)", v == "stay" and d["why"] == "vanish")
     # synthetic NO orientation: YES ask is our bid, YES bid is our ask, YES ask depth is our bid depth
     yes = [(N - 50, 44.5, 120000, 45.0, 150000, 130000, 180000), (N - 2, 45.5, 90000, 46.0, 30000, 95000, 40000)]
     ours = orient(yes, True)

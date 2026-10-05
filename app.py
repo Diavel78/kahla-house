@@ -13244,7 +13244,8 @@ def _hand_side_rows(samples, syn: bool):
 
 
 def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: float,
-                    relocate_pct: float = 60.0, need_ask: bool = False):
+                    relocate_pct: float = 60.0, need_ask: bool = False,
+                    drop: bool = True, drop_min_pct: float = 20.0):
     """rows = OUR-side book samples (ts, bid_c, bid_q, ask_c, ask_q[, bid_depth3]),
     oldest first. -> (verdict, detail) with verdict 'stay' | 'cancel'.
     P = the touch price at the baseline high (window [now-90s, now-10s]).
@@ -13355,7 +13356,44 @@ def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: flo
         det["why"] = "move"
         return "cancel", det
     det["why"] = ("vanish" if not relocated else "pull") if collapse else "quiet"
+    if det["why"] == "vanish" and drop and bc is not None and P is not None and abs(bc - P) < 0.01:
+        # THE VANISH IS NOT A MOVE, BUT IT LEAVES US ALONE (Rob, Oct 4 2026:
+        # "I probably don't want to be out there alone… instead of cancel we
+        # drop a rung to the new fat rung"). No sit-out — one amend down to
+        # the first rung beneath us that has company.
+        tgt = _hand_drop_target(lad(last), P, our_price_c, our_qty, drop_min_pct)
+        if tgt is not None:
+            det["why"] = "vanish_drop"
+            det["drop_c"] = tgt
+            return "drop", det
     return "stay", det
+
+
+def _hand_drop_target(ladder, p_c, our_price_c, our_qty, min_pct):
+    """Pure. The rung to drop to after a vanish at p_c: the highest rung
+    under p_c with size (minus ours) that is NOT itself a sliver of the rung
+    beneath it (the thin-touch test, min_pct); else the biggest rung under
+    p_c; None when nothing rests below. Selftest `test_hand_move_plan`."""
+    try:
+        rows = sorted([(float(p), float(q)) for p, q in (ladder or [])
+                       if p is not None and q is not None and float(p) < float(p_c) - 1e-9],
+                      key=lambda x: -x[0])
+    except (TypeError, ValueError):
+        return None
+    def excl(p, q):
+        if our_price_c is not None and abs(p - float(our_price_c)) < 0.01:
+            return max(0.0, q - float(our_qty or 0.0))
+        return q
+    rows = [(p, excl(p, q)) for p, q in rows if excl(p, q) > 0]
+    if not rows:
+        return None
+    for i, (p, q) in enumerate(rows):
+        if i + 1 >= len(rows):
+            return p
+        nq = rows[i + 1][1]
+        if min_pct is None or float(min_pct) <= 0 or q >= nq * float(min_pct) / 100.0:
+            return p
+    return max(rows, key=lambda x: x[1])[0]
 
 
 def _hand_calm(rows, now_ts: float) -> bool:
@@ -13521,7 +13559,48 @@ def _hand_move_tick(sb, client, now) -> dict:
             leaves = 0.0
         verdict, det = _hand_move_plan(side_rows, price_c, leaves, now_ts, pct,
                                        relocate_pct=_fl("hand_move_relocate_pct", _HAND_MOVE_RELOCATE_PCT),
-                                       need_ask=bool(_machine_flag("hand_move_need_ask", False)))
+                                       need_ask=bool(_machine_flag("hand_move_need_ask", False)),
+                                       drop=bool(_machine_flag("hand_move_drop", True)),
+                                       drop_min_pct=_fl("hand_join_min_pct", _HAND_JOIN_MIN_PCT))
+        if verdict == "drop":
+            # THE VANISH DROP: one amend down to the fat rung, no sit-out;
+            # the rejoin hold keeps the chase off the emptied rung for 30 min.
+            if _time.monotonic() - last_at < 30.0:
+                continue
+            tgt = det.get("drop_c")
+            if tgt is None or float(tgt) >= price_c - 1e-9:
+                continue
+            _HAND_MOVE_LAST[r["id"]] = _time.monotonic()
+            acts += 1
+            qty_total = _amend_total(o.get("leaves"), o.get("cum"))
+            v = "skip"
+            if qty_total >= 1:
+                canon = (100.0 - float(tgt)) / 100.0 if syn else float(tgt) / 100.0
+                v = _repeg_amend(client, oid, slug, canon, qty_total, _hand_gtt(ev))
+            stamp = {"hand_move_drop": True, "pick_id": r["id"], "slug": slug, "order_id": oid,
+                     "from_c": price_c, "to_c": tgt, "leaves": leaves, "verdict": v,
+                     "lead_s": round(lead_s), "at": now.isoformat(), **det}
+            if v == "amended":
+                hold_s = _fl("hand_move_rejoin_hold_s", _HAND_MOVE_REJOIN_HOLD_S)
+                nb = {**blob, "price_c": float(tgt), "amended": True,
+                      "line_drops": int(blob.get("line_drops") or 0) + 1,
+                      "dropped_at": now.isoformat(),
+                      "rejoin_hold": {"cap_c": float(tgt), "at": now.isoformat(), "why": "vanish_drop",
+                                      "until": (now + timedelta(seconds=float(hold_s))).isoformat()}}
+                nb.pop("chase_hold", None)
+                nb.pop("thin_hold", None)
+                sb.table("bot_picks").update({"signal_blob": nb,
+                                              "entry_price": _cents_to_american_py(float(tgt))}).eq("id", r["id"]).execute()
+                st["dropped"] = st.get("dropped", 0) + 1
+            else:
+                st["errors"] += 1
+            try:
+                _probe_log(stamp)
+            except Exception:
+                pass
+            app.logger.warning("hand move-drop %s pick %s %.1f→%.1f¢ (vanish %s%%) → %s",
+                               slug, r["id"], price_c, float(tgt), det.get("drop_pct"), v)
+            continue
         if verdict != "cancel":
             continue
         if _time.monotonic() - last_at < 30.0:
