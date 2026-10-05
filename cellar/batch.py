@@ -121,11 +121,13 @@ JOBS: tuple[Job, ...] = (
     # model… UP TO DATE"). scripts/box_sheets.py prices every game through
     # app._gridiron_proj and writes football_sheets in THIS database, which
     # is the one the site reads — no Actions, no cloud project, no sync.
-    # Monday 17:00 AZ = the old Tue-00:00-UTC full build; the three daily
-    # refreshes re-price into data_blob.friday (what the site prefers).
-    Job("sheets_build", ["scripts.box_sheets", "--mode", "monday", "--commit"],
-        hour=17, minute=0, weekday=0, timeout_s=1500,
-        note="football pick sheets: Monday full build (box model)"),
+    # The Monday FULL build (`sheets_build`) lives BELOW the model computes:
+    # the lane runs the first due job in list order, so on a catch-up morning
+    # it must come after power_ratings/football_qb/cfbd/nfl_market. The three
+    # daily refreshes re-price into data_blob.friday (what the site prefers).
+    # ⚠ A friday-mode run targets week_key_default() = THIS Monday, so on a
+    # Monday before the full build it finds zero rows and is a no-op — the
+    # new week's sheets come only from sheets_build.
     Job("sheets_refresh_am", ["scripts.box_sheets", "--mode", "friday", "--commit"],
         hour=5, minute=30, timeout_s=1500,
         note="football pick sheets: morning re-price (box model)"),
@@ -190,6 +192,15 @@ JOBS: tuple[Job, ...] = (
     Job("nfl_market", ["scripts.ingest_nfl_market", "--commit"],
         hour=4, minute=25, timeout_s=600,
         note="nfelo rating + nflverse Vegas lines (NFL pre-market)"),
+    # FOOTBALL PICK SHEETS — Monday FULL build at 05:00 AZ (Oct 5 2026,
+    # Rob at 08:56 Monday: "Why no new sheets??" — it sat at 17:00, the old
+    # Actions Routine's slot, so the page showed last week all day). Sunday's
+    # finals land at 04:00 (power_ratings), QB/CFBD/nfelo by 04:25; 05:00 is
+    # the first clock where the model is current. Listed after those jobs on
+    # purpose (first-due-in-list-order). --days 8 reaches next Monday's MNF.
+    Job("sheets_build", ["scripts.box_sheets", "--mode", "monday", "--commit"],
+        hour=5, minute=0, weekday=0, timeout_s=1500,
+        note="football pick sheets: Monday full build (box model)"),
 
     # -- weekly ------------------------------------------------------------
     # NOT --delta: this script has no such flag. Its delta mode is
