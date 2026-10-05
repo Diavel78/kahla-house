@@ -480,7 +480,7 @@
             if (i.q) {
                 if (i.q.ok) {
                     q = '<div class="q ok">' + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
-                      + 'touch ' + i.q.price_c + '¢' + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + '</div>';
+                      + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + '</div>';
                     cost += n * i.q.price_c / 100; known++;
                 } else if (i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'queued on the box — placing…') + '</div>';
                 else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
@@ -755,7 +755,7 @@
                     const ch = b.chase || {}, hold = ch.hold;
                     if (hold && hold.touch_c != null) chip += '<span class="chip c-lost" title="the touch moved more than ' + (hold.leash_c != null ? hold.leash_c : 2) + '¢ past your last hand price — the box stopped chasing; re-peg to take the new price">MANUAL RE-PEG · touch ' + (b.touch_c != null ? b.touch_c : hold.touch_c) + '¢ · ' + (ch.anchor_c != null ? Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : 'past the leash') + '</span>';
                     else if (ch.thin_hold && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01 && Math.abs((ch.thin_hold.touch_c || 0) - b.touch_c) < 0.26)
-                        chip += '<span class="chip c-rest" title="the touch rung is a sliver of the rung under it — a straggler rung, the one the hit lands on; the chase sits on the rung under it until it has company (guard is off inside T-6h)">THIN TOUCH · ' + b.touch_c + '¢ has ' + Math.round(ch.thin_hold.touch_q || 0) + ' over ' + Math.round(ch.thin_hold.below_q || 0) + ' at ' + ch.thin_hold.below_c + '¢ · sitting ' + o.price_c + '¢</span>';
+                        chip += '<span class="chip c-rest" title="the touch rung is a sliver of the rung under it — a straggler rung, the one the hit lands on; the chase sits on the rung under it until it has company; a bet found ON a thin touch is dropped to the fat rung (guard is off inside T-6h)">THIN TOUCH · ' + b.touch_c + '¢ has ' + Math.round(ch.thin_hold.touch_q || 0) + ' over ' + Math.round(ch.thin_hold.below_q || 0) + ' at ' + ch.thin_hold.below_c + '¢ · sitting ' + o.price_c + '¢</span>';
                     else if (ch.rejoin_hold && ch.rejoin_hold.until && new Date(ch.rejoin_hold.until) > new Date() && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01)
                         chip += '<span class="chip c-rest" title="the line-move rule sat this bet back down at the rung the size relocated to; the chase will not climb back onto the straggler rung above it until the hold expires">POST-MOVE HOLD · touch ' + b.touch_c + '¢ · until ' + fmtClock(ch.rejoin_hold.until) + '</span>';
                     else if (b.outbid) chip += '<span class="chip c-lost">OUTBID · touch ' + b.touch_c + '¢ · ' + (b.in_play ? 're-peg in the app' : 'chasing') + '</span>';
