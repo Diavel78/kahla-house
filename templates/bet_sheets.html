@@ -482,7 +482,7 @@
                     q = '<div class="q ok">' + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
                       + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + '</div>';
                     cost += n * i.q.price_c / 100; known++;
-                } else if (i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'queued on the box — placing…') + '</div>';
+                } else if (i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'placing on the box…') + '</div>';
                 else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
             }
             return '<div class="si"><div class="lab"><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport) + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
@@ -546,7 +546,7 @@
                 const bits = [];
                 if (placed) bits.push('Placed ' + placed + ' bet' + (placed === 1 ? '' : 's'));
                 if (ran) bits.push(notes.join(' · '));
-                if (qn) bits.push(qn + ' still running on the box');
+                if (qn) bits.push(qn + ' placing on the box…');
                 if (stayed) bits.push(stayed + ' stayed on the slip');
                 toast(bits.length ? bits.join(' · ') : 'Nothing done — see the slip', !(placed || ran || qn));
                 loadBets();
@@ -583,7 +583,7 @@
                 saveSlip(); renderSlip(); renderGames();
             }
         } catch (e) {}
-        if (_slip.some(i => i.q && i.q.queued)) _pollT = setTimeout(pollQueue, 3000);
+        if (_slip.some(i => i.q && i.q.queued)) _pollT = setTimeout(pollQueue, 1500);
     }
     function quoteSlip() { postSlip(true); }
     function placeSlip() {

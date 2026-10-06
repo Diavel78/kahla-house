@@ -12548,6 +12548,50 @@ def _bet_sheet_book(client, slug: str, tries: int = 3):
     return None
 
 
+def _bet_sheet_item_check(item: dict):
+    """Pure. The slip item's shape — the part of a resolve that needs no
+    venue read. None when fine, else the reason the item stays on the slip."""
+    sport = str(item.get("sport") or "").upper()
+    mt = str(item.get("market_type") or "")
+    side = str(item.get("side") or "")
+    if sport not in _SHEET_SPORTS or mt not in _BET_SHEET_MTS or not (
+            item.get("away") and item.get("home") and item.get("event_start")):
+        return "bad item"
+    if side not in (("home", "away") if mt != "total" else ("over", "under")):
+        return "bad side"
+    if mt != "ml":
+        try:
+            float(item.get("line"))
+        except (TypeError, ValueError):
+            return "sheet has no line"
+    try:
+        dt = datetime.fromisoformat(str(item.get("event_start")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return "bad event_start"
+    if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return "game already started — pre-game bets only"
+    return None
+
+
+_HANDBETS_ALIVE_S = 60.0      # the lane polls every 10s; a 19-order run holds it ~60-90s
+
+
+def _handbets_box_alive(sb) -> bool:
+    """Is a box running the `handbets` lane right now? Read off its lease
+    heartbeat. Fails CLOSED (unreadable → False → Vercel runs the rows
+    itself, exactly the pre-Oct-5 fallback). True means: leave the rows
+    pending, the box is mid-batch and claims them on its next tick."""
+    try:
+        rows = (sb.table("cellar_lease").select("owner,heartbeat_at")
+                .eq("lane", "handbets").limit(1).execute().data or [])
+        if not rows or str(rows[0].get("owner") or "") != "cellar":
+            return False
+        hb = datetime.fromisoformat(str(rows[0].get("heartbeat_at")).replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - hb.astimezone(timezone.utc)).total_seconds() <= _HANDBETS_ALIVE_S
+    except Exception:
+        return False
+
+
 def _bet_sheet_resolve(client, item: dict) -> dict:
     """One slip item → the Polymarket slug + the touch on our side. Reads
     the venue twice (event lookup, cached 120s across items; one book)."""
@@ -12678,51 +12722,58 @@ def api_bet_sheets_place():
     sb = get_supabase()
     results, queued = [], []
     t_end = _time.monotonic() + 50.0          # under the Vercel function budget
-    for n, it in enumerate(items):
-        key = (it or {}).get("key")
-        if _time.monotonic() > t_end - 15.0:
-            results.append({"key": key, "ok": False, "reason": "out of time — submit again"})
-            continue
-        if n:
-            _time.sleep(0.6)                  # pace the venue reads — a burst earns a 429
-        res = _bet_sheet_resolve(client, it or {})
-        res.pop("_book", None)
-        res["key"] = key
-        if not res.get("ok") or preview:
+    if preview:
+        for n, it in enumerate(items):
+            key = (it or {}).get("key")
+            if _time.monotonic() > t_end - 10.0:
+                results.append({"key": key, "ok": False, "reason": "out of time — quote again"})
+                continue
+            if n:
+                _time.sleep(0.6)              # pace the venue reads — a burst earns a 429
+            res = _bet_sheet_resolve(client, it or {})
+            res.pop("_book", None)
+            res["key"] = key
             results.append(res)
+        return jsonify({"ok": True, "preview": True, "placed": 0,
+                        "contracts": contracts, "results": results})
+    # PLACE: no venue reads here (Oct 5 2026 — a 19-bet slip ran out the 50s
+    # budget resolving rungs one at a time and needed two submits). Every
+    # valid item is queued RAW in under a second; the executor resolves +
+    # places it. The request waits only for the box to CLAIM the rows (or
+    # runs them itself when no box is alive), then the page polls.
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    for it in items:
+        it = it or {}
+        key = it.get("key")
+        bad = _bet_sheet_item_check(it)
+        if bad:
+            results.append({"key": key, "ok": False, "reason": bad})
             continue
-        if sb is None:
-            res.update({"ok": False, "reason": "database unavailable"})
-            results.append(res)
-            continue
-        row = {"op": "create", "slug": res["slug"], "synthetic": bool(res["synthetic"]),
-               "price_c": None,               # the placer joins the touch at placement time
+        row = {"op": "create", "slug": None,      # resolved by the executor
+               "synthetic": False, "price_c": None,  # joins the touch at placement time
                "contracts": contracts, "event_start": it.get("event_start"),
-               "payload": {"item": it, "asked_by": g.uid, "contracts": contracts,
-                           "resolve": {k: res.get(k) for k in
-                                       ("slug", "synthetic", "rung_line", "rung_why",
-                                        "price_c", "ask_c", "event_title")}}}
+               "payload": {"item": it, "asked_by": g.uid, "contracts": contracts}}
         try:
             rid = _hand_order_enqueue(sb, row)
         except Exception as e:
-            res.update({"ok": False, "reason": f"queue write failed: {e}"[:160]})
-            results.append(res)
+            results.append({"key": key, "ok": False, "reason": f"queue write failed: {e}"[:160]})
             continue
-        res["queue_id"] = rid
-        queued.append((rid, res))
-    # wait for the box (or run them here if no box claims them)
-    done = _hand_orders_wait(sb, [rid for rid, _ in queued], t_end) if queued else {}
+        queued.append((rid, {"key": key, "ok": True, "queue_id": rid}))
+    done = (_hand_orders_wait(sb, [rid for rid, _ in queued], t_end, until_claimed=True)
+            if queued else {})
     placed = 0
     for rid, res in queued:
         out = done.get(rid)
         if out is None:
             res.update({"ok": False, "queued": True,
-                        "reason": "queued on the box — placing…"})
+                        "reason": "placing on the box…"})
         elif not out.get("ok"):
             res.update({"ok": False, "reason": out.get("error") or "order failed"})
         else:
             res.update({k: out.get(k) for k in ("order_id", "state", "resting", "cost",
-                                                  "price_c", "pick_id", "warning", "via")
+                                                  "price_c", "pick_id", "warning", "via",
+                                                  "slug", "rung_line")
                         if out.get(k) is not None})
             res["contracts"] = contracts
             placed += 1
@@ -12812,6 +12863,23 @@ def _hand_order_claim(sb, row_id, worker: str) -> bool:
         return False
 
 
+def _hand_orders_claim_many(sb, ids: list, worker: str) -> set:
+    """Atomic batch claim: UPDATE … WHERE id IN ids AND state='pending'.
+    Returns the ids WE won (the returned rows). One write for a whole
+    slip, so Vercel's claim-wait sees every row leave `pending` at once."""
+    if not ids:
+        return set()
+    try:
+        r = (sb.table("hand_orders")
+             .update({"state": "claimed", "worker": worker,
+                      "claimed_at": datetime.now(timezone.utc).isoformat()})
+             .in_("id", list(ids)).eq("state", "pending").execute())
+        return {x.get("id") for x in (r.data or [])}
+    except Exception as e:
+        app.logger.warning("hand_orders: batch claim failed: %s", e)
+        return set()
+
+
 def _hand_order_finish(sb, row_id, res: dict) -> None:
     try:
         sb.table("hand_orders").update({
@@ -12822,11 +12890,30 @@ def _hand_order_finish(sb, row_id, res: dict) -> None:
         app.logger.warning("hand_orders: finish %s failed: %s", row_id, e)
 
 
+_HAND_CLAIMED_STUCK_S = 600.0   # a claimed row the worker never finished
+
+
+def _hand_order_stuck(r: dict):
+    """Reason string when a pending/claimed row is past its life, else None."""
+    try:
+        if r.get("state") == "claimed" and r.get("claimed_at"):
+            at = datetime.fromisoformat(str(r["claimed_at"]).replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - at.astimezone(timezone.utc)).total_seconds() > _HAND_CLAIMED_STUCK_S:
+                return "the box stopped mid-run — submit again"
+        if r.get("state") == "pending" and r.get("created_at"):
+            at = datetime.fromisoformat(str(r["created_at"]).replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - at.astimezone(timezone.utc)).total_seconds() > _HAND_EXPIRE_S:
+                return "expired — nobody ran it in 15 min"
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
 def _hand_order_read(sb, ids: list) -> dict:
     if not ids:
         return {}
     try:
-        rows = (sb.table("hand_orders").select("id,state,result,error,worker")
+        rows = (sb.table("hand_orders").select("id,state,result,error,worker,created_at,claimed_at")
                 .in_("id", list(ids)).execute().data or [])
     except Exception:
         return {}
@@ -12878,7 +12965,25 @@ def _hand_order_execute(sb, client, row: dict, worker: str) -> dict:
     if op == "create":
         slug, syn = row.get("slug"), bool(row.get("synthetic"))
         price_c = row.get("price_c")
-        book = _bet_sheet_book(client, slug)
+        book = None
+        if not slug:
+            # THE FAST SLIP (Oct 5 2026, Rob after a 19-bet submit: "we need a
+            # MUCH faster process… took forever… and took 2 submits"): Vercel
+            # no longer resolves the rung inside its 50s function budget — it
+            # enqueues the RAW slip item and the executor (box, or the Vercel
+            # fallback) resolves it here: venue event → rung → book, one read
+            # each, no clock but the 15-min expiry.
+            rs = _bet_sheet_resolve(client, pl.get("item") or {})
+            if not rs.get("ok"):
+                return {"ok": False, "error": rs.get("reason") or "could not resolve the rung"}
+            slug, syn = rs["slug"], bool(rs.get("synthetic"))
+            book = rs.pop("_book", None)
+            pl["resolve"] = {k: rs.get(k) for k in
+                             ("slug", "synthetic", "rung_line", "rung_why",
+                              "price_c", "ask_c", "event_title")}
+            row = dict(row, slug=slug, synthetic=syn, payload=pl)
+        if book is None:
+            book = _bet_sheet_book(client, slug)
         if book is None:
             return {"ok": False, "error": "book unreadable — try again"}
         seat_det = None
@@ -14077,9 +14182,12 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
     return st
 
 
-def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
-    """THE BOX LANE: claim pending rows oldest-first and run them. Rows
-    older than _HAND_EXPIRE_S are failed, never placed late."""
+def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
+    """THE BOX LANE: claim every pending row in ONE update (oldest-first,
+    ≤max_n) and run them serially, BEFORE the strip/chase maintenance —
+    Oct 5 2026: 8 rows a tick behind a 5-10s maintenance pass made a
+    19-bet slip a multi-minute wait. Rows older than _HAND_EXPIRE_S are
+    failed, never placed late."""
     stats = {"claimed": 0, "done": 0, "failed": 0, "expired": 0}
     if not _hand_orders_ensure(sb):
         stats["gate"] = "no_table"
@@ -14091,8 +14199,35 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
         stats["gate"] = f"read_failed: {e}"[:120]
         return stats
     client = None
+    live, expired = [], []
+    for row in rows:
+        try:
+            age = (now - datetime.fromisoformat(
+                str(row.get("created_at")).replace("Z", "+00:00"))).total_seconds()
+        except Exception:
+            age = 0.0
+        (expired if age > _HAND_EXPIRE_S else live).append(row)
+    for row in expired:
+        if _hand_order_claim(sb, row["id"], worker):
+            _hand_order_finish(sb, row["id"], {"ok": False, "error": "expired — nobody ran it in 15 min"})
+            stats["expired"] += 1
+    won = _hand_orders_claim_many(sb, [r["id"] for r in live], worker) if live else set()
+    for row in live:
+        if row["id"] not in won:
+            continue
+        stats["claimed"] += 1
+        try:
+            if client is None:
+                client = get_client()
+            res = _hand_order_execute(sb, client, row, worker)
+        except Exception as e:
+            res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
+        _hand_order_finish(sb, row["id"], res)
+        stats["done" if res.get("ok") else "failed"] += 1
+        _time.sleep(0.2)
     try:
-        client = get_client()
+        if client is None:
+            client = get_client()
         try:
             stats["adopt"] = _hand_app_adopt_tick(sb, client, now)   # app bets → sheet picks
         except Exception as e:
@@ -14118,36 +14253,18 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 8) -> dict:
         stats["chase"] = _hand_chase_tick(sb, client, now)
     except Exception as e:
         stats["chase"] = {"err": f"{type(e).__name__}: {e}"[:120]}
-    for row in rows:
-        try:
-            age = (now - datetime.fromisoformat(
-                str(row.get("created_at")).replace("Z", "+00:00"))).total_seconds()
-        except Exception:
-            age = 0.0
-        if age > _HAND_EXPIRE_S:
-            if _hand_order_claim(sb, row["id"], worker):
-                _hand_order_finish(sb, row["id"], {"ok": False, "error": "expired — nobody ran it in 15 min"})
-                stats["expired"] += 1
-            continue
-        if not _hand_order_claim(sb, row["id"], worker):
-            continue
-        stats["claimed"] += 1
-        try:
-            if client is None:
-                client = get_client()
-            res = _hand_order_execute(sb, client, row, worker)
-        except Exception as e:
-            res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
-        _hand_order_finish(sb, row["id"], res)
-        stats["done" if res.get("ok") else "failed"] += 1
-        _time.sleep(0.5)
     return stats
 
 
-def _hand_orders_wait(sb, ids: list, deadline: float) -> dict:
+def _hand_orders_wait(sb, ids: list, deadline: float, until_claimed: bool = False) -> dict:
     """VERCEL'S SIDE: wait for the box to claim + finish the rows. Rows no
     box has claimed after _HAND_CLAIM_WAIT_S are claimed and run HERE (the
-    fallback). Returns {id: result} for every row that finished in time."""
+    fallback) — unless a box's handbets lane is ALIVE (heartbeat fresh),
+    in which case the box is mid-batch and gets them on its next tick
+    (Oct 5 2026: running them from Vercel would race the box and bring
+    the geo-check back). Returns {id: result} for every row that finished
+    in time. `until_claimed`: stop waiting once every row is off `pending`
+    (the slip's Place — the page polls the rest)."""
     done: dict = {}
     if not ids:
         return done
@@ -14168,7 +14285,15 @@ def _hand_orders_wait(sb, ids: list, deadline: float) -> dict:
                 pending.discard(rid)
         if not pending:
             break
+        if until_claimed and all((rows.get(rid) or {}).get("state") not in (None, "pending")
+                                 for rid in pending):
+            break                             # the box has every row; the page polls
         if _time.monotonic() >= t_claim:
+            if _handbets_box_alive(sb):
+                if until_claimed:
+                    break                     # box alive, mid-batch: it claims them next tick
+                _time.sleep(1.0)
+                continue
             # nobody on the box took them — run them here, claim-first
             for rid in list(pending):
                 r = rows.get(rid)
@@ -14212,6 +14337,13 @@ def api_bet_sheets_queue():
     rows = _hand_order_read(sb, ids[:50])
     out = {}
     for rid, r in rows.items():
+        if r.get("state") in ("pending", "claimed"):
+            # a row the box claimed and never finished (daemon died mid-run),
+            # or one nobody ever ran: fail it so the slip stops waiting.
+            stuck = _hand_order_stuck(r)
+            if stuck:
+                _hand_order_finish(sb, rid, {"ok": False, "error": stuck})
+                r = dict(r, state="failed", error=stuck)
         res = dict(r.get("result") or {})
         out[str(rid)] = {"state": r.get("state"), "result": res,
                          "error": r.get("error") or res.get("error"), "via": r.get("worker")}
