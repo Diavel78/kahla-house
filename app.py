@@ -12950,7 +12950,8 @@ def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int):
         blob = {"bet_sheet": True, "manual_web_bet": True,
                 "pmm_slug": rs.get("slug"), "pmm_synthetic": bool(rs.get("synthetic")),
                 "order_id": out.get("order_id"), "contracts": contracts,
-                "price_c": price_c, "quoted_c": rs.get("price_c"),
+                "price_c": price_c, "anchor_c": price_c,     # Rob's hand price: the chase leash measures from here
+                "quoted_c": rs.get("price_c"),
                 "sheet_line": it.get("line"), "rung_line": rs.get("rung_line"),
                 "rung_why": rs.get("rung_why"), "label": it.get("label"), "sport": sport,
                 "placed_via": out.get("via"),
