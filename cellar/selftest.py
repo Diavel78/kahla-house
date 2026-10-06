@@ -2690,11 +2690,17 @@ def test_hand_start_plan() -> None:
     early = [row(S - 80, 100000, 128000), row(S - 26, 50000, 15000)]
     v = f(early + [row(S + 2, 2600, 14700), row(S + 9, 2900, 12700)], S, S + 10, 70)
     assert v[0] == "started" and v[1] == 228000, v
-    # GTD slack is a positive offset from the listed start
+    # NO EXPIRY (Oct 5 2026, Rob): a hand bet is good-till-cancel; the makers
+    # leaving is the only clock. A positive slack flag restores a GTD backstop.
     from datetime import datetime, timezone
-    g = _app._hand_gtt(datetime(2026, 10, 4, 17, 0, tzinfo=timezone.utc))
-    assert g > "2026-10-04T17:00:00Z" and g.endswith("Z"), g
-    print("  PASS  hand start-cancel planner + GTD slack")
+    dt = datetime(2026, 10, 4, 17, 0, tzinfo=timezone.utc)
+    assert _app._hand_gtt(dt, slack_min=0) is None
+    assert _app._HAND_GTD_SLACK_MIN == 0
+    assert _app._hand_tif_params(None) == {"tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL"}
+    g = _app._hand_gtt(dt, slack_min=45)
+    assert g == "2026-10-04T17:45:00Z", g
+    assert _app._hand_tif_params(g)["goodTillTime"] == g
+    print("  PASS  hand start-cancel planner + no-expiry (GTC) hand orders")
 
 
 def test_hand_chase_plan() -> None:
