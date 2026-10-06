@@ -3193,6 +3193,28 @@ def api_cellar_health():
                             "enabled": sum(1 for p in pr if p.get("enabled"))}
         except Exception:
             pass
+        if request.args.get("batch"):
+            # ?batch=1 — the batch lane's PER-JOB history (lane 'batch:<job>'),
+            # which the lane card above cannot show: the lane row only carries
+            # the runner's own tick, so a job that fails fast every tick reads
+            # as a healthy lane doing zero work (Oct 5 2026: the Monday sheet
+            # build, due since boot, never surfaced here). Newest first.
+            try:
+                n = max(1, min(int(request.args.get("batch") or 25), 100))
+            except ValueError:
+                n = 25
+            try:
+                bt = (sb.table("cellar_ticks")
+                      .select("lane,started_at,ok,work,duration_ms,error,detail")
+                      .like("lane", "batch:%").order("started_at", desc=True)
+                      .limit(n).execute().data) or []
+                out["batch"] = [{"lane": x.get("lane"), "at": x.get("started_at"),
+                                 "ok": x.get("ok"), "work": x.get("work"),
+                                 "ms": x.get("duration_ms"),
+                                 "error": (x.get("error") or "")[-700:] or None}
+                                for x in bt]
+            except Exception as e:
+                out["batch_err"] = f"{type(e).__name__}: {e}"[:200]
     except Exception as e:
         out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
     return jsonify(out)
