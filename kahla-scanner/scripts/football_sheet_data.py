@@ -472,6 +472,12 @@ def _resolve_team(name: str, teams: dict) -> str:
 # exactly as before (its own ratings solve from game_results — Actions path).
 MODEL_HOOK = None   # fn(sport) -> model dict (R/params/n_games/computed_at)
 PRICE_HOOK = None   # fn(model, home, away, neutral) -> priced dict | None
+# THE LINE IS PINNACLE'S (Rob, Oct 5 2026: "update the odds in the bet sheets
+# based on the pinnacle number… three or four times a day"). fn(sport, away,
+# home) -> {"spread_home", "total", "src": "pinnacle", ...} | None. The box
+# supplies it off the parlay-api slate cache (scripts/box_sheets.line_hook);
+# without it the sheet prices against DK/Circa/ESPN consensus as before.
+LINE_HOOK = None
 
 
 def load_model(sport: str) -> dict | None:
@@ -843,15 +849,19 @@ def history_block(results: list[dict], away: str, home: str) -> dict:
 
 # ---------------------------------------------------------------- assembly
 def _best_market_lines(pm: dict | None, vs: dict | None,
-                       book: dict | None) -> dict:
+                       book: dict | None, pin: dict | None = None) -> dict:
     """The posted lines the model prices against, with provenance.
-    Preference: DK (the book the crew bets) → Circa → the ESPN consensus
-    line (available Monday, before VSiN's 80h window opens) → PMM →
-    Kalshi."""
+    Preference: PINNACLE (the sharp line, off the parlay-api slate the box
+    pulls at every sheet refresh — Oct 5 2026) → DK (the book the crew
+    bets) → Circa → the ESPN consensus line (available Monday, before
+    VSiN's 80h window opens) → PMM → Kalshi."""
     out: dict = {}
     def _set(kind, line, src):
         if line is not None and kind not in out:
             out[kind] = {"line": float(line), "src": src}
+    if pin:
+        _set("spread_home", pin.get("spread_home"), pin.get("src") or "pinnacle")
+        _set("total", pin.get("total"), pin.get("src") or "pinnacle")
     for bk in ("draftkings", "circa"):
         b = (vs or {}).get(bk) or {}
         sp = (b.get("spread") or {}).get("home") or {}
@@ -976,8 +986,18 @@ def build_game_blob(g: dict, sport: str, model: dict | None,
         unavailable.append("exchange_tape")
     if not vs:
         unavailable.append("vsin")
+    pin = None
+    if LINE_HOOK:
+        try:
+            pin = LINE_HOOK(sport, g["away"], g["home"])
+        except Exception as e:           # a Pinnacle miss is a fallback, never a dark sheet
+            log.warning("line hook failed for %s @ %s: %s", g["away"], g["home"], e)
+            pin = None
+        if not pin:
+            unavailable.append("pinnacle")
+    blob["pin_lines"] = pin
 
-    mkt = _best_market_lines(pm, vs, g.get("book_odds"))
+    mkt = _best_market_lines(pm, vs, g.get("book_odds"), pin)
     if model:
         priced = price_game(model, g["home"], g["away"],
                             bool(g.get("neutral_site")))
@@ -1199,6 +1219,7 @@ def run(mode: str, sports: list[str], days: int, week_key: str,
                     "built_at": datetime.now(timezone.utc).isoformat(),
                     "lines": fresh.get("lines"), "splits": fresh.get("splits"),
                     "book_odds": fresh.get("book_odds"),
+                    "pin_lines": fresh.get("pin_lines"),
                     "injuries": fresh.get("injuries"),
                     "model": fresh.get("model"),
                     "changes": changes}

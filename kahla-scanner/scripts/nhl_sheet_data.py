@@ -46,7 +46,9 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_SCANNER = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _SCANNER)
+sys.path.insert(0, os.path.dirname(_SCANNER))      # repo root: app.py (the Pinnacle slate)
 from _lib import crease_iq2 as ci2  # noqa: E402
 from scripts.football_sheet_data import (_espn_get, sb_select,  # noqa: E402
                                          sb_upsert, week_key_default)
@@ -302,6 +304,76 @@ def project_goalie(team: str, side: str, g: dict, goalies: list[dict],
             "known": True}
 
 
+# ------------------------------------------------------------- pinnacle
+def pin_odds_from_events(events, away: str, home: str, pin_outcomes) -> dict | None:
+    """Pinnacle's ML / puck line / total for one game, in the ESPN odds
+    shape the verdicts read, off a TOA-shaped slate. `pin_outcomes` is
+    app._pin_outcomes (passed in so this stays a pure, testable function).
+    None unless Pinnacle posts the moneyline (the sheet's primary market)."""
+    if not events:
+        return None
+    mh, ma = pin_outcomes(events, away, home, "h2h", "home")
+    if not mh or mh.get("price") is None or not ma or ma.get("price") is None:
+        return None
+    out: dict = {"provider": "pinnacle",
+                 "ml_home": _num(mh.get("price")), "ml_away": _num(ma.get("price"))}
+    ov, un = pin_outcomes(events, away, home, "totals", "over")
+    if ov and ov.get("point") is not None:
+        out["total"] = _num(ov.get("point"))
+        out["over_odds"] = _num(ov.get("price"))
+        out["under_odds"] = _num((un or {}).get("price"))
+    ph, pa = pin_outcomes(events, away, home, "spreads", "home")
+    if ph and ph.get("point") is not None:
+        out["puck_home"] = _num(ph.get("point"))
+        out["puck_home_odds"] = _num(ph.get("price"))
+        out["puck_away_odds"] = _num((pa or {}).get("price"))
+    return out
+
+
+def pin_overlay(slate: list[dict], spend: bool) -> dict:
+    """Rob, Oct 5 2026: the sheet's line is Pinnacle's. Pull (spend=True,
+    ~3 credits, 90-min cache, 900/mo hard stop) or just read the cached
+    parlay-api NHL slate and swap each game's ESPN odds for Pinnacle's;
+    ESPN's stay in g["odds_espn"]. A stale (>_PIN_CENTER_MAX_AGE_S) or
+    missing slate leaves ESPN in place."""
+    try:
+        import app
+    except Exception as e:
+        log.warning("pinnacle: app import failed (%s) — ESPN lines stay", e)
+        return {"error": "no_app"}
+    sb = app.get_supabase()
+    now = datetime.now(timezone.utc)
+    st: dict = {"spend": spend}
+    try:
+        if spend:
+            app._pin_slate(sb, "NHL", now)
+        events, age = app._pin_slate_cached(sb, "NHL", now)
+    except Exception as e:
+        log.warning("pinnacle: slate read failed: %s", e)
+        return {"error": str(e)[:120]}
+    st["events"] = len(events or [])
+    st["age_min"] = round(age, 1) if age is not None else None
+    if not events or age is None or age * 60.0 > app._PIN_CENTER_MAX_AGE_S:
+        st["used"] = 0
+        return st
+    n = 0
+    for g in slate:
+        po = pin_odds_from_events(events, g["away"]["name"], g["home"]["name"],
+                                  app._pin_outcomes)
+        if po:
+            g["odds_espn"] = g["odds"]
+            g["odds"] = po
+            n += 1
+    st["used"] = n
+    try:
+        month_k = "usage:" + now.strftime("%Y-%m")
+        st["credits_used"] = (((app._parlay_state_get(sb, month_k) or {}).get("v") or {})
+                              .get("credits") or 0)
+    except Exception:
+        pass
+    return st
+
+
 # ---------------------------------------------------------------- pricing
 def _implied(a: float | None) -> float | None:
     if a is None:
@@ -379,7 +451,7 @@ def _ensure_sport_check() -> bool:
     return False
 
 
-def run(days: int, commit: bool) -> dict:
+def run(days: int, commit: bool, pin: bool | None = None) -> dict:
     games, goalies = finished_games()
     st, params = ci2.fit(games)
     log.info("Crease IQ v2 fit: n=%d coef=%s l3=%.2f delta=%.3f k=%.2f",
@@ -389,6 +461,7 @@ def run(days: int, commit: bool) -> dict:
     if slate is None:
         log.error("ESPN unreachable — no slate")
         return {"games": 0, "error": "espn_dark"}
+    pin_st = pin_overlay(slate, spend=bool(pin)) if pin is not None else None
     today = datetime.now(AZ).date()
     dfo = {}
     for i in range(days + 1):
@@ -415,7 +488,8 @@ def run(days: int, commit: bool) -> dict:
                          "event_start": g["start"].isoformat(),
                          "records": {"away": g["away"]["record"], "home": g["home"]["record"]},
                          "broadcast": g.get("broadcast")},
-                "lines": g["odds"], "goalies": {"home": gh, "away": ga},
+                "lines": g["odds"], "lines_espn": g.get("odds_espn"),
+                "goalies": {"home": gh, "away": ga},
                 "model_meta": {"engine": "crease_iq2", "n_fit": params["n_fit"],
                                "computed_at": now_iso}}
         if pr:
@@ -446,6 +520,8 @@ def run(days: int, commit: bool) -> dict:
                                             "games": len(rows), "deep_games": 0}],
                   "week_key,sport")
     summary["week_key"] = wk
+    if pin_st is not None:
+        summary["pinnacle"] = pin_st
     return summary
 
 
@@ -455,8 +531,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=1, help="today + N days (AZ)")
     ap.add_argument("--commit", action="store_true")
+    ap.add_argument("--pin", action="store_true",
+                    help="pull Pinnacle's NHL slate (parlay-api, ~3 credits, 90-min "
+                         "cache) and price against it; without it the cached slate "
+                         "is still used when fresh")
     args = ap.parse_args()
-    s = run(args.days, args.commit)
+    s = run(args.days, args.commit, pin=args.pin)
     print(json.dumps(s, indent=2, default=str))
     return 0 if s.get("games") or s.get("error") is None else 1
 
