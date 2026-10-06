@@ -2898,6 +2898,62 @@ def test_hand_orders_queue() -> None:
     check("handbets is quiet (no idle tick flood)", _cfg.ALL_LANES["handbets"].quiet)
 
 
+def test_sheet_pinnacle_line() -> None:
+    """Rob, Oct 5 2026: the sheet's line is PINNACLE's, refreshed 3-4× a day
+    inside the free parlay-api tier. Pinnacle beats every other source; a
+    missing Pinnacle market falls through to DK / ESPN consensus; the
+    hockey overlay reads a TOA-shaped slate into the ESPN odds shape; and
+    the batch jobs that may SPEND a pull are exactly the football refreshes
+    + build and the one pre-slate hockey run (budget ≈ 837 of 900 a month)."""
+    import sys as _sys
+    from cellar.batch import JOBS, SCANNER_DIR
+    if SCANNER_DIR not in _sys.path:
+        _sys.path.insert(0, SCANNER_DIR)
+    from scripts import football_sheet_data as fsd
+    from scripts import nhl_sheet_data as nsd
+
+    pin = {"spread_home": -6.5, "total": 51.5, "src": "pinnacle"}
+    book = {"spread_home": -7.0, "total": 52.0, "provider": "consensus"}
+    vs = {"draftkings": {"spread": {"home": {"line": -7.5}}, "total": {"over": {"line": 50.5}}}}
+    m = fsd._best_market_lines(None, vs, book, pin)
+    check("sheet: Pinnacle beats DK and ESPN", m["spread_home"] == {"line": -6.5, "src": "pinnacle"}
+          and m["total"] == {"line": 51.5, "src": "pinnacle"}, f"got {m}")
+    m = fsd._best_market_lines(None, vs, book, {"spread_home": -6.5, "total": None, "src": "pinnacle"})
+    check("sheet: a missing Pinnacle market falls through to DK",
+          m["spread_home"]["src"] == "pinnacle" and m["total"] == {"line": 50.5, "src": "draftkings"}, f"got {m}")
+    m = fsd._best_market_lines(None, None, book, None)
+    check("sheet: no Pinnacle, no DK → ESPN consensus as before",
+          m["spread_home"]["src"] == "consensus" and m["total"]["line"] == 52.0, f"got {m}")
+
+    slate = [{"away_team": "Boston Bruins", "home_team": "Toronto Maple Leafs", "bookmakers": [
+        {"key": "pinnacle", "markets": [
+            {"key": "h2h", "outcomes": [{"name": "Toronto Maple Leafs", "price": -130},
+                                        {"name": "Boston Bruins", "price": 115}]},
+            {"key": "totals", "outcomes": [{"name": "Over", "point": 6.5, "price": -105},
+                                           {"name": "Under", "point": 6.5, "price": -108}]},
+            {"key": "spreads", "outcomes": [{"name": "Toronto Maple Leafs", "point": -1.5, "price": 170},
+                                            {"name": "Boston Bruins", "point": 1.5, "price": -195}]}]}]}]
+    import app as _app
+    po = nsd.pin_odds_from_events(slate, "Boston Bruins", "Toronto Maple Leafs", _app._pin_outcomes)
+    check("hockey: Pinnacle ML/total/puck land in the ESPN odds shape",
+          po == {"provider": "pinnacle", "ml_home": -130.0, "ml_away": 115.0,
+                 "total": 6.5, "over_odds": -105.0, "under_odds": -108.0,
+                 "puck_home": -1.5, "puck_home_odds": 170.0, "puck_away_odds": -195.0}, f"got {po}")
+    check("hockey: a game Pinnacle does not list → None (ESPN line stays)",
+          nsd.pin_odds_from_events(slate, "Dallas Stars", "Colorado Avalanche", _app._pin_outcomes) is None)
+
+    spend = {j.name for j in JOBS if "--pin" in j.argv}
+    check("batch: the Pinnacle-spending jobs are the football refreshes + build and ONE hockey run",
+          spend == {"sheets_build", "sheets_refresh_am", "sheets_refresh_md",
+                    "sheets_refresh_pm", "sheets_refresh_ev", "nhl_sheet_1530"}, f"got {sorted(spend)}")
+    # 4 football pulls × 2 sports × 3 credits + 1 hockey × 3, 31 days, under the 900 stop
+    fb = sum(1 for j in JOBS if j.name.startswith("sheets_refresh") and "--pin" in j.argv)
+    nh = sum(1 for j in JOBS if j.name.startswith("nhl_sheet") and "--pin" in j.argv)
+    month = (fb * 2 * _app._PARLAY_CREDITS_PER_CALL + nh * _app._PARLAY_CREDITS_PER_CALL) * 31
+    check(f"batch: a 31-day month of pulls ({month}) fits the {_app._PARLAY_BUDGET} stop",
+          month <= _app._PARLAY_BUDGET, f"{month} > {_app._PARLAY_BUDGET}")
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
@@ -2914,7 +2970,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_hand_orders_queue):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_hand_orders_queue, test_sheet_pinnacle_line):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

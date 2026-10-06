@@ -1079,6 +1079,7 @@ def _sheet_game_football(r: dict) -> dict:
             "away_short": (g.get("locs") or {}).get("away"),
             "home_short": (g.get("locs") or {}).get("home"),
             "line": line, "model": mdl,
+            "line_src": {"spread": (bs or {}).get("src"), "total": (bt or {}).get("src")},
             "spread": bs, "total": bt, "unrated": model is None,
             "grade": blob.get("grade"),
             "friday_note": r.get("friday_md")}
@@ -3184,6 +3185,21 @@ def api_cellar_health():
         flags = (sb.table("machine_flags").select("key,value,updated_at")
                  .limit(60).execute().data) or []
         out["flags"] = {f["key"]: f.get("value") for f in flags}
+        try:
+            # parlay-api (Pinnacle slate) credits this month + each cached
+            # slate's age — the sheets price off these (Oct 5 2026).
+            _now = datetime.now(timezone.utc)
+            _mk = "usage:" + _now.strftime("%Y-%m")
+            _pa = {"month": _mk, "budget": _PARLAY_BUDGET,
+                   "credits": (((_parlay_state_get(sb, _mk) or {}).get("v") or {})
+                               .get("credits") or 0), "slates": {}}
+            for _sp in ("NFL", "NCAAF", "NHL"):
+                _ev, _age = _pin_slate_cached(sb, _sp, _now)
+                _pa["slates"][_sp] = {"events": len(_ev or []),
+                                      "age_min": round(_age, 1) if _age is not None else None}
+            out["parlay"] = _pa
+        except Exception as e:
+            out["parlay_err"] = f"{type(e).__name__}: {e}"[:160]
         try:
             pr = (sb.table("pair_hedges").select("id,enabled")
                   .gte("kickoff", (datetime.now(timezone.utc)
@@ -30633,8 +30649,16 @@ def _pin_slate(sb, sport: str, now) -> list | None:
     except Exception:
         return ((cache or {}).get("v") or {}).get("events")
     _parlay_state_put(sb, f"pin:{sport}", {"events": events}, now)
+    # The vendor's x-requests-used header is the credit truth (our ledger
+    # undercounted — the props path learned this first); never go below
+    # what we already counted.
+    try:
+        vend = r.headers.get("x-requests-used")
+        used_now = int(float(vend)) if vend else used + _PARLAY_CREDITS_PER_CALL
+    except (TypeError, ValueError):
+        used_now = used + _PARLAY_CREDITS_PER_CALL
     _parlay_state_put(sb, month_k,
-                      {"credits": used + _PARLAY_CREDITS_PER_CALL}, now)
+                      {"credits": max(used_now, used + _PARLAY_CREDITS_PER_CALL)}, now)
     return events
 
 

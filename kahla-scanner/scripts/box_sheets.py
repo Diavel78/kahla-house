@@ -73,6 +73,55 @@ def model_hook(sport: str) -> dict | None:
             "src": "box:power_ratings"}
 
 
+_PIN_SLATES: dict = {}          # sport -> (events, age_min) — one cache read per run
+
+
+def pin_pull(sports, spend: bool) -> dict:
+    """Refresh the Pinnacle slate for each sport through app._pin_slate
+    (3 credits a sport, 90-min cache, 900/1,000 monthly hard stop — a
+    budget-exhausted pull serves the stale cache) and load it for the
+    line hook. spend=False loads the cache only."""
+    app = _app()
+    sb = app.get_supabase()
+    now = datetime.now(ZoneInfo("UTC"))
+    out: dict = {}
+    for sport in sports:
+        try:
+            if spend:
+                ev = app._pin_slate(sb, sport, now)
+            events, age = app._pin_slate_cached(sb, sport, now)
+            _PIN_SLATES[sport] = (events, age)
+            out[sport] = {"events": len(events or []),
+                          "age_min": round(age, 1) if age is not None else None}
+        except Exception as e:
+            log.warning("%s: pinnacle slate failed: %s", sport, e)
+            out[sport] = {"error": str(e)[:120]}
+    try:
+        month_k = "usage:" + now.strftime("%Y-%m")
+        out["credits_used"] = (((app._parlay_state_get(sb, month_k) or {}).get("v") or {})
+                               .get("credits") or 0)
+    except Exception:
+        pass
+    return out
+
+
+def line_hook(sport: str, away: str, home: str) -> dict | None:
+    """Pinnacle's spread (home-oriented) + total for one game off the
+    cached slate; None when the slate is missing, older than the app's
+    _PIN_CENTER_MAX_AGE_S, or does not list the game — the builder then
+    falls back to DK / ESPN consensus exactly as before."""
+    app = _app()
+    events, age = _PIN_SLATES.get(sport, (None, None))
+    if not events or age is None or age * 60.0 > app._PIN_CENTER_MAX_AGE_S:
+        return None
+    sp = app._pin_line_from_events(events, away, home, "spread")
+    tt = app._pin_line_from_events(events, away, home, "total")
+    if sp is None and tt is None:
+        return None
+    return {"spread_home": sp, "total": tt, "src": "pinnacle",
+            "age_min": round(age, 1)}
+
+
 def price_hook(model: dict, home: str, away: str, neutral: bool) -> dict | None:
     """One matchup through app._gridiron_proj: results solve + fitted HFA +
     QB adjustment + (NCAAF/NFL) CFBD/nfelo consensus blend, in RAW margin
@@ -141,6 +190,9 @@ def main() -> int:
     ap.add_argument("--commit", action="store_true")
     ap.add_argument("--force", action="store_true",
                     help="allow a monday (full) build on a non-Monday")
+    ap.add_argument("--pin", action="store_true",
+                    help="pull Pinnacle's slate (parlay-api, ~3 credits a sport, "
+                         "90-min cache) and price the sheet against it")
     args = ap.parse_args()
 
     now_az = datetime.now(AZ)
@@ -152,10 +204,13 @@ def main() -> int:
     from scripts import football_sheet_data as fsd
     fsd.MODEL_HOOK = model_hook
     fsd.PRICE_HOOK = price_hook
+    fsd.LINE_HOOK = line_hook
     sports = args.sport or ["NFL", "NCAAF"]
+    pin = pin_pull(sports, spend=args.pin)
     wk = args.week_key or fsd.week_key_default()
     summary = fsd.run(args.mode, sports, args.days, wk, args.commit)
     summary["model"] = "box:_gridiron_proj"
+    summary["pinnacle"] = pin
     print(json.dumps(summary, indent=2, default=str))
     try:
         _app()._probe_log({"kind": "box_sheets", "mode": args.mode,

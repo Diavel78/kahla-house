@@ -308,6 +308,10 @@
         const L = g.line || {}, M = g.model;
         const bs = g.spread, bt = g.total;
         const rows = [];
+        // where the line came from: PIN = Pinnacle (the sheet's line since Oct 5 2026);
+        // anything else is the fallback (DK / ESPN consensus / exchange) and says so
+        const srcTag = k => { const s = (g.line_src || {})[k]; if (!s) return '';
+            return ' <span class="dim" title="line source">' + (s === 'pinnacle' ? 'PIN' : s.toUpperCase().slice(0, 8)) + '</span>'; };
         // spread
         let pk = '', det = '';
         if (bs && bs.verdict !== 'pass') {
@@ -315,7 +319,7 @@
             det = sgn(bs.edge_pts) + ' pts' + (bs.fair ? ', to ' + am(bs.fair) + ' / ' + pct(impl(bs.fair)) : '');
         } else if (bs) pk = verdictBadge('pass') + '<span class="dim">' + favLine(g, L.spread_home, 1) + '</span>';
         else if (L.spread_home != null) pk = '<span class="dim">' + favLine(g, L.spread_home, 1) + '</span>';
-        rows.push(mrow('Spread', pk, M ? favLine(g, M.spread_home, 1) + gradeMark(g, 'model', 'spread') : (g.unrated ? '<span class="unrated">unrated</span>' : ''), det));
+        rows.push(mrow('Spread', pk + (pk ? srcTag('spread') : ''), M ? favLine(g, M.spread_home, 1) + gradeMark(g, 'model', 'spread') : (g.unrated ? '<span class="unrated">unrated</span>' : ''), det));
         // total
         pk = ''; det = '';
         if (bt && bt.verdict !== 'pass') {
@@ -323,7 +327,7 @@
             det = sgn(bt.edge_pts) + ' pts' + (bt.fair ? ', to ' + am(bt.fair) + ' / ' + pct(impl(bt.fair)) : '');
         } else if (bt) pk = verdictBadge('pass') + '<span class="dim">O/U ' + bt.line + '</span>';
         else if (L.total != null) pk = '<span class="dim">O/U ' + L.total + '</span>';
-        rows.push(mrow('Total', pk, M && M.total != null ? Number(M.total).toFixed(1) + gradeMark(g, 'model', 'total') : '', det));
+        rows.push(mrow('Total', pk + (pk ? srcTag('total') : ''), M && M.total != null ? Number(M.total).toFixed(1) + gradeMark(g, 'model', 'total') : '', det));
         return rows.join('');
     }
     function hockeyRows(g) {
@@ -341,6 +345,7 @@
             const wh = Number(M.win_home);
             mdl = (wh >= 0.5 ? nameOf(g, 'home') + ' ' + pct(wh) : nameOf(g, 'away') + ' ' + pct(1 - wh)) + gradeMark(g, 'model', 'ml');
         } else if (g.unrated) mdl = '<span class="unrated">unrated</span>';
+        if (pk && L.provider) pk += ' <span class="dim" title="line source">' + (L.provider === 'pinnacle' ? 'PIN' : String(L.provider).toUpperCase().slice(0, 8)) + '</span>';
         rows.push(mrow('ML', pk, mdl, det));
         // total
         pk = ''; det = '';

@@ -128,26 +128,40 @@ JOBS: tuple[Job, ...] = (
     # ⚠ A friday-mode run targets week_key_default() = THIS Monday, so on a
     # Monday before the full build it finds zero rows and is a no-op — the
     # new week's sheets come only from sheets_build.
-    Job("sheets_refresh_am", ["scripts.box_sheets", "--mode", "friday", "--commit"],
+    # THE LINE IS PINNACLE'S (Rob, Oct 5 2026: "update the odds in the bet
+    # sheets based on the pinnacle number… three or four times a day as long
+    # as we have enough tokens on the free API"). `--pin` pulls the sport's
+    # parlay-api slate (3 credits a sport, 90-min cache, 900-of-1,000 monthly
+    # hard stop in app._pin_slate) and the sheet prices against it. Budget
+    # (31-day month): football 4 pulls × 2 sports × 3 = 24/day ≈ 744; NHL
+    # one pull a day (the pre-slate 15:35 run) = 93; Monday's 05:00 build
+    # shares the 05:30 cache. ≈ 837/mo — inside the stop, ~60 to spare.
+    # Credits used this month: /api/cellar/health → parlay.
+    Job("sheets_refresh_am", ["scripts.box_sheets", "--mode", "friday", "--commit", "--pin"],
         hour=5, minute=30, timeout_s=1500,
-        note="football pick sheets: morning re-price (box model)"),
-    Job("sheets_refresh_md", ["scripts.box_sheets", "--mode", "friday", "--commit"],
+        note="football pick sheets: morning re-price (box model, Pinnacle pull)"),
+    Job("sheets_refresh_md", ["scripts.box_sheets", "--mode", "friday", "--commit", "--pin"],
         hour=11, minute=0, timeout_s=1500,
-        note="football pick sheets: midday re-price (box model)"),
-    Job("sheets_refresh_pm", ["scripts.box_sheets", "--mode", "friday", "--commit"],
+        note="football pick sheets: midday re-price (box model, Pinnacle pull)"),
+    Job("sheets_refresh_pm", ["scripts.box_sheets", "--mode", "friday", "--commit", "--pin"],
         hour=15, minute=30, timeout_s=1500,
-        note="football pick sheets: pre-slate re-price (box model)"),
+        note="football pick sheets: pre-slate re-price (box model, Pinnacle pull)"),
+    Job("sheets_refresh_ev", ["scripts.box_sheets", "--mode", "friday", "--commit", "--pin"],
+        hour=19, minute=0, timeout_s=1500,
+        note="football pick sheets: evening re-price (box model, Pinnacle pull)"),
     # Hockey: Crease IQ v2 off the box's own goalie/shot spines (3:00/3:10
     # above), DailyFaceoff goalies + ESPN lines fetched live. Same four
-    # clocks the Actions workflow kept (07:00/11:00/14:00/15:30 AZ).
+    # clocks the Actions workflow kept (07:00/11:00/14:00/15:30 AZ). Only
+    # the 15:35 run SPENDS a Pinnacle pull; the others price off the cached
+    # slate while it is under 26h old, else ESPN's line.
     Job("nhl_sheet_07", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
         hour=7, minute=0, timeout_s=1500, note="NHL pick sheet (box)"),
     Job("nhl_sheet_11", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
         hour=11, minute=5, timeout_s=1500, note="NHL pick sheet (box)"),
     Job("nhl_sheet_14", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
         hour=14, minute=0, timeout_s=1500, note="NHL pick sheet (box)"),
-    Job("nhl_sheet_1530", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
-        hour=15, minute=35, timeout_s=1500, note="NHL pick sheet (box)"),
+    Job("nhl_sheet_1530", ["scripts.nhl_sheet_data", "--days", "1", "--commit", "--pin"],
+        hour=15, minute=35, timeout_s=1500, note="NHL pick sheet (box, Pinnacle pull)"),
     # Yesterday's sheet record, every sport, stamped to exec_probe_runs
     # (kind=sheet_grade) so a sandbox can read it through the site.
     Job("sheets_grade", ["scripts.grade_football_sheets", "--sport", "NFL",
@@ -198,7 +212,7 @@ JOBS: tuple[Job, ...] = (
     # finals land at 04:00 (power_ratings), QB/CFBD/nfelo by 04:25; 05:00 is
     # the first clock where the model is current. Listed after those jobs on
     # purpose (first-due-in-list-order). --days 8 reaches next Monday's MNF.
-    Job("sheets_build", ["scripts.box_sheets", "--mode", "monday", "--commit"],
+    Job("sheets_build", ["scripts.box_sheets", "--mode", "monday", "--commit", "--pin"],
         hour=5, minute=0, weekday=0, timeout_s=1500,
         note="football pick sheets: Monday full build (box model)"),
 
