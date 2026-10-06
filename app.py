@@ -12350,20 +12350,37 @@ def _manual_side_book(book: dict, synthetic: bool):
     return s_bid, s_ask
 
 
-# ── HAND-BET GTD = listed start + slack (Oct 4 2026). The venue used to
-# expire every hand bet AT the listed start, which is exactly when the
-# makers pull (measured 10:00:02 on three 10am games) — so the "game
-# started" rule below could never act. The socket rule is the cancel; the
-# GTD is the backstop for a dead socket. `machine_flags hand_gtd_slack_min`.
-_HAND_GTD_SLACK_MIN = 45
+# ── HAND-BET EXPIRY: NONE (Oct 5 2026, Rob: "When the makers leave, the
+# game started. When the bidders are still there, the game hasn't
+# started. The end." — a CFB game sat in a two-hour lightning delay that
+# weekend with its makers still quoting). Hand bets rest GOOD-TILL-CANCEL;
+# the ONLY cancel is `_hand_start_tick` reading the makers leave off the
+# depth tape. History: GTD = listed start (the venue expired every bet in
+# the same second the makers pulled, so the rule could never act) → listed
+# start + 45 min (Oct 4, #91) → no expiry at all. `machine_flags
+# hand_gtd_slack_min` > 0 restores a venue-side GTD backstop at listed
+# start + that many minutes; 0 / unset = GTC.
+_HAND_GTD_SLACK_MIN = 0
 
 
-def _hand_gtt(dt) -> str:
-    try:
-        slack = float(_machine_flag_val("hand_gtd_slack_min", _HAND_GTD_SLACK_MIN))
-    except (TypeError, ValueError):
-        slack = _HAND_GTD_SLACK_MIN
-    return (dt.astimezone(timezone.utc) + timedelta(minutes=slack)).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _hand_gtt(dt, slack_min=None):
+    """The hand bet's goodTillTime, or None for good-till-cancel."""
+    if slack_min is None:
+        try:
+            slack_min = float(_machine_flag_val("hand_gtd_slack_min", _HAND_GTD_SLACK_MIN))
+        except (TypeError, ValueError):
+            slack_min = _HAND_GTD_SLACK_MIN
+    if not slack_min or float(slack_min) <= 0:
+        return None
+    return (dt.astimezone(timezone.utc) + timedelta(minutes=float(slack_min))).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _hand_tif_params(gtt) -> dict:
+    """Pure. The time-in-force params for a hand order: GTC when gtt is
+    None, else GTD at gtt."""
+    if gtt:
+        return {"tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt}
+    return {"tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL"}
 
 
 def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
@@ -12404,8 +12421,8 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
             str(event_start).replace("Z", "+00:00"))
         gtt = _hand_gtt(dt)
     except (TypeError, ValueError):
-        return {"ok": False, "error": "event_start (ISO) required — orders "
-                "expire at kickoff"}, 400
+        return {"ok": False, "error": "event_start (ISO) required — pre-game "
+                "bets only"}, 400
     if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
         return {"ok": False, "error": "game already started — pre-game bets only"}, 400
     canon = (100.0 - price_c) / 100.0 if synthetic else price_c / 100.0
@@ -12415,7 +12432,7 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
               "type": "ORDER_TYPE_LIMIT",
               "price": {"value": f"{canon:.4f}", "currency": "USD"},   # .4f — a quarter tick is 0.0025
               "quantity": contracts,
-              "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
+              **_hand_tif_params(gtt),       # GTC — the makers leaving is the only clock
               "participateDontInitiate": True,
               "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_MANUAL"}
     # THE GEO-CHECK (Oct 3 2026, Troy −9.5): the venue's order endpoint
@@ -35176,7 +35193,7 @@ def _repeg_amend(client, oid, slug, canon: float, qty: int, gtt: str) -> str:
         return "gone"
     mod = {"marketSlug": slug,
            "price": {"value": f"{canon:.4f}", "currency": "USD"},   # .4f — quarter ticks (Oct 4 2026)
-           "tif": "TIME_IN_FORCE_GOOD_TILL_DATE", "goodTillTime": gtt,
+           **_hand_tif_params(gtt),           # gtt None = a hand bet: good-till-cancel
            "participateDontInitiate": True, "quantity": int(qty)}
     try:
         client.orders.modify(oid, mod)
