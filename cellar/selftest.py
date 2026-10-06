@@ -2841,6 +2841,45 @@ def test_hand_orders_queue() -> None:
         from datetime import datetime as _dt, timezone as _tz
         st = _app._hand_orders_tick(sb, _dt.now(_tz.utc), worker="box")
         check("box tick claims + runs the pending row", st.get("claimed") == 1 and st.get("done") == 1 and ran[-1] == (3, "box"))
+        # THE FAST SLIP (Oct 5 2026): Place enqueues RAW rows and waits only
+        # for the CLAIM; a box that is alive but mid-batch keeps them.
+        rid4 = _app._hand_order_enqueue(sb, {"op": "create", "slug": None, "contracts": 1,
+                                             "payload": {"item": {"sport": "NCAAF"}}, "created_at": "2099-01-01T00:00:00+00:00"})
+        rid5 = _app._hand_order_enqueue(sb, {"op": "create", "slug": None, "contracts": 1,
+                                             "payload": {"item": {"sport": "NFL"}}, "created_at": "2099-01-01T00:00:00+00:00"})
+        saved_alive = _app._handbets_box_alive
+        try:
+            _app._handbets_box_alive = lambda sb_: True
+            n0 = len(ran)
+            t0 = _t.monotonic()
+            d4 = _app._hand_orders_wait(sb, [rid4, rid5], _t.monotonic() + 5.0, until_claimed=True)
+            check("box alive + rows unclaimed → Vercel leaves them pending (queued), runs nothing",
+                  d4 == {} and len(ran) == n0 and all(r["state"] == "pending" for r in sb.db["hand_orders"] if r["id"] in (rid4, rid5)))
+            check("…and returns at the claim wait, not the deadline", _t.monotonic() - t0 < 3.0)
+            won = _app._hand_orders_claim_many(sb, [rid4, rid5], "box")
+            check("batch claim wins both rows in one update", won == {rid4, rid5})
+            check("batch claim is atomic (second claim wins nothing)", _app._hand_orders_claim_many(sb, [rid4, rid5], "vercel") == set())
+            t0 = _t.monotonic()
+            d5 = _app._hand_orders_wait(sb, [rid4, rid5], _t.monotonic() + 5.0, until_claimed=True)
+            check("every row claimed → until_claimed returns at once with nothing done", d5 == {} and _t.monotonic() - t0 < 2.5)
+            _app._handbets_box_alive = lambda sb_: False
+            rid6 = _app._hand_order_enqueue(sb, {"op": "create", "slug": None, "contracts": 1, "payload": {"item": {}}})
+            d6 = _app._hand_orders_wait(sb, [rid6], _t.monotonic() + 5.0, until_claimed=True)
+            check("no box alive → Vercel runs the raw row itself", d6.get(rid6, {}).get("ok") is True and ran[-1] == (rid6, "vercel"))
+        finally:
+            _app._handbets_box_alive = saved_alive
+        # the box tick runs the queue in ONE pass: many pending rows, one tick
+        for k in range(12):
+            _app._hand_order_enqueue(sb, {"op": "create", "slug": None, "contracts": 1, "payload": {"item": {}}, "created_at": "2099-01-01T00:00:00+00:00"})
+        st2 = _app._hand_orders_tick(sb, _dt.now(_tz.utc), worker="box")
+        check("box tick claims + runs a whole 12-row slip in one tick", st2.get("claimed") == 12 and st2.get("done") == 12)
+        check("the slip's item shape check is pure and names the fault",
+              _app._bet_sheet_item_check({"sport": "NFL", "market_type": "spread", "side": "home", "away": "a", "home": "b",
+                                          "event_start": "2099-01-01T00:00:00+00:00"}) == "sheet has no line"
+              and _app._bet_sheet_item_check({"sport": "NFL", "market_type": "ml", "side": "home", "away": "a", "home": "b",
+                                              "event_start": "2099-01-01T00:00:00+00:00"}) is None
+              and _app._bet_sheet_item_check({"sport": "NFL", "market_type": "ml", "side": "home", "away": "a", "home": "b",
+                                              "event_start": "2020-01-01T00:00:00+00:00"}) == "game already started — pre-game bets only")
     finally:
         _app._HAND_ENSURED["ok"], _app._HAND_CLAIM_WAIT_S, _app.get_client, _app._hand_order_execute = saved
     # THE END STATE (Rob, Oct 3 2026: the box "is wrapping down everything it

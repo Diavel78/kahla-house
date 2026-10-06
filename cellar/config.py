@@ -226,7 +226,10 @@ ALL_LANES: dict[str, Lane] = {
         # as a proxy). 10s poll; Vercel waits ~12s for a claim before it
         # falls back to placing itself. Add `handbets` to CELLAR_LANES in
         # the money daemon's .env.
-        Lane("handbets",        10,    60, writes_money=True, stuck_s=120,
+        # stuck_s=300 (Oct 5 2026): a whole slip runs in ONE tick now (batch
+        # claim, serial venue writes ~3s each) — a 19-bet submit is a healthy
+        # 60-90s tick, not a hang. Lease ttl stays 60; the renewer covers it.
+        Lane("handbets",        10,    60, writes_money=True, stuck_s=300,
              quiet=True, note="hand bets queued by the site — placed from the box"),
     ]
 }
