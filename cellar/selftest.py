@@ -2952,6 +2952,18 @@ def test_sheet_pinnacle_line() -> None:
     month = (fb * 2 * _app._PARLAY_CREDITS_PER_CALL + nh * _app._PARLAY_CREDITS_PER_CALL) * 31
     check(f"batch: a 31-day month of pulls ({month}) fits the {_app._PARLAY_BUDGET} stop",
           month <= _app._PARLAY_BUDGET, f"{month} > {_app._PARLAY_BUDGET}")
+    # The ONLY spenders are the sheet jobs (via _pin_slate) and the OMS's own
+    # daily refresh (gated off with the machine). The paperlog stamp was the
+    # hidden one — 48 credits a day off hockey suggestions.
+    import inspect
+    src = inspect.getsource(_app._pin_stamp_rows)
+    check("the bet-time Pinnacle stamp is CACHE-ONLY (never spends a credit)",
+          "_pin_slate(" not in src and "_pin_slate_cached(" in src)
+    spenders = [n for n, f in vars(_app).items()
+                if callable(f) and getattr(f, "__module__", None) == _app.__name__
+                and n not in ("_pin_slate",) and "_pin_slate(sb" in (inspect.getsource(f) if inspect.isfunction(f) else "")]
+    check("only _pin_daily_refresh spends Pinnacle credits inside app.py",
+          set(spenders) == {"_pin_daily_refresh"}, f"got {spenders}")
 
 
 def main() -> int:
