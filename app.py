@@ -30711,9 +30711,19 @@ def _pin_outcomes(events, away: str, home: str, mkt_key: str, side: str,
     return None, None
 
 
+_PIN_STAMP_MAX_AGE_MIN = 90.0   # a stamp is "contemporaneous" only off a slate this fresh
+
+
 def _pin_stamp_rows(sb, rows: list, now) -> int:
-    """Stamp signal_blob.pin = {price, line, opp_price, at} onto this tick's
-    REAL gate-cleared main-market rows. Never raises; 0 on any failure."""
+    """Stamp signal_blob.pin = {price, line, opp_price, at, slate_age_min}
+    onto this tick's REAL gate-cleared main-market rows. Never raises; 0 on
+    any failure. ⚠ CACHE-ONLY since Oct 6 2026: this stamp used to call
+    _pin_slate and was the hidden spender of the free parlay-api tier —
+    hockey suggestions clear the gate every minute, so it re-pulled the
+    NHL slate every 90 min (207 credits by Oct 6, ~48/day) for a retired
+    Pick Bot's review dataset. The SHEETS own the budget now (box_sheets /
+    nhl_sheet_data --pin); the stamp rides whatever slate they pulled, and
+    only while it is under _PIN_STAMP_MAX_AGE_MIN old."""
     try:
         todo = [r for r in rows
                 if r.get("gates_cleared") and r["market_type"] in _PIN_MKT_KEY
@@ -30722,10 +30732,14 @@ def _pin_stamp_rows(sb, rows: list, now) -> int:
             return 0
         stamped = 0
         slates: dict = {}
+        ages: dict = {}
         for r in todo:
             sp = r.get("sport")
             if sp not in slates:
-                slates[sp] = _pin_slate(sb, sp, now) or []
+                _ev, _age = _pin_slate_cached(sb, sp, now)
+                if not _ev or _age is None or _age > _PIN_STAMP_MAX_AGE_MIN:
+                    _ev = []
+                slates[sp], ages[sp] = _ev or [], _age
             en = (r.get("event_name") or "")
             if " @ " not in en:
                 continue
@@ -30739,7 +30753,9 @@ def _pin_stamp_rows(sb, rows: list, now) -> int:
                                 "pin": {"price": pick.get("price"),
                                         "line": pick.get("point"),
                                         "opp_price": (opp or {}).get("price"),
-                                        "at": now.isoformat()}}
+                                        "at": now.isoformat(),
+                                        "slate_age_min": (round(ages.get(sp), 1)
+                                                          if ages.get(sp) is not None else None)}}
             stamped += 1
         return stamped
     except Exception:
