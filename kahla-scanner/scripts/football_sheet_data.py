@@ -140,8 +140,20 @@ def sb_select(table: str, params: dict, page: int = 1000) -> list[dict]:
         h = dict(headers)
         h["Range"] = f"{lo}-{lo + page - 1}"
         h["Range-Unit"] = "items"
-        r = httpx.get(f"{base}/rest/v1/{table}", params=params, headers=h,
-                      timeout=30)
+        try:
+            r = httpx.get(f"{base}/rest/v1/{table}", params=params, headers=h,
+                          timeout=30)
+        except httpx.TimeoutException:
+            # One retry, wider. A second miss names the TABLE: the batch
+            # lane keeps only the traceback's tail, and a bare
+            # "httpx.ReadTimeout: timed out" cost an evening (Oct 5 2026).
+            try:
+                r = httpx.get(f"{base}/rest/v1/{table}", params=params,
+                              headers=h, timeout=45)
+            except httpx.TimeoutException as e:
+                raise RuntimeError(
+                    f"PostgREST read of {table} timed out twice "
+                    f"(params={ {k: v for k, v in params.items() if k != 'select'} })") from e
         r.raise_for_status()
         rows = r.json() or []
         out.extend(rows)
@@ -676,6 +688,29 @@ def match_market(g: dict, spine: list[dict]) -> str | None:
     return best
 
 
+# THE TAPE IS OPTIONAL, THE SHEET IS NOT (Oct 5 2026). The Monday build died
+# three times in ~36s on the FIRST game's pm_snapshots read (a PostgREST
+# timeout), and Sunday's refreshes died the same way, so 74 games got no
+# sheet because one side-table read hung. A tape read that fails darkens the
+# tape for the REST OF THIS RUN (one 30s+45s miss, not 74 of them) and the
+# game builds with model + ESPN book odds; `unavailable` says
+# exchange_tape / vsin, and the next friday-mode refresh re-reads the tape
+# into data_blob.friday, which the site prefers — self-healing by schedule.
+_TAPE_DARK: dict = {}
+
+
+def _tape(fn, mid: str, what: str):
+    if _TAPE_DARK.get(what):
+        return None
+    try:
+        return fn(mid)
+    except Exception as e:                 # noqa: BLE001 — never kill the build
+        _TAPE_DARK[what] = str(e)[:300]
+        log.error("%s read failed for %s — %s dark for the rest of this "
+                  "run: %s", what, mid, what, e)
+        return None
+
+
 def _pm_lines(mid: str) -> dict | None:
     """pm_snapshots open→now per (source, market_type). ATM line = latest
     line whose cents sit closest to 50 (the at-the-money convention the
@@ -931,8 +966,9 @@ def build_game_blob(g: dict, sport: str, model: dict | None,
                  "broadcast": g.get("broadcast"), "records": g.get("records"),
                  "locs": g.get("locs")},
     }
-    pm = _pm_lines(g["market_id"]) if g.get("market_id") else None
-    vs = _vsin_lines(g["market_id"]) if g.get("market_id") else None
+    mid = g.get("market_id")
+    pm = _tape(_pm_lines, mid, "exchange_tape") if mid else None
+    vs = _tape(_vsin_lines, mid, "vsin") if mid else None
     blob["lines"] = pm or {}
     blob["splits"] = vs or {}
     blob["book_odds"] = g.get("book_odds")
@@ -1171,7 +1207,8 @@ def run(mode: str, sports: list[str], days: int, week_key: str,
                              {"data_blob": new_blob})
                 n_diffed += 1
             summary[sport] = {"mode": "friday", "games": len(games),
-                              "diffed": n_diffed}
+                              "diffed": n_diffed,
+                              "tape_dark": dict(_TAPE_DARK) or None}
             log.info("%s friday: %d games, %d diffed", sport, len(games),
                      n_diffed)
             continue
@@ -1214,6 +1251,7 @@ def run(mode: str, sports: list[str], days: int, week_key: str,
                 "data_built_at": f"lt.{now_iso}"})
         summary[sport] = {
             "games": len(rows),
+            "tape_dark": dict(_TAPE_DARK) or None,
             "deep": sum(1 for r in rows if r["tier"] == "deep"),
             "with_model": sum(1 for r in rows
                               if "model" in r["data_blob"]),
