@@ -425,12 +425,19 @@
     _applyBetsCollapse();
     let _slip = [];          // [{key, sport, away, home, event_start, market_type, side, line, label, game, q}]
     let _slipOpen = false;
+    // THE SLIP STAYS WHERE YOU PUT IT (Rob, Oct 7 2026: "if I hide you, I'll
+    // look when I'm done adding bets"): the first add pops the slip open; once
+    // you hide it by hand, further adds only bump the count. Emptying the slip
+    // (placed, cleared, removed) re-arms the pop-open.
+    let _slipUserHid = false;
+    function autoOpenSlip() { if (!_slipUserHid) toggleSlip(true); }
     try { const s = JSON.parse(localStorage.getItem(SLIP_KEY) || '{}'); _slip = s.items || []; if (s.contracts) document.getElementById('contracts').value = s.contracts; } catch (e) {}
     function saveSlip() {
         try { localStorage.setItem(SLIP_KEY, JSON.stringify({ items: _slip.map(i => ({ ...i, q: (i.q && i.q.queued) ? i.q : undefined })), contracts: document.getElementById('contracts').value })); } catch (e) {}
     }
     function toggleSlip(force) {
         _slipOpen = (force === undefined) ? !_slipOpen : !!force;
+        if (force === undefined) _slipUserHid = !_slipOpen;   // a tap on the header is the user's choice
         document.getElementById('slip').classList.toggle('open', _slipOpen);
         document.getElementById('slipChev').textContent = _slipOpen ? '▼' : '▲';
     }
@@ -445,7 +452,7 @@
             if (g.event_start && new Date(g.event_start).getTime() <= Date.now()) { toast('Game already started — pre-game only', true); return; }
             _slip.push({ key, sport: _sport, away: g.away, home: g.home, event_start: g.event_start,
                          market_type: mt, side, line, label, game: shortTeam(g.away) + ' @ ' + shortTeam(g.home) });
-            toggleSlip(true);
+            autoOpenSlip();
         }
         saveSlip(); renderSlip(); renderGames();
     }
@@ -460,6 +467,7 @@
     function contractsN() { const n = parseInt(document.getElementById('contracts').value, 10); return (n >= 1 && n <= 250) ? n : 10; }
     function renderSlip() {
         document.getElementById('slipCnt').textContent = _slip.length;
+        if (!_slip.length) _slipUserHid = false;
         const n = contractsN();
         let cost = 0, known = 0;
         const el = document.getElementById('slipItems');
@@ -821,7 +829,7 @@
             _slip.push({ key, op, pick_id: id, sport: b.sport, event_start: b.event_start,
                          label: betLabel(b), game: (b.event_name || '').split(' @ ').map(shortTeam).join(' @ '),
                          resting_c: o.price_c, touch_c: b.touch_c, leaves: o.leaves });
-            toggleSlip(true);
+            autoOpenSlip();
         }
         saveSlip(); renderSlip(); loadBetsRender();
     }
