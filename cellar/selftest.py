@@ -2894,6 +2894,77 @@ def test_pmm_unsigned_cover_questions() -> None:
     check("_bet_sheet_resolve runs the slug guard", "_bet_sheet_slug_disagrees(entry, mt)" in inspect.getsource(_app._bet_sheet_resolve))
 
 
+def test_pmm_day_list_prefetch() -> None:
+    """THE DAY LIST (Oct 7 2026): a slip prefetches each ET day's events
+    once, and _search_event matches against that list before its per-game
+    search — so a game costs one markets.list, not up to nine events.list.
+    A game the list misses still falls through to the full search."""
+    import pmm_markets as pm
+    from datetime import datetime, timezone, timedelta
+    st = datetime(2026, 10, 10, 19, 30, tzinfo=timezone.utc)
+    evs = [{"slug": f"cfb-zz{i}-yy{i}-2026-10-10", "title": f"Zeta{i} vs. Ypsi{i}",
+            "startTime": (st + timedelta(minutes=i)).isoformat()} for i in range(150)]
+    evs.append({"slug": "cfb-alph-bet-2026-10-10", "title": "Alphaville Tech vs. Betaburg State",
+                "startTime": st.isoformat()})
+
+    class _Ev:
+        calls = []
+        def list(self, params):
+            self.calls.append(dict(params))
+            off = int(params.get("offset") or 0)
+            if "startTimeMin" not in params or "offset" not in params:
+                return {"events": []}            # the per-game search finds nothing here
+            return {"events": evs[off:off + int(params.get("limit") or 100)]}
+
+    class _Mk:
+        calls = 0
+        def list(self, params):
+            _Mk.calls += 1
+            return {"markets": []}
+
+    class _C:
+        events = _Ev()
+        markets = _Mk()
+    c = _C()
+    pm._DAY_EVENTS.clear()
+    out = pm.prefetch_day_events(c, "NCAAF", [st.isoformat(), (st + timedelta(hours=3)).isoformat()])
+    check("prefetch pages one ET day to the end (151 events, 2 calls)",
+          out["days"] == 1 and out["events"] == 151 and out["calls"] == 2)
+    n_ev = len(_Ev.calls)
+    diag = {}
+    m = pm._search_event(c, "NCAAF", "Alphaville Tech Ravens", "Betaburg State Owls", st.isoformat(), diag=diag)
+    check("a game on the day list matches with NO further events.list calls",
+          m is not None and len(_Ev.calls) == n_ev and diag.get("day_list") is True)
+    pm.prefetch_day_events(c, "NCAAF", [st.isoformat()])
+    check("a fresh day list is not re-fetched inside its TTL", len(_Ev.calls) == n_ev)
+    m2 = pm._search_event(c, "NCAAF", "Gammaton Ravens", "Deltaport Owls", st.isoformat(), diag={})
+    check("a game the day list misses falls through to the per-game search",
+          m2 is None and len(_Ev.calls) > n_ev)
+    # THE ALIAS RULE (same night): ESPN's "App State"/"Massachusetts" are
+    # Polymarket's "Appalachian State"/"UMass"
+    bd = datetime(2026, 10, 10, 17, 0, tzinfo=timezone.utc)
+    ev = [{"slug": "cfb-old-applst-2026-10-10", "title": "Old Dominion vs. Appalachian State",
+           "startTime": "2026-10-10T17:00:00Z"}]
+    check("Old Dominion vs. Appalachian State matches App State Mountaineers",
+          pm._match_event_to_game(ev, "Old Dominion Monarchs", "App State Mountaineers", "NCAAF", bd) is not None)
+    ev = [{"slug": "cfb-miaoh-umass-2026-10-10", "title": "Miami (OH) vs. UMass",
+           "startTime": "2026-10-10T18:00:00Z"}]
+    check("Miami (OH) vs. UMass matches Massachusetts Minutemen",
+          pm._match_event_to_game(ev, "Miami (OH) RedHawks", "Massachusetts Minutemen", "NCAAF",
+                                  datetime(2026, 10, 10, 18, 0, tzinfo=timezone.utc)) is not None)
+    check("an alias question resolves its side",
+          pm._side_by_first_mention("Will the Appalachian State cover 9.5 vs the Old Dominion",
+                                    "Old Dominion Monarchs", "App State Mountaineers") == "home")
+    check("no alias fires inside another school's name",
+          pm._alias_cands("Mississippi State Bulldogs") == [] and pm._alias_cands("Ole Miss Rebels") == [])
+    pm._DAY_EVENTS.clear()
+    import app as _app, inspect
+    check("the hand-order batch prefetches before it runs creates",
+          "prefetch_day_events" in inspect.getsource(_app._hand_orders_tick))
+    check("resolve remembers a venue miss so the second leg of a game does not re-search",
+          "_BET_SHEET_MISS[miss_key]" in inspect.getsource(_app._bet_sheet_resolve))
+
+
 def test_hand_orders_queue() -> None:
     """THE HAND-ORDER QUEUE (Oct 3 2026): Vercel enqueues, the box claims
     atomically; with no box, Vercel claims the row itself (claim-first, so
@@ -3177,7 +3248,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

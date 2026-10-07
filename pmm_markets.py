@@ -170,7 +170,7 @@ def _team_mention_pos(q_norm: str, team: str) -> int:
             p = min(p, len(q_norm) - 1)    # padded offset → raw-ish pos
         if p >= 0 and (best < 0 or p < best):
             best = p
-    for cand in _abbrev_cands(team):        # 'nm state' (token-bounded)
+    for cand in _abbrev_cands(team) + _alias_cands(team):   # 'nm state', 'umass' (token-bounded)
         p = padded_q.find(" " + cand + " ")
         if p >= 0:
             p = min(p, len(q_norm) - 1)
@@ -264,6 +264,42 @@ def _name_prefix_cands(team_name: str) -> list[str]:
             out.append(cand)
     return out
 
+
+
+# SCHOOL NAMES THAT DIFFER BETWEEN ESPN (our sheets) AND POLYMARKET (Oct 7
+# 2026: "App State" vs "Old Dominion vs. Appalachian State", "Massachusetts"
+# vs "Miami (OH) vs. UMass" — both read "not listed" among 243 events). Keys
+# are the LEADING words of our normalized team name; only pairs that cannot
+# land inside another school's name belong here (no Ole Miss→"mississippi",
+# it would fire inside "Mississippi State").
+_SCHOOL_ALIASES: dict[str, list[str]] = {
+    "app state": ["appalachian state"],
+    "appalachian state": ["app state"],
+    "massachusetts": ["umass"],
+    "umass": ["massachusetts"],
+    "uconn": ["connecticut"],
+    "connecticut": ["uconn"],
+    "pitt": ["pittsburgh"],
+    "pittsburgh": ["pitt"],
+    "ucf": ["central florida"],
+    "central florida": ["ucf"],
+    "fiu": ["florida international"],
+    "florida international": ["fiu"],
+    "fau": ["florida atlantic"],
+    "florida atlantic": ["fau"],
+    "southern miss": ["southern mississippi"],
+    "southern mississippi": ["southern miss"],
+}
+
+
+def _alias_cands(team_name: str) -> list[str]:
+    """Polymarket's name for our school, when it differs (_SCHOOL_ALIASES)."""
+    n = _norm(team_name) + " "
+    out = []
+    for k, alts in _SCHOOL_ALIASES.items():
+        if n.startswith(k + " "):
+            out += alts
+    return out
 
 
 def _abbrev_cands(team_name: str) -> list[str]:
@@ -503,6 +539,76 @@ def _match_event_to_game(events: list, away: str, home: str,
 
 # ──────────────────────────── Event search ────────────────────────────
 
+_DAY_EVENTS: dict = {}          # (tag, ET date iso) -> (ts, [events])
+_DAY_EVENTS_TTL_S = 180.0
+
+
+def prefetch_day_events(client, sport: str, starts) -> dict:
+    """One paged events.list per (sport tag, ET date) for the given event
+    starts, kept _DAY_EVENTS_TTL_S for _search_event's first pass. A
+    partial list (rate limit, offset ignored) is still kept: a game it
+    misses falls through to the normal per-game search."""
+    out = {"days": 0, "events": 0, "calls": 0}
+    tag = _SPORT_TAG_SLUG.get(sport)
+    if not tag:
+        return out
+    try:
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+    except Exception:
+        et = timezone.utc
+    dates = set()
+    for st in (starts or []):
+        try:
+            dt = datetime.fromisoformat(str(st).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        d = _bet_et_date(dt)
+        if d is not None:
+            dates.add(d)
+    for d in sorted(dates):
+        key = (tag, d.isoformat())
+        hit = _DAY_EVENTS.get(key)
+        if hit and (time.time() - hit[0]) < _DAY_EVENTS_TTL_S:
+            continue
+        day0 = datetime(d.year, d.month, d.day, tzinfo=et)
+        win_min = (day0 - timedelta(hours=6)).isoformat()
+        win_max = (day0 + timedelta(hours=30)).isoformat()
+        evs, seen = [], set()
+        for pg in range(8):
+            if _RL_GATE is not None and not _RL_GATE():
+                break
+            try:
+                resp = client.events.list({"tagSlug": tag, "closed": False,
+                                           "startTimeMin": win_min, "startTimeMax": win_max,
+                                           "limit": 100, "offset": pg * 100})
+            except Exception as e:
+                if _RL_TRIP is not None:
+                    _RL_TRIP(e)
+                break
+            out["calls"] += 1
+            page = (resp.get("events") if isinstance(resp, dict)
+                    else getattr(resp, "events", None)) or []
+            fresh = 0
+            for ev in page:
+                sl = ev.get("slug") if isinstance(ev, dict) else getattr(ev, "slug", None)
+                if sl and sl in seen:
+                    continue
+                if sl:
+                    seen.add(sl)
+                evs.append(ev)
+                fresh += 1
+            if len(page) < 100 or not fresh:
+                break
+        if evs:
+            _DAY_EVENTS[key] = (time.time(), evs)
+            out["days"] += 1
+            out["events"] += len(evs)
+    return out
+
+
 def _search_event(client, sport: str, away: str, home: str,
                   event_start_iso: str,
                   diag: dict | None = None) -> dict | None:
@@ -587,7 +693,20 @@ def _search_event(client, sport: str, away: str, home: str,
     last_error = None
     used_attempt = None
     matched = None
-    for i, params in enumerate(attempts):
+    # THE DAY LIST (Oct 7 2026): a 34-bet slip spent ~90s of its 150s in
+    # these searches — up to nine events.list calls per game, a miss burning
+    # all nine, and the bursts tripped the venue's rate limiter (two 20s
+    # holds). A batch now prefetches each ET day's events ONCE
+    # (prefetch_day_events); the same matcher and date guards run over that
+    # list first, and only a miss falls through to the per-game search below.
+    _day = _DAY_EVENTS.get((tag, (_bet_et_date(bet_dt) or bet_dt.date()).isoformat()))
+    if _day and (time.time() - _day[0]) < _DAY_EVENTS_TTL_S:
+        _m = _match_event_to_game(list(_day[1]), away, home, sport=sport, bet_dt=bet_dt)
+        if _m is not None:
+            matched, events, used_attempt = _m, list(_day[1]), "day_list"
+            if diag is not None:
+                diag["day_list"] = True
+    for i, params in enumerate(attempts if matched is None else []):
         if _RL_GATE is not None and not _RL_GATE():
             last_error = "paced out"
             break
