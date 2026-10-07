@@ -240,7 +240,14 @@ def _name_prefix_cands(team_name: str) -> list[str]:
     out = []
     for k in range(len(parts) - 1, 0, -1):
         cand = " ".join(parts[:k])
-        if len(cand) >= 5:
+        # THE ARMY RULE (Oct 6 2026): a FOUR-letter school name with a
+        # two-word mascot ('Army Black Knights', 'Duke Blue Devils') had
+        # no candidate at all — the city variant is 'army black', the
+        # 5-char floor dropped 'army' — so 'Tulane vs. Army' read as
+        # "Polymarket has not listed this game" with the game on the book.
+        # The floor exists for 3-letter generic city words (new/san/los);
+        # a 4-letter LEADING token is matched token-bounded, so it stays.
+        if len(cand) >= 5 or (k == 1 and len(cand) == 4):
             out.append(cand)
     return out
 
@@ -271,6 +278,7 @@ def _team_code_cands(team: str, sport: str | None = None) -> set[str]:
     if parts:
         cands.add("".join(p[0] for p in parts))          # nym / gsw / sas
         cands.add(parts[0][:3])                          # phi / bos / tor
+        cands.add(parts[0][:4])                          # army / duke / rice (CFB slugs carry the short school whole)
         if len(parts) >= 2:
             cands.add("".join(p[0] for p in parts[:-1]))  # ny / la / tb
             if len(parts) >= 3:
