@@ -1299,15 +1299,23 @@ def test_pair_plan() -> None:
     check("prop sisters seat 10 a leg (Rob, Oct 3 2026)", _app._pair_prop_qty() == 10 or _app._machine_flag_val("pair_props_qty") is not None)
     # THE NEBRASKA BET (Oct 3 2026): a position built by a MANUAL buy is never adopted
     class _NebSB:
-        def __init__(self, moi): self.moi = moi
-        def table(self, *_a): return self
-        def select(self, *_a): return self
+        def __init__(self, moi, record=None, oid=None):
+            self.moi, self.record, self.oid, self.t = moi, record or {}, oid, None
+        def table(self, name): self.t = name; return self
+        def select(self, *_a, **_k): return self
         def eq(self, *_a): return self
+        def gte(self, *_a): return self
         def limit(self, *_a): return self
         def execute(self):
             class _R: pass
-            r = _R(); r.data = [{"payload": {"trade": {"isAggressor": False, "passive": {
-                "intent": "ORDER_INTENT_BUY_SHORT", "manualOrderIndicator": self.moi}}}}] if self.moi else []
+            r = _R()
+            if self.t == "poly_activities":
+                mo = {"intent": "ORDER_INTENT_BUY_SHORT", "manualOrderIndicator": self.moi}
+                if self.oid:
+                    mo["orderId"] = self.oid
+                r.data = [{"payload": {"trade": {"isAggressor": False, "passive": mo}}}] if self.moi else []
+            else:
+                r.data = list(self.record.get(self.t) or [])   # the box's own record, by table
             return r
     check("a hand-placed fill reads as the user's (True)",
           _app._hand_fill_verdict(_NebSB("MANUAL_ORDER_INDICATOR_MANUAL"), "aec-cfb-mary-nebr-2026-10-03", True) is True)
@@ -1315,6 +1323,43 @@ def test_pair_plan() -> None:
           _app._hand_fill_verdict(_NebSB("MANUAL_ORDER_INDICATOR_AUTOMATIC"), "aec-cfb-mary-nebr-2026-10-03", True) is False)
     check("no buy trade visible yet is unknown (None) — adoption waits",
           _app._hand_fill_verdict(_NebSB(None), "aec-cfb-mary-nebr-2026-10-03", True) is None)
+    # THE MISSOURI BET (Oct 4-5 2026): the venue flags every API order AUTOMATIC — box-placed
+    # sheet bets, chase amends and line-move rejoins included — so the box's OWN record decides
+    _mz = "asc-cfb-txam-missr-2026-10-10-pos-4pt5"
+    check("an AUTOMATIC fill on a slug with a hand_* stamp is Rob's (True)",
+          _app._hand_fill_verdict(_NebSB("MANUAL_ORDER_INDICATOR_AUTOMATIC",
+                                         {"exec_probe_runs": [{"result": {"hand_app_retire": True, "slug": _mz}}]}), _mz, True) is True)
+    check("an AUTOMATIC fill on a slug with a settled sheet pick is Rob's (True)",
+          _app._hand_fill_verdict(_NebSB("MANUAL_ORDER_INDICATOR_AUTOMATIC",
+                                         {"bot_picks": [{"id": 1, "signal_blob": {"bet_sheet": True, "pmm_slug": _mz}}]}), _mz, True) is True)
+    check("an AUTOMATIC fill on a slug with a hand_orders row is Rob's (True)",
+          _app._hand_fill_verdict(_NebSB("MANUAL_ORDER_INDICATOR_AUTOMATIC",
+                                         {"hand_orders": [{"id": 9, "result": {"ok": True}}]}), _mz, True) is True)
+    check("an AUTOMATIC fill whose order id the hand lane created is Rob's (True)",
+          _app._hand_fill_verdict(_NebSB("MANUAL_ORDER_INDICATOR_AUTOMATIC",
+                                         {"exec_probe_runs": [{"result": {"hand_chase": True, "slug": "other-slug", "order_id": "CX1"}}]}, oid="CX1"),
+                                  _mz, True) is False)   # a stamp on ANOTHER slug does not vouch for this one
+    check("a stamp on another slug is not a record for this slug",
+          not _app._hand_slug_record(_NebSB(None, {"exec_probe_runs": [{"result": {"hand_chase": True, "slug": "other"}}]}), _mz)["ours"])
+    check("a non-hand stamp on the slug is not a hand record",
+          not _app._hand_slug_record(_NebSB(None, {"exec_probe_runs": [{"result": {"kind": "flag_set", "slug": _mz}}]}), _mz)["ours"])
+    check("an AUTOMATIC fill with no box record stays the machine's (False)",
+          _app._hand_fill_verdict(_NebSB("MANUAL_ORDER_INDICATOR_AUTOMATIC"), _mz, True) is False)
+    # THE MISSOURI RETIRE: a short positions read deletes nothing
+    check("4 of 97 positions is a partial read", _app._positions_partial(4, 97))
+    check("58 of 97 is a partial read (under 60%)", _app._positions_partial(58, 97))
+    check("60 of 97 is not", not _app._positions_partial(60, 97))
+    check("a small book never trips the guard (5 of 8)", not _app._positions_partial(5, 8))
+    check("an empty read against a held book is partial", _app._positions_partial(0, 12))
+    _src_at = _insp0.getsource(_app._hand_app_adopt_tick)
+    check("the retire path guards the fresh positions read (partial → skip, None → skip)",
+          "_hand_positions_partial(sb, positions)" in _src_at and "positions_read_failed" in _src_at)
+    check("the retire path never deletes a pick the socket mirror shows held",
+          "_mirror_shows_held(b.get(\"pmm_slug\"))" in _src_at)
+    check("held-lot adoption runs through the shared helper (tick + readopt)",
+          "_hand_adopt_held(sb, client, owner, slug, pos, now)" in _src_at
+          and "_hand_adopt_held(sb, client, owner, slug, pos, now)" in _insp0.getsource(_app._hand_readopt))
+    check("the picks endpoint exposes readopt=", "readopt" in _insp0.getsource(_app.api_bet_sheets_picks))
     check("the ghost loop refuses a position on True or None (source shows both gates)",
           "manual_fill" in _insp0.getsource(_app._pmm_autolog) and "fill_owner_unknown" in _insp0.getsource(_app._pmm_autolog))
     # WIND-DOWN (Rob, Oct 3 2026): flat rows are cancelled + retired, held rows keep running

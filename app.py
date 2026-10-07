@@ -3152,6 +3152,9 @@ def api_bet_sheets_picks():
             except Exception as e:
                 out.setdefault("delete_err", []).append(f"{pid}: {e}"[:120])
         out["deleted"] = deleted
+    re_slug = (request.args.get("readopt") or "").strip()
+    if re_slug:                                        # THE MISSOURI RE-ATTACH (Oct 6 2026): book one
+        out["readopt"] = _hand_readopt(sb, re_slug)     # held lot as a hand bet, from Vercel, now
     try:
         out["pending_total"] = (sb.table("bot_picks").select("id", count="exact")
                                 .eq("status", "pending").limit(1).execute().count) or 0
@@ -14065,6 +14068,146 @@ def _hand_app_pick_row(sb, client, owner_uid, o: dict, now) -> dict | None:
             "signal_blob": blob}
 
 
+def _positions_partial(n_read: int, n_expect: int, min_n: int = 10,
+                       frac: float = _AUTOLOG_MAP_MIN_FRAC) -> bool:
+    """A positions map far smaller than what the book says we hold is a
+    PARTIAL READ, not a sold-out account (pure, selftested)."""
+    try:
+        return int(n_expect) >= int(min_n) and int(n_read) < float(frac) * int(n_expect)
+    except (TypeError, ValueError):
+        return False
+
+
+def _mirror_shows_held(slug) -> bool:
+    """The socket-fed venue mirror holds ≥1 share on the slug."""
+    if not slug:
+        return False
+    try:
+        with _VENUE_MIRROR["lock"]:
+            v = (_VENUE_MIRROR.get("positions") or {}).get(slug) or {}
+        return abs(float(v.get("net") or 0)) >= 1.0
+    except Exception:
+        return False
+
+
+def _hand_positions_partial(sb, positions: dict) -> str | None:
+    """Reason string when a fresh positions read looks PARTIAL: fewer rows
+    than 60% of what we expect to hold, expectation = the larger of the
+    socket mirror's held slugs and the book's filled pending picks. None =
+    trust it. Unreadable expectation = trust it (the mirror alone decides)."""
+    n_read = len(positions or {})
+    expect = 0
+    try:
+        with _VENUE_MIRROR["lock"]:
+            expect = sum(1 for v in (_VENUE_MIRROR.get("positions") or {}).values()
+                         if abs(float((v or {}).get("net") or 0)) >= 1.0)
+    except Exception:
+        expect = 0
+    try:
+        nf = (sb.table("bot_picks").select("id", count="exact").eq("status", "pending")
+              .filter("signal_blob->>filled", "eq", "true").limit(1).execute().count) or 0
+        expect = max(expect, int(nf))
+    except Exception:
+        pass
+    if _positions_partial(n_read, expect):
+        return f"positions_partial:{n_read}/{expect}"
+    return None
+
+
+def _hand_adopt_held(sb, client, owner, slug: str, pos: dict, now):
+    """Book a pickless HELD lot as a hand bet: (row, None) when it is Rob's
+    and resolvable, (None, reason) otherwise. Shared by the handbets tick
+    and the picks endpoint's `readopt=` (the Missouri re-attach)."""
+    try:
+        net = float(pos.get("net") or 0.0)
+        qty = abs(net)
+    except (TypeError, ValueError):
+        return None, "pos_bad_net"
+    if qty < 1.0:
+        return None, "pos_dust"
+    if not _event_slug_from_market(slug) and not _RENT_SLUG_RE.match(slug):
+        return None, "pos_not_game"                # props / unknown shapes: not this lane
+    v = _hand_fill_verdict(sb, slug, net < 0)
+    if v is not True:
+        return None, ("pos_machine_fill" if v is False else "pos_fill_unknown")
+    avg = pos.get("avg_price")
+    if avg is None or not (0.005 <= float(avg) <= 0.995):
+        return None, "pos_no_avg"
+    syn = net < 0
+    pseudo = {"slug": slug, "intent": "BUY_SHORT" if syn else "BUY_LONG",
+              "price_yes": (1.0 - float(avg)) if syn else float(avg),
+              "qty": qty, "leaves": 0.0, "id": None, "title": "", "event_slug": None,
+              "created": "", "_filled": True}
+    row = _hand_app_pick_row(sb, client, owner, pseudo, now)
+    if not row:
+        return None, "pos_unresolved"
+    try:
+        ev_dt = datetime.fromisoformat(str(row.get("event_start")).replace("Z", "+00:00"))
+        if ev_dt.astimezone(timezone.utc) < now - timedelta(hours=_HAND_APP_POS_LOOKBACK_H):
+            return None, "pos_old_game"
+    except (TypeError, ValueError):
+        return None, "pos_no_start"
+    return row, None
+
+
+def _hand_readopt(sb, slug: str) -> dict:
+    """Book a HELD lot on `slug` as a hand bet right now (the picks
+    endpoint's `readopt=`): fresh venue positions read, refuses when a
+    pending sheet/app pick already carries the slug, otherwise the exact
+    row the handbets tick would mint. Reads only; the one write is the
+    pick row."""
+    res: dict = {"slug": slug}
+    owner = _kalshi_owner_uid()
+    if not owner:
+        res["error"] = "needs_owner"
+        return res
+    try:
+        if (sb.table("bot_picks").select("id", count="exact").eq("status", "pending")
+                .eq("signal_blob->>pmm_slug", slug).limit(1).execute().count) or 0:
+            res["error"] = "has_pending_pick"
+            return res
+    except Exception as e:
+        res["error"] = f"pending read: {e}"[:120]
+        return res
+    try:
+        client = get_client()
+        positions = _pmm_positions_raw(client, fresh=True)
+    except Exception as e:
+        res["error"] = f"venue: {e}"[:120]
+        return res
+    if positions is None:
+        res["error"] = "positions_read_failed"
+        return res
+    pos = positions.get(slug)
+    res["held"] = (pos or {}).get("net")
+    if not pos:
+        res["error"] = "not_held"
+        return res
+    res["record"] = {k: (sorted(v) if isinstance(v, set) else v)
+                     for k, v in _hand_slug_record(sb, slug).items()}
+    now = datetime.now(timezone.utc)
+    row, why = _hand_adopt_held(sb, client, owner, slug, pos, now)
+    if not row:
+        res["error"] = why
+        return res
+    try:
+        ins = sb.table("bot_picks").insert(row).execute()
+        pid = (ins.data or [{}])[0].get("id")
+    except Exception as e:
+        res["error"] = f"insert: {e}"[:120]
+        return res
+    res.update({"ok": True, "pick_id": pid, "label": row["signal_blob"]["label"],
+                "price_c": row["signal_blob"]["price_c"], "contracts": row["signal_blob"]["contracts"],
+                "side": row.get("side"), "line": row.get("entry_line"), "event_start": row.get("event_start")})
+    try:
+        _probe_log({"hand_app_adopt": True, "filled": True, "readopt": True, "pick_id": pid, "slug": slug,
+                    "price_c": row["signal_blob"]["price_c"], "contracts": row["signal_blob"]["contracts"],
+                    "label": row["signal_blob"]["label"], "at": now.isoformat()})
+    except Exception:
+        pass
+    return res
+
+
 def _hand_app_adopt_tick(sb, client, now) -> dict:
     """Every handbets tick: adopt resting MANUAL buys with no pick; retire
     adopted picks whose order is gone with nothing held."""
@@ -14172,8 +14315,7 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
         if pos_adopted >= 2 or _time.monotonic() - t0 > 20.0:
             break
         try:
-            net = float(pos.get("net") or 0.0)
-            qty = abs(net)
+            qty = abs(float(pos.get("net") or 0.0))
         except (TypeError, ValueError):
             continue
         if qty < 1.0 or not slug or slug in pending_slugs or slug in pair:
@@ -14181,26 +14323,9 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
         if not _event_slug_from_market(slug) and not _RENT_SLUG_RE.match(slug):
             continue                                   # props / unknown shapes: not this lane
         st["cands"] += 1
-        v = _hand_fill_verdict(sb, slug, net < 0)
-        if v is not True:
-            _skip("pos_machine_fill" if v is False else "pos_fill_unknown"); continue
-        avg = pos.get("avg_price")
-        if avg is None or not (0.005 <= float(avg) <= 0.995):
-            _skip("pos_no_avg"); continue
-        syn = net < 0
-        pseudo = {"slug": slug, "intent": "BUY_SHORT" if syn else "BUY_LONG",
-                  "price_yes": (1.0 - float(avg)) if syn else float(avg),
-                  "qty": qty, "leaves": 0.0, "id": None, "title": "", "event_slug": None,
-                  "created": "", "_filled": True}
-        row = _hand_app_pick_row(sb, client, owner, pseudo, now)
+        row, why = _hand_adopt_held(sb, client, owner, slug, pos, now)
         if not row:
-            _skip("pos_unresolved"); continue
-        try:
-            ev_dt = datetime.fromisoformat(str(row.get("event_start")).replace("Z", "+00:00"))
-            if ev_dt.astimezone(timezone.utc) < now - timedelta(hours=_HAND_APP_POS_LOOKBACK_H):
-                _skip("pos_old_game"); continue
-        except (TypeError, ValueError):
-            _skip("pos_no_start"); continue
+            _skip(why or "pos_unresolved"); continue
         try:
             ins = sb.table("bot_picks").insert(row).execute()
             pid = (ins.data or [{}])[0].get("id")
@@ -14255,11 +14380,27 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
                 _HAND_APP_MISS.pop(r["id"], None)
                 continue
             if positions is None:
-                positions = _pmm_positions_raw(client, fresh=True) or {}
+                positions = _pmm_positions_raw(client, fresh=True)
+                if positions is None:
+                    st["retire_skipped"] = "positions_read_failed"
+                    break                          # a dark venue retires nothing
+                why = _hand_positions_partial(sb, positions)
+                if why:
+                    # THE MISSOURI RETIRE (Oct 5 2026 08:49 AZ): one positions
+                    # read came back with 4 of ~97 lots and three filled sheet
+                    # bets (Missouri, Iowa, Indiana) were retired in the same
+                    # tick as "nothing held". The autolog had this guard since
+                    # Sep 15; the hand lane did not. A short read deletes nothing.
+                    st["retire_skipped"] = why
+                    app.logger.warning("hand app-retire SKIPPED: %s", why)
+                    break
         except Exception as e:
             st["skipped"]["retire_read"] = str(e)[:60]
             continue
         held = _bet_sheet_pick_side_held(positions.get(b.get("pmm_slug")), bool(b.get("pmm_synthetic")))
+        if held <= 0.0 and _mirror_shows_held(b.get("pmm_slug")):
+            _HAND_APP_MISS.pop(r["id"], None)      # the socket mirror says held — a short REST map never wins
+            continue
         if held > 0.0:
             _HAND_APP_MISS.pop(r["id"], None)      # it filled — the pick rides, the resolver grades it
             if not b.get("filled_qty"):
@@ -16571,19 +16712,84 @@ def _mirror_fresh(key: str) -> bool:
     return _time.monotonic() - at <= _VENUE_MIRROR_TTL_S
 
 
+_HAND_RECORD_DAYS = 21             # how far back the box's own hand-bet record is consulted
+
+
+def _hand_slug_record(sb, slug: str) -> dict:
+    """THE BOX'S OWN RECORD of a slug (Oct 6 2026, the Missouri −4.5 fill):
+    every bot_picks row the sheet/app lane ever minted on it (any status),
+    every `hand_*` stamp in exec_probe_runs (adopt / chase / line-move
+    cancel + rejoin / drop / start-cancel / fill forensics / retire) and
+    every hand_orders queue row — plus every order id those records name.
+    `ours` = any of them exists. Read failures count as nothing (fail
+    toward 'not ours' — the caller then falls back to the venue flag)."""
+    rec = {"picks": 0, "stamps": 0, "orders": 0, "order_ids": set(), "ours": False}
+    if not slug:
+        return rec
+    try:
+        rows = (sb.table("bot_picks").select("id,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("signal_blob->>pmm_slug", slug)
+                .limit(20).execute().data) or []
+        for r in rows:
+            b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+            if not b.get("bet_sheet") or b.get("pmm_slug") != slug:
+                continue
+            rec["picks"] += 1
+            if b.get("order_id"):
+                rec["order_ids"].add(str(b["order_id"]))
+    except Exception:
+        pass
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=_HAND_RECORD_DAYS)).isoformat()
+        st = (sb.table("exec_probe_runs").select("result").eq("result->>slug", slug)
+              .gte("at", since).limit(300).execute().data) or []
+        for x in st:
+            r = x.get("result") if isinstance(x.get("result"), dict) else {}
+            if r.get("slug") != slug or not any(str(k).startswith("hand_") for k in r):
+                continue
+            rec["stamps"] += 1
+            if r.get("order_id"):
+                rec["order_ids"].add(str(r["order_id"]))
+    except Exception:
+        pass
+    try:
+        ho = (sb.table("hand_orders").select("id,result").eq("slug", slug)
+              .limit(50).execute().data) or []
+        for r in ho:
+            rec["orders"] += 1
+            res = r.get("result") if isinstance(r.get("result"), dict) else {}
+            if res.get("order_id"):
+                rec["order_ids"].add(str(res["order_id"]))
+    except Exception:
+        pass
+    rec["ours"] = bool(rec["picks"] or rec["stamps"] or rec["orders"])
+    return rec
+
+
 def _hand_fill_verdict(sb, slug, synth) -> bool | None:
-    """Whose buy built this position? True = a HAND-PLACED (MANUAL) buy,
-    False = the machine's (AUTOMATIC), None = no buy trade visible yet.
-    Read off the venue's own trade tape (poly_activities mirror): the
-    manualOrderIndicator rides on every fill, and the venue's order list
-    drops filled orders, so the tape is the only record.
+    """Whose buy built this position? True = a HAND bet's buy, False = the
+    machine's, None = no buy trade visible yet. Read off the venue's own
+    trade tape (poly_activities mirror): the manualOrderIndicator rides on
+    every fill, and the venue's order list drops filled orders, so the tape
+    is the only venue record.
 
     THE NEBRASKA BET (Oct 3 2026): Rob bought 5 Nebraska ML by hand at
     14:40; football ghost adoption booked the pickless position as a
     machine bet, the scalp rested an ask at cost and sold it at 14:42 for
     6¢ — and the game won. The MANUAL flag lives on orders and fills, never
     on a position, so "never touches a hand bet" was only true until the
-    hand bet filled. Callers REFUSE to adopt on True AND on None."""
+    hand bet filled. Callers REFUSE to adopt on True AND on None.
+
+    THE MISSOURI BET (Oct 4-5 2026): the venue stores EVERY API order as
+    AUTOMATIC — the box's Bet Sheets placements, the chase's amends and
+    the line-move rejoins included (CLAUDE.md, Bet Sheets). Rob's Missouri
+    −4.5 filled on a box-placed rejoin order, a partial positions read
+    retired the pick, and the held lot then read AUTOMATIC → "the
+    machine's" → never re-adopted, while the MANUAL app fills beside it
+    (Nebraska, Iowa) came straight back. The venue flag only says WHICH
+    DOOR the order came through; the box's own record (`_hand_slug_record`)
+    says whose bet it is — an AUTOMATIC fill on a slug the hand lane has
+    touched, or on an order id the hand lane created, is Rob's."""
     try:
         acts = (sb.table("poly_activities").select("payload")
                 .eq("type", "ACTIVITY_TYPE_TRADE").eq("slug", slug)
@@ -16592,6 +16798,7 @@ def _hand_fill_verdict(sb, slug, synth) -> bool | None:
         return None
     want = ("ORDER_INTENT_BUY_SHORT" if synth else "ORDER_INTENT_BUY_LONG")
     seen = None
+    auto_oids: set = set()
     for a in acts:
         t = (a.get("payload") or {}).get("trade") or {}
         mo = (t.get("aggressor") if t.get("isAggressor") else t.get("passive")) or {}
@@ -16600,6 +16807,13 @@ def _hand_fill_verdict(sb, slug, synth) -> bool | None:
         if mo.get("manualOrderIndicator") == "MANUAL_ORDER_INDICATOR_MANUAL":
             return True                      # any hand buy on the lot = hands off
         seen = False
+        for k in ("orderId", "orderID", "order_id", "id"):
+            if mo.get(k):
+                auto_oids.add(str(mo[k]))
+    if seen is False:
+        rec = _hand_slug_record(sb, slug)
+        if rec["ours"] or (auto_oids & rec["order_ids"]):
+            return True                      # the box placed / chased / rejoined it: Rob's bet
     return seen
 
 
