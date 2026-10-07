@@ -23740,6 +23740,14 @@ def _gridiron_is_placeholder(bid, ask) -> bool:
 
 
 _PIN_CENTER_MAX_AGE_S = 26 * 3600      # a daily pull is the design; stale = ignore
+# THE SHEETS: ONE 7AM PULL, THEN THE BOOK (Rob, Oct 6 2026: "7 am pull
+# pinnacle, daily, for all sports, then DK for the updates"). A sheet run
+# prices against Pinnacle only while the slate is this fresh — the 07:00
+# runs that pulled it. Later refreshes fall through to the book line the
+# ESPN scoreboard carries (tagged by provider name on the page), because a
+# 16-hour-old Pinnacle number loses to a fresh book line on a daily sport
+# once the injury news lands. The machine's 26h gate above is untouched.
+_SHEET_PIN_FRESH_S = 3 * 3600
 _PIN_REFRESH_AFTER_H = 20 * 3600       # re-pull once the slate is a day old
 _PIN_REFRESH_HOUR_AZ = 6               # Rob: "every morning at six o'clock"
 _PIN_REFRESH_EARLY_AZ_MIN = 150        # Rob, Sep 26 2026: "Add that extra Pinn pull at 2:30, 100%" —

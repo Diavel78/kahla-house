@@ -330,12 +330,15 @@ def pin_odds_from_events(events, away: str, home: str, pin_outcomes) -> dict | N
     return out
 
 
-def pin_overlay(slate: list[dict], spend: bool) -> dict:
+def pin_overlay(slate: list[dict], spend: bool, sport: str = "NHL") -> dict:
     """Rob, Oct 5 2026: the sheet's line is Pinnacle's. Pull (spend=True,
     ~3 credits, 90-min cache, 900/mo hard stop) or just read the cached
-    parlay-api NHL slate and swap each game's ESPN odds for Pinnacle's;
-    ESPN's stay in g["odds_espn"]. A stale (>_PIN_CENTER_MAX_AGE_S) or
-    missing slate leaves ESPN in place."""
+    parlay-api slate for `sport` (NHL here, NBA via nba_sheet_data) and
+    swap each game's ESPN odds for Pinnacle's; ESPN's stay in
+    g["odds_espn"]. Oct 6 2026 (Rob: "7 am pull pinnacle, daily, for all
+    sports, then DK for the updates"): a slate older than the app's
+    _SHEET_PIN_FRESH_S leaves the book line in place — the 07:00 run is
+    the Pinnacle sheet, the later runs re-price off the book."""
     try:
         import app
     except Exception as e:
@@ -346,15 +349,18 @@ def pin_overlay(slate: list[dict], spend: bool) -> dict:
     st: dict = {"spend": spend}
     try:
         if spend:
-            app._pin_slate(sb, "NHL", now)
-        events, age = app._pin_slate_cached(sb, "NHL", now)
+            app._pin_slate(sb, sport, now)
+        events, age = app._pin_slate_cached(sb, sport, now)
     except Exception as e:
         log.warning("pinnacle: slate read failed: %s", e)
         return {"error": str(e)[:120]}
+    st["sport"] = sport
     st["events"] = len(events or [])
     st["age_min"] = round(age, 1) if age is not None else None
-    if not events or age is None or age * 60.0 > app._PIN_CENTER_MAX_AGE_S:
+    fresh_s = getattr(app, "_SHEET_PIN_FRESH_S", app._PIN_CENTER_MAX_AGE_S)
+    if not events or age is None or age * 60.0 > fresh_s:
         st["used"] = 0
+        st["why"] = "no_slate" if not events else "stale"
         return st
     n = 0
     for g in slate:
