@@ -1041,7 +1041,7 @@ def football_picks_page():
     return render_template("football_picks.html")
 
 
-_SHEET_SPORTS = ("NHL", "NCAAF", "NFL")
+_SHEET_SPORTS = ("NHL", "NBA", "NCAAF", "NFL")
 _SHEET_NHL_LOOKBACK_H = 36   # hockey sheet keeps last night's graded games on the page
 
 
@@ -1115,6 +1115,33 @@ def _sheet_game_nhl(r: dict) -> dict:
                         for k, v in gl.items()}}
 
 
+def _sheet_game_nba(r: dict) -> dict:
+    """Hoops IQ sheet row → the page's game shape (hockey-like: ml/total
+    verdicts + a spread verdict; spread/total are lean-capped upstream)."""
+    blob = r.get("data_blob") or {}
+    g = blob.get("game") or {}
+    ln = blob.get("lines") or {}
+    model = blob.get("model")
+    picks = blob.get("picks") or {}
+    line = {k: ln.get(k) for k in ("ml_home", "ml_away", "total", "spread_home",
+                                   "spread_home_odds", "spread_away_odds",
+                                   "over_odds", "under_odds", "provider")
+            if ln.get(k) is not None}
+    mdl = None
+    if model:
+        mdl = {"spread_home": round(-(model.get("exp_margin") or 0), 1),
+               "total": model.get("exp_total"),
+               "win_home": model.get("win_home")}
+    return {"event_name": r.get("event_name"), "event_start": r.get("event_start"),
+            "market_id": r.get("market_id"),
+            "away": g.get("away"), "home": g.get("home"),
+            "away_short": g.get("away_abbr"), "home_short": g.get("home_abbr"),
+            "line": line, "model": mdl, "ml": picks.get("ml"),
+            "spread": picks.get("spread"), "total": picks.get("total"),
+            "unrated": model is None, "grade": blob.get("grade"),
+            "injuries": blob.get("injuries")}
+
+
 def _nhl_sheet_fallback(sb):
     """Bridge until the box DB's sport CHECK is widened
     (supabase/pick_sheets_sports.sql): the mirror endpoint parks a
@@ -1151,7 +1178,7 @@ def api_football_picks():
             q = (sb.table("football_sheets")
                  .select("market_id,event_name,event_start,tier,data_blob,friday_md,data_built_at")
                  .eq("week_key", wk["week_key"]).eq("sport", sport))
-            if sport == "NHL":
+            if sport in ("NHL", "NBA"):
                 # A daily slate: the sheet shows what's still to play PLUS
                 # the last ~36h, so last night's games stay up with their
                 # ✅/❌ grade (Oct 3 2026) until the next slate rolls on.
@@ -1180,7 +1207,9 @@ def api_football_picks():
 
     games, lines_updated_at, built_at = [], None, None
     for r in rows:
-        games.append(_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_football(r))
+        games.append(_sheet_game_nhl(r) if sport == "NHL"
+                     else _sheet_game_nba(r) if sport == "NBA"
+                     else _sheet_game_football(r))
         blob = r.get("data_blob") or {}
         stamp = (blob.get("friday") or {}).get("built_at") or r.get("data_built_at")
         if stamp and (lines_updated_at is None or stamp > lines_updated_at):

@@ -432,7 +432,7 @@ def lane_grader(ctx: Ctx) -> int:
         _GRADER_SHEETS_TS["ts"] = _t.time()
         ok3, out3 = _run_one(["scripts.grade_football_sheets", "--sport", "NFL",
                               "--sport", "NCAAF", "--sport", "NHL",
-                              "--days-back", "1", "--today", "--write"], 240)
+                              "--sport", "NBA", "--days-back", "1", "--today", "--write"], 240)
         if ok3:
             n += 1
         else:

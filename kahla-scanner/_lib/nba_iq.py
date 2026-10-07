@@ -205,3 +205,102 @@ def calib_fit(rows, cols, ycol):
 
 def calib_pred(coef, r, cols):
     return float(coef[0] + sum(coef[i + 1] * r[c] for i, c in enumerate(cols)))
+
+
+# ── the walk-forward core (shared by the backtest AND the live sheet) ────
+import datetime as _dt
+
+MIN_CAL = 400
+CAL_DAYS = 2 * SEASON_DAYS
+FEATS = {
+    "base":  (["raw_m"], ["raw_t"]),
+    "avail": (["raw_m", "d_val", "d_min"], ["raw_t", "s_pts", "s_min"]),
+}
+
+
+def game_day(iso: str) -> int:
+    """US game night as an ordinal: shift −10h so a late ET tip stays one day."""
+    d = _dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    return (d - _dt.timedelta(hours=10)).toordinal()
+
+
+def game_poss(g: dict):
+    bx = g.get("box") or {}
+    if bx.get("home") and bx.get("away"):
+        p1, p2 = poss_of(bx["home"]), poss_of(bx["away"])
+        if p1 and p2:
+            return (p1 + p2) / 2
+    return None
+
+
+def features(m: HoopsIQ, f, home, away, day, played_home, played_away, hb2b, ab2b):
+    pr = m.project(f, home, away, hb2b, ab2b)
+    av_h = m.availability(home, day, played_home)
+    av_a = m.availability(away, day, played_away)
+    return {"raw_m": pr["margin"], "raw_t": pr["total"], "poss": pr["poss"],
+            "d_val": av_a["miss_val"] - av_h["miss_val"],
+            "d_min": av_a["miss_min"] - av_h["miss_min"],
+            "s_pts": av_h["miss_pts"] + av_a["miss_pts"],
+            "s_min": av_h["miss_min"] + av_a["miss_min"],
+            "miss_home": av_h, "miss_away": av_a}
+
+
+def b2b_flags(m: HoopsIQ, home, away, day):
+    return (1.0 if day - m.last_date.get(home, -99) == 1 else 0.0,
+            1.0 if day - m.last_date.get(away, -99) == 1 else 0.0)
+
+
+def calibrate(pairs, st, feats="avail"):
+    fm, ft = FEATS[feats]
+    cal = [p for p in pairs if st - p["st"] <= CAL_DAYS and p["st"] < st]
+    if len(cal) < MIN_CAL:
+        return None
+    return {"m": calib_fit(cal, fm, "act_m"), "t": calib_fit(cal, ft, "act_t"),
+            "n": len(cal), "feats": feats}
+
+
+def priced(cal, rec):
+    fm, ft = FEATS[cal["feats"]]
+    mu = calib_pred(cal["m"][0], rec, fm)
+    tu = calib_pred(cal["t"][0], rec, ft)
+    return mu, cal["m"][1], tu, cal["t"][1]
+
+
+def walk(rows, params, feats="avail", warmup_days=21):
+    """Predict-then-update over finished games (sorted by date).
+    Returns (model, pairs, preds, season_start)."""
+    m = HoopsIQ(**params)
+    season_start: dict = {}
+    pairs, preds, by_day = [], [], []
+    for r in rows:
+        d = game_day(r["date"])
+        if not by_day or by_day[-1][0] != d:
+            by_day.append((d, []))
+        by_day[-1][1].append(r)
+    for d, games in by_day:
+        season = games[0]["season"]
+        st = HoopsIQ.season_time(season, d, season_start)
+        f = m.fit(st, season)
+        cal = calibrate(pairs, st, feats) if f is not None else None
+        staged = []
+        for g in games:
+            hb, ab = b2b_flags(m, g["home"], g["away"], d)
+            if f is not None:
+                pl = g.get("players") or {}
+                played = {s: {x[0] for x in (pl.get(s) or []) if x[2] and x[2] > 0}
+                          for s in ("home", "away")}
+                rec = features(m, f, g["home"], g["away"], d,
+                               played["home"], played["away"], hb, ab)
+                rec.update(st=st, season=season, id=g["id"],
+                           act_m=g["hs"] - g["as"], act_t=g["hs"] + g["as"],
+                           line=g.get("line"))
+                if cal is not None:
+                    rec["mu"], rec["sd"], rec["tu"], rec["tsd"] = priced(cal, rec)
+                    preds.append(rec)
+                if d - season_start[season] > warmup_days:
+                    staged.append(rec)
+            poss = game_poss(g)
+            if poss:
+                m.add(st, season, d, g, poss, hb, ab)
+        pairs.extend(staged)
+    return m, pairs, preds, season_start

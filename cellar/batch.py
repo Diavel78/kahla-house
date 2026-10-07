@@ -162,11 +162,21 @@ JOBS: tuple[Job, ...] = (
         hour=14, minute=0, timeout_s=1500, note="NHL pick sheet (box)"),
     Job("nhl_sheet_1530", ["scripts.nhl_sheet_data", "--days", "1", "--commit", "--pin"],
         hour=15, minute=35, timeout_s=1500, note="NHL pick sheet (box, Pinnacle pull)"),
+    # Basketball: Hoops IQ (pace × efficiency + who is OUT), ESPN history
+    # cached in ~/.kahla/nba_cache (closed seasons never rescanned), ESPN
+    # lines + injuries live. Injury news lands late — the 15:45 run is the
+    # one closest to tip that still lands before the early slate.
+    Job("nba_sheet_08", ["scripts.nba_sheet_data", "--days", "1", "--commit"],
+        hour=8, minute=0, timeout_s=1500, note="NBA pick sheet (box)"),
+    Job("nba_sheet_12", ["scripts.nba_sheet_data", "--days", "1", "--commit"],
+        hour=12, minute=10, timeout_s=1500, note="NBA pick sheet (box)"),
+    Job("nba_sheet_1545", ["scripts.nba_sheet_data", "--days", "1", "--commit"],
+        hour=15, minute=45, timeout_s=1500, note="NBA pick sheet (box, pre-tip injuries)"),
     # Yesterday's sheet record, every sport, stamped to exec_probe_runs
     # (kind=sheet_grade) so a sandbox can read it through the site.
     Job("sheets_grade", ["scripts.grade_football_sheets", "--sport", "NFL",
                          "--sport", "NCAAF", "--sport", "NHL",
-                         "--days-back", "2", "--stamp", "--write"],
+                         "--sport", "NBA", "--days-back", "2", "--stamp", "--write"],
         hour=9, minute=0, timeout_s=600, note="pick-sheet record (yesterday + day before)"),
     # Intraday ✅/❌ ride the `grader` lane every ~5 min (cellar/lanes.py
     # lane_grader) — this job owns only the stamped daily record.

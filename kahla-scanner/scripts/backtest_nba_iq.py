@@ -17,30 +17,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import itertools
 import json
 import logging
 import math
 import sys
 
-from _lib.nba_iq import HoopsIQ, calib_fit, calib_pred, ncdf, poss_of
+from _lib.nba_iq import ncdf, walk
 from scripts.nba_fetch import load
 
 log = logging.getLogger("bt_nba")
-MIN_CAL = 400
-CAL_DAYS = 2 * 175          # two seasons of season-time
-WARMUP_SEASON = 2023
-FEATS = {
-    "base":  (["raw_m"], ["raw_t"]),
-    "avail": (["raw_m", "d_val", "d_min"], ["raw_t", "s_pts", "s_min"]),
-}
-
-
-def _day(iso):
-    d = dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    # US game night: shift −10h so a 7:30pm ET tip (23:30Z/00:30Z) is one day
-    return (d - dt.timedelta(hours=10)).toordinal()
 
 
 def _imp(ml):
@@ -49,66 +35,8 @@ def _imp(ml):
     return 100 / (ml + 100) if ml > 0 else -ml / (-ml + 100)
 
 
-def run(rows, params, feats="avail", collect=False):
-    m = HoopsIQ(**params)
-    season_start = {}
-    pairs = []        # calibration pairs + eval records
-    preds = []
-    i = 0
-    by_day = []
-    for r in rows:
-        d = _day(r["date"])
-        if not by_day or by_day[-1][0] != d:
-            by_day.append((d, []))
-        by_day[-1][1].append(r)
-    fm, ft = FEATS[feats]
-    for d, games in by_day:
-        season = games[0]["season"]
-        st = HoopsIQ.season_time(season, d, season_start)
-        f = m.fit(st, season)
-        cal = [p for p in pairs if st - p["st"] <= CAL_DAYS and p["st"] < st]
-        cm = ct = None
-        if f is not None and len(cal) >= MIN_CAL:
-            cm = calib_fit(cal, fm, "act_m")
-            ct = calib_fit(cal, ft, "act_t")
-        staged = []
-        for g in games:
-            hb = 1.0 if d - m.last_date.get(g["home"], -99) == 1 else 0.0
-            ab = 1.0 if d - m.last_date.get(g["away"], -99) == 1 else 0.0
-            poss = None
-            bx = g.get("box") or {}
-            if bx.get("home") and bx.get("away"):
-                p1, p2 = poss_of(bx["home"]), poss_of(bx["away"])
-                if p1 and p2:
-                    poss = (p1 + p2) / 2
-            if f is not None:
-                pr = m.project(f, g["home"], g["away"], hb, ab)
-                pl = g.get("players") or {}
-                played = {s: {x[0] for x in (pl.get(s) or []) if x[2] and x[2] > 0}
-                          for s in ("home", "away")}
-                av_h = m.availability(g["home"], d, played["home"])
-                av_a = m.availability(g["away"], d, played["away"])
-                rec = {"st": st, "season": season, "id": g["id"],
-                       "raw_m": pr["margin"], "raw_t": pr["total"],
-                       "d_val": av_a["miss_val"] - av_h["miss_val"],
-                       "d_min": av_a["miss_min"] - av_h["miss_min"],
-                       "s_pts": av_h["miss_pts"] + av_a["miss_pts"],
-                       "s_min": av_h["miss_min"] + av_a["miss_min"],
-                       "act_m": g["hs"] - g["as"], "act_t": g["hs"] + g["as"],
-                       "line": g.get("line")}
-                if cm is not None:
-                    mu = calib_pred(cm[0], rec, fm); sd = cm[1]
-                    tu = calib_pred(ct[0], rec, ft); tsd = ct[1]
-                    rec.update(mu=mu, sd=sd, tu=tu, tsd=tsd)
-                    preds.append(rec)
-                if season >= WARMUP_SEASON and d - season_start[season] > 21:
-                    staged.append(rec)
-            if poss:
-                staged_add = (st, season, d, g, poss, hb, ab)
-                m.add(*staged_add)
-        pairs.extend(staged)
-        i += len(games)
-    return preds
+def run(rows, params, feats="avail"):
+    return walk(rows, params, feats)[2]
 
 
 def score(preds, seasons):
