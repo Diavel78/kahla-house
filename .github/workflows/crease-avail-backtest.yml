@@ -1,0 +1,52 @@
+name: Crease IQ — Skater Availability Backtest
+
+# Walk-forward: Crease IQ v2 + missing-regular skaters vs the DK close.
+# ESPN box history + the goalie/shot pull are cached between runs.
+# Required repo secrets: SUPABASE_URL, SUPABASE_SERVICE_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "ESPN season years (first = warmup)"
+        required: false
+        default: "2023,2024,2025,2026"
+      probe:
+        description: "an ESPN NHL event id to print the box shape (blank = skip)"
+        required: false
+        default: "401559256"
+
+concurrency:
+  group: crease-avail-backtest
+  cancel-in-progress: true
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: kahla-scanner/requirements.txt
+      - run: pip install -r requirements.txt numpy
+      - uses: actions/cache@v4
+        with:
+          path: kahla-scanner/.nhl_cache
+          key: nhl-cache-v1-${{ github.run_id }}
+          restore-keys: nhl-cache-v1-
+      - name: Probe box shape
+        if: ${{ inputs.probe != '' }}
+        run: python -m scripts.nhl_fetch --probe "${{ inputs.probe }}" || true
+      - name: Fetch ESPN history
+        run: python -m scripts.nhl_fetch --seasons "${{ inputs.seasons || '2023,2024,2025,2026' }}" --out .nhl_cache
+      - name: Backtest
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.backtest_crease_avail --cache .nhl_cache --seasons "${{ inputs.seasons || '2023,2024,2025,2026' }}"
