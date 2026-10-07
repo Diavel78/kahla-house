@@ -13050,21 +13050,27 @@ _HAND_ENSURED = {"ok": False, "at": 0.0}
 
 
 def _hand_orders_ensure(sb) -> bool:
-    """The table exists? On the BOX, apply the DDL with psql when it does
-    not (the only machine with a direct Postgres); elsewhere just report."""
+    """The table exists and matches the DDL? On the BOX, apply the DDL file
+    with psql ONCE PER BOOT (it is idempotent — create-if-missing plus the op
+    CHECK rebuilt), so a new op ships with a kick instead of a hand-typed
+    ALTER (Oct 7 2026: 'rerung' was refused by the old CHECK at the queue
+    write). Elsewhere just report."""
     if _HAND_ENSURED["ok"]:
         return True
     if _time.monotonic() - _HAND_ENSURED["at"] < 30.0:
         return False
     _HAND_ENSURED["at"] = _time.monotonic()
+    msg = ""
     try:
         sb.table("hand_orders").select("id").limit(1).execute()
-        _HAND_ENSURED["ok"] = True
-        return True
+        if _CELLAR_SIDE != "cellar" or _HAND_ENSURED.get("applied"):
+            _HAND_ENSURED["ok"] = True
+            return True
     except Exception as e:
         msg = str(e)
-    if _CELLAR_SIDE == "cellar" and ("hand_orders" in msg or "PGRST205" in msg
+    if _CELLAR_SIDE == "cellar" and (not msg or "hand_orders" in msg or "PGRST205" in msg
                                      or "schema cache" in msg):
+        _HAND_ENSURED["applied"] = True             # once per boot, pass or fail
         ddl = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "kahla-scanner", "supabase", "hand_orders.sql")
         psql = (os.environ.get("KAHLA_PSQL")
