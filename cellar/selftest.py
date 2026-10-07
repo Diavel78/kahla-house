@@ -2993,7 +2993,8 @@ def test_sheet_pinnacle_line() -> None:
     Pinnacle market falls through to DK / ESPN consensus; the hockey overlay
     (shared with the NBA sheet) reads a TOA-shaped slate into the ESPN odds
     shape; and the batch jobs that may SPEND a pull are exactly the 07:00
-    runs of every sheet sport + the Monday build (≈ 400 of 900 a month)."""
+    and pre-slate runs of every sheet sport + the Monday build (≈ 770 of
+    900 a month — Rob: "pinnacle twice? 7 am and 3 pm?")."""
     import sys as _sys
     from cellar.batch import JOBS, SCANNER_DIR
     if SCANNER_DIR not in _sys.path:
@@ -3050,18 +3051,19 @@ def test_sheet_pinnacle_line() -> None:
               "_tape_rows(" in src and "sb_select(" not in src)
 
     spend = {j.name for j in JOBS if "--pin" in j.argv}
-    check("batch: the Pinnacle-spending jobs are the 07:00 runs (football, NHL, NBA) + the Monday build",
-          spend == {"sheets_build", "sheets_refresh_am", "nhl_sheet_07", "nba_sheet_07"}, f"got {sorted(spend)}")
+    check("batch: the Pinnacle-spending jobs are the 7am + 3pm runs (football, NHL, NBA) + the Monday build",
+          spend == {"sheets_build", "sheets_refresh_am", "sheets_refresh_pm",
+                    "nhl_sheet_07", "nhl_sheet_1530", "nba_sheet_07", "nba_sheet_1545"}, f"got {sorted(spend)}")
     by = {j.name: j for j in JOBS}
-    check("batch: every spending daily run sits at the 7am clock",
-          all(by[n].hour == 7 for n in spend if n != "sheets_build"),
+    check("batch: every spending daily run sits at the 7am or the 3pm clock",
+          all(by[n].hour in (7, 15) for n in spend if n != "sheets_build"),
           f"got {[(n, by[n].hour, by[n].minute) for n in spend]}")
-    # 1 football pull × 2 sports + NHL + NBA = 4 × 3 credits a day, + the Monday build, 31 days
+    # 2 football pulls × 2 sports + 2 NHL + 2 NBA = 8 × 3 credits a day, + the Monday build, 31 days
     fb = sum(1 for j in JOBS if j.name.startswith("sheets_refresh") and "--pin" in j.argv)
     daily = sum(1 for j in JOBS if j.name.startswith(("nhl_sheet", "nba_sheet")) and "--pin" in j.argv)
     month = (fb * 2 + daily) * _app._PARLAY_CREDITS_PER_CALL * 31 + 2 * _app._PARLAY_CREDITS_PER_CALL * 5
-    check(f"batch: a 31-day month of pulls ({month}) fits the {_app._PARLAY_BUDGET} stop with room",
-          month <= _app._PARLAY_BUDGET * 0.6, f"{month} > {_app._PARLAY_BUDGET * 0.6}")
+    check(f"batch: a 31-day month of pulls ({month}) fits the {_app._PARLAY_BUDGET} stop with ≥100 spare",
+          month <= _app._PARLAY_BUDGET - 100, f"{month} > {_app._PARLAY_BUDGET - 100}")
     # THE FRESH GATE: a run that did not pull prices off Pinnacle only while the slate is <3h old
     check("sheets price off Pinnacle only while the slate is fresh (3h), never the machine's 26h",
           _app._SHEET_PIN_FRESH_S == 3 * 3600 and _app._SHEET_PIN_FRESH_S < _app._PIN_CENTER_MAX_AGE_S)

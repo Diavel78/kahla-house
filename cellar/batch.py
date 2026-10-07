@@ -128,54 +128,56 @@ JOBS: tuple[Job, ...] = (
     # ⚠ A friday-mode run targets week_key_default() = THIS Monday, so on a
     # Monday before the full build it finds zero rows and is a no-op — the
     # new week's sheets come only from sheets_build.
-    # THE LINE IS PINNACLE'S — ONE PULL A DAY, 07:00 AZ, EVERY SPORT (Rob,
-    # Oct 6 2026: "7 am pull pinnacle, daily, for all sports, then DK for
-    # the updates"; Oct 5 was 3-4 pulls a day for football). `--pin` pulls
+    # THE LINE IS PINNACLE'S — TWO PULLS A DAY, 07:00 + ~15:30 AZ, EVERY
+    # SPORT (Rob, Oct 6 2026: "7 am pull pinnacle, daily, for all sports,
+    # then DK for the updates" → "pinnacle twice? 7 am and 3 pm?"; Oct 5 was
+    # 3-4 pulls a day for football only). `--pin` pulls
     # the sport's parlay-api slate (3 credits a sport, 90-min cache,
     # 900-of-1,000 monthly hard stop in app._pin_slate) and the sheet
     # prices against it; a run WITHOUT `--pin` still reads the cached slate
     # but uses it only while under app._SHEET_PIN_FRESH_S (3h) — so the
-    # 07:00 runs are the Pinnacle sheets and the later refreshes re-price
-    # off the ESPN book line (tagged by provider on the page). Budget
-    # (31-day month): 07:00 football 2 sports + NHL + NBA = 4 pulls × 3 =
-    # 12/day ≈ 372; Monday's 05:00 build pulls football too (+6/wk ≈ 26).
-    # ≈ 400/mo of the 900 stop. Credits used: /api/cellar/health → parlay.
+    # 07:00 and pre-slate (15:30-15:45) runs are the Pinnacle sheets and
+    # the other refreshes re-price off the ESPN book line (tagged by
+    # provider on the page). Budget (31-day month): 2 pulls × (football 2
+    # sports + NHL + NBA) = 8 × 3 = 24/day ≈ 744; Monday's 05:00 build pulls
+    # football too (+6/wk ≈ 26). ≈ 770/mo of the 900 stop. Credits used:
+    # /api/cellar/health → parlay.
     Job("sheets_refresh_am", ["scripts.box_sheets", "--mode", "friday", "--commit", "--pin"],
         hour=7, minute=0, timeout_s=1500,
         note="football pick sheets: 7am re-price (box model, THE Pinnacle pull)"),
     Job("sheets_refresh_md", ["scripts.box_sheets", "--mode", "friday", "--commit"],
         hour=11, minute=0, timeout_s=1500,
         note="football pick sheets: midday re-price (box model, book line)"),
-    Job("sheets_refresh_pm", ["scripts.box_sheets", "--mode", "friday", "--commit"],
+    Job("sheets_refresh_pm", ["scripts.box_sheets", "--mode", "friday", "--commit", "--pin"],
         hour=15, minute=30, timeout_s=1500,
-        note="football pick sheets: pre-slate re-price (box model, book line)"),
+        note="football pick sheets: pre-slate re-price (box model, the 3pm Pinnacle pull)"),
     Job("sheets_refresh_ev", ["scripts.box_sheets", "--mode", "friday", "--commit"],
         hour=19, minute=0, timeout_s=1500,
         note="football pick sheets: evening re-price (box model, book line)"),
     # Hockey: Crease IQ v2 off the box's own goalie/shot spines (3:00/3:10
     # above), DailyFaceoff goalies + ESPN lines fetched live. Same four
     # clocks the Actions workflow kept (07:00/11:00/14:00/15:30 AZ). The
-    # 07:00 run SPENDS the day's Pinnacle pull; the others price off the
-    # ESPN book line once the slate is past the 3h freshness gate.
+    # 07:00 and 15:35 runs SPEND the day's two Pinnacle pulls; the others
+    # price off the ESPN book line once the slate is past the 3h gate.
     Job("nhl_sheet_07", ["scripts.nhl_sheet_data", "--days", "1", "--commit", "--pin"],
         hour=7, minute=0, timeout_s=1500, note="NHL pick sheet (box, THE Pinnacle pull)"),
     Job("nhl_sheet_11", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
         hour=11, minute=5, timeout_s=1500, note="NHL pick sheet (box, book line)"),
     Job("nhl_sheet_14", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
         hour=14, minute=0, timeout_s=1500, note="NHL pick sheet (box, book line)"),
-    Job("nhl_sheet_1530", ["scripts.nhl_sheet_data", "--days", "1", "--commit"],
-        hour=15, minute=35, timeout_s=1500, note="NHL pick sheet (box, pre-slate, book line)"),
+    Job("nhl_sheet_1530", ["scripts.nhl_sheet_data", "--days", "1", "--commit", "--pin"],
+        hour=15, minute=35, timeout_s=1500, note="NHL pick sheet (box, pre-slate, the 3pm Pinnacle pull)"),
     # Basketball: Hoops IQ (pace × efficiency + who is OUT), ESPN history
     # cached in ~/.kahla/nba_cache (closed seasons never rescanned), ESPN
-    # lines + injuries live. The 07:00 run is the Pinnacle sheet (same pull
-    # clock as the rest); injury news lands late — the 15:45 run is the one
-    # closest to tip that still lands before the early slate, book line.
+    # lines + injuries live. The 07:00 and 15:45 runs are the Pinnacle
+    # sheets (the two pull clocks); injury news lands late — the 15:45 run
+    # is the one closest to tip that still lands before the early slate.
     Job("nba_sheet_07", ["scripts.nba_sheet_data", "--days", "1", "--commit", "--pin"],
         hour=7, minute=5, timeout_s=1500, note="NBA pick sheet (box, THE Pinnacle pull)"),
     Job("nba_sheet_12", ["scripts.nba_sheet_data", "--days", "1", "--commit"],
         hour=12, minute=10, timeout_s=1500, note="NBA pick sheet (box, book line)"),
-    Job("nba_sheet_1545", ["scripts.nba_sheet_data", "--days", "1", "--commit"],
-        hour=15, minute=45, timeout_s=1500, note="NBA pick sheet (box, pre-tip injuries, book line)"),
+    Job("nba_sheet_1545", ["scripts.nba_sheet_data", "--days", "1", "--commit", "--pin"],
+        hour=15, minute=45, timeout_s=1500, note="NBA pick sheet (box, pre-tip injuries, the 3pm Pinnacle pull)"),
     # Yesterday's sheet record, every sport, stamped to exec_probe_runs
     # (kind=sheet_grade) so a sandbox can read it through the site.
     Job("sheets_grade", ["scripts.grade_football_sheets", "--sport", "NFL",
