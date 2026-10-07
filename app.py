@@ -12719,6 +12719,13 @@ def _handbets_box_alive(sb) -> bool:
         return False
 
 
+# A game the venue search just missed is not searched again for 90s: a
+# slip carries a game's spread AND total, and each miss burned up to nine
+# events.list calls (Oct 7 2026, ODU@App State and Miami (OH)@UMass).
+_BET_SHEET_MISS: dict = {}
+_BET_SHEET_MISS_S = 90.0
+
+
 def _bet_sheet_slug_disagrees(entry: dict, mt: str):
     """Pure. None when the rung's text-derived (side, line) agrees with the
     venue's slug convention (`_slug_side_line`: pos-X = away +X, neg-X =
@@ -12764,6 +12771,10 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
         return {"ok": False, "reason": "bad item"}
     if side not in (("home", "away") if mt != "total" else ("over", "under")):
         return {"ok": False, "reason": "bad side"}
+    miss_key = (sport, str(away), str(home), str(es))
+    hit = _BET_SHEET_MISS.get(miss_key)
+    if hit and _time.time() - hit < _BET_SHEET_MISS_S:
+        return {"ok": False, "reason": "Polymarket has not listed this game"}
     pmm = None
     try:
         import pmm_markets as _pm
@@ -12778,6 +12789,7 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
     if not pmm:
         if _venue_rl_active():
             return {"ok": False, "reason": "Polymarket is rate-limiting us — wait 20s and submit again"}
+        _BET_SHEET_MISS[miss_key] = _time.time()
         return {"ok": False, "reason": "Polymarket has not listed this game"}
     entry, why = _bet_sheet_rung(pmm.get(mt), mt, side, item.get("line"))
     if entry is None:
@@ -14514,6 +14526,23 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
             _hand_order_finish(sb, row["id"], {"ok": False, "error": "expired — nobody ran it in 15 min"})
             stats["expired"] += 1
     won = _hand_orders_claim_many(sb, [r["id"] for r in live], worker) if live else set()
+    raw = [r for r in live if r["id"] in won and r.get("op") == "create" and not r.get("slug")]
+    if raw:
+        # one events fetch per (sport, ET day) for the whole slip, not up
+        # to nine per game (pmm_markets.prefetch_day_events, Oct 7 2026)
+        try:
+            client = get_client()
+            import pmm_markets as _pm
+            by_sport: dict = {}
+            for r in raw:
+                it = (r.get("payload") or {}).get("item") or {}
+                sp = str(it.get("sport") or "").upper()
+                if sp:
+                    by_sport.setdefault(sp, []).append(it.get("event_start"))
+            stats["prefetch"] = {sp: _pm.prefetch_day_events(client, sp, st)
+                                 for sp, st in by_sport.items()}
+        except Exception as e:
+            stats["prefetch"] = {"err": f"{type(e).__name__}: {e}"[:80]}
     for row in live:
         if row["id"] not in won:
             continue
