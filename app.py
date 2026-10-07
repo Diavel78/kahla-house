@@ -3152,6 +3152,21 @@ def api_bet_sheets_picks():
             except Exception as e:
                 out.setdefault("delete_err", []).append(f"{pid}: {e}"[:120])
         out["deleted"] = deleted
+    qn = request.args.get("queue")
+    if qn:                                             # the hand-order queue, newest first (Oct 6 2026)
+        try:
+            qrows = (sb.table("hand_orders")
+                     .select("id,created_at,state,op,slug,synthetic,price_c,contracts,order_id,pick_id,"
+                             "payload,result,error,worker,claimed_at,done_at")
+                     .order("id", desc=True).limit(min(int(qn), 100)).execute().data) or []
+            out["queue"] = [{**{k: r.get(k) for k in ("id", "created_at", "state", "op", "slug", "synthetic",
+                                                     "price_c", "contracts", "order_id", "pick_id", "result",
+                                                     "error", "worker", "claimed_at", "done_at")},
+                             "item": {k: ((r.get("payload") or {}).get("item") or {}).get(k)
+                                      for k in ("label", "away", "home", "sport", "market_type", "side", "line", "event_start")}}
+                            for r in qrows]
+        except Exception as e:
+            out["queue_err"] = str(e)[:160]
     re_slug = (request.args.get("readopt") or "").strip()
     if re_slug:                                        # THE MISSOURI RE-ATTACH (Oct 6 2026): book one
         out["readopt"] = _hand_readopt(sb, re_slug)     # held lot as a hand bet, from Vercel, now
