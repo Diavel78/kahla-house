@@ -283,8 +283,14 @@ def _run_one(argv: list[str], timeout_s: int) -> tuple[bool, str]:
     try:
         p = subprocess.run(cmd, cwd=SCANNER_DIR, capture_output=True,
                            text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        return False, f"TIMEOUT after {timeout_s}s"
+    except subprocess.TimeoutExpired as e:
+        # keep what the job printed before it died — a bare TIMEOUT hid a
+        # whole day of football refreshes (Oct 6 2026) with no clue which
+        # game or read ate the 1,500s.
+        def _txt(x):
+            return x.decode(errors="replace") if isinstance(x, bytes) else (x or "")
+        tail = _txt(e.stdout)[-1200:] + (("\nSTDERR:\n" + _txt(e.stderr)[-1200:]) if e.stderr else "")
+        return False, (f"TIMEOUT after {timeout_s}s\n" + tail).strip()
     tail = (p.stdout or "")[-1500:] + (("\nSTDERR:\n" + p.stderr[-1500:]) if p.stderr else "")
     return p.returncode == 0, tail.strip()
 
