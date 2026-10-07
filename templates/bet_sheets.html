@@ -765,7 +765,8 @@
         done.forEach(b => { if (b.pnl_usd != null) usd += b.pnl_usd; if (b.status === 'won') w++; else if (b.status === 'lost') l++; else p++; });
         document.getElementById('betsMeta').textContent = (_sport + ' ' + open.length + ' open') + (done.length ? ' · settled ' + w + '-' + l + (p ? '-' + p : '') + ' ' + money(usd) : '')
             + (openAll !== open.length ? ' · ' + openAll + ' open all tabs' : '')
-            + (d.src === 'box' ? ' · live from the box' : ' · ⚠ box not publishing — venue read from Vercel') + (d.venue_ok ? '' : ' · ⚠ venue unreadable');
+            + (d.src === 'box' ? ' · live from the box' : ' · ⚠ box not publishing — venue read from Vercel') + (d.venue_ok ? '' : ' · ⚠ venue unreadable')
+            + (d.tape_dark ? ' · 🚨 ORDER-BOOK FEED DOWN (' + d.tape_dark[0] + '/' + d.tape_dark[1] + ' bets blind) — NO kickoff or line-move cancels' : '');
         if (!tabBets.length) { document.getElementById('bets').innerHTML = '<div class="empty" style="padding:14px 0">No ' + esc(_sport) + ' bets' + (bets.length ? ' — ' + openAll + ' open on other tabs' : '') + '. Build a slip below.</div>'; return; }
         const rows = open.concat(done.slice().reverse());
         document.getElementById('bets').innerHTML = rows.map(b => {
