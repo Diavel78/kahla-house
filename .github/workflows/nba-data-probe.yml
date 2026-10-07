@@ -1,0 +1,28 @@
+name: NBA Data — Probe
+
+# Phase 0 of the NBA side + totals model: read-only reachability + field-shape
+# probe of every free NBA source from a runner (the Claude sandbox's egress
+# blocks ESPN/NBA hosts). Prints one NBA_PROBE_REPORT JSON to the log.
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "a PAST regular-season date (YYYYMMDD)"
+        required: false
+        default: "20260315"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - run: python -m scripts.probe_nba_sources --date "${{ inputs.date || '20260315' }}"
