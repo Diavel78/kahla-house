@@ -199,13 +199,20 @@
         .bets .sec-h .chev { color: var(--muted); font-size: 11px; display: inline-block; transition: transform .15s; margin-left: auto; }
         .bets.collapsed .sec-h .chev { transform: rotate(-90deg); }
         .bets.collapsed #bets { display: none; }
-        .bet { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+        .bet { display: flex; align-items: center; flex-wrap: wrap; column-gap: 12px; row-gap: 6px; padding: 9px 0; border-bottom: 1px solid var(--line); }
         .bet .info { flex: 1; min-width: 0; }
+        .bet .info .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
         .bet .info .l1 { font-size: 13.5px; font-weight: 600; }
-        .bet .info .l1 b { font-family: 'JetBrains Mono', monospace; }
+        .bet .info .l1 b { font-family: 'JetBrains Mono', monospace; white-space: nowrap; }
         .bet .info .l2 { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
         .bet .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-        .chip { display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: .04em; padding: 2px 7px; border-radius: 8px; margin-right: 5px; }
+        .chip { display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: .04em; padding: 2px 7px; border-radius: 8px; line-height: 1.4; }
+        /* phones: the buttons drop under the bet, lined up with the text, so
+           the chips and label get the full width (Oct 7 2026 — a LINE MOVED
+           chip beside three buttons crushed the row into a 4-word column) */
+        @media (max-width: 680px) {
+            .bet .acts { flex-basis: 100%; justify-content: flex-start; padding-left: 56px; }
+        }
         .c-rest { background: #3a3410; color: var(--amber); }
         .c-fill { background: #103c2c; color: var(--green); }
         .c-won { background: #103c2c; color: var(--green); }
@@ -824,7 +831,7 @@
                   + '<button class="btn sm' + (rp ? ' on' : '') + '" onclick="toggleOp(\'repeg\',' + b.id + ')">' + (rp ? '✓ Re-peg' : 'Re-peg') + '</button>'
                   + '<button class="btn sm warn' + (cn ? ' on' : '') + '" onclick="toggleOp(\'cancel\',' + b.id + ')">' + (cn ? '✓ Cancel' : 'Cancel') + '</button></div>' : '';
             return '<div class="bet">' + winGauge(prob, entryP, tip)
-                 + '<div class="info"><div class="l1">' + chip + '<b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc((b.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + ' · ' + esc(b.sport) + ' · ' + fmtTime(b.event_start) + ' ' + fmtClock(b.event_start) + '</span></div>'
+                 + '<div class="info">' + (chip ? '<div class="chips">' + chip + '</div>' : '') + '<div class="l1"><b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc((b.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + ' · ' + esc(b.sport) + ' · ' + fmtTime(b.event_start) + ' ' + fmtClock(b.event_start) + '</span></div>'
                  + '<div class="l2">' + l2 + '</div></div>' + acts + '</div>';
         }).join('');
     }
