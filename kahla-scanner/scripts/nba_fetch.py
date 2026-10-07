@@ -181,6 +181,65 @@ def fetch_season(season: int, out_dir: str, workers: int = 8):
     return path
 
 
+CORE = ("https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/"
+        "events/{e}/competitions/{e}/odds")
+
+
+def _amer(x):
+    try:
+        v = str((x or {}).get("american") or "").replace("+", "")
+        return float(v) if v not in ("", "EVEN", "even") else (100.0 if v else None)
+    except Exception:
+        return None
+
+
+def core_line(eid):
+    """DK close (+ open) off ESPN's core odds API — covers games whose
+    summary pickcenter is empty (most pre-2025-26 games)."""
+    b = _get(CORE.format(e=eid))
+    for it in (b or {}).get("items") or []:
+        h, a = it.get("homeTeamOdds") or {}, it.get("awayTeamOdds") or {}
+        hc, ac, ho = h.get("close") or {}, a.get("close") or {}, h.get("open") or {}
+        spread = _num(it.get("spread"))
+        sp_c = _amer(hc.get("pointSpread"))
+        total = _num(it.get("overUnder"))
+        tc = ((it.get("close") or {}).get("total") or {})
+        if sp_c is not None:
+            spread = sp_c
+        if _amer(tc) is not None:
+            total = abs(_amer(tc))
+        if spread is None and total is None:
+            continue
+        return {"spread": spread, "total": total,
+                "ml_home": _amer(hc.get("moneyLine")) or _num(h.get("moneyLine")),
+                "ml_away": _amer(ac.get("moneyLine")) or _num(a.get("moneyLine")),
+                "spread_open": _amer(ho.get("pointSpread")),
+                "provider": (it.get("provider") or {}).get("name"), "src": "core"}
+    return None
+
+
+def backfill_lines(out_dir: str, season: int, workers: int = 8):
+    path = os.path.join(out_dir, f"nba_{season}.jsonl")
+    if not os.path.exists(path):
+        return
+    rows = [json.loads(l) for l in open(path)]
+    todo = [r for r in rows if not r.get("line") and not r.get("line_tried")]
+    if not todo:
+        return
+    with ThreadPoolExecutor(workers) as ex:
+        got = list(ex.map(lambda r: core_line(r["id"]), todo))
+    n = 0
+    for r, ln in zip(todo, got):
+        r["line_tried"] = True
+        if ln:
+            r["line"] = ln; n += 1
+    with open(path + ".tmp", "w") as f:
+        for r in rows:
+            f.write(json.dumps(r, separators=(",", ":")) + "\n")
+    os.replace(path + ".tmp", path)
+    log.info("season %s: core-odds backfilled %d of %d missing lines", season, n, len(todo))
+
+
 def load(out_dir: str, seasons):
     rows = []
     for s in seasons:
@@ -208,6 +267,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     for s in [int(x) for x in a.seasons.split(",") if x]:
         fetch_season(s, a.out)
+        backfill_lines(a.out, s)
     return 0
 
 

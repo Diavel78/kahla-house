@@ -171,7 +171,7 @@ def main():
     report = {"games": len(rows), "with_line": n_line, "with_box": n_box, "runs": []}
     configs = [("base", base, "base"), ("avail", base, "avail")]
     if a.sweep:
-        for hl, cr, rg in itertools.product((25.0, 40.0, 70.0), (0.4, 0.7), (25.0, 60.0, 150.0)):
+        for hl, cr, rg in itertools.product((70.0, 110.0, 160.0), (0.7, 0.85), (4.0, 10.0, 25.0)):
             configs.append((f"hl{hl:.0f}_c{cr}_r{rg:.0f}",
                             dict(hl_days=hl, carry=cr, ridge_eff=rg, ridge_pace=rg), "avail"))
     for name, params, feats in configs:
