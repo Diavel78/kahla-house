@@ -1,0 +1,46 @@
+name: Hoops IQ — Backtest
+
+# NBA possession model (sides + totals) walk-forward vs the DK close.
+# Fetches ESPN history into a cached JSONL (resumable; the cache survives
+# between runs), then runs scripts/backtest_nba_iq. Read-only — no DB writes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "ESPN season years (Y = the Y-1..Y season)"
+        required: false
+        default: "2023,2024,2025,2026"
+      sweep:
+        description: "run the hyperparameter sweep (true/false)"
+        required: false
+        default: "false"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests numpy
+      - uses: actions/cache@v4
+        with:
+          path: kahla-scanner/.nba_cache
+          key: nba-cache-v1-${{ github.run_id }}
+          restore-keys: nba-cache-v1-
+      - name: Fetch ESPN history
+        run: python -m scripts.nba_fetch --seasons "${{ inputs.seasons }}" --out .nba_cache
+      - name: Backtest
+        run: python -m scripts.backtest_nba_iq --cache .nba_cache --seasons "${{ inputs.seasons }}" ${{ inputs.sweep == 'true' && '--sweep' || '' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nba-cache
+          path: kahla-scanner/.nba_cache
+          retention-days: 30
