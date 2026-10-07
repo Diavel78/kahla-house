@@ -2853,6 +2853,47 @@ def test_pmm_short_school_names() -> None:
           and pm._team_mention_pos(pm._norm("Spread: Army (-3.5)"), "Tulane Green Wave") < 0)
 
 
+def test_pmm_unsigned_cover_questions() -> None:
+    """THE NMSU RULE (Oct 7 2026): Polymarket titled NMSU@FIU spreads "Will
+    the NM State cover 6.5 vs the Florida International"; only FIU was
+    recognised, every rung was handed to FIU, and a 'New Mexico State +6.5'
+    slip item rested on FIU +6.5 at 82c. Three layers: 'NM State' is a
+    name candidate, a lone team found after 'vs' is the opponent, and
+    placement refuses any rung whose text and slug disagree."""
+    import pmm_markets as pm
+    import app as _app
+    A, H = "New Mexico State Aggies", "Florida International Panthers"
+    q = "Will the NM State cover 6.5 vs the Florida International in NM State vs. Florida International?"
+    check("'NM State' reads as New Mexico State", pm._side_by_first_mention(q, A, H) == "away")
+    check("'nm state'/'nm st' are abbreviation candidates", pm._abbrev_cands(A) == ["nm state", "nm st"])
+    check("no abbreviation without two words before State", pm._abbrev_cands("Iowa State Cyclones") == [])
+    q2 = "Will the XQ cover 6.5 vs the Florida International"
+    check("lone team after 'vs' → the market is the other team's", pm._side_by_first_mention(q2, A, H) == "away")
+    q3 = "Will the Florida International cover 6.5 vs the XQ"
+    check("lone team before 'vs' keeps its own market", pm._side_by_first_mention(q3, A, H) == "home")
+    check("classic 'Spread: Team (+4.5)' unchanged",
+          pm._side_by_first_mention("Spread: Baltimore Orioles (+4.5)", "Baltimore Orioles", "Tampa Bay Rays") == "away")
+    f = _app._bet_sheet_slug_disagrees
+    bad = {"side": "away", "line": 6.5, "slug": "asc-cfb-nmxst-flint-2026-10-07-neg-6pt5", "synthetic": True}
+    check("the 82c NMSU rung is refused", bool(f(bad, "spread")))
+    check("NMSU +6.5 on pos-6pt5 YES passes",
+          f({"side": "away", "line": 6.5, "slug": "asc-cfb-nmxst-flint-2026-10-07-pos-6pt5"}, "spread") is None)
+    check("FIU +6.5 as the NO of neg-6pt5 passes",
+          f({"side": "home", "line": 6.5, "slug": "asc-cfb-nmxst-flint-2026-10-07-neg-6pt5", "synthetic": True}, "spread") is None)
+    check("Army -2.5 as the NO of pos-2pt5 passes",
+          f({"side": "home", "line": -2.5, "slug": "asc-cfb-tulane-army-2026-10-10-pos-2pt5", "synthetic": True}, "spread") is None)
+    check("under = NO of the total passes",
+          f({"side": "under", "line": 46.5, "slug": "tsc-cfb-nmxst-flint-2026-10-07-total-46pt5", "synthetic": True}, "total") is None)
+    check("an over on the NO side is refused",
+          bool(f({"side": "over", "line": 46.5, "slug": "tsc-cfb-nmxst-flint-2026-10-07-total-46pt5", "synthetic": True}, "total")))
+    check("home ML = NO of aec passes, away ML on the NO is refused",
+          f({"side": "home", "slug": "aec-nhl-fla-ana-2026-10-04", "synthetic": True}, "ml") is None
+          and bool(f({"side": "away", "slug": "aec-nhl-fla-ana-2026-10-04", "synthetic": True}, "ml")))
+    check("an unreadable slug is no evidence — passes", f({"side": "away", "line": 3.5, "slug": "weird-slug"}, "spread") is None)
+    import inspect
+    check("_bet_sheet_resolve runs the slug guard", "_bet_sheet_slug_disagrees(entry, mt)" in inspect.getsource(_app._bet_sheet_resolve))
+
+
 def test_hand_orders_queue() -> None:
     """THE HAND-ORDER QUEUE (Oct 3 2026): Vercel enqueues, the box claims
     atomically; with no box, Vercel claims the row itself (claim-first, so
@@ -3136,7 +3177,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

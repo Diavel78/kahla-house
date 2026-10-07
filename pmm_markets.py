@@ -170,6 +170,12 @@ def _team_mention_pos(q_norm: str, team: str) -> int:
             p = min(p, len(q_norm) - 1)    # padded offset → raw-ish pos
         if p >= 0 and (best < 0 or p < best):
             best = p
+    for cand in _abbrev_cands(team):        # 'nm state' (token-bounded)
+        p = padded_q.find(" " + cand + " ")
+        if p >= 0:
+            p = min(p, len(q_norm) - 1)
+            if best < 0 or p < best:
+                best = p
     # Tricode as a whole TOKEN ('nym', 'phi') — PMM's July 2026 abbreviated
     # format. ≥3 chars only ('ny' as a token is too collision-prone);
     # token-bounded so 'phi' never fires inside 'philadelphia' (harmless
@@ -200,10 +206,17 @@ def _side_by_first_mention(question: str, away: str, home: str) -> str | None:
     h_pos = _team_mention_pos(q, home)
     if a_pos < 0 and h_pos < 0:
         return None
-    if h_pos < 0:
-        return "away"
-    if a_pos < 0:
-        return "home"
+    if a_pos < 0 or h_pos < 0:
+        # ONLY ONE TEAM RECOGNISED (Oct 7 2026, NMSU@FIU — "Will the NM State
+        # cover 6.5 vs the Florida International"): the team we found sits
+        # AFTER the 'vs', so it is the OPPONENT, and the YES side is the team
+        # we failed to read. Handing the market to the only name we know
+        # flipped every rung on the game.
+        found, pos = ("away", a_pos) if h_pos < 0 else ("home", h_pos)
+        vs = (" " + q + " ").find(" vs ")
+        if vs > 0 and pos >= vs:
+            return "home" if found == "away" else "away"
+        return found
     return "away" if a_pos < h_pos else "home"
 
 
@@ -251,6 +264,24 @@ def _name_prefix_cands(team_name: str) -> list[str]:
             out.append(cand)
     return out
 
+
+
+def _abbrev_cands(team_name: str) -> list[str]:
+    """'New Mexico State Aggies' -> ['nm state', 'nm st']. THE NM STATE RULE
+    (Oct 7 2026): Polymarket titled NMSU@FIU spreads "Will the NM State
+    cover 6.5 vs the Florida International", none of our name variants
+    matched 'nm state', only FIU was found, and every rung on the game was
+    read as FIU's — a 'New Mexico State +6.5' slip item rested on FIU +6.5
+    at 82c. Initials of the two-plus words before 'State', token-bounded at
+    the call site."""
+    parts = _norm(team_name).split()
+    out = []
+    if "state" in parts:
+        k = parts.index("state")
+        if k >= 2:
+            ini = "".join(p[0] for p in parts[:k])
+            out += [f"{ini} state", f"{ini} st"]
+    return out
 
 
 def _team_code_cands(team: str, sport: str | None = None) -> set[str]:

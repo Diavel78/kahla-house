@@ -12719,6 +12719,39 @@ def _handbets_box_alive(sb) -> bool:
         return False
 
 
+def _bet_sheet_slug_disagrees(entry: dict, mt: str):
+    """Pure. None when the rung's text-derived (side, line) agrees with the
+    venue's slug convention (`_slug_side_line`: pos-X = away +X, neg-X =
+    away −X, a NO mirrors; tsc YES = over; aec YES = away), else the reason
+    the item stays on the slip. THE NMSU GUARD (Oct 7 2026): the text read
+    flipped every NMSU@FIU rung and a 'New Mexico State +6.5' item rested on
+    FIU +6.5 at 82c; the slug said so the whole time. A slug we cannot read
+    is not evidence either way — it passes."""
+    try:
+        sl = _slug_side_line(entry.get("slug") or "", bool(entry.get("synthetic")))
+    except Exception:
+        sl = None
+    if not sl:
+        return None
+    s_mt, s_side, s_line = sl
+    want_mt = {"ml": "moneyline"}.get(mt, mt)
+    bad = s_mt != want_mt or s_side != entry.get("side")
+    if not bad and mt != "ml":
+        try:
+            bad = s_line is None or abs(float(s_line) - float(entry.get("line"))) > 0.01
+        except (TypeError, ValueError):
+            bad = True
+    if not bad:
+        return None
+    def _fmt(sd, ln):
+        if ln is None:
+            return str(sd)
+        return f"{sd} {float(ln):+g}" if mt == "spread" else f"{sd} {float(ln):g}"
+    return (f"Polymarket's market text and its slug disagree on {entry.get('slug')} "
+            f"(text reads {_fmt(entry.get('side'), entry.get('line'))}, slug reads "
+            f"{_fmt(s_side, s_line)}) — not placing")
+
+
 def _bet_sheet_resolve(client, item: dict) -> dict:
     """One slip item → the Polymarket slug + the touch on our side. Reads
     the venue twice (event lookup, cached 120s across items; one book)."""
@@ -12751,6 +12784,9 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
         return {"ok": False, "reason": why}
     slug = entry["slug"]
     synthetic = bool(entry.get("synthetic"))
+    disagree = _bet_sheet_slug_disagrees(entry, mt)
+    if disagree:
+        return {"ok": False, "reason": disagree, "slug": slug, "rung_line": entry.get("line")}
     book = _bet_sheet_book(client, slug)
     if book is None:
         return {"ok": False, "reason": ("Polymarket is rate-limiting us — wait 20s and submit again"
