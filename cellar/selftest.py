@@ -3078,6 +3078,29 @@ def test_hand_orders_queue() -> None:
     check("the daemon boots with CELLAR_LANES=handbets alone", _Runner.validate(["handbets"]) == [])
     check("handbets needs no owner uid", not _cfg.ALL_LANES["handbets"].needs_owner)
     check("handbets is quiet (no idle tick flood)", _cfg.ALL_LANES["handbets"].quiet)
+    # Oct 7 2026: a handbets-only daemon never started the sockets (the gate
+    # read "repeg"), so the touch tape was empty and start-cancel was blind.
+    from cellar.runner import ws_feed_lanes as _wsl, hand_queue_pending as _hqp
+    check("a handbets-only daemon starts the websocket feed", _wsl(["handbets"]) == {"handbets"})
+    check("the tape daemon roster starts no websocket feed", _wsl(["batch", "grader", "mirror"]) == set())
+
+    class _Q:
+        def __init__(self, rows): self.rows, self.f = rows, {}
+        def table(self, t): self.t = t; return self
+        def select(self, *_a): return self
+        def eq(self, k, v): self.f[k] = v; return self
+        def limit(self, _n): return self
+        def execute(self):
+            class _R: pass
+            r = _R(); r.data = [x for x in self.rows if x.get("state") == self.f.get("state")]
+            return r
+    check("the queue watcher sees a pending hand order", _hqp(_Q([{"id": 1, "state": "pending"}])))
+    check("the queue watcher ignores claimed/done rows",
+          not _hqp(_Q([{"id": 1, "state": "claimed"}, {"id": 2, "state": "done"}])))
+    _r = _Runner.__new__(_Runner)
+    _r._next_due = {"handbets": 99e9}
+    _r.wake("handbets")
+    check("a queue wake makes handbets due now", _r._next_due["handbets"] == 0.0)
 
 
 def test_end_state_rosters() -> None:

@@ -52,6 +52,23 @@ def _clip(d, limit: int = 4000):
         return None
 
 
+HAND_QUEUE_WATCH_S = 1.0
+
+
+def ws_feed_lanes(enabled) -> set:
+    """Lanes the websocket feed may wake — empty means don't start it.
+    `handbets` counts: its strip, chase, start-cancel and line-move rules
+    all read the socket's quote table and touch tape."""
+    return {ln for ln in ("repeg", "opener", "scalp", "pair", "handbets")
+            if ln in enabled}
+
+
+def hand_queue_pending(sb) -> bool:
+    rows = (sb.table("hand_orders").select("id").eq("state", "pending")
+            .limit(1).execute().data or [])
+    return bool(rows)
+
+
 class Runner:
     def __init__(self, sb, lease: Lease, journal: Journal | None = None):
         self.sb = sb
@@ -320,6 +337,16 @@ class Runner:
         self._wake_pending = getattr(self, "_wake_pending", set())
         self._wake_pending.add(lane)
 
+    def _hand_queue_watch(self) -> None:
+        """Wake `handbets` the second Bet Sheets enqueues a row. Read-only;
+        a failed read just waits for the lane's own 10s tick."""
+        while not self.stop.wait(HAND_QUEUE_WATCH_S):
+            try:
+                if hand_queue_pending(self.sb):
+                    self.wake("handbets")
+            except Exception as e:
+                log.debug("hand queue watch: %s", e)
+
     def _tick(self, now: float, enabled: list[str]) -> None:
         for name in enabled:
             spec = config.ALL_LANES[name]
@@ -425,13 +452,17 @@ class Runner:
         # rebuy hint) — restricted to lanes enabled on THIS side. start()
         # self-disables loudly on a missing lib or creds — the daemon then
         # runs exactly as it did before this feature existed.
-        if config.WS_FEED and "repeg" in enabled:
+        # HANDBETS NEEDS THE SOCKETS TOO (Oct 7 2026): the money daemon runs
+        # CELLAR_LANES=handbets alone since the machine shut down, and this
+        # gate used to read `"repeg" in enabled` — so the feed never started
+        # and the touch tape sat EMPTY (n=0 on all 99 watched hand slugs):
+        # no start-cancel when the makers leave (hand bets are GTC), no
+        # line-move cancel, the chase on REST. `ws_feed_lanes` is the gate.
+        ws_lanes = ws_feed_lanes(enabled)
+        if config.WS_FEED and ws_lanes:
             try:
                 from .wsfeed import WsFeed
-                self._wsfeed = WsFeed(
-                    self.wake, sb=self.sb,
-                    lanes={ln for ln in ("repeg", "opener", "scalp", "pair")
-                           if ln in enabled})
+                self._wsfeed = WsFeed(self.wake, sb=self.sb, lanes=ws_lanes)
                 self._wsfeed.start()
                 # Watch list from VENUE TRUTH: every repeg lap pushes its
                 # open-orders slug set into the markets socket, so the
@@ -478,6 +509,15 @@ class Runner:
             except Exception as e:
                 log.error("ws feed failed to start (%s) — lanes run on "
                           "schedule as before", e)
+
+        # THE QUEUE WATCHER (Oct 7 2026 — Rob after a 4-bet slip: "So…..
+        # SLOW"): the bets placed in 8s, but the 10s handbets poll made the
+        # tap wait up to 10s before the box even CLAIMED them. One cheap
+        # local read a second; a pending row wakes the lane through the
+        # normal path (lease, skip-if-running, sticky wake).
+        if "handbets" in enabled:
+            threading.Thread(target=self._hand_queue_watch, name="cellar-handq",
+                             daemon=True).start()
 
         log.info("%s", config.summary())
         while not self.stop.is_set():
