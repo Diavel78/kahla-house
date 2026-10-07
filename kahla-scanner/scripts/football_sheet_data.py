@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import sys
+import time as _time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -717,17 +718,54 @@ def _tape(fn, mid: str, what: str):
         return None
 
 
+# THE TAPE READ IS BOUNDED (Oct 6 2026). A football game's pm_snapshots grow
+# all week — every rung of a ~70-market ladder logs a row on every cent
+# change — and `market_id=eq.X order captured_at.asc` fetched ALL of it,
+# 1,000 rows a page through the tunnel. The Week-6 refresh went 11s (Sun,
+# last week's finished sheet) → 15 min (Mon build) → 24 min (Tue 05:30) →
+# every run after 11:25 Tue TIMED OUT at 1,500s, nine in a row, and the
+# batch lane re-ran the dead job every tick behind which nothing else moved.
+# The reader needs the OPEN and the LATEST per key, nothing in between: two
+# bounded requests (oldest N + newest N), merged. A key born in the gap
+# between them reads its open off the newest batch (`bounded: True`).
+_TAPE_ROWS = 800
+
+
+def _tape_rows(table: str, select: str, mid: str, n: int = _TAPE_ROWS) -> tuple[list[dict], bool]:
+    """Oldest n + newest n rows of a market's tape, oldest→newest, deduped
+    on (captured_at, every selected column). Returns (rows, bounded) —
+    bounded=True when the two ends did not meet (rows exist in the gap)."""
+    base = {"select": select, "market_id": f"eq.{mid}", "limit": str(n)}
+    oldest = sb_select(table, {**base, "order": "captured_at.asc"})
+    if len(oldest) < n:
+        return oldest, False                  # the whole tape fit in one read
+    newest = sb_select(table, {**base, "order": "captured_at.desc"})
+    return _merge_tape(oldest, newest)
+
+
+def _merge_tape(oldest: list[dict], newest: list[dict]) -> tuple[list[dict], bool]:
+    """Pure: oldest (asc) ∪ newest (desc) → asc, deduped; bounded when the
+    newest batch's earliest row is later than the oldest batch's last."""
+    seen = {tuple(sorted(r.items())) for r in oldest}
+    tail = [r for r in reversed(newest) if tuple(sorted(r.items())) not in seen]
+    # the batches overlap (no gap) when the newest batch reaches back to or
+    # past the oldest batch's last row
+    bounded = (bool(newest) and bool(oldest)
+               and (newest[-1].get("captured_at") or "") > (oldest[-1].get("captured_at") or ""))
+    return oldest + tail, bounded
+
+
 def _pm_lines(mid: str) -> dict | None:
     """pm_snapshots open→now per (source, market_type). ATM line = latest
     line whose cents sit closest to 50 (the at-the-money convention the
     sharp score uses). cents are PROB POINTS for the row's own side."""
-    rows = sb_select("pm_snapshots", {
-        "select": "source,market_type,side,line,cents,bid_c,ask_c,captured_at",
-        "market_id": f"eq.{mid}",
-        "order": "captured_at.asc"})
+    rows, bounded = _tape_rows(
+        "pm_snapshots", "source,market_type,side,line,cents,bid_c,ask_c,captured_at", mid)
     if not rows:
         return None
     out: dict = {}
+    if bounded:
+        out["bounded"] = True
     by_key = defaultdict(list)
     for r in rows:
         by_key[(r["source"], r["market_type"])].append(r)
@@ -762,12 +800,13 @@ def _pm_lines(mid: str) -> dict | None:
 def _vsin_lines(mid: str) -> dict | None:
     """vsin_snapshots open + latest per (book, market_type, side): line,
     handle%, bets% — plus computed RLM + money-arrival deltas."""
-    rows = sb_select("vsin_snapshots", {
-        "select": "book,market_type,side,line,handle_pct,bets_pct,captured_at",
-        "market_id": f"eq.{mid}", "order": "captured_at.asc"})
+    rows, bounded = _tape_rows(
+        "vsin_snapshots", "book,market_type,side,line,handle_pct,bets_pct,captured_at", mid)
     if not rows:
         return None
     out: dict = {}
+    if bounded:
+        out["bounded"] = True
     grouped = defaultdict(list)
     for r in rows:
         grouped[(r["book"], r["market_type"], r["side"])].append(r)
@@ -781,6 +820,8 @@ def _vsin_lines(mid: str) -> dict | None:
     # the book moved against the money → sharp on the other side.
     flags = []
     for book, mts in out.items():
+        if not isinstance(mts, dict):
+            continue                          # the `bounded` marker
         for mt, sides in mts.items():
             if mt == "total":
                 continue
@@ -1148,6 +1189,16 @@ def week_key_default() -> str:
     return (az_today - timedelta(days=az_today.weekday())).isoformat()
 
 
+def _progress(sport: str, i: int, n: int, t_game: float, t_run: float) -> None:
+    """One INFO line per game slower than 8s and every 10th game — the batch
+    lane keeps the subprocess's output tail even on a timeout, so a stuck
+    run names where its minutes went."""
+    dt = _time.monotonic() - t_game
+    if dt >= 8.0 or i % 10 == 0 or i == n:
+        log.info("%s game %d/%d took %.1fs (run %.0fs)", sport, i, n, dt,
+                 _time.monotonic() - t_run)
+
+
 def run(mode: str, sports: list[str], days: int, week_key: str,
         commit: bool) -> dict:
     summary: dict = {"mode": mode, "week_key": week_key}
@@ -1206,13 +1257,16 @@ def run(mode: str, sports: list[str], days: int, week_key: str,
                 "week_key": f"eq.{week_key}", "sport": f"eq.{sport}"})
             by_name = {r["event_name"]: r for r in existing}
             n_diffed = 0
-            for g in games:
+            t_run = _time.monotonic()
+            for i, g in enumerate(games, 1):
                 name = f"{g['away']} @ {g['home']}"
                 row = by_name.get(name)
                 if not row or not row.get("data_blob"):
                     continue
+                t_g = _time.monotonic()
                 fresh = build_game_blob(g, sport, model, results, injuries,
                                         ranks, fpi)
+                _progress(sport, i, len(games), t_g, t_run)
                 changes = friday_diff(row["data_blob"], fresh)
                 new_blob = dict(row["data_blob"])
                 new_blob["friday"] = {
@@ -1236,9 +1290,12 @@ def run(mode: str, sports: list[str], days: int, week_key: str,
 
         rows = []
         with_blob = []
-        for g in games:
+        t_run = _time.monotonic()
+        for i, g in enumerate(games, 1):
+            t_g = _time.monotonic()
             blob = build_game_blob(g, sport, model, results, injuries, ranks,
                                    fpi)
+            _progress(sport, i, len(games), t_g, t_run)
             g["blob"] = blob
             with_blob.append(g)
         decide_tiers(sport, with_blob)

@@ -2942,6 +2942,24 @@ def test_sheet_pinnacle_line() -> None:
     check("hockey: a game Pinnacle does not list → None (ESPN line stays)",
           nsd.pin_odds_from_events(slate, "Dallas Stars", "Colorado Avalanche", _app._pin_outcomes) is None)
 
+    # THE TAPE READ IS BOUNDED (Oct 6 2026): oldest N + newest N, merged
+    # oldest→newest, deduped, `bounded` only when rows sit in the gap.
+    o = [{"captured_at": "t1", "cents": 50}, {"captured_at": "t2", "cents": 51}]
+    nw = [{"captured_at": "t9", "cents": 60}, {"captured_at": "t2", "cents": 51}]
+    rows, bounded = fsd._merge_tape(o, nw)
+    check("tape merge: asc order, overlap deduped, no gap → not bounded",
+          rows == [o[0], o[1], nw[0]] and bounded is False, f"got {rows} {bounded}")
+    rows, bounded = fsd._merge_tape(o, [{"captured_at": "t9", "cents": 60}, {"captured_at": "t8", "cents": 59}])
+    check("tape merge: rows in the gap → bounded", bounded is True and len(rows) == 4, f"got {rows} {bounded}")
+    rows, bounded = fsd._merge_tape([], [])
+    check("tape merge: empty tape", rows == [] and bounded is False)
+    check("tape reads are bounded to _TAPE_ROWS a side", fsd._TAPE_ROWS <= 1000 and fsd._TAPE_ROWS >= 200)
+    import inspect as _insp
+    for fn in (fsd._pm_lines, fsd._vsin_lines):
+        src = _insp.getsource(fn)
+        check(f"{fn.__name__} reads through the bounded tape reader",
+              "_tape_rows(" in src and "sb_select(" not in src)
+
     spend = {j.name for j in JOBS if "--pin" in j.argv}
     check("batch: the Pinnacle-spending jobs are the football refreshes + build and ONE hockey run",
           spend == {"sheets_build", "sheets_refresh_am", "sheets_refresh_md",
