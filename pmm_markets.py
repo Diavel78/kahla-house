@@ -621,6 +621,21 @@ def _search_event(client, sport: str, away: str, home: str,
             ((e.get("title") if isinstance(e, dict) else getattr(e, "title", "")) or "")
             for e in events[:8]
         ]
+        # NEAR TITLES (Oct 7 2026, ODU@App State / Miami (OH)@UMass read
+        # "not listed" among 243 events): every event whose title or slug
+        # shares a 4+ letter word with either team, so a miss shows what
+        # Polymarket actually calls the game.
+        _toks = {t for t in (_norm(away) + " " + _norm(home)).split()
+                 if len(t) >= 4 and t not in ("state", "university")}
+        _near = []
+        for e in events:
+            _t = (e.get("title") if isinstance(e, dict) else getattr(e, "title", "")) or ""
+            _s = (e.get("slug") if isinstance(e, dict) else getattr(e, "slug", "")) or ""
+            if any(t in _norm(_t) or t in _s for t in _toks):
+                _near.append({"title": _t, "slug": _s,
+                              "start": (e.get("startTime") if isinstance(e, dict)
+                                        else getattr(e, "startTime", None))})
+        diag["near_titles"] = _near[:20]
     # Events.list returns event metadata but NOT the nested markets
     # list (despite Event's TypedDict declaring markets). Hit the
     # markets.list endpoint directly with eventSlug filter — that one
