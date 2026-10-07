@@ -3315,6 +3315,25 @@ def api_cellar_health():
                                 for x in bt]
             except Exception as e:
                 out["batch_err"] = f"{type(e).__name__}: {e}"[:200]
+        lane_q = (request.args.get("lane") or "").strip()
+        if lane_q:
+            # ?lane=handbets[&n=5] — any lane's recent ticks WITH the stats
+            # detail (the chase / move / start / adopt numbers live there).
+            try:
+                n = max(1, min(int(request.args.get("n") or 5), 30))
+            except ValueError:
+                n = 5
+            try:
+                lt = (sb.table("cellar_ticks")
+                      .select("lane,started_at,ok,work,duration_ms,error,detail")
+                      .eq("lane", lane_q).order("started_at", desc=True)
+                      .limit(n).execute().data) or []
+                out["lane_ticks"] = [{"at": x.get("started_at"), "ok": x.get("ok"),
+                                      "work": x.get("work"), "ms": x.get("duration_ms"),
+                                      "error": (x.get("error") or "")[-400:] or None,
+                                      "detail": x.get("detail")} for x in lt]
+            except Exception as e:
+                out["lane_err"] = f"{type(e).__name__}: {e}"[:200]
     except Exception as e:
         out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
     return jsonify(out)
