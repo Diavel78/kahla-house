@@ -3236,6 +3236,62 @@ def api_bet_sheets_picks():
         except Exception as e:
             pa["err"] = f"{type(e).__name__}: {e}"[:200]
         out["positions"] = pa
+    arch = (request.args.get("archive_stale") or "").strip()
+    if arch:
+        # STALE-PICK ARCHIVE (Oct 7 2026, Rob: "Archive them"): pending machine
+        # picks stamped filled, game started >24h ago, NO venue position left
+        # (the venue settled them; the ESPN resolver never will). Backup to
+        # reconcile_bak, THEN delete. Never a bet-sheet pick; a held slug or an
+        # unreadable positions list archives nothing. archive_stale=dry lists.
+        ar: dict = {"dry": arch != "1"}
+        try:
+            allp = _positions_all_pages(get_client())
+            if allp is None:
+                raise RuntimeError("positions unreadable - nothing archived")
+            held = set()
+            for sl, pos in allp:
+                nn = _norm_position(pos)
+                if nn is not None and abs(float(nn.get("net") or 0)) > 0:
+                    held.add(sl)
+            cut = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            fp = _sb_paged(lambda: sb.table("bot_picks").select("*")
+                           .eq("status", "pending").filter("signal_blob->>filled", "eq", "true")
+                           .lt("event_start", cut), max_pages=5) or []
+            cand, skipped = [], {"bet_sheet": 0, "held": 0, "no_slug": 0}
+            for r in fp:
+                b = r.get("signal_blob") or {}
+                sl = b.get("pmm_slug")
+                if b.get("bet_sheet") or b.get("manual_web_bet"):
+                    skipped["bet_sheet"] += 1
+                elif not sl:
+                    skipped["no_slug"] += 1
+                elif sl in held:
+                    skipped["held"] += 1
+                else:
+                    cand.append(r)
+            ar.update(candidates=len(cand), skipped=skipped, held_slugs=len(held),
+                      eg=[{"id": r["id"], "slug": (r.get("signal_blob") or {}).get("pmm_slug"),
+                           "start": r.get("event_start"), "mt": r.get("market_type")} for r in cand[:10]])
+            if not ar["dry"]:
+                bk = dl = 0
+                errs = []
+                for r in cand:
+                    try:
+                        sb.table("reconcile_bak").insert({"pick_id": r["id"], "reason": "stale_archive",
+                                                          "row": r}).execute()
+                        bk += 1
+                    except Exception as e:
+                        errs.append(f"bak {r['id']}: {e}"[:120])
+                        continue                       # never delete without a backup
+                    try:
+                        sb.table("bot_picks").delete().eq("id", r["id"]).execute()
+                        dl += 1
+                    except Exception as e:
+                        errs.append(f"del {r['id']}: {e}"[:120])
+                ar.update(backed_up=bk, deleted=dl, errors=errs[:10])
+        except Exception as e:
+            ar["err"] = f"{type(e).__name__}: {e}"[:200]
+        out["archive_stale"] = ar
     re_slug = (request.args.get("readopt") or "").strip()
     if re_slug:                                        # THE MISSOURI RE-ATTACH (Oct 6 2026): book one
         out["readopt"] = _hand_readopt(sb, re_slug)     # held lot as a hand bet, from Vercel, now
