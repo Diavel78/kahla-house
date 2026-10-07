@@ -728,13 +728,16 @@
         const col = `hsl(${Math.round(p * 120)},75%,48%)`;
         return `<div class="win-gauge" title="${esc(tip || '')}"><svg width="${size}" height="${size}">${trackO}${trackI}${arc(rO, CO, p, col, 4)}${innerArc}</svg><span class="wg-num" style="color:${col}">${Math.round(p * 100)}</span></div>`;
     }
+    // The bet itself (team + line), built from the pick's own fields first:
+    // an app-adopted order's stored label can be the bare EVENT title
+    // ("Indiana vs. Nebraska") — Rob couldn't tell which bet it was (Oct 7 2026).
     function betLabel(b) {
-        if (b.label) return b.label;
         const parts = (b.event_name || '').split(' @ ');
-        const team = b.side === 'home' ? shortTeam(parts[1]) : b.side === 'away' ? shortTeam(parts[0]) : '';
-        if (b.market_type === 'total') return (b.side === 'over' ? 'O ' : 'U ') + b.line;
-        if (b.market_type === 'spread') return team + ' ' + sgn(b.line, 1);
-        return team + ' ML';
+        const team = parts.length === 2 ? (b.side === 'home' ? shortTeam(parts[1]) : b.side === 'away' ? shortTeam(parts[0]) : '') : '';
+        if (b.market_type === 'total' && b.line != null && (b.side === 'over' || b.side === 'under')) return (b.side === 'over' ? 'O ' : 'U ') + Number(b.line);
+        if (b.market_type === 'spread' && b.line != null && team) return team + ' ' + sgn(b.line, 1);
+        if (b.market_type === 'moneyline' && team) return team + ' ML';
+        return b.label || (team ? team + ' ML' : '?');
     }
     function money(x) { if (x == null) return ''; return (x >= 0 ? '+$' : '−$') + Math.abs(x).toFixed(2); }
     async function loadBets() {
