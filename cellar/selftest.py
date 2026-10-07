@@ -2898,6 +2898,49 @@ def test_hand_orders_queue() -> None:
     check("handbets is quiet (no idle tick flood)", _cfg.ALL_LANES["handbets"].quiet)
 
 
+def test_end_state_rosters() -> None:
+    """Oct 6 2026 — the sheets are the product. Tape daemon = batch, grader,
+    mirror; money daemon = handbets. The mirror lane carries the dashboard's
+    two feeds out of the retired paperlog route; the dead model computes are
+    off the batch list; a lane named in machine_flags lanes_off reads `off`
+    on the health card instead of stale forever."""
+    import os as _os, re as _re
+    from cellar import config, lanes
+    from cellar.batch import JOBS
+    import app as _app
+    check("mirror lane is registered and configured",
+          "mirror" in lanes.REGISTRY and "mirror" in config.ALL_LANES
+          and not config.ALL_LANES["mirror"].writes_money
+          and not config.ALL_LANES["mirror"].needs_owner)
+    src = __import__("inspect").getsource(lanes.lane_mirror)
+    check("mirror lane runs the activities sync and the dashboard precompute",
+          "_acts_sync(" in src and "_dash_cache_refresh(" in src)
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    plist = open(_os.path.join(root, "scripts", "com.kahlahouse.cellard-tape.plist")).read()
+    m = _re.search(r"<key>CELLAR_LANES</key>\s*<string>([^<]*)</string>", plist)
+    check("tape daemon plist runs batch,grader,mirror",
+          m is not None and set(m.group(1).split(",")) == {"batch", "grader", "mirror"},
+          f"got {m.group(1) if m else None}")
+    dead = {"diamond_iq", "football_props", "whiff_iq", "ufc_model", "tune_prime_window"}
+    names = {j.name for j in JOBS}
+    check("dead model computes are off the batch list", not (dead & names), f"still: {dead & names}")
+    check("the sheet models stay on the batch list",
+          {"power_ratings", "football_qb", "cfbd_ratings", "nfl_market", "nhl_goalies",
+           "nhl_shots", "sheets_build", "sheets_grade"} <= names)
+    _app._MFLAGS_CACHE["map"] = {**(_app._MFLAGS_CACHE.get("map") or {}), "lanes_off": ["paperlog", "scalp"]}
+    _app._MFLAGS_CACHE["at"] = __import__("time").time()
+    try:
+        check("a lane in machine_flags lanes_off reads off",
+              _app._lane_disabled("paperlog") and _app._lane_disabled("scalp")
+              and not _app._lane_disabled("grader"))
+    finally:
+        _app._MFLAGS_CACHE["map"].pop("lanes_off", None)
+    wf = open(_os.path.join(root, ".github", "workflows", "scanner-poll.yml")).read()
+    check("the cloud cron workflow is a no-op stub (no Vercel pings, no resolver)",
+          "thekahlahouse.com" not in wf and "bot_picks_resolver" not in wf
+          and "workflow_dispatch" in wf)
+
+
 def test_sheet_pinnacle_line() -> None:
     """Rob, Oct 5 2026: the sheet's line is PINNACLE's, refreshed 3-4× a day
     inside the free parlay-api tier. Pinnacle beats every other source; a
@@ -3000,7 +3043,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_hand_orders_queue, test_sheet_pinnacle_line):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

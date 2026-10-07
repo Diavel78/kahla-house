@@ -1,246 +1,26 @@
-name: Odds Ingest — Poll
+name: Odds Ingest — Poll (RETIRED)
 
-# Kahla House odds ingest via The Odds API (v4).
-#
-# One API call per sport hits /v4/sports/{sport_key}/odds with
-#   markets=h2h,spreads,totals
-#   regions=us,eu          ← EU is required for Pinnacle (it's not in US region)
-# Persists book_snapshots to Supabase, deduped: only writes when a
-# (market, book, market_type, side)'s price/line changes.
-#
-# Cost math (The Odds API charges credits = markets × regions per call):
-#   3 markets × 2 regions = 6 credits per call
-#
-# Adaptive cadence (per-sport gate in scrapers/odds_api.py:_should_fire):
-#   nearest game in:
-#     ≤ 30 min       → poll every 2 min   (terminal steam window)
-#     30 min – 2h    → poll every 5 min   (final-2h sharp window)
-#     2 – 6h         → poll every 15 min
-#     6 – 18h        → poll every 30 min
-#     18h+ / none    → skip (off-season / nothing meaningful pre-game)
-#   overnight 10p-7a MT → skip regardless (no US games tip at 3am)
-#   no event in next 7d → skip (off-season)
-#
-# cron-job.org should fire this workflow every 1 min so the per-sport
-# gate can hit its 2-min bucket reliably. The gate writes a heartbeat
-# row to odds_ingest_runs on every tick (fired OR skipped).
-#
-# Required GitHub repo secrets:
-#   ODDS_API_KEY         — from the-odds-api.com (paid tier)
-#   SUPABASE_URL
-#   SUPABASE_SERVICE_KEY
-#   TELEGRAM_BOT_TOKEN   — optional; from @BotFather. Sharp/steam alerts
-#   TELEGRAM_CHAT_ID     — optional; user id from /getUpdates.
-#                          Both required to send alerts; if either is
-#                          missing the alert step exits as a no-op.
-#   FILLS_CRON_SECRET    — optional; same value as the Vercel env var.
-#                          Enables the redundant Polymarket fill-alert
-#                          ping step below. If unset, that step no-ops.
-#
-# To add/remove sports: edit SPORTS_ENABLED below.
+# RETIRED Oct 6 2026 — a no-op kept only so cron-job.org's per-minute
+# workflow_dispatch does not start erroring (delete the cron-job.org job and
+# then this file). Everything it used to do runs on the house box:
+#   - resolver grading + the ESPN markets spine  -> the `grader` lane
+#   - the poly_activities mirror + dashboard cache -> the `mirror` lane
+#   - the Pinnacle slate pulls                     -> the sheet batch jobs
+# The per-minute Vercel pings it carried (pm-snapshot, paperlog) were the
+# Pick Bot's feeds; the Pick Bot is dead, and with the box's paperlog lane
+# retired a ping here would have handed those routes BACK to Vercel (lease
+# arbitration) and woken the machine's engines in the paperlog route body.
+# Full history: git log on this path.
 
-# Trigger: cron-job.org pings workflow_dispatch every 1 min so the
-# adaptive cadence gate above can hit its 2-min bucket in the final
-# 30 min pre-tip. Idle ticks are cheap — gate returns instantly with
-# a heartbeat row. concurrency:cancel-in-progress: true ensures we
-# never queue two overlapping runs.
 on:
   workflow_dispatch:
 
 concurrency:
   group: odds-ingest-poll
-  # If cron-job.org ever retries or someone manually triggers while a run
-  # is queued, cancel the older one. Each run is idempotent (dedup logic
-  # in scrapers/odds_api.py) so a half-finished run getting killed loses
-  # nothing — the next run picks up what was missed. This guarantees we
-  # never run two ingests back-to-back and double the credit burn.
   cancel-in-progress: true
 
 jobs:
-  poll:
+  retired:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    defaults:
-      run:
-        working-directory: kahla-scanner
-
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: kahla-scanner/requirements.txt
-
-      - name: Install deps
-        run: pip install -r requirements.txt
-
-      # ESPN-spine: ESPN's free scoreboard creates the `markets` rows; runs
-      # BEFORE odds_api so the rows exist when odds_api attaches snapshots.
-      # Dedup fixed June 2026 (windows the candidate set to upcoming games,
-      # not all-active — the prior all-active fetch got truncated at 1000 by
-      # the never-cleaned table and minted a dupe every tick). Verified
-      # idempotent: a commit run then a re-run shows 0 would-create.
-      # UFC = ESPN's UFC-scoped mma/ufc (no GLORY kickboxing). continue-on-error so an
-      # ESPN blip never blocks the odds tick.
-      - name: ESPN → markets (schedule spine)
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.ingest_espn_markets --commit
-
-      # The Odds API / Pinnacle ingest was RETIRED June 2026 (hard cutover
-      # to the free PMM+Kalshi exchanges — the subscription was paid through
-      # June 25 but the pick engine, CLV, and fair anchor no longer depend on
-      # PIN, so there was no reason to keep burning credits). The exchange
-      # ingest is now the pm-snapshot ping in the `fill_ping` job below; ESPN
-      # (above) owns market creation. `book_snapshots` simply stops getting
-      # new rows — every PIN reader degrades to its exchange path or its warm
-      # fallback. The adaptive-cadence gate + odds_pull_requests trigger in
-      # scrapers/odds_api.py are now dead code (kept in git history); the
-      # /odds Board rebuild on pm_snapshots is the remaining fast-follow.
-
-      # Handicapper Bot — pick resolver. Grades pending bot_picks rows
-      # (from in-chat pick logging via scripts/handicapper_log_pick.py)
-      # against ESPN final scores. Same pattern as paper_bets_resolver,
-      # but reads `units` per row (1/3/5u sizing instead of flat 1u).
-      - name: Bot picks — Resolver
-        continue-on-error: true
-        env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.bot_picks_resolver
-
-  # Flask ping job. (Named for its original job — the Polymarket
-  # fill-alert ping, RETIRED July 2026 with the Kalshi execution cutover:
-  # Kalshi notifies fills natively, so /api/polymarket/check-fills is
-  # gone. FILLS_CRON_SECRET survives as the shared secret for the pings
-  # below. The prime-window alert ping was retired earlier the same month
-  # — the unlogged-BET alert rides the paperlog ping inside
-  # /api/handicapper/paperlog.)
-  #
-  # SEPARATE PARALLEL JOB on purpose: the `poll` job runs longer than the
-  # 60s cron cadence on a busy slate, so concurrency:cancel-in-progress
-  # guillotines it mid-run — a ping appended as poll's LAST step never
-  # executed (the early odds-ingest heartbeat landed, the trailing ping did
-  # not). As its own job it runs concurrently and finishes in ~10s, well
-  # inside the cancellation window, so it actually fires every tick. No
-  # checkout / Python needed — it's just curls.
-  #
-  # SECRET SANITIZE NOTE (do not drop): each step strips ALL whitespace
-  # from the secret before building the URL — GitHub secrets routinely
-  # carry a trailing newline from copy-paste, and curl then rejects the
-  # URL with an embedded control char ("curl (3): URL rejected: Malformed
-  # input"), so the request never sends and the ping silently dies
-  # (HTTP 000, no Vercel log). Same class of bug as the Telegram token
-  # (gotcha #22). Vercel's side already .strip()s its env.
-  fill_ping:
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-
-      # Prediction-market cent-logger ping. /api/pm-snapshot records free
-      # Polymarket + Kalshi cents per side for upcoming MLB games into
-      # pm_snapshots (deduped) — the cross-confirm detector's memory + the
-      # data to validate the 1c-AND and measure the lead vs paid PINN. Free
-      # (no Odds-API hit). Reuses FILLS_CRON_SECRET; idempotent.
-      #
-      # CADENCE (June 2026): every 1 min. On the Pro plan the $20/cycle
-      # included credit covers infra usage, and this endpoint is I/O-light
-      # (Active CPU only bills compute, not the network wait on PMM/Kalshi),
-      # so 1-min sampling is cheap and maximizes the cross-confirm freshness +
-      # the lead vs paid PINN. (Was 2-min under Hobby's 4h cap — see gotcha #38.)
-      - name: Prediction-market — PMM+Kalshi cent snapshot ping
-        continue-on-error: true
-        env:
-          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
-        run: |
-          if [ -z "$FILLS_CRON_SECRET" ]; then
-            echo "FILLS_CRON_SECRET not set — skipping pm-snapshot ping (no-op)."
-            exit 0
-          fi
-          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
-          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
-            "https://www.thekahlahouse.com/api/pm-snapshot?key=${KEY}" || echo "000")
-          echo "pm-snapshot HTTP $code"
-
-
-      # Pick Bot paperlog ping. /api/handicapper/paperlog auto-logs every
-      # gate-cleared suggestion for upcoming MLB games (5h->1min window) into
-      # pickbot_paperlog — the complete bot-suggestion dataset for the 2-week
-      # review. Budgeted server-side so it stays under Vercel's 10s; stale-
-      # game-first cycles coverage across ticks. Reuses FILLS_CRON_SECRET.
-      #
-      # CADENCE (June 2026): every 1 min. Biggest compute consumer (~8s of
-      # build_dossier per tick) — but that's the point now: on Pro the $20
-      # credit covers it, and 1-min coverage cycles the stale-first game
-      # rotation 5x faster, so the paperlog (incl. the VSiN-veto validation
-      # dataset) fills in far more completely. (Was 5-min under Hobby.)
-      - name: Pick Bot — paperlog ping
-        continue-on-error: true
-        env:
-          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
-        run: |
-          if [ -z "$FILLS_CRON_SECRET" ]; then
-            echo "FILLS_CRON_SECRET not set — skipping paperlog ping (no-op)."
-            exit 0
-          fi
-          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
-          body=$(curl -sS -m 60 \
-            "https://www.thekahlahouse.com/api/handicapper/paperlog?key=${KEY}" || echo "CURL-FAILED")
-          echo "paperlog response: ${body:0:800}"
-
-      # Kalshi auto-log ping. /api/handicapper/kalshi-autolog reads the admin's
-      # filled Kalshi positions and auto-creates the matching 1u bot_pick (ML /
-      # NRFI) so bets get logged + green-tagged even when the admin NEVER opens
-      # the site — Kalshi is the book of record. Reuses FILLS_CRON_SECRET.
-      # CADENCE GATE: every 2 min (fills get picked up within ~2 min; the read
-      # is I/O-light — a Kalshi portfolio pull + a few small DB queries).
-      - name: Pick Bot — Kalshi auto-log ping
-        continue-on-error: true
-        env:
-          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
-        run: |
-          M=$(date -u +%-M)
-          if [ $(( M % 2 )) -ne 0 ]; then
-            echo "off-cadence minute ($M) — skipping kalshi-autolog ping."
-            exit 0
-          fi
-          if [ -z "$FILLS_CRON_SECRET" ]; then
-            echo "FILLS_CRON_SECRET not set — skipping kalshi-autolog ping (no-op)."
-            exit 0
-          fi
-          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
-          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
-            "https://www.thekahlahouse.com/api/handicapper/kalshi-autolog?key=${KEY}" || echo "000")
-          echo "kalshi-autolog HTTP $code"
-
-      # VSiN splits snapshot ping. /api/vsin-snapshot logs Circa + DraftKings
-      # handle%/bets% per market (ML/SPR/TOT) for upcoming games into
-      # vsin_snapshots (deduped on change) — the sharp-money movement curve for
-      # model tuning (when does sharp money hit Circa?) + the resolver's
-      # per-pick closing stamp. Reuses FILLS_CRON_SECRET (endpoint fallback).
-      #
-      # CADENCE GATE: every 15 min. VSiN's scrape is 15-min server-cached and
-      # the %s move slowly, so finer ticks just re-log identical (deduped-away)
-      # numbers for no signal. Aligned to :00/:15/:30/:45.
-      - name: VSiN — splits snapshot ping
-        continue-on-error: true
-        env:
-          FILLS_CRON_SECRET: ${{ secrets.FILLS_CRON_SECRET }}
-        run: |
-          M=$(date -u +%-M)
-          if [ $(( M % 15 )) -ne 0 ]; then
-            echo "minute $M — skipping vsin-snapshot ping (15-min cadence)."
-            exit 0
-          fi
-          if [ -z "$FILLS_CRON_SECRET" ]; then
-            echo "FILLS_CRON_SECRET not set — skipping vsin-snapshot ping (no-op)."
-            exit 0
-          fi
-          KEY=$(printf '%s' "$FILLS_CRON_SECRET" | tr -d '[:space:]')
-          code=$(curl -sS -m 25 -o /dev/null -w '%{http_code}' \
-            "https://www.thekahlahouse.com/api/vsin-snapshot?key=${KEY}" || echo "000")
-          echo "vsin-snapshot HTTP $code"
+      - run: echo "retired Oct 6 2026 — the box runs everything (grader + mirror lanes); delete the cron-job.org job"

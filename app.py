@@ -3159,6 +3159,42 @@ def api_bet_sheets_picks():
     return jsonify(out)
 
 
+@app.route("/api/cellar/flag")
+def api_cellar_flag():
+    """Shared-secret WRITER for one machine_flags row (Oct 6 2026): the box's
+    kill switches live in ITS Postgres, which a sandbox cannot reach and
+    run_sql.sh does not target — until now every flip was a psql line Rob
+    typed on the box. `?key=…&flag=<name>&value=<json>`; `value` must parse
+    as JSON (true / false / 5 / ["a","b"] / {"k":1}). Stamps exec_probe_runs
+    kind=flag_set with the old and new value. The engines read flags on a
+    60s cache, so a flip lands within a minute of the box's next read."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    name = (request.args.get("flag") or "").strip()
+    raw = request.args.get("value")
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", name) or raw is None:
+        return jsonify({"ok": False, "error": "need flag=<name> and value=<json>"}), 400
+    try:
+        val = json.loads(raw)
+    except ValueError:
+        return jsonify({"ok": False, "error": "value is not JSON"}), 400
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    try:
+        prev = (sb.table("machine_flags").select("value").eq("key", name)
+                .limit(1).execute().data or [{}])[0].get("value")
+        sb.table("machine_flags").upsert(
+            {"key": name, "value": val, "updated_at": datetime.now(timezone.utc).isoformat()},
+            on_conflict="key").execute()
+        _probe_log({"kind": "flag_set", "flag": name, "old": prev, "new": val})
+        return jsonify({"ok": True, "flag": name, "old": prev, "new": val})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}), 500
+
+
 @app.route("/api/cellar/health")
 def api_cellar_health():
     """READ-ONLY: the box's lane vitals, the SHA it booted on, the machine
@@ -3468,8 +3504,19 @@ _LANE_WORK_WARN_S = {
 # Read from the LIVE flag rather than a hand-kept list, so flipping the
 # engine back on restores its monitoring in the same commit.
 def _lane_disabled(lane: str) -> bool:
-    return {"harvest": not _HARVEST_ENABLED,
-            "ou_trader": not OU_TRADER_ENABLED}.get(lane, False)
+    """A lane switched off ON PURPOSE reads `off`, never stale (Aug 19 2026).
+    `machine_flags lanes_off` (jsonb list of lane names, Oct 6 2026) is the
+    retired roster — the Pick Bot / machine lanes dropped from both daemons
+    when the sheets became the only product; flipping a lane back on is
+    removing it from the list + adding it to CELLAR_LANES."""
+    if lane in ("harvest", "ou_trader"):
+        return {"harvest": not _HARVEST_ENABLED,
+                "ou_trader": not OU_TRADER_ENABLED}[lane]
+    try:
+        off = _machine_flag_val("lanes_off", []) or []
+        return lane in off if isinstance(off, list) else False
+    except Exception:
+        return False
 
 
 def _ws_feed_health(sb) -> dict:
@@ -31893,6 +31940,9 @@ _CELLAR_LEASE_ENFORCED = (os.environ.get("CELLAR_LEASE_ENFORCED") or "").strip()
 #   "handbets" -> _hand_orders_tick (Oct 3 2026 — Bet Sheets' orders, queued
 #                by the site, placed from the house IP; box-only, Vercel is
 #                the claim-first fallback)
+#   "mirror"  -> _acts_sync + _dash_cache_refresh (Oct 6 2026 — the two
+#                dashboard feeds lifted out of the paperlog route body when
+#                the paperlog lane retired with the Pick Bot; no engine)
 # NOT YET GATED (all on the "alerts" lane, all in the paperlog route body):
 #   _tg_flush, _bet_alerts, _opener_watchdog. Each is individually near-
 #   idempotent (per-bet markers, send-and-mark, cooldowns) so double-running

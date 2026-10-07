@@ -37,6 +37,19 @@ Multi-page sports betting platform deployed at **thekahlahouse.com**. Flask back
 > - The four things that earn a spot: **gotchas/landmines, decisions + their why, the map (where things live), and invariants (rules you must not break).** Everything else is a deletion candidate.
 > - The file should stay roughly the same size over time, not grow. If it feels heavy, do a deletion pass.
 
+> # 🎯 THE SHAPE NOW (Oct 6 2026, Rob: "Pick bot is dead, the Ferrari is dead, the sisters are dead… this is about gambling again. The sheets IS THE MAIN thing… models and lines are all that matters")
+>
+> **LIVE — the only product:** `/pick-sheets` (football + hockey: **Pinnacle line · the model · the pick**, graded ✅/❌) and `/bet-sheets` (Rob's hand bets, rested at the touch on Polymarket by the box's `handbets` lane, chased/guarded by the hand-bet rules). Plus the dashboard (venue P&L) and the family apps (Book Club, Games, Grocery).
+>
+> **What runs, and where:**
+> - **Tape daemon** (`com.kahlahouse.cellard-tape`, plist in `scripts/`): `CELLAR_LANES=batch,grader,mirror`. `batch` = the model computes (power_ratings → football_qb → cfbd/nfelo; the NHL goalie/shot spines) + the sheet builds/refreshes (Pinnacle pulls ride them) + `sheets_grade`; `grader` = the resolver (grades `bet_sheet` picks) + the ESPN markets spine + the 5-min sheet grader; `mirror` = `poly_activities` sync + the dashboard precompute (lifted out of the retired paperlog route — the dashboard's two feeds).
+> - **Money daemon** (`com.kahlahouse.cellard`, `.env`): `CELLAR_LANES=handbets` — the hand-order queue, the My-bets strip publisher, chase/thin-touch/start-cancel/line-move. **Sockets stay ON** (`CELLAR_WS` default) — the strip and the chase read the quote table.
+> - **Vercel** = the website only. The per-minute cloud cron (`scanner-poll.yml`) is a **no-op stub** — delete the cron-job.org job whenever.
+>
+> **RETIRED (code kept, flags off, lanes out of the rosters — un-shutting is a roster edit + a flag flip, never a rebuild):** the Pick Bot (page, paperlog logger, prime-window tuner, bet alerts), the machine (opener/OMS, repeg chase + snipers, scalp sell arm, the middle pairs + prop sisters, seat top-up, ledger, alerts), the prop/MLB/UFC model computes (`diamond_iq`, `whiff_iq`, `football_props`, `ufc_model`), the pm_snapshot / vsin / kalshi_autolog tapes. `machine_flags lanes_off` names the retired lanes so the health card reads them `off`, not stale. The long sections below are the record of how each of those worked — read them before reviving one, not as a description of what is running.
+>
+> **Flags without a box trip:** `/api/cellar/flag?flag=<name>&value=<json>` (shared-secret, via the site-curl bridge; stamps `exec_probe_runs kind=flag_set`). Read them back on `/api/cellar/health`.
+
 > # ⚠️ THE RENT RULE — HARD RULE (user, Aug 18 2026) ⚠️
 >
 > **NO COMPUTER BET, AT ALL, unless the market PAYS RENT and we are INSIDE
