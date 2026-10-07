@@ -47,6 +47,19 @@ def score(preds, seasons):
     tt = {"n": 0, "b": 0.0, "hit": 0}
     lad = {"n": 0, "b": 0.0}
     cal = [[0, 0.0, 0] for _ in range(10)]
+    # The football harness's ladder (backtest_gridiron_spread._OFFSETS):
+    # half-point lines at these offsets from the MODEL's own rounded
+    # projection — the apples-to-apples number for Gridiron IQ's 0.19x.
+    gl = {"spread": [0, 0.0], "total": [0, 0.0]}
+    for p in P:
+        for key, proj, act, sd in (("spread", p["mu"], p["act_m"], p["sd"]),
+                                    ("total", p["tu"], p["act_t"], p["tsd"])):
+            c = int(round(proj))
+            for off in (-14, -10, -7, -3, -1, 0, 1, 3, 7, 10, 14):
+                thr = c + off + 0.5
+                q = ncdf((proj - thr) / sd)
+                y = 1.0 if act > thr else 0.0
+                gl[key][0] += 1; gl[key][1] += (q - y) ** 2
     for p in P:
         y = 1.0 if p["act_m"] > 0 else 0.0
         q = ncdf(p["mu"] / p["sd"])
@@ -79,6 +92,7 @@ def score(preds, seasons):
     out["spread"] = {"n": sp["n"], "brier": f(sp), "hit": round(sp["hit"] / sp["n"], 4) if sp["n"] else None}
     out["total"] = {"n": tt["n"], "brier": f(tt), "hit": round(tt["hit"] / tt["n"], 4) if tt["n"] else None,
                     "ladder_brier": f(lad)}
+    out["gridiron_ladder"] = {k: round(v[1] / v[0], 4) if v[0] else None for k, v in gl.items()}
     out["ml_calib"] = [(round(c[1] / c[0], 3), round(c[2] / c[0], 3), c[0]) for c in cal if c[0]]
     return out
 
@@ -97,7 +111,8 @@ def main():
     log.info("loaded %d games (%d with line, %d with box)", len(rows), n_line, n_box)
     base = dict(hl_days=40.0, carry=0.6, ridge_eff=60.0, ridge_pace=60.0)
     report = {"games": len(rows), "with_line": n_line, "with_box": n_box, "runs": []}
-    configs = [("base", base, "base"), ("avail", base, "avail")]
+    configs = [("base", base, "base"), ("avail", base, "avail"),
+               ("live", dict(hl_days=70.0, carry=0.7, ridge_eff=4.0, ridge_pace=4.0), "avail")]
     if a.sweep:
         for hl, cr, rg in itertools.product((70.0, 110.0, 160.0), (0.7, 0.85), (4.0, 10.0, 25.0)):
             configs.append((f"hl{hl:.0f}_c{cr}_r{rg:.0f}",
@@ -110,6 +125,8 @@ def main():
                "by_season": {s: score(preds, {s})["ml"] for s in (2024, 2025, 2026)}}
         report["runs"].append(res)
         e = res["eval_2025_26"]
+        log.info("%-22s gridiron-style ladder (eval): spread %s total %s", name,
+                 e["gridiron_ladder"]["spread"], e["gridiron_ladder"]["total"])
         log.info("%-22s sel ML %.4f | eval ML %s (mkt %s) acc %s | SPR %s | TOT %s ladder %s",
                  name, res["select_2024"]["ml"]["brier"] or -1, e["ml"]["brier"],
                  e["ml"]["market_brier"], e["ml"]["acc"], e["spread"]["brier"],
