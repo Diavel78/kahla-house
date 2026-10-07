@@ -14395,8 +14395,16 @@ def _hand_positions_partial(sb, positions: dict) -> str | None:
     except Exception:
         expect = 0
     try:
+        # Only HAND bets on live games can still hold a lot: positions vanish
+        # at settlement. Oct 7 2026 — 96 retired machine prop picks (Sep 13-28,
+        # pending + filled, no position) made the expectation 99 against 21
+        # real lots, the guard tripped every tick, and the app-cancel retire
+        # path never ran.
+        _since = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
         nf = (sb.table("bot_picks").select("id", count="exact").eq("status", "pending")
-              .filter("signal_blob->>filled", "eq", "true").limit(1).execute().count) or 0
+              .eq("signal_blob->>bet_sheet", "true")
+              .filter("signal_blob->>filled", "eq", "true")
+              .gte("event_start", _since).limit(1).execute().count) or 0
         expect = max(expect, int(nf))
     except Exception:
         pass
