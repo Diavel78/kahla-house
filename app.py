@@ -14194,9 +14194,18 @@ def _hand_app_pick_row(sb, client, owner_uid, o: dict, now) -> dict | None:
     except (TypeError, ValueError):
         ev_dt = None
     in_play = bool(ev_dt and ev_dt.astimezone(timezone.utc) <= now)
+    # THE BET, NOT THE EVENT (Oct 7 2026): the order's title is often the
+    # event title ("Indiana vs. Nebraska"), which hid the side and line.
     title = o.get("title") or ""
-    label = title or (f"{(home if side == 'home' else away) if mt != 'total' else side} "
-                      f"{'' if line is None else ('%+g' % line if mt == 'spread' else '%g' % line)}").strip()
+    team = home if side == "home" else away if side == "away" else None
+    if mt == "total" and line is not None and side in ("over", "under"):
+        label = f"{'O' if side == 'over' else 'U'} {line:g}"
+    elif mt == "spread" and line is not None and team:
+        label = f"{team} {line:+g}"
+    elif mt == "moneyline" and team:
+        label = f"{team} ML"
+    else:
+        label = title
     blob = {"bet_sheet": True, "app_adopted": True, "manual_app_bet": True,
             "pmm_slug": slug, "pmm_synthetic": syn, "order_id": o.get("id"),
             "contracts": qty, "price_c": price_c, "anchor_c": price_c,
