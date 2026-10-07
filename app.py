@@ -12493,8 +12493,31 @@ def _hand_tif_params(gtt) -> dict:
     return {"tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL"}
 
 
+def _mirror_order_seen(oid, wait_s: float = 2.5):
+    """(seen, state) for an order we just created, read off the socket-fed
+    venue MIRROR — no REST. The private feed upserts every order frame
+    (a terminal one is dropped but stamped in ord_ts), so a fresh create
+    shows up in well under a second while the socket is live. Waits only
+    if the socket has delivered order frames in this process."""
+    if not oid:
+        return False, None
+    m = _VENUE_MIRROR
+    deadline = _time.monotonic() + (wait_s if (m.get("ws_orders") or 0) > 0 else 0.0)
+    while True:
+        with m["lock"]:
+            n = m["orders"].get(oid)
+            ts = (m.get("ord_ts") or {}).get(oid)
+        if n:
+            return True, n.get("state")
+        if ts:
+            return True, None                    # terminal frame (rejected / cancelled)
+        if _time.monotonic() >= deadline:
+            return False, None
+        _time.sleep(0.1)
+
+
 def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
-                        event_start, book: dict | None = None):
+                        event_start, book: dict | None = None, verify: str = "fresh"):
     """THE HAND BET — one post-only MANUAL order (Aug 22 2026 rails, lifted
     out of the route Oct 3 2026 so the Bet Sheets slip can place a list of
     them). Returns (payload, http_status); payload['ok'] False carries
@@ -12574,19 +12597,29 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
     # orders.list is the only truthful read (retrieve 404s on live
     # orders — the probe-proven landmine). Post-only rejections show up
     # here as a missing/rejected order rather than a resting one.
-    state = None
-    try:
-        for o in (_pmm_open_orders_raw(client, fresh=True) or []):
-            if o.get("id") == oid:
-                state = o.get("state")
-                break
-    except Exception:
-        pass
+    # verify="socket" (the hand-order queue, Oct 7 2026): a full orders.list
+    # per create was ~half the venue reads of a slip and tripped the 20s
+    # rate-limit breaker every 5-6 bets (a 36-bet slip: 2m44s, ~2 min of it
+    # breaker holds). The private socket reports the new order; the queue
+    # verifies whatever it didn't see with ONE list after the batch.
+    state, unverified = None, False
+    if verify == "socket":
+        seen, state = _mirror_order_seen(oid)
+        unverified = not seen
+    else:
+        try:
+            for o in (_pmm_open_orders_raw(client, fresh=True) or []):
+                if o.get("id") == oid:
+                    state = o.get("state")
+                    break
+        except Exception:
+            pass
     _probe_log({"manual_order": True, "slug": slug, "price_c": price_c,
                 "contracts": contracts, "synthetic": synthetic,
-                "order_id": oid, "state": state})
+                "order_id": oid, "state": state, "verify": verify,
+                "unverified": unverified})
     return {"ok": True, "order_id": oid, "state": state,
-            "resting": state in _OPEN_ORDER_STATES,
+            "resting": state in _OPEN_ORDER_STATES, "unverified": unverified,
             "cost": round(cost, 2), "price_c": price_c,
             "side_bid_c": s_bid, "side_ask_c": s_ask}, 200
 
@@ -12799,6 +12832,13 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
     disagree = _bet_sheet_slug_disagrees(entry, mt)
     if disagree:
         return {"ok": False, "reason": disagree, "slug": slug, "rung_line": entry.get("line")}
+    try:                     # the event download carries the tick — no per-slug market read
+        _tk = float(entry.get("tick") or 0)
+        if 0.001 <= _tk <= 0.02:
+            _TICK_CACHE[slug] = _tk * 100.0
+            _TICK_CACHE_AT[slug] = _time.monotonic()
+    except (TypeError, ValueError):
+        pass
     book = _bet_sheet_book(client, slug)
     if book is None:
         return {"ok": False, "reason": ("Polymarket is rate-limiting us — wait 20s and submit again"
@@ -13133,7 +13173,7 @@ def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int):
         return None, f"pick log failed: {e}"[:160]
 
 
-def _hand_order_execute(sb, client, row: dict, worker: str) -> dict:
+def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | None = None) -> dict:
     """Run one queued hand order. THE ONLY placement path for Bet Sheets,
     box or Vercel. A create with price_c=None joins the touch NOW."""
     op = row.get("op")
@@ -13171,7 +13211,8 @@ def _hand_order_execute(sb, client, row: dict, worker: str) -> dict:
             seat, seat_det = _hand_seat_price(book, syn, row.get("event_start"), datetime.now(timezone.utc), mp, oh)
             price_c = seat if seat is not None else s_bid
         out, _st = _manual_order_place(client, slug, syn, price_c, row.get("contracts"),
-                                       row.get("event_start"), book=book)
+                                       row.get("event_start"), book=book,
+                                       verify=("socket" if deferred is not None else "fresh"))
         if not out.get("ok"):
             return {"ok": False, "error": out.get("error") or "order failed"}
         res = {"ok": True, "via": worker, "order_id": out.get("order_id"),
@@ -13179,7 +13220,11 @@ def _hand_order_execute(sb, client, row: dict, worker: str) -> dict:
                "cost": out.get("cost"), "price_c": out.get("price_c")}
         if seat_det and seat_det.get("thin"):
             res["thin"] = {k: seat_det.get(k) for k in ("touch_c", "touch_q", "below_c", "below_q", "pct")}
-        if not out.get("resting"):
+        if out.get("unverified") and deferred is not None:
+            res["resting"] = None
+            res["verify"] = "pending"               # the batch's one list settles it
+            deferred.append((row["id"], res))
+        elif not out.get("resting"):
             res["warning"] = (f"order sent but not resting (state {out.get('state') or 'unknown'})"
                               " — check the app")
         contracts = int(row.get("contracts") or pl.get("contracts") or 0)
@@ -14543,6 +14588,7 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
                                  for sp, st in by_sport.items()}
         except Exception as e:
             stats["prefetch"] = {"err": f"{type(e).__name__}: {e}"[:80]}
+    deferred: list = []
     for row in live:
         if row["id"] not in won:
             continue
@@ -14550,12 +14596,14 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
         try:
             if client is None:
                 client = get_client()
-            res = _hand_order_execute(sb, client, row, worker)
+            res = _hand_order_execute(sb, client, row, worker, deferred=deferred)
         except Exception as e:
             res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
         _hand_order_finish(sb, row["id"], res)
         stats["done" if res.get("ok") else "failed"] += 1
         _time.sleep(0.2)
+    if deferred:
+        stats["verify"] = _hand_verify_batch(sb, client, deferred)
     try:
         if client is None:
             client = get_client()
@@ -14585,6 +14633,35 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
     except Exception as e:
         stats["chase"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     return stats
+
+
+def _hand_verify_batch(sb, client, deferred: list) -> dict:
+    """ONE fresh orders.list for every create the socket did not confirm,
+    then patch each row's result (resting / warning)."""
+    st = {"n": len(deferred), "resting": 0, "missing": 0, "unread": 0}
+    orders = None
+    try:
+        orders = _pmm_open_orders_raw(client, fresh=True)
+    except Exception:
+        orders = None
+    by_id = {o.get("id"): o for o in (orders or []) if o.get("id")}
+    for row_id, res in deferred:
+        res.pop("verify", None)
+        if orders is None:
+            res["warning"] = "order sent but not verified (venue read failed) — check the app"
+            st["unread"] += 1
+        else:
+            o = by_id.get(res.get("order_id"))
+            res["state"] = o.get("state") if o else None
+            res["resting"] = bool(o and o.get("state") in _OPEN_ORDER_STATES)
+            if res["resting"]:
+                st["resting"] += 1
+            else:
+                res["warning"] = (f"order sent but not resting (state {res.get('state') or 'unknown'})"
+                                  " — check the app")
+                st["missing"] += 1
+        _hand_order_finish(sb, row_id, res)
+    return st
 
 
 def _hand_orders_wait(sb, ids: list, deadline: float, until_claimed: bool = False) -> dict:

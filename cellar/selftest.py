@@ -2853,6 +2853,63 @@ def test_pmm_short_school_names() -> None:
           and pm._team_mention_pos(pm._norm("Spread: Army (-3.5)"), "Tulane Green Wave") < 0)
 
 
+def test_pmm_shared_prefix_schools() -> None:
+    """LOUISIANA @ LOUISIANA TECH (Oct 7 2026): "Will the Louisiana cover 3.5
+    vs the Louisiana Tech" — 'louisiana' is a prefix of both schools, both
+    read position 9, the tie went to home and every rung flipped (the slug
+    guard refused the bet). A contested mention belongs to the team that is
+    NOT named distinctly elsewhere."""
+    import pmm_markets as pm
+    A, H = "Louisiana Ragin' Cajuns", "Louisiana Tech Bulldogs"
+    tail = " in Louisiana vs. Louisiana Tech"
+    check("'the Louisiana cover … vs the Louisiana Tech' = Louisiana (away)",
+          pm._side_by_first_mention("Will the Louisiana cover 3.5 vs the Louisiana Tech" + tail, A, H) == "away")
+    check("'the Louisiana Tech cover … vs the Louisiana' = Louisiana Tech (home)",
+          pm._side_by_first_mention("Will the Louisiana Tech cover 3.5 vs the Louisiana" + tail, A, H) == "home")
+    check("'Spread: Louisiana Tech (-3.5)' = home",
+          pm._side_by_first_mention("Spread: Louisiana Tech (-3.5)", A, H) == "home")
+    check("a distinct-name question is unchanged (Orioles)",
+          pm._side_by_first_mention("Spread: Baltimore Orioles (+4.5)", "Baltimore Orioles", "Tampa Bay Rays") == "away")
+
+
+def test_hand_verify_batch() -> None:
+    """THE SLIP SPEED FIX (Oct 7 2026): a create is confirmed off the private
+    socket's mirror, and whatever the socket missed is settled by ONE
+    orders.list after the batch — a full list per create tripped the venue's
+    rate-limit breaker every 5-6 bets."""
+    import app as _app
+    m = _app._VENUE_MIRROR
+    with m["lock"]:
+        saved = (dict(m["orders"]), dict(m.get("ord_ts") or {}), m.get("ws_orders"))
+        m["orders"]["OID_REST"] = {"id": "OID_REST", "state": "ORDER_STATE_NEW", "slug": "x"}
+        m.setdefault("ord_ts", {})["OID_GONE"] = 1.0
+        m["ws_orders"] = 0
+    try:
+        check("a create the socket reported reads resting", _app._mirror_order_seen("OID_REST") == (True, "ORDER_STATE_NEW"))
+        check("a create the socket saw die reads terminal", _app._mirror_order_seen("OID_GONE") == (True, None))
+        check("an unseen create is unverified (no wait with a silent socket)",
+              _app._mirror_order_seen("OID_NONE", wait_s=5.0) == (False, None))
+    finally:
+        with m["lock"]:
+            m["orders"].clear(); m["orders"].update(saved[0])
+            m["ord_ts"] = saved[1]; m["ws_orders"] = saved[2]
+    saved_raw, saved_fin = _app._pmm_open_orders_raw, _app._hand_order_finish
+    finished = {}
+    try:
+        _app._pmm_open_orders_raw = lambda client, fresh=False: [{"id": "A", "state": "ORDER_STATE_NEW"}]
+        _app._hand_order_finish = lambda sb, rid, res: finished.__setitem__(rid, dict(res))
+        st = _app._hand_verify_batch(None, None, [(1, {"ok": True, "order_id": "A", "verify": "pending"}),
+                                                  (2, {"ok": True, "order_id": "B", "verify": "pending"})])
+        check("batch verify: one resting, one missing", st == {"n": 2, "resting": 1, "missing": 1, "unread": 0})
+        check("batch verify patches the resting row clean", finished[1].get("resting") is True and "warning" not in finished[1])
+        check("batch verify warns on the missing row", finished[2].get("resting") is False and "check the app" in finished[2].get("warning", ""))
+        _app._pmm_open_orders_raw = lambda client, fresh=False: None
+        st = _app._hand_verify_batch(None, None, [(3, {"ok": True, "order_id": "C"})])
+        check("batch verify: a failed read never claims resting", st["unread"] == 1 and "not verified" in finished[3]["warning"])
+    finally:
+        _app._pmm_open_orders_raw, _app._hand_order_finish = saved_raw, saved_fin
+
+
 def test_pmm_unsigned_cover_questions() -> None:
     """THE NMSU RULE (Oct 7 2026): Polymarket titled NMSU@FIU spreads "Will
     the NM State cover 6.5 vs the Florida International"; only FIU was
@@ -3008,7 +3065,7 @@ def test_hand_orders_queue() -> None:
         _app._HAND_ENSURED["ok"] = True
         _app._HAND_CLAIM_WAIT_S = 0.0
         _app.get_client = lambda: object()
-        _app._hand_order_execute = lambda sb_, c, row, worker: (ran.append((row.get("id"), worker)) or {"ok": True, "order_id": "X1"})
+        _app._hand_order_execute = lambda sb_, c, row, worker, deferred=None: (ran.append((row.get("id"), worker)) or {"ok": True, "order_id": "X1"})
         rid = _app._hand_order_enqueue(sb, {"op": "create", "slug": "s", "synthetic": False,
                                             "contracts": 1, "payload": {"asked_by": "u"}})
         check("enqueue returns an id", rid == 1)
@@ -3271,7 +3328,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

@@ -217,7 +217,74 @@ def _side_by_first_mention(question: str, away: str, home: str) -> str | None:
         if vs > 0 and pos >= vs:
             return "home" if found == "away" else "away"
         return found
+    if a_pos == h_pos:
+        # SHARED-PREFIX TIE (Oct 7 2026, Louisiana @ Louisiana Tech — "Will
+        # the Louisiana cover 3.5 vs the Louisiana Tech"): 'louisiana' is a
+        # name prefix of BOTH schools, so both read position 9 and the tie
+        # went to home — every rung flipped (the slug guard caught it).
+        owner = _contested_owner(q, away, home)
+        if owner:
+            return owner
     return "away" if a_pos < h_pos else "home"
+
+
+def _team_mention_spans(q_norm: str, team: str) -> list:
+    """Every (pos, len) where one of this team's name variants appears —
+    the same variants `_team_mention_pos` tries, all occurrences."""
+    out = []
+
+    def _all(hay, cand, off=0):
+        i = hay.find(cand)
+        while i >= 0:
+            out.append((i - off, len(cand)))
+            i = hay.find(cand, i + 1)
+
+    for cand in (_norm(team), _city_tokens(team), _last_token(team)):
+        if cand:
+            _all(q_norm, cand)
+    padded = " " + q_norm + " "
+    for cand in (list(_name_prefix_cands(team)) + _abbrev_cands(team) + _alias_cands(team)
+                 + [c for c in _team_code_cands(team) if len(c) >= 3]):
+        if cand:
+            i = padded.find(" " + cand + " ")
+            while i >= 0:
+                out.append((i, len(cand)))
+                i = padded.find(" " + cand + " ", i + 1)
+    return out
+
+
+def _contested_owner(q_norm: str, away: str, home: str):
+    """Pure. Resolve a first-mention tie between two teams whose names share
+    a prefix. A span one team matches LONGER (or that sits inside the other
+    team's longer match) belongs to that team; a span both match exactly
+    the same is contested. If the earliest mention is contested and exactly
+    one team is named distinctly elsewhere, the contested mention is the
+    OTHER team (it would have been named distinctly too). Else None."""
+    A = set(_team_mention_spans(q_norm, away))
+    H = set(_team_mention_spans(q_norm, home))
+
+    def _excl(mine, theirs):
+        res = []
+        for p, l in mine:
+            if (p, l) in theirs:
+                continue
+            if any(q <= p and p + l <= q + m and m > l for q, m in theirs):
+                continue
+            res.append(p)
+        return min(res) if res else None
+    ea, eh = _excl(A, H), _excl(H, A)
+    cont = [p for p, l in A & H
+            if not any(q <= p and p + l <= q + m and m > l for q, m in (A | H))]
+    c = min(cont) if cont else None
+    inf = 10 ** 9
+    first_excl = min(ea if ea is not None else inf, eh if eh is not None else inf)
+    if c is not None and c < first_excl:
+        if (ea is None) != (eh is None):
+            return "away" if ea is None else "home"
+        return None
+    if ea is not None or eh is not None:
+        return "away" if (ea if ea is not None else inf) < (eh if eh is not None else inf) else "home"
+    return None
 
 
 def _last_token(team_name: str) -> str:
