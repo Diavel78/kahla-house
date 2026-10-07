@@ -13449,6 +13449,36 @@ def _touch_tape_dark(sb):
     return (dark, len(sl)) if dark * 2 > len(sl) or dark == len(sl) else None
 
 
+_TOUCH_PUSHED = {"set": frozenset(), "at": 0.0}
+_TOUCH_PUSH_EVERY_S = 60.0
+
+
+def _touch_watch_push(want: set, now_t: float):
+    """Hand the watched hand-bet slugs to the sockets — MERGED into the watch
+    list (the one-argument `_WS_WATCHLIST_MERGE_CB`), on a change or every
+    `_TOUCH_PUSH_EVERY_S`. Returns 'ok' / 'err: …' / None (nothing to do).
+
+    ⚠ Oct 7 2026: this called `_WS_WATCHLIST_CB(set, False)` since the tape
+    was built (#90) — the box's callback takes ONE argument, so every push
+    raised and was swallowed into a stat. The tape only filled because an
+    ORDER event's own push folds `TOUCH_WATCH_SLUGS` in; in the handbets-
+    only daemon a quiet book after a kick meant NOTHING was ever subscribed
+    (92 of 92 dark, chase 89 no_quote, line-move + kickoff cancel blind).
+    Never the replace callback here: it would evict every other order slug."""
+    cb = _WS_WATCHLIST_MERGE_CB
+    if not want or cb is None:
+        return None
+    fs = frozenset(want)
+    if fs == _TOUCH_PUSHED["set"] and now_t - _TOUCH_PUSHED["at"] < _TOUCH_PUSH_EVERY_S:
+        return None
+    try:
+        cb(set(want))
+    except Exception as e:
+        return f"err: {e}"[:80]
+    _TOUCH_PUSHED["set"], _TOUCH_PUSHED["at"] = fs, now_t
+    return "ok"
+
+
 def _touch_tape_publish(sb) -> dict:
     """Refresh the watch set from machine_flags, push it to the depth socket,
     publish the tape (last 240 samples per slug) to lookup_cache."""
@@ -13473,11 +13503,9 @@ def _touch_tape_publish(sb) -> dict:
             for s in list(TOUCH_TAPE):
                 if s not in want:
                     TOUCH_TAPE.pop(s, None)
-        if want and _WS_WATCHLIST_CB is not None:
-            try:
-                _WS_WATCHLIST_CB(set(want), False)
-            except Exception as e:
-                out["push_err"] = str(e)[:80]
+        pushed = _touch_watch_push(want, now_t)
+        if pushed:
+            out["push"] = pushed
         out["watch"] = len(want)
         if not want:
             return out
@@ -15492,8 +15520,9 @@ def _hand_rerung_suggest(client, r: dict, cur_slug, anchor_c, leash_c, now) -> d
         pmm = _pm.lookup(client, str(r.get("sport") or "").upper(), parts[0], parts[1],
                          r.get("event_start"), want_props=False, max_age_s=120)
     except Exception as e:
-        _venue_rl_trip(e)
-        return None
+        if _venue_rl_trip(e):
+            return None                                 # rate limit: ask again next tick
+        return {"none": True, "why": f"err: {type(e).__name__}: {e}"[:120], "at": stamp}
     if not pmm:
         return {"none": True, "why": "lookup", "at": stamp}
     e, bid_c = _hand_rerung_target(pmm.get(mt), mt, r.get("side"), cur_slug, anchor_c, leash_c)

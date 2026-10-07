@@ -2946,6 +2946,38 @@ def test_touch_tape_dark() -> None:
           _app._touch_tape_dark(_SB({"at": fresh, "slugs": {"a": []}})) == (1, 1))
 
 
+def test_touch_watch_push() -> None:
+    """THE TAPE PUSH (Oct 7 2026): the hand-bet slugs reach the sockets
+    through the ONE-argument merge callback, on change or every minute —
+    never the two-argument call that raised for two months unnoticed."""
+    import app as _app
+    got = []
+    saved = (_app._WS_WATCHLIST_MERGE_CB, _app._WS_WATCHLIST_CB, dict(_app._TOUCH_PUSHED))
+    try:
+        def _replace(_s):
+            raise AssertionError("replace callback must not be used")
+        _app._WS_WATCHLIST_CB = _replace
+        _app._WS_WATCHLIST_MERGE_CB = lambda slugs: got.append(set(slugs))
+        _app._TOUCH_PUSHED.update({"set": frozenset(), "at": 0.0})
+        check("first push goes out", _app._touch_watch_push({"a", "b"}, 1000.0) == "ok"
+              and got == [{"a", "b"}])
+        check("same set inside a minute = no push", _app._touch_watch_push({"a", "b"}, 1030.0) is None
+              and len(got) == 1)
+        check("same set after a minute = refresh", _app._touch_watch_push({"a", "b"}, 1061.0) == "ok"
+              and len(got) == 2)
+        check("changed set pushes now", _app._touch_watch_push({"a", "c"}, 1062.0) == "ok"
+              and got[-1] == {"a", "c"})
+        check("empty set = nothing", _app._touch_watch_push(set(), 2000.0) is None)
+        _app._WS_WATCHLIST_MERGE_CB = None
+        check("no socket = nothing", _app._touch_watch_push({"z"}, 3000.0) is None)
+        _app._WS_WATCHLIST_MERGE_CB = lambda slugs: (_ for _ in ()).throw(RuntimeError("x"))
+        r = _app._touch_watch_push({"y"}, 4000.0)
+        check("a failing callback reports, never raises", isinstance(r, str) and r.startswith("err"))
+    finally:
+        _app._WS_WATCHLIST_MERGE_CB, _app._WS_WATCHLIST_CB = saved[0], saved[1]
+        _app._TOUCH_PUSHED.clear(); _app._TOUCH_PUSHED.update(saved[2])
+
+
 def test_hand_rerung_target() -> None:
     """RE-RUNG (Oct 7 2026): when the line runs past a held bet, the current
     line is the same-side rung whose bid sits nearest Rob's own price, never
@@ -3390,7 +3422,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
