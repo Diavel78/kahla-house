@@ -2312,7 +2312,7 @@ def test_review_sep26_sizing_and_state() -> None:
     try:
         m["positions"] = {"t": {"net": 20.0, "qty": 20.0, "avg_price": 0.5}}
         _app._pmm_read_client = lambda c: c
-        out = _app._pmm_positions_raw(NS(portfolio=NS(positions=lambda: {"unexpected": 1})), fresh=True)
+        out = _app._pmm_positions_raw(NS(portfolio=NS(positions=lambda params=None: {"unexpected": 1})), fresh=True)
         check("positions: a response without 'positions' is unreadable (None), mirror kept",
               out is None and "t" in m["positions"])
         out2 = _app._pmm_open_orders_raw(NS(orders=NS(list=lambda: {"unexpected": 1})), fresh=True)
@@ -2324,7 +2324,7 @@ def test_review_sep26_sizing_and_state() -> None:
     try:
         m["positions"] = {}; m["positions_at"] = 0.0; m.setdefault("pos_ts", {}).clear()
         _app._pmm_read_client = lambda c: c
-        def _positions_with_fill_midflight():
+        def _positions_with_fill_midflight(params=None):
             _app._mirror_position_event({"marketSlug": "t", "afterPosition": {"netPositionDecimal": "20", "cost": {"value": "10"}}})
             return {"positions": {}}        # snapshot taken BEFORE the fill
         out3 = _app._pmm_positions_raw(NS(portfolio=NS(positions=_positions_with_fill_midflight)), fresh=True)
@@ -2946,6 +2946,40 @@ def test_touch_tape_dark() -> None:
           _app._touch_tape_dark(_SB({"at": fresh, "slugs": {"a": []}})) == (1, 1))
 
 
+def test_positions_all_pages() -> None:
+    """The positions read walks EVERY page (Oct 7 2026 — page one only read
+    21 lots of ~99) and a failed/malformed page is a failed read, never a
+    partial book."""
+    import app as _app
+
+    class _P:
+        def __init__(self, pages): self.pages, self.calls = pages, []
+        def positions(self, params=None):
+            self.calls.append(dict(params or {}))
+            i = len(self.calls) - 1
+            pg = self.pages[i]
+            if isinstance(pg, Exception):
+                raise pg
+            return pg
+
+    class _C:
+        def __init__(self, pages): self.portfolio = _P(pages)
+
+    c = _C([{"positions": {"a": {}, "b": {}}, "nextCursor": "x", "eof": False},
+            {"positions": {"c": {}}, "nextCursor": "y", "eof": False},
+            {"positions": {"d": {}}, "eof": True}])
+    got = _app._positions_all_pages(c)
+    check("every page is read", [k for k, _ in got] == ["a", "b", "c", "d"])
+    check("the cursor is passed on", c.portfolio.calls[1].get("cursor") == "x"
+          and c.portfolio.calls[2].get("cursor") == "y")
+    c2 = _C([{"positions": {"a": {}}, "nextCursor": "x", "eof": False}, {"oops": 1}])
+    check("a malformed later page = failed read, not a partial book", _app._positions_all_pages(c2) is None)
+    c3 = _C([{"positions": {"a": {}}, "eof": True}])
+    check("one-page account reads clean", len(_app._positions_all_pages(c3)) == 1)
+    c4 = _C([{"positions": {}, "eof": True}])
+    check("an empty account is an empty list, not None", _app._positions_all_pages(c4) == [])
+
+
 def test_hand_orders_ops_allowed() -> None:
     """Every op the hand-order executor dispatches is allowed by the
     hand_orders CHECK (Oct 7 2026: 'rerung' was refused at the queue write)."""
@@ -3438,7 +3472,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

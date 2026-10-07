@@ -1619,11 +1619,50 @@ def _get(obj, *keys, default=None):
 # Data fetching — Polymarket SDK
 # ---------------------------------------------------------------------------
 
+_POS_PAGE_LIMIT = 100
+_POS_MAX_PAGES = 30
+_POS_PAGING_LAST: dict = {}
+
+
+def _positions_all_pages(client) -> list | None:
+    """EVERY position on the account as [(slug, pos), …], walking the
+    venue's cursor (`limit`/`cursor` in, `nextCursor`/`eof` out). None = a
+    page failed or came back malformed — a read failure, never a partial
+    list passed off as the whole book.
+
+    ⚠ Oct 7 2026: every reader took ONE call to portfolio.positions() — the
+    first page only. A fresh read returned 21 lots against ~99 the book
+    expected, so the strip, the post-cancel 'held?' checks and the venue
+    mirror all saw a fraction of the account; only the partial-read guard
+    (60%) stopped the retire paths from deleting held bets."""
+    out: list = []
+    cursor = None
+    pages = 0
+    for _ in range(_POS_MAX_PAGES):
+        params = {"limit": _POS_PAGE_LIMIT}
+        if cursor:
+            params["cursor"] = cursor
+        resp = client.portfolio.positions(params=params)
+        pl = resp.get("positions") if isinstance(resp, dict) else None
+        if pl is None:
+            return None
+        pages += 1
+        out.extend(list((pl or {}).items()))
+        nxt = resp.get("nextCursor")
+        if resp.get("eof", True) or not nxt or not pl:
+            _POS_PAGING_LAST.update(pages=pages, n=len(out), capped=False)
+            return out
+        cursor = nxt
+    _POS_PAGING_LAST.update(pages=pages, n=len(out), capped=True)
+    return None                                   # cap hit: not the whole book
+
+
 def fetch_positions(client):
     try:
-        response = client.portfolio.positions()
-        positions_map = response.get("positions", {})
-        return list(positions_map.items())
+        items = _positions_all_pages(client)
+        if items is None:
+            raise RuntimeError("positions read incomplete")
+        return items
     except Exception as e:
         print(f"ERROR fetching positions: {e}")
         return []
@@ -3167,6 +3206,36 @@ def api_bet_sheets_picks():
                             for r in qrows]
         except Exception as e:
             out["queue_err"] = str(e)[:160]
+    if request.args.get("positions"):
+        # PAGING AUDIT (Oct 7 2026): page one alone vs every page, and the
+        # pending 'filled' picks with no position behind them.
+        pa: dict = {}
+        try:
+            cl = get_client()
+            r1 = cl.portfolio.positions()
+            p1 = (r1 or {}).get("positions") or {}
+            pa["page1"] = {"n": len(p1), "eof": (r1 or {}).get("eof"),
+                           "has_next": bool((r1 or {}).get("nextCursor"))}
+            allp = _positions_all_pages(cl)
+            pa["all"] = None if allp is None else len(allp)
+            pa["paging"] = dict(_POS_PAGING_LAST)
+            held = {}
+            for sl, pos in (allp or []):
+                nn = _norm_position(pos)
+                if nn is not None and abs(float(nn.get("net") or 0)) >= 1.0:
+                    held[sl] = nn
+            pa["held_ge1"] = len(held)
+            fp = _sb_paged(lambda: sb.table("bot_picks").select("id,signal_blob,event_start")
+                           .eq("status", "pending").filter("signal_blob->>filled", "eq", "true"),
+                           max_pages=5) or []
+            slugs = [((r.get("signal_blob") or {}).get("pmm_slug"), r.get("event_start"), r.get("id")) for r in fp]
+            miss = [x for x in slugs if x[0] and x[0] not in held]
+            pa["filled_pending"] = len(slugs)
+            pa["filled_no_position"] = len(miss)
+            pa["filled_no_position_eg"] = [{"id": i, "slug": sl, "start": st} for sl, st, i in miss[:12]]
+        except Exception as e:
+            pa["err"] = f"{type(e).__name__}: {e}"[:200]
+        out["positions"] = pa
     re_slug = (request.args.get("readopt") or "").strip()
     if re_slug:                                        # THE MISSOURI RE-ATTACH (Oct 6 2026): book one
         out["readopt"] = _hand_readopt(sb, re_slug)     # held lot as a hand bet, from Vercel, now
@@ -3550,6 +3619,11 @@ _LANE_WORK_WARN_S = {
     "batch":         100_800,      # daily jobs; 28h covers a late run
     "alerts":         86_400,
     "kalshi_autolog":   None,      # dormant by design — see above
+    # handbets: "work" = queue rows (slips Rob submitted). A day with no new
+    # slips is not a fault — the chase/move/start ticks run every 10s either
+    # way. Real failures are the stale heartbeat, an erroring tick and the
+    # TAPE DARK tripwire (Oct 7 2026: 'idle' was the health card's only red).
+    "handbets":         None,
     # scalp: zero work on a settled overnight book is real (asks rest,
     # nothing walks). The STARVATION detector is the dead-scalp tripwire
     # in _cellar_health, which reads outcomes (asks placed vs candidates
@@ -17390,13 +17464,12 @@ def _pmm_positions_raw(client, fresh: bool = False) -> dict | None:
     _t0 = _time.monotonic()           # anything the socket writes after this is NEWER than this read
     for _attempt in (1, 2):           # one retry: transient reset ≠ dark venue
         try:
-            resp = rc.portfolio.positions()
-            _pl = resp.get("positions") if isinstance(resp, dict) else None
-            if _pl is None:
-                continue          # MALFORMED ≠ EMPTY (Sep 26 2026): keep the last good mirror
-            items = list((_pl or {}).items())
+            items = _positions_all_pages(rc)   # EVERY page (Oct 7 2026 — page one only was 21 of ~99)
+            if items is None:
+                continue          # MALFORMED/INCOMPLETE ≠ EMPTY (Sep 26 2026): keep the last good mirror
             break
         except Exception:
+            items = None
             continue
     if items is None:
         return None                              # read failed → not "no positions"
