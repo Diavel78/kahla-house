@@ -3991,6 +3991,19 @@ def _cellar_health(sb) -> dict:
                       "stale": bool(age_s is not None and age_s > 26 * 3600)}
     except Exception:
         backup = {}
+    # ── TAPE DARK TRIPWIRE (Oct 7 2026) — see `_touch_tape_dark`.
+    try:
+        _td = _touch_tape_dark(sb)
+        if _td:
+            for _l in lanes:
+                if _l["lane"] == "handbets" and _l["state"] in ("ok", "idle"):
+                    _l["state"] = "error"
+                    _l["error"] = (f"TAPE DARK: {_td[0]} of {_td[1]} hand bets have "
+                                   f"no order-book frames — sockets down; no kickoff "
+                                   f"cancel, no line-move cancel")
+                    bad += 1
+    except Exception:
+        pass
     try:
         ws = _ws_feed_health(sb)            # footer garnish — never fatal
     except Exception:
@@ -13363,6 +13376,7 @@ _TOUCH_LINGER: dict = {}               # slug → expiry (time.time())
 _TOUCH_TAPE_KEY = "touch_tape"
 _TOUCH_TAPE_LEVELS = 6                 # per-rung ladder depth kept on each tape row (the relocation read)
 _TOUCH_TAPE_MAX = 900
+_TOUCH_PROC_T0 = _time.time()          # process start — the TAPE DARK tripwire's boot grace
 
 
 def _touch_tape_record(slug: str, bids: list, asks: list) -> None:
@@ -13382,6 +13396,33 @@ def _touch_tape_record(slug: str, bids: list, asks: list) -> None:
         dq.append(row)
     except Exception:
         pass
+
+
+def _touch_tape_dark(sb):
+    """TAPE DARK (Oct 7 2026 — Rob: "you shut down the websockets and didn't
+    even realize it??"). The money daemon went handbets-only and the socket
+    gate read `repeg`, so the feed never started: the touch tape held ZERO
+    frames on every resting hand bet, start-cancel and line-move were blind,
+    and every light read green because the lane TICKED. A working depth
+    socket replays one frame per slug the moment it subscribes, so a live
+    publish (<180s old, box up >120s) whose watched slugs mostly have no
+    frames at all is a dead feed. Returns (dark, watched) or None."""
+    tr = (sb.table("lookup_cache").select("payload")
+          .eq("key", _TOUCH_TAPE_KEY).limit(1).execute().data) or []
+    if not tr:
+        return None
+    tp = tr[0].get("payload") or {}
+    at = datetime.fromisoformat(str(tp.get("at")).replace("Z", "+00:00"))
+    if (datetime.now(timezone.utc) - at).total_seconds() >= 180:
+        return None                       # box not publishing — a different alarm
+    up = tp.get("up_s")
+    if up is not None and float(up) <= 120:
+        return None                       # just booted: subscribes still landing
+    sl = tp.get("slugs") or {}
+    if not sl:
+        return None
+    dark = sum(1 for v in sl.values() if not v)
+    return (dark, len(sl)) if dark * 2 > len(sl) or dark == len(sl) else None
 
 
 def _touch_tape_publish(sb) -> dict:
@@ -13418,6 +13459,7 @@ def _touch_tape_publish(sb) -> dict:
             return out
         payload = {"at": datetime.now(timezone.utc).isoformat(),
                    "adopt": dict(_HAND_APP_LAST) if isinstance(_HAND_APP_LAST, dict) else None,
+                   "up_s": round(now_t - _TOUCH_PROC_T0),
                    "slugs": {s: list(TOUCH_TAPE.get(s) or [])[-240:] for s in sorted(want)}}
         sb.table("lookup_cache").upsert({
             "key": _TOUCH_TAPE_KEY, "sport": "ANY",
@@ -14926,7 +14968,11 @@ def api_bet_sheets_mine():
                        "thin_hold": blob.get("thin_hold")}),
             "line_hold": (bx.get("line_hold") if bx is not None else blob.get("line_hold")),
         })
-    return jsonify({"ok": True, "bets": out, "venue_ok": venue_ok,
+    try:
+        tape_dark = _touch_tape_dark(sb)
+    except Exception:
+        tape_dark = None
+    return jsonify({"ok": True, "bets": out, "venue_ok": venue_ok, "tape_dark": tape_dark,
                     "src": ("box" if box is not None else "vercel"),
                     "box_age_s": (box or {}).get("age_s"), "at": now.isoformat()})
 

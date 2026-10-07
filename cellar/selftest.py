@@ -2910,6 +2910,42 @@ def test_hand_verify_batch() -> None:
         _app._pmm_open_orders_raw, _app._hand_order_finish = saved_raw, saved_fin
 
 
+def test_touch_tape_dark() -> None:
+    """TAPE DARK (Oct 7 2026): a live tape publish whose watched hand bets
+    have no order-book frames is a dead socket feed — red, not green."""
+    import app as _app
+    from datetime import datetime, timezone, timedelta
+
+    class _Q:
+        def __init__(self, rows): self.rows = rows
+        def select(self, *a, **k): return self
+        def eq(self, *a, **k): return self
+        def limit(self, *a, **k): return self
+        def execute(self):
+            return type("R", (), {"data": self.rows})()
+
+    class _SB:
+        def __init__(self, payload): self.p = payload
+        def table(self, name): return _Q([{"payload": self.p}] if self.p else [])
+
+    now = datetime.now(timezone.utc)
+    fresh, old = now.isoformat(), (now - timedelta(minutes=10)).isoformat()
+    f = [[1.0, 50.0, 10.0, 51.0, 10.0, 0, 0, [], []]]
+    check("every hand bet frameless = dark",
+          _app._touch_tape_dark(_SB({"at": fresh, "up_s": 600, "slugs": {"a": [], "b": []}})) == (2, 2))
+    check("frames on every bet = healthy",
+          _app._touch_tape_dark(_SB({"at": fresh, "up_s": 600, "slugs": {"a": f, "b": f}})) is None)
+    check("one new bet without its first frame yet is not an alarm",
+          _app._touch_tape_dark(_SB({"at": fresh, "up_s": 600, "slugs": {"a": f, "b": f, "c": []}})) is None)
+    check("just booted = grace",
+          _app._touch_tape_dark(_SB({"at": fresh, "up_s": 30, "slugs": {"a": []}})) is None)
+    check("stale publish is a different alarm",
+          _app._touch_tape_dark(_SB({"at": old, "up_s": 600, "slugs": {"a": []}})) is None)
+    check("no tape row = None", _app._touch_tape_dark(_SB(None)) is None)
+    check("pre-fix box (no up_s) still trips",
+          _app._touch_tape_dark(_SB({"at": fresh, "slugs": {"a": []}})) == (1, 1))
+
+
 def test_pmm_unsigned_cover_questions() -> None:
     """THE NMSU RULE (Oct 7 2026): Polymarket titled NMSU@FIU spreads "Will
     the NM State cover 6.5 vs the Florida International"; only FIU was
@@ -3328,7 +3364,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
