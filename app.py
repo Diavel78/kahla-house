@@ -3177,7 +3177,8 @@ def api_bet_sheets_picks():
         out["pending_total"] = f"err: {e}"[:120]
     keep = ("contracts", "price_c", "anchor_c", "order_id", "app_adopted", "manual_web_bet",
             "filled", "filled_qty", "placed_via", "adopted_at", "placed_at", "entry_src",
-            "in_play", "pmm_synthetic", "label", "line_rejoins", "amended")
+            "in_play", "pmm_synthetic", "label", "line_rejoins", "amended",
+            "chase_hold", "thin_hold", "line_hold", "rejoin_hold", "rerung_from")
     if slug:
         try:
             rows = (sb.table("bot_picks")
