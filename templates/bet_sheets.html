@@ -188,6 +188,7 @@
         .si .tag { display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .05em; padding: 1px 6px; border-radius: 6px;
                    margin-right: 6px; background: var(--cyan); color: var(--bg); vertical-align: 1px; }
         .si .tag.cancel { background: var(--red); color: #fff; }
+        .si .tag.rerung { background: var(--amber, #e0a020); color: var(--bg); }
         .slip-cost { color: var(--muted); font-size: 12px; margin-left: auto; font-family: 'JetBrains Mono', monospace; }
         .wrap { padding-bottom: 120px; }
         .sec-h { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 8px; }
@@ -480,11 +481,13 @@
                 const lv = (o.leaves != null) ? o.leaves : i.leaves;
                 let line = i.op === 'repeg'
                     ? ('move ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + (tch != null ? ' → touch ' + tch + '¢' : '') + (rest != null && tch != null && Math.abs(rest - tch) < 0.01 ? ' (already there)' : '') + ' · keeps its size')
+                    : i.op === 'rerung'
+                    ? ('cancel ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + ' → rest them on ' + i.rerung_label + (i.rerung_c != null ? ' (bid ' + i.rerung_c + '¢ now)' : '') + ' · priced at the touch when it runs')
                     : ('pull the resting order' + (o.leaves != null ? ' · ' + Math.round(o.leaves) + ' unfilled' : ''));
                 if (i.q && i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'queued on the box…') + '</div>';
                 else if (i.q && i.q.ok === false) q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
                 else q = '<div class="q">' + esc(line) + '</div>';
-                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
+                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                      + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
             }
             if (i.q) {
@@ -532,7 +535,7 @@
             if (!preview && opItems.length) {
                 bp.textContent = 'Running ' + opItems.length + ' action' + (opItems.length === 1 ? '' : 's') + '…';
                 const r = await authFetch('/api/bet-sheets/ops', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ items: opItems.map(i => ({ key: i.key, op: i.op, pick_id: i.pick_id })) }) });
+                    body: JSON.stringify({ items: opItems.map(i => ({ key: i.key, op: i.op, pick_id: i.pick_id, rerung_slug: i.rerung_slug })) }) });
                 const d = r ? await r.json().catch(() => null) : null;
                 if (!d || !d.ok) opItems.forEach(i => { byKey[i.key] = { ok: false, reason: 'Failed: ' + ((d && d.error) || (r && r.status) || 'network') }; });
                 else (d.results || []).forEach(x => { byKey[x.key] = x; });
@@ -567,6 +570,7 @@
     }
     function opNote(i, x) {
         if (i.op === 'cancel') return 'Cancelled ' + i.label + (x.deleted ? '' : ' (' + x.held + ' filled stays)');
+        if (i.op === 'rerung') return x.rerung ? ('Moved ' + i.label + ' → ' + (x.label || i.rerung_label) + ' @ ' + x.price_c + '¢' + (x.held ? ' (' + x.held + ' filled stays on the old line)' : '') + (x.warning ? ' · ' + x.warning : '')) : (i.label + ': ' + (x.note || 'not moved'));
         if (x.moved) return 'Moved ' + i.label + ' ' + (x.from_c != null ? x.from_c + '¢ → ' : 'to ') + x.price_c + '¢';
         return i.label + ': ' + (x.note || 'no move');
     }
@@ -598,11 +602,12 @@
     function quoteSlip() { postSlip(true); }
     function placeSlip() {
         const n = contractsN();
-        const nb = _slip.filter(i => !i.op).length, nr = _slip.filter(i => i.op === 'repeg').length, nc = _slip.filter(i => i.op === 'cancel').length;
+        const nb = _slip.filter(i => !i.op).length, nr = _slip.filter(i => i.op === 'repeg').length, nc = _slip.filter(i => i.op === 'cancel').length, nx = _slip.filter(i => i.op === 'rerung').length;
         const parts = [];
         if (nb) parts.push('place ' + nb + ' resting bet' + (nb === 1 ? '' : 's') + ' at the touch, ' + n + ' contracts each');
         if (nr) parts.push('re-peg ' + nr + ' order' + (nr === 1 ? '' : 's') + ' to the touch');
         if (nc) parts.push('cancel ' + nc + ' resting order' + (nc === 1 ? '' : 's'));
+        if (nx) parts.push('move ' + nx + ' bet' + (nx === 1 ? '' : 's') + ' to the current line (cancel + new order)');
         if (!confirm(parts.join('; ').replace(/^./, c => c.toUpperCase()) + '?')) return;
         postSlip(false);
     }
@@ -739,6 +744,11 @@
         if (b.market_type === 'moneyline' && team) return team + ' ML';
         return b.label || (team ? team + ' ML' : '?');
     }
+    // The same bet on another rung: "U 58.5", "Ole Miss +3.5".
+    function rungLabel(b, line) {
+        if (line == null) return betLabel(b);
+        return betLabel(Object.assign({}, b, { line: line, label: null }));
+    }
     function money(x) { if (x == null) return ''; return (x >= 0 ? '+$' : '−$') + Math.abs(x).toFixed(2); }
     async function loadBets() {
         let r;
@@ -789,7 +799,9 @@
                 if (o.resting) {
                     chip += '<span class="chip c-rest">RESTING ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '') + '</span>';
                     const ch = b.chase || {}, hold = ch.hold;
-                    if (hold && hold.touch_c != null) chip += '<span class="chip c-lost" title="the touch moved more than ' + (hold.leash_c != null ? hold.leash_c : 2) + '¢ past your last hand price — the box stopped chasing; re-peg to take the new price">MANUAL RE-PEG · touch ' + (b.touch_c != null ? b.touch_c : hold.touch_c) + '¢ · ' + (ch.anchor_c != null ? Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : 'past the leash') + '</span>';
+                    const rr = (hold && hold.rerung && hold.rerung.slug) ? hold.rerung : null;
+                    if (hold && hold.touch_c != null && rr) chip += '<span class="chip c-lost" title="the line moved: this rung\'s touch ran ' + (ch.anchor_c != null ? Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢' : 'more than the leash') + ' past your price. The current line at your price is ' + esc(rungLabel(b, rr.line)) + ' — tap it to cancel this order and rest the unfilled size there">LINE MOVED · touch ' + (b.touch_c != null ? b.touch_c : hold.touch_c) + '¢ here · current line ' + esc(rungLabel(b, rr.line)) + ' @ ' + rr.bid_c + '¢</span>';
+                    else if (hold && hold.touch_c != null) chip += '<span class="chip c-lost" title="the touch moved more than ' + (hold.leash_c != null ? hold.leash_c : 2) + '¢ past your last hand price — the box stopped chasing; re-peg to take the new price">MANUAL RE-PEG · touch ' + (b.touch_c != null ? b.touch_c : hold.touch_c) + '¢ · ' + (ch.anchor_c != null ? Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : 'past the leash') + '</span>';
                     else if (ch.thin_hold && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01 && Math.abs((ch.thin_hold.touch_c || 0) - b.touch_c) < 0.26)
                         chip += '<span class="chip c-rest" title="the touch rung is a sliver of the rung under it — a straggler rung, the one the hit lands on; the chase sits on the rung under it until it has company; a bet found ON a thin touch is dropped to the fat rung (guard is off inside T-6h)">THIN TOUCH · ' + b.touch_c + '¢ has ' + Math.round(ch.thin_hold.touch_q || 0) + ' over ' + Math.round(ch.thin_hold.below_q || 0) + ' at ' + ch.thin_hold.below_c + '¢ · sitting ' + o.price_c + '¢</span>';
                     else if (ch.rejoin_hold && ch.rejoin_hold.until && new Date(ch.rejoin_hold.until) > new Date() && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01)
@@ -805,9 +817,11 @@
                 if (!o.resting && !(held > 0)) chip += '<span class="chip c-off">' + (b.started ? 'IN PLAY' : 'OFF THE BOOK') + '</span>';
                 l2 = (b.cur_c != null ? 'now ' + b.cur_c + '¢ (' + am(_probToAmer(b.cur_c / 100)) + ')' : 'no live quote') + (b.started ? ' · in play' : '');
             }
-            const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id));
+            const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id)), rx = inSlip(opKey('rerung', b.id));
+            const rrx = (b.chase && b.chase.hold && b.chase.hold.rerung && b.chase.hold.rerung.slug) ? b.chase.hold.rerung : null;
             const acts = (b.status === 'pending' && o.resting && !b.started)
-                ? '<div class="acts"><button class="btn sm' + (rp ? ' on' : '') + '" onclick="toggleOp(\'repeg\',' + b.id + ')">' + (rp ? '✓ Re-peg' : 'Re-peg') + '</button>'
+                ? '<div class="acts">' + (rrx ? '<button class="btn sm' + (rx ? ' on' : '') + '" title="cancel this order and rest the unfilled size on the current line" onclick="toggleOp(\'rerung\',' + b.id + ')">' + (rx ? '✓ ' : '') + 'Move to ' + esc(rungLabel(b, rrx.line)) + '</button>' : '')
+                  + '<button class="btn sm' + (rp ? ' on' : '') + '" onclick="toggleOp(\'repeg\',' + b.id + ')">' + (rp ? '✓ Re-peg' : 'Re-peg') + '</button>'
                   + '<button class="btn sm warn' + (cn ? ' on' : '') + '" onclick="toggleOp(\'cancel\',' + b.id + ')">' + (cn ? '✓ Cancel' : 'Cancel') + '</button></div>' : '';
             return '<div class="bet">' + winGauge(prob, entryP, tip)
                  + '<div class="info"><div class="l1">' + chip + '<b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc((b.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + ' · ' + esc(b.sport) + ' · ' + fmtTime(b.event_start) + ' ' + fmtClock(b.event_start) + '</span></div>'
@@ -830,9 +844,11 @@
             _slip = _slip.filter(i => !(i.op && i.pick_id === id));
             const b = _betsById[id] || {};
             const o = b.order || {};
+            const rr = (b.chase && b.chase.hold && b.chase.hold.rerung) || {};
             _slip.push({ key, op, pick_id: id, sport: b.sport, event_start: b.event_start,
                          label: betLabel(b), game: (b.event_name || '').split(' @ ').map(shortTeam).join(' @ '),
-                         resting_c: o.price_c, touch_c: b.touch_c, leaves: o.leaves });
+                         resting_c: o.price_c, touch_c: b.touch_c, leaves: o.leaves,
+                         ...(op === 'rerung' ? { rerung_slug: rr.slug, rerung_label: rungLabel(b, rr.line), rerung_c: rr.bid_c } : {}) });
             autoOpenSlip();
         }
         saveSlip(); renderSlip(); loadBetsRender();

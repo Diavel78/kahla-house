@@ -13255,6 +13255,10 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
         out, _st = _bet_sheet_repeg_exec(sb, client, row.get("pick_id"))
         out["via"] = worker
         return out
+    if op == "rerung":
+        out, _st = _bet_sheet_rerung_exec(sb, client, row.get("pick_id"), pl.get("rerung_slug"))
+        out["via"] = worker
+        return out
     return {"ok": False, "error": f"unknown op {op}"}
 
 
@@ -15041,6 +15045,120 @@ def _bet_sheet_cancel_exec(sb, client, pick_id):
     return {"ok": True, "deleted": False, "held": held}, 200
 
 
+def _bet_sheet_rerung_exec(sb, client, pick_id, want_slug=None):
+    """RE-RUNG (Oct 7 2026): the line moved past the bet, so move the bet to
+    the current line — cancel the resting order (verified; the cancel path's
+    own rules for a partial fill), then rest the unfilled size on the rung the
+    chase found (`chase_hold.rerung`) at its seat price, and book it as its
+    own pick. Checks before touching anything: same game, same side, the
+    slug agrees with itself, pre-game, the new book has bids, the old order is
+    still on the book. (payload, status)."""
+    r, blob = _bet_sheet_pick(sb, pick_id)
+    if not r:
+        return {"ok": False, "error": "pick not found"}, 404
+    try:
+        full = (sb.table("bot_picks").select("sport,event_name,market_type,side,entry_line")
+                .eq("id", r["id"]).single().execute().data) or {}
+    except Exception as e:
+        return {"ok": False, "error": f"pick read failed: {e}"[:160]}, 503
+    rr = ((blob.get("chase_hold") or {}).get("rerung") if isinstance(blob.get("chase_hold"), dict) else None) or {}
+    new_slug = rr.get("slug")
+    if not new_slug:
+        return {"ok": False, "error": "no current-line rung found for this bet — re-peg or cancel instead"}, 409
+    if want_slug and want_slug != new_slug:
+        return {"ok": False, "error": "the current line changed since you tapped — tap it again"}, 409
+    new_syn = bool(rr.get("synthetic"))
+    old_slug, oid = blob.get("pmm_slug"), blob.get("order_id")
+    mt, side = full.get("market_type"), full.get("side")
+    if not (old_slug and oid):
+        return {"ok": False, "error": "no resting order on this bet"}, 400
+    if (_event_slug_from_market(old_slug) or "x") != (_event_slug_from_market(new_slug) or "y"):
+        return {"ok": False, "error": "the new rung is not the same game — not moving"}, 409
+    sl = _slug_side_line(new_slug, new_syn)
+    if not sl or sl[0] != mt or sl[1] != side or sl[2] is None:
+        return {"ok": False, "error": f"the new rung {new_slug} is not the same side — not moving"}, 409
+    new_line = float(sl[2])
+    try:
+        ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad event_start on the pick"}, 400
+    if ev.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return {"ok": False, "error": "game already started — pre-game only"}, 400
+    book = _bet_sheet_book(client, new_slug)
+    if book is None:
+        return {"ok": False, "error": "new rung's book unreadable — try again"}, 503
+    s_bid, _s_ask = _manual_side_book(book, new_syn)
+    if s_bid is None:
+        return {"ok": False, "error": "no bids on the new rung — nothing to join"}, 409
+    mp, oh = _hand_thin_cfg()
+    seat, _sdet = _hand_seat_price(book, new_syn, r.get("event_start"), datetime.now(timezone.utc), mp, oh)
+    seat = seat if seat is not None else s_bid
+    ords = _pmm_open_orders_raw(client, fresh=True)
+    if ords is None:
+        return {"ok": False, "error": "orders unreadable — try again"}, 503
+    cur = next((o for o in ords if o.get("id") == oid), None)
+    if cur is None:
+        return {"ok": False, "error": "the old order is not on the book (filled?) — check My bets"}, 409
+    total = _amend_total(cur.get("leaves"), cur.get("cum"))
+    try:
+        leaves = int(round(float(cur.get("leaves") or 0)))
+    except (TypeError, ValueError):
+        leaves = 0
+    if leaves < 1:
+        return {"ok": False, "error": "nothing left unfilled to move"}, 409
+    old_c = None
+    if cur.get("price_yes") is not None:
+        py = float(cur["price_yes"]) * 100.0
+        old_c = round((100.0 - py) if bool(blob.get("pmm_synthetic")) else py, 2)
+    out_c, _st_c = _bet_sheet_cancel_exec(sb, client, r["id"])
+    if not out_c.get("ok"):
+        return out_c, 502                                 # nothing moved
+    held = out_c.get("held")
+    qty = leaves if held is None else max(0, int(round(total - float(held))))
+    if qty < 1:
+        return {"ok": True, "moved": False, "note": "it filled before the move — nothing left to move",
+                "held": held}, 200
+    out, _st = _manual_order_place(client, new_slug, new_syn, seat, qty, r.get("event_start"),
+                                   book=book, verify="fresh")
+    if not out.get("ok"):
+        _probe_log({"bet_sheet_rerung": True, "pick_id": r["id"], "from_slug": old_slug,
+                    "to_slug": new_slug, "error": out.get("error")})
+        return {"ok": False, "error": (f"old order cancelled, but the new one failed: "
+                                       f"{out.get('error') or 'order failed'} — place it again from the sheet")}, 502
+    parts = (full.get("event_name") or "").split(" @ ")
+    away, home = (parts + ["", ""])[:2]
+    team = home if side == "home" else away
+    label = (f"{'O' if side == 'over' else 'U'} {new_line:g}" if mt == "total"
+             else f"{team} {new_line:+g}")
+    it = {"market_type": mt, "sport": full.get("sport"), "away": away, "home": home,
+          "event_start": r.get("event_start"), "side": side, "line": new_line, "label": label}
+    rs = {"slug": new_slug, "synthetic": new_syn, "rung_line": new_line, "rung_why": "rerung",
+          "price_c": seat}
+    res = {"order_id": out.get("order_id"), "price_c": out.get("price_c") or seat, "via": "rerung"}
+    pid, warn = _bet_sheet_log_pick(sb, r.get("asked_by"), it, rs, res, qty)
+    if pid:
+        try:
+            nr = (sb.table("bot_picks").select("signal_blob").eq("id", pid).single().execute().data) or {}
+            nbb = {**(nr.get("signal_blob") or {}),
+                   "rerung_from": {"pick_id": r["id"], "slug": old_slug, "line": full.get("entry_line"),
+                                   "price_c": old_c, "at": datetime.now(timezone.utc).isoformat()}}
+            sb.table("bot_picks").update({"signal_blob": nbb}).eq("id", pid).execute()
+        except Exception as e:
+            warn = ((warn or "") + f" · rerung stamp failed: {e}"[:80]).strip(" ·")
+    _probe_log({"bet_sheet_rerung": True, "pick_id": r["id"], "new_pick_id": pid,
+                "from_slug": old_slug, "from_line": full.get("entry_line"), "from_c": old_c,
+                "to_slug": new_slug, "to_line": new_line, "to_c": res["price_c"], "qty": qty,
+                "held_old": held, "resting": out.get("resting")})
+    ret = {"ok": True, "moved": True, "rerung": True, "label": label, "from_line": full.get("entry_line"),
+           "to_line": new_line, "price_c": res["price_c"], "from_c": old_c, "contracts": qty,
+           "pick_id": pid, "resting": out.get("resting")}
+    if held:
+        ret["held"] = held
+    if warn:
+        ret["warning"] = warn
+    return ret, 200
+
+
 def _bet_sheet_repeg_exec(sb, client, pick_id):
     """Move a resting sheet order to the touch by AMENDING IT IN PLACE (Oct 4
     2026, Rob: "that is NOT today's functionality on repegs, we amend on the
@@ -15293,6 +15411,80 @@ def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c, cap_c=None):
     return "move", touch_c, "join"
 
 
+# ── RE-RUNG (Oct 7 2026, Rob, on U 59.5 resting 49¢ with the touch at 58¢:
+# "the line has shifted HARD… this needs a re-rung, not a repeg… show
+# 'Current line @XX' and if I click that, it cancels my old no longer valid
+# and moves the rung"). When the chase holds (touch past the leash), the box
+# finds the rung on the SAME side whose bid sits nearest Rob's own price —
+# the line that now costs what he wanted to pay — and the strip offers it as
+# one tap. Never a rung that costs more than his price + the leash.
+_HAND_RERUNG_REFRESH_S = 180.0      # re-read the ladder for a held bet at most this often
+_HAND_RERUNG_READS = 2              # venue event lookups per chase tick for re-rung suggestions
+
+
+def _hand_rerung_target(entries, mt: str, side: str, cur_slug, anchor_c, leash_c):
+    """Pure. (entry, bid_c) — the same-side rung whose our-side bid is nearest
+    `anchor_c` without costing more than anchor + leash; ties go to the more
+    favorable line (spread / under: higher; over: lower). (None, None) when
+    no other rung qualifies. `entries` = the pmm lookup list for `mt`; each
+    quote is already OUR side's (a synthetic NO is inverted)."""
+    if anchor_c is None or mt not in ("spread", "total"):
+        return None, None
+    try:
+        anchor_c, leash_c = float(anchor_c), float(leash_c)
+    except (TypeError, ValueError):
+        return None, None
+    cands = []
+    for e in entries or []:
+        if e.get("side") != side or not e.get("slug") or e.get("slug") == cur_slug or e.get("line") is None:
+            continue
+        b = (e.get("quote") or {}).get("bid")
+        if b is None:
+            continue
+        try:
+            bc, ln = round(float(b) * 100.0, 2), float(e["line"])
+        except (TypeError, ValueError):
+            continue
+        if 5.0 <= bc <= 95.0 and bc <= anchor_c + leash_c + 1e-9:
+            cands.append((ln, bc, e))
+    if not cands:
+        return None, None
+    better_hi = mt == "spread" or side == "under"
+    cands.sort(key=lambda c: (abs(c[1] - anchor_c), -c[0] if better_hi else c[0]))
+    return cands[0][2], cands[0][1]
+
+
+def _hand_rerung_suggest(client, r: dict, cur_slug, anchor_c, leash_c, now) -> dict | None:
+    """The current-line rung for a held sheet bet → {slug, synthetic, line,
+    bid_c, at} or {none, why, at}. None = could not ask (rate limit) —
+    retry next tick. One venue event lookup (pmm cache 120s)."""
+    mt = r.get("market_type")
+    stamp = now.isoformat()
+    if mt not in ("spread", "total"):
+        return {"none": True, "why": "market", "at": stamp}
+    parts = (r.get("event_name") or "").split(" @ ")
+    if len(parts) != 2:
+        return {"none": True, "why": "event", "at": stamp}
+    if _venue_rl_active():
+        return None
+    try:
+        import pmm_markets as _pm
+        pmm = _pm.lookup(client, str(r.get("sport") or "").upper(), parts[0], parts[1],
+                         r.get("event_start"), want_props=False, max_age_s=120)
+    except Exception as e:
+        _venue_rl_trip(e)
+        return None
+    if not pmm:
+        return {"none": True, "why": "lookup", "at": stamp}
+    e, bid_c = _hand_rerung_target(pmm.get(mt), mt, r.get("side"), cur_slug, anchor_c, leash_c)
+    if e is None:
+        return {"none": True, "why": "no_rung", "at": stamp}
+    if _bet_sheet_slug_disagrees(e, mt):
+        return {"none": True, "why": "slug_disagrees", "at": stamp}
+    return {"slug": e["slug"], "synthetic": bool(e.get("synthetic")), "line": float(e["line"]),
+            "bid_c": bid_c, "at": stamp}
+
+
 def _hand_chase_tick(sb, client, now) -> dict:
     """One pass over the pending sheet bets with a resting order."""
     global HAND_LIVE_SLUGS
@@ -15315,7 +15507,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
     thin_off_h = _fl("hand_join_thin_off_h", _HAND_JOIN_THIN_OFF_H)
     t0 = _time.monotonic()
     try:
-        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob,sport,event_name,market_type,side")
                 .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                 .limit(300).execute().data or [])
     except Exception as e:
@@ -15447,10 +15639,26 @@ def _hand_chase_tick(sb, client, now) -> dict:
                     continue
         if verdict == "hold":
             st["held"] += 1
-            if not hold or thin_hold or abs(float(hold.get("touch_c") or -1) - target) >= 0.49:
-                nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c,
-                      "chase_hold": {"touch_c": target, "price_c": price_c, "leash_c": leash,
-                                     "at": now.isoformat()}}
+            rr = (hold or {}).get("rerung") if isinstance((hold or {}).get("rerung"), dict) else None
+            moved_touch = not hold or abs(float(hold.get("touch_c") or -1) - target) >= 0.49
+            rr_age = None
+            try:
+                rr_age = (now - datetime.fromisoformat(str((rr or {}).get("at")).replace("Z", "+00:00"))).total_seconds()
+            except (TypeError, ValueError):
+                pass
+            if (st.get("rr_reads", 0) < _HAND_RERUNG_READS
+                    and (rr is None or rr_age is None or rr_age > _HAND_RERUNG_REFRESH_S or moved_touch)):
+                st["rr_reads"] = st.get("rr_reads", 0) + 1
+                got = _hand_rerung_suggest(client, r, slug, anchor_c if anchor_c is not None else price_c,
+                                           leash, now)
+                if got is not None:
+                    rr = got
+                    moved_touch = True                  # write the fresh suggestion
+            if moved_touch or thin_hold:
+                ch = {"touch_c": target, "price_c": price_c, "leash_c": leash, "at": now.isoformat()}
+                if rr:
+                    ch["rerung"] = rr
+                nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c, "chase_hold": ch}
                 nb.pop("thin_hold", None)
                 sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
             continue
@@ -15556,14 +15764,15 @@ def api_bet_sheets_ops():
         key = (it or {}).get("key") or f"op|{(it or {}).get('op')}|{(it or {}).get('pick_id')}"
         op = str((it or {}).get("op") or "").lower()
         res = {"key": key, "op": op, "pick_id": (it or {}).get("pick_id")}
-        if op not in ("cancel", "repeg"):
+        if op not in ("cancel", "repeg", "rerung"):
             res.update({"ok": False, "reason": "unknown action"}); results.append(res); continue
         r, blob = _bet_sheet_pick(sb, (it or {}).get("pick_id"))
         if not r:
             res.update({"ok": False, "reason": "bet not found (already settled or removed?)"}); results.append(res); continue
         row = {"op": op, "pick_id": r["id"], "slug": blob.get("pmm_slug"),
                "synthetic": bool(blob.get("pmm_synthetic")), "order_id": blob.get("order_id"),
-               "payload": {"asked_by": g.uid}}
+               "payload": {"asked_by": g.uid,
+                           **({"rerung_slug": (it or {}).get("rerung_slug")} if op == "rerung" else {})}}
         try:
             rid = _hand_order_enqueue(sb, row)
         except Exception as e:
@@ -15579,7 +15788,8 @@ def api_bet_sheets_ops():
         elif not out.get("ok"):
             res.update({"ok": False, "reason": out.get("error") or f"{res['op']} failed"})
         else:
-            res.update({k: out.get(k) for k in ("moved", "from_c", "price_c", "note", "deleted", "held", "via", "order_lost")
+            res.update({k: out.get(k) for k in ("moved", "from_c", "price_c", "note", "deleted", "held", "via", "order_lost",
+                                                "rerung", "label", "to_line", "contracts", "warning")
                         if out.get(k) is not None})
             res["ok"] = True
             n_ok += 1
