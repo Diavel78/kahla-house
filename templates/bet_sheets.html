@@ -246,6 +246,7 @@
                    oninput="renderGames()">
             <div class="tabs">
                 <button class="tab on" data-sport="NHL" onclick="switchSport('NHL')">🏒 Hockey</button>
+                <button class="tab" data-sport="NBA" onclick="switchSport('NBA')">🏀 NBA</button>
                 <button class="tab" data-sport="NCAAF" onclick="switchSport('NCAAF')">🏈 College</button>
                 <button class="tab" data-sport="NFL" onclick="switchSport('NFL')">🏈 NFL</button>
             </div>
@@ -306,6 +307,7 @@
     }
 
     let _sport = 'NHL';
+    const _daily = () => _sport === 'NHL' || _sport === 'NBA';   // daily-slate sports (no week key)
     function switchSport(s) {
         _sport = s;
         document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.sport === s));
@@ -391,7 +393,7 @@
         return pct(p) + ' <span class="dim">(' + am(a) + ')</span>';
     }
     function nameOf(g, side) {
-        if (_sport === 'NHL') return g[side + '_short'] || shortTeam(g[side]);
+        if (_daily()) return g[side + '_short'] || shortTeam(g[side]);
         return g[side + '_short'] || shortTeam(g[side]);
     }
     // A home-oriented spread printed the way a book prints it: the favorite
@@ -660,6 +662,28 @@
         } else out.push('<span class="sb dis">no total</span>');
         return '<div class="sides">' + out.join('') + '</div>';
     }
+    // basketball: ML both sides, spread both sides (the market line, else the
+    // model's margin on the half-point grid, tagged model), total over/under
+    function basketballSides(gi, g) {
+        if (g._st && g._st !== 'up') return '';     // started/finished — pre-game bets only
+        const L = g.line || {}, M = g.model || {};
+        const out = [];
+        out.push(sideBtn(gi, g, 'ml', 'away', 0, nameOf(g, 'away') + ' ML', false));
+        out.push(sideBtn(gi, g, 'ml', 'home', 0, nameOf(g, 'home') + ' ML', false));
+        let sh = L.spread_home, fromM = false;
+        if (sh == null && M.spread_home != null) { sh = Math.round(Number(M.spread_home) * 2) / 2; if (Math.abs(sh - Math.round(sh)) < 0.01) sh += 0.5; fromM = true; }
+        if (sh != null) {
+            out.push(sideBtn(gi, g, 'spread', 'away', -sh, nameOf(g, 'away') + ' ' + sgn(-sh, 1), fromM));
+            out.push(sideBtn(gi, g, 'spread', 'home', sh, nameOf(g, 'home') + ' ' + sgn(sh, 1), fromM));
+        }
+        let tot = L.total, fromMt = false;
+        if (tot == null && M.total != null) { tot = Math.round(Number(M.total) * 2) / 2; if (Math.abs(tot - Math.round(tot)) < 0.01) tot += 0.5; fromMt = true; }
+        if (tot != null) {
+            out.push(sideBtn(gi, g, 'total', 'over', tot, 'O ' + tot, fromMt));
+            out.push(sideBtn(gi, g, 'total', 'under', tot, 'U ' + tot, fromMt));
+        }
+        return '<div class="sides">' + out.join('') + '</div>';
+    }
     // hockey: ML both sides, total over/under, puck line both sides
     function hockeySides(gi, g) {
         if (g._st && g._st !== 'up') return '';     // started/finished — pre-game bets only
@@ -835,7 +859,21 @@
         rows.push(mrow('Total', pk, M && M.total != null ? Number(M.total).toFixed(1) + gradeMark(g, 'model', 'total') : '', det));
         return rows.join('');
     }
-    function hockeyRows(g) {
+    // NBA (Hoops IQ, Oct 2026): ML verdict like hockey; spread + total are LEAN
+    // at most — no backtested edge vs the closing number yet.
+    function basketballRows(g) {
+        const L = g.line || {}, M = g.model;
+        const rows = [hockeyRows(g, true)];
+        let pk = '', det = '';
+        const bs = g.spread;
+        if (bs && bs.verdict !== 'pass') {
+            pk = verdictBadge(bs.verdict) + '<b>' + (bs.abbr || shortTeam(bs.team)) + ' ' + sgn(bs.line) + (bs.price != null ? ' ' + am(bs.price) : '') + '</b>';
+            det = 'edge ' + sgn(bs.edge_pp) + '%' + (bs.fair ? ', fair ' + am(bs.fair) : '');
+        } else if (L.spread_home != null) pk = (bs ? verdictBadge('pass') : '') + '<span class="dim">' + favLine(g, L.spread_home, 1) + '</span>';
+        rows.push(mrow('Spread', pk, M && M.spread_home != null ? favLine(g, M.spread_home, 1) + gradeMark(g, 'model', 'spread') : '', det));
+        return rows.join('');
+    }
+    function hockeyRows(g, noPuck) {
         const L = g.line || {}, M = g.model;
         const rows = [];
         // moneyline
@@ -859,7 +897,7 @@
         } else if (L.total != null) pk = (g.total ? verdictBadge('pass') : '') + '<span class="dim">O/U ' + L.total + '</span>';
         rows.push(mrow('Total', pk, M && M.total != null ? Number(M.total).toFixed(1) + gradeMark(g, 'model', 'total') : '', det));
         // puck line (no sheet verdict — line + model margin)
-        if (L.puck_home !== undefined || (M && M.spread_home != null)) {
+        if (!noPuck && (L.puck_home !== undefined || (M && M.spread_home != null))) {
             const favHome = L.puck_home !== undefined && Number(L.puck_home) < 0;
             const po = L.puck_home !== undefined ? (favHome ? L.puck_home_odds : L.puck_away_odds) : undefined;
             pk = L.puck_home !== undefined ? '<span class="dim">' + favLine(g, L.puck_home, 1) + (po !== undefined ? ' ' + am(po) : '') + '</span>' : '';
@@ -892,11 +930,11 @@
         if (!d.week_key || !d.games || !d.games.length) {
             document.getElementById('metaLine').textContent = d.note || 'no sheets for this sport yet';
             _games = [];
-            document.getElementById('games').innerHTML = '<div class="empty">' + (_sport === 'NHL' ? 'No upcoming games on the sheet yet.' : 'Nothing built yet — check back after the Monday or Friday run.') + '</div>';
+            document.getElementById('games').innerHTML = '<div class="empty">' + (_daily() ? (_sport === 'NBA' ? 'No upcoming games on the sheet yet — the regular season tips Oct 20; the sheet skips preseason.' : 'No upcoming games on the sheet yet.') : 'Nothing built yet — check back after the Monday or Friday run.') + '</div>';
             return;
         }
 
-        document.getElementById('metaLine').textContent = _sport === 'NHL'
+        document.getElementById('metaLine').textContent = _daily()
             ? d.games.length + ' games · lines/model updated ' + ago(d.lines_updated_at)
             : 'Week of ' + d.week_key + ' · ' + d.games.length + ' games · sheet built ' + ago(d.built_at || d.published_at) +
               ' · lines/model updated ' + ago(d.lines_updated_at);
@@ -917,7 +955,7 @@
     }
     // 'up' = not started; 'final' = graded final or started > FINAL_AFTER_H
     // ago (a grade lands within ~5 min of the final); 'live' = in between.
-    const FINAL_AFTER_H = { NHL: 3.5, NFL: 4.5, NCAAF: 4.5 };
+    const FINAL_AFTER_H = { NHL: 3.5, NBA: 3.0, NFL: 4.5, NCAAF: 4.5 };
     function gameStatus(g) {
         const t = g.event_start ? new Date(g.event_start).getTime() : null;
         if (t === null || t > Date.now()) return 'up';
@@ -964,7 +1002,7 @@
                 const dstr = fmtTime(g.event_start);
                 if (dstr !== day) { html += '<div class="day-hdr">' + dstr + '</div>'; day = dstr; }
             }
-            const rows = _sport === 'NHL' ? hockeyRows(g) : footballRows(g);
+            const rows = _sport === 'NHL' ? hockeyRows(g) : _sport === 'NBA' ? basketballRows(g) : footballRows(g);
             let sub = '';
             if (_sport === 'NHL' && g.goalies) {
                 const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
@@ -974,7 +1012,7 @@
             html += '<div class="game' + (g._st === 'final' ? ' done' : '') + '"><div class="ghead"><span class="t">' + (g._st === 'final' ? fmtTime(g.event_start).split(',')[0] + ' ' : '') + fmtClock(g.event_start) + '</span>'
                   + '<span class="m">' + shortTeam(g.away) + ' @ ' + shortTeam(g.home) + '</span>' + flag + finalChip(g) + sub + '</div>'
                   + '<div class="mbox">' + rows + '</div>'
-                  + (_sport === 'NHL' ? hockeySides(g._gi, g) : footballSides(g._gi, g))
+                  + (_sport === 'NHL' ? hockeySides(g._gi, g) : _sport === 'NBA' ? basketballSides(g._gi, g) : footballSides(g._gi, g))
                   + '</div>';
         }
         document.getElementById('games').innerHTML = html;
