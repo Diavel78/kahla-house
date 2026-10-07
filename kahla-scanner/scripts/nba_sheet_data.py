@@ -39,7 +39,7 @@ sys.path.insert(0, _SCANNER)
 from _lib import nba_iq as hq  # noqa: E402
 from scripts import nba_fetch  # noqa: E402
 from scripts.football_sheet_data import _espn_get, sb_upsert, week_key_default  # noqa: E402
-from scripts.nhl_sheet_data import _american, _no_vig, _parse_odds  # noqa: E402
+from scripts.nhl_sheet_data import _american, _no_vig, _parse_odds, pin_overlay  # noqa: E402
 
 log = logging.getLogger("nba_sheet_data")
 AZ = ZoneInfo("America/Phoenix")
@@ -73,6 +73,16 @@ def refresh_history(seasons):
             continue                      # a closed season: nothing new to fetch
         nba_fetch.fetch_season(s, CACHE)
     return nba_fetch.load(CACHE, seasons)
+
+
+def _spread_names(odds: dict) -> dict:
+    """The NHL parser (and the Pinnacle overlay built on it) call the
+    spread `puck_home`; the NBA sheet reads `spread_home`."""
+    if "puck_home" in odds:
+        odds["spread_home"] = odds.pop("puck_home")
+        odds["spread_home_odds"] = odds.pop("puck_home_odds", None)
+        odds["spread_away_odds"] = odds.pop("puck_away_odds", None)
+    return odds
 
 
 def espn_slate(days: int, preseason: bool = False):
@@ -109,11 +119,7 @@ def espn_slate(days: int, preseason: bool = False):
             start = datetime.fromisoformat((ev.get("date") or "").replace("Z", "+00:00"))
         except ValueError:
             continue
-        odds = _parse_odds(comp)
-        if "puck_home" in odds:           # the NHL parser's name for the spread
-            odds["spread_home"] = odds.pop("puck_home")
-            odds["spread_home_odds"] = odds.pop("puck_home_odds", None)
-            odds["spread_away_odds"] = odds.pop("puck_away_odds", None)
+        odds = _spread_names(_parse_odds(comp))
         out.append({"espn_id": str(ev.get("id")), "start": start,
                     "home": sides["home"], "away": sides["away"], "odds": odds,
                     "broadcast": ", ".join(b for bl in (comp.get("broadcasts") or [])
@@ -188,7 +194,7 @@ def verdicts(g, pr):
     return picks
 
 
-def run(days: int, commit: bool, preseason: bool = False) -> dict:
+def run(days: int, commit: bool, preseason: bool = False, pin: bool | None = None) -> dict:
     cur = current_season()
     rows = refresh_history([cur - 3, cur - 2, cur - 1, cur])
     m, pairs, _preds, season_start = hq.walk(rows, PARAMS, FEATS)
@@ -196,9 +202,16 @@ def run(days: int, commit: bool, preseason: bool = False) -> dict:
     slate = espn_slate(days, preseason)
     if slate is None:
         return {"games": 0, "error": "espn_dark"}
+    # THE LINE IS PINNACLE'S on the run that pulled it (07:00 AZ), the
+    # book's on the later runs — the hockey overlay with sport="NBA".
+    pin_st = None
+    if pin is not None:
+        pin_st = pin_overlay(slate, spend=bool(pin), sport="NBA")
+        for g in slate:
+            g["odds"] = _spread_names(g["odds"])
     wk = week_key_default()
     now_iso = datetime.now(timezone.utc).isoformat()
-    out_rows, summary = [], {"games": 0, "priced": 0, "plays": 0}
+    out_rows, summary = [], {"games": 0, "priced": 0, "plays": 0, "pinnacle": pin_st}
     for g in slate:
         d = hq.game_day(g["start"].isoformat())
         st = hq.HoopsIQ.season_time(cur, d, season_start)
@@ -213,7 +226,7 @@ def run(days: int, commit: bool, preseason: bool = False) -> dict:
                          "event_start": g["start"].isoformat(),
                          "records": {"away": g["away"]["record"], "home": g["home"]["record"]},
                          "broadcast": g.get("broadcast")},
-                "lines": g["odds"],
+                "lines": g["odds"], "lines_espn": g.get("odds_espn"),
                 "injuries": {s: [v[0] for v in (inj.get(g[s]["id"]) or {}).values()]
                              for s in ("home", "away")},
                 "model_meta": {"engine": "hoops_iq", "params": PARAMS,
@@ -259,10 +272,14 @@ def main() -> int:
     ap.add_argument("--commit", action="store_true")
     ap.add_argument("--preseason", action="store_true",
                     help="include preseason games (dry runs only — never with --commit)")
+    ap.add_argument("--pin", action="store_true",
+                    help="pull Pinnacle's NBA slate (parlay-api, ~3 credits, 90-min cache) "
+                         "and price against it; without it the cached slate is used only "
+                         "while fresh (the 07:00 pull), else the ESPN book line")
     a = ap.parse_args()
     if a.preseason and a.commit:
         ap.error("--preseason is for dry runs")
-    s = run(a.days, a.commit, a.preseason)
+    s = run(a.days, a.commit, a.preseason, pin=a.pin)
     print(json.dumps(s, indent=2, default=str))
     return 0 if s.get("error") is None else 1
 

@@ -108,11 +108,13 @@ def pin_pull(sports, spend: bool) -> dict:
 def line_hook(sport: str, away: str, home: str) -> dict | None:
     """Pinnacle's spread (home-oriented) + total for one game off the
     cached slate; None when the slate is missing, older than the app's
-    _PIN_CENTER_MAX_AGE_S, or does not list the game — the builder then
-    falls back to DK / ESPN consensus exactly as before."""
+    _SHEET_PIN_FRESH_S (Oct 6 2026: one 07:00 pull a day, the later
+    refreshes price off the book line), or does not list the game — the
+    builder then falls back to DK / ESPN consensus exactly as before."""
     app = _app()
     events, age = _PIN_SLATES.get(sport, (None, None))
-    if not events or age is None or age * 60.0 > app._PIN_CENTER_MAX_AGE_S:
+    fresh_s = getattr(app, "_SHEET_PIN_FRESH_S", app._PIN_CENTER_MAX_AGE_S)
+    if not events or age is None or age * 60.0 > fresh_s:
         return None
     sp = app._pin_line_from_events(events, away, home, "spread")
     tt = app._pin_line_from_events(events, away, home, "total")

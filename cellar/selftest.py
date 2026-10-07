@@ -2987,12 +2987,13 @@ def test_end_state_rosters() -> None:
 
 
 def test_sheet_pinnacle_line() -> None:
-    """Rob, Oct 5 2026: the sheet's line is PINNACLE's, refreshed 3-4× a day
-    inside the free parlay-api tier. Pinnacle beats every other source; a
-    missing Pinnacle market falls through to DK / ESPN consensus; the
-    hockey overlay reads a TOA-shaped slate into the ESPN odds shape; and
-    the batch jobs that may SPEND a pull are exactly the football refreshes
-    + build and the one pre-slate hockey run (budget ≈ 837 of 900 a month)."""
+    """Rob, Oct 5 2026: the sheet's line is PINNACLE's; Oct 6: "7 am pull
+    pinnacle, daily, for all sports, then DK for the updates". Pinnacle
+    beats every other source while the slate is FRESH (3h); a missing
+    Pinnacle market falls through to DK / ESPN consensus; the hockey overlay
+    (shared with the NBA sheet) reads a TOA-shaped slate into the ESPN odds
+    shape; and the batch jobs that may SPEND a pull are exactly the 07:00
+    runs of every sheet sport + the Monday build (≈ 400 of 900 a month)."""
     import sys as _sys
     from cellar.batch import JOBS, SCANNER_DIR
     if SCANNER_DIR not in _sys.path:
@@ -3049,15 +3050,35 @@ def test_sheet_pinnacle_line() -> None:
               "_tape_rows(" in src and "sb_select(" not in src)
 
     spend = {j.name for j in JOBS if "--pin" in j.argv}
-    check("batch: the Pinnacle-spending jobs are the football refreshes + build and ONE hockey run",
-          spend == {"sheets_build", "sheets_refresh_am", "sheets_refresh_md",
-                    "sheets_refresh_pm", "sheets_refresh_ev", "nhl_sheet_1530"}, f"got {sorted(spend)}")
-    # 4 football pulls × 2 sports × 3 credits + 1 hockey × 3, 31 days, under the 900 stop
+    check("batch: the Pinnacle-spending jobs are the 07:00 runs (football, NHL, NBA) + the Monday build",
+          spend == {"sheets_build", "sheets_refresh_am", "nhl_sheet_07", "nba_sheet_07"}, f"got {sorted(spend)}")
+    by = {j.name: j for j in JOBS}
+    check("batch: every spending daily run sits at the 7am clock",
+          all(by[n].hour == 7 for n in spend if n != "sheets_build"),
+          f"got {[(n, by[n].hour, by[n].minute) for n in spend]}")
+    # 1 football pull × 2 sports + NHL + NBA = 4 × 3 credits a day, + the Monday build, 31 days
     fb = sum(1 for j in JOBS if j.name.startswith("sheets_refresh") and "--pin" in j.argv)
-    nh = sum(1 for j in JOBS if j.name.startswith("nhl_sheet") and "--pin" in j.argv)
-    month = (fb * 2 * _app._PARLAY_CREDITS_PER_CALL + nh * _app._PARLAY_CREDITS_PER_CALL) * 31
-    check(f"batch: a 31-day month of pulls ({month}) fits the {_app._PARLAY_BUDGET} stop",
-          month <= _app._PARLAY_BUDGET, f"{month} > {_app._PARLAY_BUDGET}")
+    daily = sum(1 for j in JOBS if j.name.startswith(("nhl_sheet", "nba_sheet")) and "--pin" in j.argv)
+    month = (fb * 2 + daily) * _app._PARLAY_CREDITS_PER_CALL * 31 + 2 * _app._PARLAY_CREDITS_PER_CALL * 5
+    check(f"batch: a 31-day month of pulls ({month}) fits the {_app._PARLAY_BUDGET} stop with room",
+          month <= _app._PARLAY_BUDGET * 0.6, f"{month} > {_app._PARLAY_BUDGET * 0.6}")
+    # THE FRESH GATE: a run that did not pull prices off Pinnacle only while the slate is <3h old
+    check("sheets price off Pinnacle only while the slate is fresh (3h), never the machine's 26h",
+          _app._SHEET_PIN_FRESH_S == 3 * 3600 and _app._SHEET_PIN_FRESH_S < _app._PIN_CENTER_MAX_AGE_S)
+    import scripts.box_sheets as _bxs
+    for _fn in (_bxs.line_hook, nsd.pin_overlay):
+        _src = _insp.getsource(_fn)
+        check(f"{_fn.__name__} gates on _SHEET_PIN_FRESH_S", "_SHEET_PIN_FRESH_S" in _src)
+    try:
+        from scripts import nba_sheet_data as bsd       # imports nba_iq → numpy
+        _nba_src = _insp.getsource(bsd.run)
+        _renamed = bsd._spread_names({"puck_home": -3.5, "puck_home_odds": -110})["spread_home"] == -3.5
+    except ModuleNotFoundError:                          # a box without numpy: read the file
+        import os as _os
+        _nba_src = open(_os.path.join(SCANNER_DIR, "scripts", "nba_sheet_data.py")).read()
+        _renamed = 'odds["spread_home"] = odds.pop("puck_home")' in _nba_src
+    check("the NBA sheet runs the shared overlay with sport=NBA and renames the spread",
+          'pin_overlay(slate, spend=bool(pin), sport="NBA")' in _nba_src and _renamed)
     # The ONLY spenders are the sheet jobs (via _pin_slate) and the OMS's own
     # daily refresh (gated off with the machine). The paperlog stamp was the
     # hidden one — 48 credits a day off hockey suggestions.
