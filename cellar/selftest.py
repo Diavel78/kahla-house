@@ -2946,6 +2946,32 @@ def test_touch_tape_dark() -> None:
           _app._touch_tape_dark(_SB({"at": fresh, "slugs": {"a": []}})) == (1, 1))
 
 
+def test_hand_rerung_target() -> None:
+    """RE-RUNG (Oct 7 2026): when the line runs past a held bet, the current
+    line is the same-side rung whose bid sits nearest Rob's own price, never
+    one costing more than his price + the leash."""
+    import app as _app
+    def E(side, line, bid, slug):
+        return {"side": side, "line": line, "slug": slug, "quote": {"bid": bid / 100.0, "ask": (bid + 1) / 100.0}}
+    unders = [E("under", 59.5, 58.0, "u595"), E("under", 58.5, 51.0, "u585"),
+              E("under", 57.5, 45.0, "u575"), E("over", 58.5, 48.0, "o585")]
+    e, bc = _app._hand_rerung_target(unders, "total", "under", "u595", 49.0, 2.0)
+    check("U 59.5 run to 58c re-rungs to U 58.5 (51c, inside price + leash)", e and e["slug"] == "u585" and bc == 51.0)
+    e, bc = _app._hand_rerung_target(unders, "total", "under", "u595", 46.0, 2.0)
+    check("a lower anchor picks the cheaper line", e and e["slug"] == "u575")
+    e, bc = _app._hand_rerung_target(unders, "total", "under", "u595", 40.0, 2.0)
+    check("nothing within price + leash = no suggestion", e is None)
+    e, bc = _app._hand_rerung_target([E("under", 58.5, 48.0, "a"), E("under", 57.5, 50.0, "b")],
+                                     "total", "under", "x", 49.0, 2.0)
+    check("tie on distance goes to the better under line (higher)", e and e["slug"] == "a")
+    sp = [E("away", -3.5, 49.0, "a35"), E("away", -2.5, 49.0, "a25"), E("home", 3.5, 49.0, "h35")]
+    e, bc = _app._hand_rerung_target(sp, "spread", "away", "a45", 49.0, 2.0)
+    check("spread tie goes to the better spread line (-2.5 over -3.5)", e and e["slug"] == "a25")
+    check("never the other side", _app._hand_rerung_target([E("home", 3.5, 49.0, "h")], "spread", "away", "x", 49.0, 2.0)[0] is None)
+    check("a stub bid is not a line", _app._hand_rerung_target([E("under", 58.5, 1.0, "s")], "total", "under", "x", 3.0, 2.0)[0] is None)
+    check("moneyline has no rungs", _app._hand_rerung_target(sp, "ml", "away", "x", 49.0, 2.0)[0] is None)
+
+
 def test_pmm_unsigned_cover_questions() -> None:
     """THE NMSU RULE (Oct 7 2026): Polymarket titled NMSU@FIU spreads "Will
     the NM State cover 6.5 vs the Florida International"; only FIU was
@@ -3364,7 +3390,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
