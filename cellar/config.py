@@ -231,6 +231,14 @@ ALL_LANES: dict[str, Lane] = {
         # 60-90s tick, not a hang. Lease ttl stays 60; the renewer covers it.
         Lane("handbets",        10,    60, writes_money=True, stuck_s=300,
              quiet=True, note="hand bets queued by the site — placed from the box"),
+        # THE END STATE (Oct 6 2026 — Rob: "Pick bot is dead, the Ferrari is
+        # dead, the sisters are dead… the sheets IS THE MAIN thing"). Tape
+        # daemon = batch,grader,mirror; money daemon = handbets (sockets on).
+        # `mirror` carries the two dashboard feeds the paperlog ROUTE used to
+        # run (poly_activities sync + the dashboard precompute); everything
+        # else above stays registered so un-shutting is a roster edit.
+        Lane("mirror",          60,   300, stuck_s=600,
+             note="poly_activities mirror + dashboard precompute (no engine)"),
     ]
 }
 

@@ -172,17 +172,16 @@ JOBS: tuple[Job, ...] = (
     # lane_grader) — this job owns only the stamped daily record.
 
     # -- daily model computes (order matters: after their spines) ----------
-    Job("diamond_iq", ["scripts.compute_diamond_iq"],
-        hour=3, minute=50, note="MLB ML model snapshot"),
+    # RETIRED Oct 6 2026 with the Pick Bot and the machine (Rob: "models and
+    # lines are all that matters" — the SHEETS' models): diamond_iq (MLB ML
+    # snapshot for the opener lane), football_props + whiff_iq (prop-lane
+    # models), ufc_model (Fight IQ), tune_prime_window (the Pick Bot's
+    # weekly tuner). Their scripts stay; re-add a Job line to revive one.
+    # The data SPINES above stay — cheap, idempotent, and the fuel for any
+    # future model.
     # After the football_players delta (3:48) — the NFL props model state
     # (per-player decayed mean/SD + league priors, the gate-1 mirror).
     # The betting wire lands separately, from real captured prop shapes.
-    Job("football_props", ["scripts.compute_football_props", "--commit"],
-        hour=3, minute=52, note="NFL props model snapshot"),
-    Job("whiff_iq", ["scripts.compute_whiff_iq"],
-        hour=3, minute=55, timeout_s=2700,
-        note="pitcher-prop model snapshot",
-        then=(("scripts.grade_whiff_paperlog",),)),
     Job("power_ratings", ["scripts.ingest_results", "--days", "2"],
         hour=4, minute=0, note="ESPN finals -> game_results, then ratings",
         then=(("scripts.compute_power_ratings",),)),
@@ -229,12 +228,6 @@ JOBS: tuple[Job, ...] = (
          "--limit", "80"],
         hour=3, weekday=0, timeout_s=3600, needs="playwright",
         note="UFCStats delta (Mon) — needs playwright"),
-    Job("ufc_model", ["scripts.compute_ufc_model", "--commit"],
-        hour=4, weekday=0, timeout_s=2700,
-        note="Fight IQ snapshot + paperlog grading (Mon)",
-        then=(("scripts.grade_ufc_paperlog", "--commit"),)),
-    Job("tune_prime_window", ["scripts.tune_prime_window", "--lookback-days", "30"],
-        hour=5, weekday=0, note="weekly prime-window auto-tuner (Mon)"),
 )
 
 JOBS_BY_NAME = {j.name: j for j in JOBS}

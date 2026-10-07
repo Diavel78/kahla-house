@@ -353,6 +353,36 @@ def lane_ledger(ctx: Ctx) -> int:
     return int(stats.get("stamped") or stats.get("updated") or 0)
 
 
+_MIRROR_DASH_TS = 0.0
+
+
+def lane_mirror(ctx: Ctx) -> int:
+    """THE DASHBOARD'S TWO FEEDS, WITHOUT THE PICK BOT (Oct 6 2026, Rob:
+    "Pick bot is dead… the sheets IS THE MAIN thing… clean the shit up").
+    These two calls lived in the paperlog ROUTE body, so retiring the
+    paperlog lane would have silently stopped them (the Aug 20 lesson, in
+    reverse): `_acts_sync` keeps `poly_activities` current — the dashboard's
+    history, the day card's math, and the hand-fill verdict Bet Sheets'
+    adoption asks — and `_dash_cache_refresh` precomputes the dashboard
+    every _DASH_REFRESH_EVERY_S so the page never pays for the walk.
+    No engine, no money, no owner uid."""
+    global _MIRROR_DASH_TS
+    import app as _app
+    client = _app.get_client()
+    st = _app._acts_sync(ctx.sb, client, pages=2) or {}
+    n = int(st.get("inserted") or st.get("new") or 0)
+    if _t.time() - _MIRROR_DASH_TS >= _app._DASH_REFRESH_EVERY_S:
+        _MIRROR_DASH_TS = _t.time()
+        try:
+            st["dash"] = _app._dash_cache_refresh(ctx.sb, client)
+            n += 1
+        except Exception as e:  # noqa: BLE001 — the mirror never dies for the cache
+            st["dash"] = {"err": str(e)[:120]}
+    _keep_body(ctx, st)
+    log.info("mirror: %s", {k: v for k, v in st.items() if k != "dash"})
+    return n
+
+
 def lane_batch(ctx: Ctx) -> int:
     """Phase 1: the scheduled workflow roster. Implementation in batch.py."""
     from .batch import lane_batch as _impl
@@ -530,6 +560,7 @@ REGISTRY: dict[str, Callable[[Ctx], int]] = {
     "pair":           lane_pair,
     "pair_seed":      lane_pair_seed,
     "handbets":       lane_handbets,
+    "mirror":         lane_mirror,
 }
 
 
