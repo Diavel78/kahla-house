@@ -1,0 +1,28 @@
+name: NHL — Market Brier (the Vegas ceiling)
+
+# Read-only: scores DraftKings' closing NHL moneyline (ESPN core odds) the
+# way our models are scored, so Crease IQ is graded against what Vegas can
+# actually do, not against a number hockey doesn't allow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "ESPN season years"
+        required: false
+        default: "2024,2025,2026"
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - run: python -m scripts.nhl_market_brier --seasons "${{ inputs.seasons || '2024,2025,2026' }}"
