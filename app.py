@@ -13863,8 +13863,12 @@ def _hand_side_rows(samples, syn: bool):
     """Tape rows (ts, yes_bid_c, yes_bid_q, yes_ask_c, yes_ask_q, …) → OUR
     side's book as (ts, bid_c, bid_q, ask_c, ask_q). A synthetic NO bet's
     bid is the YES ask inverted."""
+    # Snapshot first: `samples` is usually the LIVE TOUCH_TAPE deque, and the
+    # socket thread appends to it while this loop runs — iterating it directly
+    # raised "deque mutated during iteration" and killed the whole line-move
+    # tick (Oct 8 2026). list() of a deque is one C call under the GIL.
     out = []
-    for r in (samples or []):
+    for r in list(samples or []):
         try:
             ts, bc, bq, ac, aq = r[0], r[1], r[2], r[3], r[4]
         except (TypeError, IndexError):
