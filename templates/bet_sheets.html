@@ -542,6 +542,27 @@
     }
     function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]); }
     let _busy = false;
+    // THE SLIP TICKET (Oct 8 2026): every item carries a `cid` the server
+    // dedups on, so a submit is safe to send twice. Safari dropped the
+    // RESPONSE to two Place submits ("TypeError: Load failed") after the bets
+    // were already queued; the page said Failed, the re-submit doubled them.
+    function _cid() {
+        try { if (crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, ''); } catch (e) {}
+        return Date.now().toString(36) + Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 12);
+    }
+    // POST that survives a dropped connection: a fetch that THROWS (the
+    // request may have landed) is re-sent with the same tickets — the server
+    // hands back the rows it already queued. HTTP errors are returned as-is.
+    async function postTicketed(url, body) {
+        let err = null;
+        for (let n = 0; n < 3; n++) {
+            if (n) await new Promise(res => setTimeout(res, 1500 * n));
+            try {
+                return await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            } catch (e) { err = e; }
+        }
+        throw err;
+    }
     async function postSlip(preview) {
         if (_busy || !_slip.length) return;
         const betItems = _slip.filter(i => !i.op), opItems = _slip.filter(i => i.op);
@@ -550,22 +571,36 @@
         const bq = document.getElementById('btnQuote'), bp = document.getElementById('btnPlace');
         bq.disabled = bp.disabled = true;
         bp.textContent = preview ? submitLabel() : (betItems.length ? 'Placing…' : 'Running…');
+        const DROPPED = 'connection dropped — the box may already have it. Place again is safe: same ticket, no double bet';
         try {
             const byKey = {};
+            if (!preview) {                                             // ticket every item BEFORE it leaves the page
+                let fresh = false;
+                _slip.forEach(i => { if (!i.cid) { i.cid = _cid(); fresh = true; } });
+                if (fresh) saveSlip();
+            }
             if (betItems.length) {
-                const r = await authFetch('/api/bet-sheets/place', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ preview, contracts: contractsN(), items: betItems.map(i => ({ key: i.key, sport: i.sport, away: i.away, home: i.home,
-                        event_start: i.event_start, market_type: i.market_type, side: i.side, line: i.line, label: i.label })) }) });
-                const d = r ? await r.json().catch(() => null) : null;
-                if (!d || !d.ok) { toast('Failed: ' + ((d && d.error) || (r && r.status) || 'network'), true); return; }
-                (d.results || []).forEach(x => { byKey[x.key] = x; });
+                let r = null, d = null;
+                try {
+                    r = await postTicketed('/api/bet-sheets/place', { preview, contracts: contractsN(), items: betItems.map(i => ({ key: i.key, cid: preview ? undefined : i.cid,
+                        sport: i.sport, away: i.away, home: i.home, event_start: i.event_start, market_type: i.market_type, side: i.side, line: i.line, label: i.label })) });
+                    d = r ? await r.json().catch(() => null) : null;
+                } catch (e) {
+                    if (preview) throw e;
+                    betItems.forEach(i => { byKey[i.key] = { ok: false, reason: DROPPED }; });
+                }
+                if (r && (!d || !d.ok)) { toast('Failed: ' + ((d && d.error) || r.status || 'network'), true); return; }
+                if (d) (d.results || []).forEach(x => { byKey[x.key] = x; });
             }
             if (!preview && opItems.length) {
                 bp.textContent = 'Running ' + opItems.length + ' action' + (opItems.length === 1 ? '' : 's') + '…';
-                const r = await authFetch('/api/bet-sheets/ops', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ items: opItems.map(i => ({ key: i.key, op: i.op, pick_id: i.pick_id, rerung_slug: i.rerung_slug })) }) });
-                const d = r ? await r.json().catch(() => null) : null;
-                if (!d || !d.ok) opItems.forEach(i => { byKey[i.key] = { ok: false, reason: 'Failed: ' + ((d && d.error) || (r && r.status) || 'network') }; });
+                let r = null, d = null;
+                try {
+                    r = await postTicketed('/api/bet-sheets/ops', { items: opItems.map(i => ({ key: i.key, cid: i.cid, op: i.op, pick_id: i.pick_id, rerung_slug: i.rerung_slug })) });
+                    d = r ? await r.json().catch(() => null) : null;
+                } catch (e) { r = null; d = null; }
+                if (!r) opItems.forEach(i => { byKey[i.key] = { ok: false, reason: DROPPED }; });
+                else if (!d || !d.ok) opItems.forEach(i => { byKey[i.key] = { ok: false, reason: 'Failed: ' + ((d && d.error) || r.status || 'network') }; });
                 else (d.results || []).forEach(x => { byKey[x.key] = x; });
             }
             let placed = 0, ran = 0;
@@ -588,7 +623,9 @@
                 if (placed) bits.push('Placed ' + placed + ' bet' + (placed === 1 ? '' : 's'));
                 if (ran) bits.push(notes.join(' · '));
                 if (qn) bits.push(qn + ' placing on the box…');
-                if (stayed) bits.push(stayed + ' stayed on the slip');
+                const dropped = _slip.filter(i => i.q && i.q.reason === DROPPED).length;
+                if (dropped) bits.push(dropped + ' lost the connection — check My bets, then Place again (no double bet)');
+                else if (stayed) bits.push(stayed + ' stayed on the slip');
                 toast(bits.length ? bits.join(' · ') : 'Nothing done — see the slip', !(placed || ran || qn));
                 loadBets();
                 if (qn) pollQueue();
