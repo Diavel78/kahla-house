@@ -15,6 +15,10 @@ on:
         description: "an ESPN NHL event id to print the box shape (blank = skip)"
         required: false
         default: "401559256"
+      avail:
+        description: "json Avail kwargs (blank = default)"
+        required: false
+        default: '{"top_n":12,"recent_days":14,"min_gp":5}'
 
 concurrency:
   group: crease-avail-backtest
@@ -49,4 +53,4 @@ jobs:
         env:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.backtest_crease_avail --cache .nhl_cache --seasons "${{ inputs.seasons || '2023,2024,2025,2026' }}"
+        run: python -m scripts.backtest_crease_avail --cache .nhl_cache --seasons "${{ inputs.seasons || '2023,2024,2025,2026' }}" --avail '${{ inputs.avail }}'

@@ -83,9 +83,10 @@ def crease_preds(cache):
 
 # --------------------------------------------------- skater availability
 class Avail:
-    def __init__(self, hl_games=15.0, reg_toi=12.0, recent_days=30, k=4.0):
+    def __init__(self, hl_games=15.0, reg_toi=12.0, recent_days=30, k=4.0, top_n=99, min_gp=2.0):
         self.dec = 0.5 ** (1.0 / hl_games)
         self.reg_toi, self.recent, self.k = reg_toi, recent_days, k
+        self.top_n, self.min_gp = top_n, min_gp
         self.pl = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, None])  # toi, gp, pts, pm, last
         self.team_of = {}
         self.roster = defaultdict(set)
@@ -98,7 +99,7 @@ class Avail:
             if self.team_of.get(aid) != team:
                 continue
             toi, gp, pts, pm, last = self.pl[aid]
-            if gp < 2.0 or last is None or (day - last).days > self.recent:
+            if gp < self.min_gp or last is None or (day - last).days > self.recent:
                 continue
             e_toi = toi / gp
             if e_toi < self.reg_toi:
@@ -106,6 +107,9 @@ class Avail:
             ppg = (pts + prior * self.k) / (gp + self.k)
             pm60 = pm / (toi + 300.0) * 60.0
             out[aid] = (e_toi, ppg, pm60)
+        if len(out) > self.top_n:
+            keep = sorted(out, key=lambda a: -out[a][0])[:self.top_n]
+            out = {a: out[a] for a in keep}
         return out
 
     def missing(self, team, day, played):
@@ -176,12 +180,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", default=".nhl_cache")
     ap.add_argument("--seasons", default="2023,2024,2025,2026")
+    ap.add_argument("--avail", default="", help="json Avail kwargs")
     a = ap.parse_args()
     cp = crease_preds(a.cache)
     espn = load_espn(a.cache, [int(x) for x in a.seasons.split(",")])
     log.info("espn: %d games", len(espn))
 
-    av = Avail()
+    av = Avail(**(json.loads(a.avail) if a.avail else {}))
     rows, unmatched = [], []
     for g in espn:
         d = espn_day(g["date"])
