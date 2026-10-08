@@ -148,6 +148,27 @@
         .sb.dis { opacity: .35; cursor: default; }
         .sb.have { border-color: var(--amber); box-shadow: inset 0 0 0 1px rgba(245,158,11,.35); }
         .sb .have-chip { display: block; color: var(--amber); font-weight: 600; font-size: 10px; margin-top: 2px; }
+        /* MY BET'S STATE IS THE BOX'S COLOR (Rob, Oct 8 2026: "green filled,
+           yellow resting all good, red box needs my attention") */
+        .sb.have.st-fill { background: #0f3a28; border-color: var(--green); box-shadow: none; }
+        .sb.have.st-fill .have-chip { color: var(--green); }
+        .sb.have.st-rest { background: #3a3410; border-color: var(--amber); box-shadow: none; }
+        .sb.have.st-warn { background: #3c1414; border-color: var(--red); box-shadow: none; }
+        .sb.have.st-warn .have-chip { color: var(--red); }
+        .mybets { display: flex; flex-direction: column; gap: 5px; margin-top: 7px; }
+        .mybet { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 6px 9px; border-radius: 8px;
+                 background: var(--surface); border-left: 3px solid var(--amber); font-size: 12px; }
+        .mybet.st-fill { border-left-color: var(--green); }
+        .mybet.st-warn { border-left-color: var(--red); background: #2a1414; }
+        .mybet .mb-t { flex: 1; min-width: 0; }
+        .mybet .mb-t b { font-family: 'JetBrains Mono', monospace; white-space: nowrap; }
+        .mybet .mb-s { font-weight: 800; font-size: 10.5px; letter-spacing: .04em; margin: 0 4px; }
+        .mybet.st-fill .mb-s { color: var(--green); }
+        .mybet.st-rest .mb-s { color: var(--amber); }
+        .mybet.st-warn .mb-s { color: var(--red); }
+        .mybet .mb-d { color: var(--muted); font-size: 11.5px; }
+        .mybet .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+        .bet .score { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; font-weight: 700; color: var(--text); }
         .sb .ml { color: var(--muted); font-weight: 400; font-size: 10.5px; }
         .mline { color: var(--amber); font-size: 10px; margin-left: 4px; }
         .slip {
@@ -643,17 +664,53 @@
         return _haveByKey['m|' + (g.market_id || '') + '|' + mt + '|' + side]
             || _haveByKey['e|' + _sport + '|' + g.event_name + '|' + mt + '|' + side] || null;
     }
+    // ONE STATE READ for a pending bet (Rob, Oct 8 2026: "green filled,
+    // yellow resting all good, red box needs my attention"). red = the box
+    // stopped and wants a hand (manual re-peg, line moved, off the book, a
+    // rejoin that errored, outbid in-play); green = filled and done;
+    // yellow = resting and the box has it (chasing, thin touch, holds).
+    function betState(b) {
+        const o = b.order || {}, held = b.held || 0, ch = b.chase || {}, hold = ch.hold;
+        const rr = (hold && hold.rerung && hold.rerung.slug) ? hold.rerung : null;
+        const qp = Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '');
+        const rest = 'resting ' + qp;
+        const fill = 'FILLED ' + held + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price));
+        const touch = b.touch_c != null ? b.touch_c : (hold && hold.touch_c);
+        if (o.resting) {
+            const pre = held > 0 ? fill + ' · ' : '';
+            if (hold && hold.touch_c != null && rr)
+                return { cls: 'warn', short: 'LINE MOVED', detail: pre + rest + ' · touch ' + touch + '¢ here · current line ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — move it or cancel' };
+            if (hold && hold.touch_c != null)
+                return { cls: 'warn', short: 'RE-PEG', detail: pre + rest + ' · touch ' + touch + '¢' + (ch.anchor_c != null ? ', ' + Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : ' past the leash') + ' — the box stopped chasing' };
+            if (b.outbid && b.in_play)
+                return { cls: 'warn', short: 'OUTBID', detail: pre + rest + ' · touch ' + b.touch_c + '¢ · in play — re-peg in the app' };
+            let why = '';
+            if (ch.thin_hold && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01 && Math.abs((ch.thin_hold.touch_c || 0) - b.touch_c) < 0.26)
+                why = 'thin touch: ' + b.touch_c + '¢ has ' + Math.round(ch.thin_hold.touch_q || 0) + ' over ' + Math.round(ch.thin_hold.below_q || 0) + ' at ' + ch.thin_hold.below_c + '¢, sitting ' + o.price_c + '¢';
+            else if (ch.rejoin_hold && ch.rejoin_hold.until && new Date(ch.rejoin_hold.until) > new Date() && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01)
+                why = 'post-move hold · touch ' + b.touch_c + '¢ · until ' + fmtClock(ch.rejoin_hold.until);
+            else if (b.outbid) why = 'outbid · touch ' + b.touch_c + '¢ · chasing';
+            else if (b.touch_c != null && o.price_c != null && Math.abs(o.price_c - b.touch_c) < 0.01) why = 'at the touch';
+            return { cls: 'rest', short: held > 0 ? 'PARTIAL' : 'RESTING', detail: (held > 0 ? pre + rest : qp) + (why ? ' · ' + why : '') };
+        }
+        if (held > 0) return { cls: 'fill', short: 'FILLED', detail: held + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price)) };
+        if (b.line_hold) {
+            const lh = b.line_hold;
+            const txt = 'line moved' + (lh.from_c != null ? ' off ' + lh.from_c + '¢' : '') + (lh.resume_at ? ' · rejoin ~' + fmtClock(lh.resume_at) : '');
+            return lh.err ? { cls: 'warn', short: 'SITTING OUT', detail: txt + ' · ' + lh.err }
+                          : { cls: 'rest', short: 'SITTING OUT', detail: txt + ' — the box rejoins when it calms' };
+        }
+        return { cls: 'warn', short: 'OFF THE BOOK', detail: 'no order resting and nothing held' };
+    }
     function haveChip(b, line) {
+        const st = betState(b);
+        let s = st.short;
         const o = b.order || {};
-        const held = b.held || 0;
-        let s;
-        if (o.resting) s = 'RESTING ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '') + (b.outbid ? ' · OUTBID' : '');
-        else if (held > 0) s = 'FILLED ' + held + (b.price_c != null ? ' @ ' + b.price_c + '¢' : '');
-        else if (b.line_hold) s = 'SITTING OUT';
-        else s = 'PENDING' + (b.price_c != null ? ' @ ' + b.price_c + '¢' : '');
+        if (st.cls === 'fill') s = 'FILLED ' + (b.held || 0) + (b.price_c != null ? ' @ ' + b.price_c + '¢' : '');
+        else if (o.resting && st.cls === 'rest') s = 'RESTING ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '');
         if (b.line != null && line != null && Math.abs(Number(b.line) - Number(line)) > 0.01) s += ' · yours ' + (b.market_type === 'total' ? Number(b.line) : sgn(Number(b.line), 1));
         if (b.app) s += ' · app';
-        return '<span class="have-chip">✓ ' + esc(s) + '</span>';
+        return '<span class="have-chip">' + esc(s) + '</span>';
     }
     function sideBtn(gi, g, mt, side, line, label, fromModel) {
         if (line === null || line === undefined) return '<span class="sb dis">' + esc(label) + '</span>';
@@ -661,7 +718,40 @@
         const on = inSlip(key);
         const mine = myBetOn(g, mt, side);
         const args = [JSON.stringify(key), JSON.stringify(mt), JSON.stringify(side), line == null ? 'null' : Number(line), JSON.stringify(label), gi].join(',');
-        return '<button class="sb' + (on ? ' in' : '') + (mine ? ' have' : '') + '" onclick=\'toggleSide(' + args.replace(/'/g, '&#39;') + ')\'>' + esc(label) + (fromModel ? '<span class="mline">model</span>' : '') + (mine ? haveChip(mine, line) : '') + '</button>';
+        return '<button class="sb' + (on ? ' in' : '') + (mine ? ' have st-' + betState(mine).cls : '') + '" onclick=\'toggleSide(' + args.replace(/'/g, '&#39;') + ')\'>' + esc(label) + (fromModel ? '<span class="mline">model</span>' : '') + (mine ? haveChip(mine, line) : '') + '</button>';
+    }
+    // THE BET'S DETAIL LIVES UNDER ITS BOXES (Rob, Oct 8 2026: "All that
+    // other verbiage should be down on the bet screen where you show the
+    // boxes") — one line per pending pre-game bet on the game, its state,
+    // the box's reason, and the Move / Re-peg / Cancel slip actions.
+    function betsOnGame(g) {
+        const out = [], seen = {};
+        [_betsByGame['m|' + (g.market_id || '')], _betsByGame['e|' + _sport + '|' + g.event_name]].forEach(l => {
+            (l || []).forEach(b => { if (!seen[b.id]) { seen[b.id] = 1; out.push(b); } });
+        });
+        return out.filter(b => b.status === 'pending' && !b.live);
+    }
+    function betActs(b) {
+        const o = b.order || {};
+        if (!(b.status === 'pending' && o.resting && !b.started)) return '';
+        const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id)), rx = inSlip(opKey('rerung', b.id));
+        const rrx = (b.chase && b.chase.hold && b.chase.hold.rerung && b.chase.hold.rerung.slug) ? b.chase.hold.rerung : null;
+        return '<div class="acts">' + (rrx ? '<button class="btn sm' + (rx ? ' on' : '') + '" title="cancel this order and rest the unfilled size on the current line" onclick="toggleOp(\'rerung\',' + b.id + ')">' + (rx ? '✓ ' : '') + 'Move to ' + esc(rungLabel(b, rrx.line)) + '</button>' : '')
+             + '<button class="btn sm' + (rp ? ' on' : '') + '" onclick="toggleOp(\'repeg\',' + b.id + ')">' + (rp ? '✓ Re-peg' : 'Re-peg') + '</button>'
+             + '<button class="btn sm warn' + (cn ? ' on' : '') + '" onclick="toggleOp(\'cancel\',' + b.id + ')">' + (cn ? '✓ Cancel' : 'Cancel') + '</button></div>';
+    }
+    function myBetRow(b, withGame) {
+        const st = betState(b);
+        return '<div class="mybet st-' + st.cls + '"><div class="mb-t"><b>' + esc(betLabel(b)) + '</b><span class="mb-s">' + esc(st.short) + '</span>'
+             + (b.app ? '<span class="mb-s" style="color:var(--muted)">APP</span>' : '')
+             + '<span class="mb-d">' + esc(st.detail) + (withGame ? ' · ' + esc((b.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + ' · ' + fmtTime(b.event_start) + ' ' + fmtClock(b.event_start) : '') + '</span></div>'
+             + betActs(b) + '</div>';
+    }
+    function myBetsBlock(g) {
+        if (g._st && g._st !== 'up') return '';
+        const bs = betsOnGame(g);
+        bs.forEach(b => { _shownIds[b.id] = 1; });
+        return bs.length ? '<div class="mybets">' + bs.map(b => myBetRow(b, false)).join('') + '</div>' : '';
     }
     // football: spread both sides at the market line (else the model's), total over/under
     function footballSides(gi, g) {
@@ -766,73 +856,65 @@
         _lastBetsPayload = d;
         renderBets(d);
     }
+    let _betsByGame = {}, _shownIds = {}, _gamesSig = '';
+    function _tabPending() {
+        return (_lastBetsPayload && _lastBetsPayload.bets || []).filter(b => b.status === 'pending'
+            && String(b.sport || '').toUpperCase() === String(_sport || '').toUpperCase());
+    }
+    function _scoreLine(b) {
+        const sc = b.score || {};
+        if (sc.away_score == null || sc.home_score == null) return '';
+        const t = (b.event_name || '').split(' @ ').map(shortTeam);
+        return (t[0] || 'Away') + ' ' + sc.away_score + ' – ' + sc.home_score + ' ' + (t[1] || 'Home') + (sc.display_status ? ' · ' + sc.display_status : '');
+    }
+    // THE STRIP IS LIVE BETS ONLY (Rob, Oct 8 2026: "the bets at the top
+    // should be live bets only, and start displaying the live odds… just
+    // games live"). Pre-game bets live under their game's boxes below.
     function renderBets(d) {
         const bets = d.bets || [];
         _betsById = {}; bets.forEach(b => { _betsById[b.id] = b; });
-        const hk = {};
-        bets.filter(b => b.status === 'pending').forEach(b => { _haveKeys(b).forEach(k => { if (!hk[k]) hk[k] = b; }); });
-        const changed = JSON.stringify(Object.keys(hk).sort()) !== JSON.stringify(Object.keys(_haveByKey).sort());
-        _haveByKey = hk;
-        if (changed && typeof _games !== 'undefined' && _games && _games.length) { try { renderGames(); } catch (e) {} }
-        // The strip follows the sport tab (Rob, Oct 4 2026: "NFL shows NFL
-        // bets, college just shows college") — the have-chips above still
-        // read EVERY bet; only the rows and the per-tab count are filtered.
+        const hk = {}, bg = {};
+        bets.filter(b => b.status === 'pending').forEach(b => {
+            _haveKeys(b).forEach(k => { if (!hk[k]) hk[k] = b; });
+            [b.market_id ? 'm|' + b.market_id : null, b.event_name ? 'e|' + (b.sport || '') + '|' + b.event_name : null]
+                .forEach(k => { if (k) (bg[k] = bg[k] || []).push(b); });
+        });
+        _haveByKey = hk; _betsByGame = bg;
+        const sig = bets.filter(b => b.status === 'pending').map(b => { const s = betState(b); return b.id + s.cls + s.short + s.detail + (b.live ? 'L' : ''); }).join('|')
+                  + '#' + _slip.filter(i => i.op).map(i => i.key).join(',');
+        if (sig !== _gamesSig) { _gamesSig = sig; if (typeof _games !== 'undefined' && _games && _games.length) { try { renderGames(); } catch (e) {} } }
         const tabBets = bets.filter(b => String(b.sport || '').toUpperCase() === String(_sport || '').toUpperCase());
-        const openAll = bets.filter(b => b.status === 'pending').length;
-        const open = tabBets.filter(b => b.status === 'pending');
+        const live = tabBets.filter(b => b.status === 'pending' && b.live);
+        const waiting = tabBets.filter(b => b.status === 'pending' && !b.live);
+        const warn = waiting.filter(b => betState(b).cls === 'warn').length;
         const done = tabBets.filter(b => b.status !== 'pending');
+        const liveAll = bets.filter(b => b.status === 'pending' && b.live).length;
         let usd = 0, w = 0, l = 0, p = 0;
         done.forEach(b => { if (b.pnl_usd != null) usd += b.pnl_usd; if (b.status === 'won') w++; else if (b.status === 'lost') l++; else p++; });
-        document.getElementById('betsMeta').textContent = (_sport + ' ' + open.length + ' open') + (done.length ? ' · settled ' + w + '-' + l + (p ? '-' + p : '') + ' ' + money(usd) : '')
-            + (openAll !== open.length ? ' · ' + openAll + ' open all tabs' : '')
-            + (d.src === 'box' ? ' · live from the box' : ' · ⚠ box not publishing — venue read from Vercel') + (d.venue_ok ? '' : ' · ⚠ venue unreadable')
+        document.getElementById('betsMeta').textContent = _sport + ' ' + live.length + ' live · ' + waiting.length + ' waiting below' + (warn ? ' (' + warn + ' need you)' : '')
+            + (done.length ? ' · today ' + w + '-' + l + (p ? '-' + p : '') + ' ' + money(usd) : '')
+            + (liveAll !== live.length ? ' · ' + liveAll + ' live all tabs' : '')
+            + (d.src === 'box' ? '' : ' · ⚠ box not publishing') + (d.venue_ok ? '' : ' · ⚠ venue unreadable')
             + (d.tape_dark ? ' · 🚨 ORDER-BOOK FEED DOWN (' + d.tape_dark[0] + '/' + d.tape_dark[1] + ' bets blind) — NO kickoff or line-move cancels' : '');
-        if (!tabBets.length) { document.getElementById('bets').innerHTML = '<div class="empty" style="padding:14px 0">No ' + esc(_sport) + ' bets' + (bets.length ? ' — ' + openAll + ' open on other tabs' : '') + '. Build a slip below.</div>'; return; }
-        const rows = open.concat(done.slice().reverse());
-        document.getElementById('bets').innerHTML = rows.map(b => {
+        if (!live.length) { document.getElementById('bets').innerHTML = '<div class="empty" style="padding:10px 0">No live ' + esc(_sport) + ' bets right now.</div>'; return; }
+        document.getElementById('bets').innerHTML = live.map(b => {
             const entryP = b.price_c != null ? b.price_c / 100 : impl(b.entry_price);
-            let prob = null, tip = '';
-            if (b.status === 'won') prob = 1; else if (b.status === 'lost') prob = 0; else if (b.status === 'push') prob = 0.5;
-            else if (b.cur_c != null) prob = b.cur_c / 100;
-            tip = (prob != null ? 'now ' + Math.round(prob * 100) + '%' : 'no quote') + (entryP != null ? ' · you bet at ' + Math.round(entryP * 100) + '%' : '');
-            let chip = '', l2 = '';
-            const o = b.order || {};
-            if (b.status !== 'pending') {
-                chip = '<span class="chip c-' + b.status + '">' + b.status.toUpperCase() + '</span>';
-                l2 = (b.pnl_usd != null ? money(b.pnl_usd) + ' · ' : '') + (b.filled_qty != null ? b.filled_qty : (b.contracts || '?')) + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price));
-            } else {
-                const held = b.held || 0;
-                if (b.app) chip += '<span class="chip c-rest" title="placed in the Polymarket app; adopted off the account socket so it shows here' + (b.in_play ? ' — placed in-play: display only, re-peg it in the app' : '') + '">APP' + (b.in_play ? ' · LIVE' : '') + '</span>';
-                if (o.resting) {
-                    chip += '<span class="chip c-rest">RESTING ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '') + '</span>';
-                    const ch = b.chase || {}, hold = ch.hold;
-                    const rr = (hold && hold.rerung && hold.rerung.slug) ? hold.rerung : null;
-                    if (hold && hold.touch_c != null && rr) chip += '<span class="chip c-lost" title="the line moved: this rung\'s touch ran ' + (ch.anchor_c != null ? Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢' : 'more than the leash') + ' past your price. The current line at your price is ' + esc(rungLabel(b, rr.line)) + ' — tap it to cancel this order and rest the unfilled size there">LINE MOVED · touch ' + (b.touch_c != null ? b.touch_c : hold.touch_c) + '¢ here · current line ' + esc(rungLabel(b, rr.line)) + ' @ ' + rr.bid_c + '¢</span>';
-                    else if (hold && hold.touch_c != null) chip += '<span class="chip c-lost" title="the touch moved more than ' + (hold.leash_c != null ? hold.leash_c : 2) + '¢ past your last hand price — the box stopped chasing; re-peg to take the new price">MANUAL RE-PEG · touch ' + (b.touch_c != null ? b.touch_c : hold.touch_c) + '¢ · ' + (ch.anchor_c != null ? Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : 'past the leash') + '</span>';
-                    else if (ch.thin_hold && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01 && Math.abs((ch.thin_hold.touch_c || 0) - b.touch_c) < 0.26)
-                        chip += '<span class="chip c-rest" title="the touch rung is a sliver of the rung under it — a straggler rung, the one the hit lands on; the chase sits on the rung under it until it has company; a bet found ON a thin touch is dropped to the fat rung (guard is off inside T-6h)">THIN TOUCH · ' + b.touch_c + '¢ has ' + Math.round(ch.thin_hold.touch_q || 0) + ' over ' + Math.round(ch.thin_hold.below_q || 0) + ' at ' + ch.thin_hold.below_c + '¢ · sitting ' + o.price_c + '¢</span>';
-                    else if (ch.rejoin_hold && ch.rejoin_hold.until && new Date(ch.rejoin_hold.until) > new Date() && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01)
-                        chip += '<span class="chip c-rest" title="the line-move rule sat this bet back down at the rung the size relocated to; the chase will not climb back onto the straggler rung above it until the hold expires">POST-MOVE HOLD · touch ' + b.touch_c + '¢ · until ' + fmtClock(ch.rejoin_hold.until) + '</span>';
-                    else if (b.outbid) chip += '<span class="chip c-lost">OUTBID · touch ' + b.touch_c + '¢ · ' + (b.in_play ? 're-peg in the app' : 'chasing') + '</span>';
-                    else if (b.touch_c != null && o.price_c != null && Math.abs(o.price_c - b.touch_c) < 0.01) chip += '<span class="chip c-fill">AT TOUCH</span>';
-                }
-                if (!o.resting && b.line_hold) {
-                    const lh = b.line_hold;
-                    chip += '<span class="chip c-lost" title="the line moved against this side (touch size collapsed and the ask came down) — the box cancelled the bid rather than get picked off; it rejoins the touch once the book calms">SITTING OUT · line moved' + (lh.from_c != null ? ' off ' + lh.from_c + '¢' : '') + (lh.resume_at ? ' · rejoin ~' + fmtClock(lh.resume_at) : '') + (lh.err ? ' · ' + lh.err : '') + '</span>';
-                }
-                if (held > 0) chip += '<span class="chip c-fill">FILLED ' + held + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price)) + '</span>';
-                if (!o.resting && !(held > 0)) chip += '<span class="chip c-off">' + (b.started ? 'IN PLAY' : 'OFF THE BOOK') + '</span>';
-                l2 = (b.cur_c != null ? 'now ' + b.cur_c + '¢ (' + am(_probToAmer(b.cur_c / 100)) + ')' : 'no live quote') + (b.started ? ' · in play' : '');
-            }
-            const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id)), rx = inSlip(opKey('rerung', b.id));
-            const rrx = (b.chase && b.chase.hold && b.chase.hold.rerung && b.chase.hold.rerung.slug) ? b.chase.hold.rerung : null;
-            const acts = (b.status === 'pending' && o.resting && !b.started)
-                ? '<div class="acts">' + (rrx ? '<button class="btn sm' + (rx ? ' on' : '') + '" title="cancel this order and rest the unfilled size on the current line" onclick="toggleOp(\'rerung\',' + b.id + ')">' + (rx ? '✓ ' : '') + 'Move to ' + esc(rungLabel(b, rrx.line)) + '</button>' : '')
-                  + '<button class="btn sm' + (rp ? ' on' : '') + '" onclick="toggleOp(\'repeg\',' + b.id + ')">' + (rp ? '✓ Re-peg' : 'Re-peg') + '</button>'
-                  + '<button class="btn sm warn' + (cn ? ' on' : '') + '" onclick="toggleOp(\'cancel\',' + b.id + ')">' + (cn ? '✓ Cancel' : 'Cancel') + '</button></div>' : '';
+            const prob = b.win_prob != null ? b.win_prob : (b.cur_c != null ? b.cur_c / 100 : null);
+            const tip = (prob != null ? 'now ' + Math.round(prob * 100) + '%' : 'no quote') + (entryP != null ? ' · you bet at ' + Math.round(entryP * 100) + '%' : '');
+            const st = betState(b);
+            const held = b.held || 0, o = b.order || {};
+            let chip = '';
+            if (held > 0) chip += '<span class="chip c-fill">FILLED ' + held + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price)) + '</span>';
+            if (o.resting) chip += '<span class="chip ' + (st.cls === 'warn' ? 'c-lost' : 'c-rest') + '">RESTING ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + o.price_c + '¢' : '') + (b.outbid ? ' · OUTBID' : '') + '</span>';
+            if (!held && !o.resting) chip += '<span class="chip c-off">NOT FILLED</span>';
+            if (b.app) chip += '<span class="chip c-push">APP</span>';
+            if (b.prob_src === 'decided') chip += '<span class="chip ' + (prob >= 0.99 ? 'c-won' : prob <= 0.01 ? 'c-lost' : 'c-push') + '">' + (prob >= 0.99 ? 'WINNING · FINAL' : prob <= 0.01 ? 'LOSING · FINAL' : 'PUSH') + '</span>';
+            const sl = _scoreLine(b);
+            const l2 = (prob != null && b.prob_src !== 'decided' ? 'now ' + Math.round(prob * 100) + '% (' + am(_probToAmer(Math.min(0.99, Math.max(0.01, prob)))) + ')' : (prob == null ? 'no live price' : ''))
+                     + (entryP != null ? (prob != null && b.prob_src !== 'decided' || prob == null ? ' · ' : '') + 'you ' + Math.round(entryP * 100) + '%' : '');
             return '<div class="bet">' + winGauge(prob, entryP, tip)
-                 + '<div class="info">' + (chip ? '<div class="chips">' + chip + '</div>' : '') + '<div class="l1"><b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc((b.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + ' · ' + esc(b.sport) + ' · ' + fmtTime(b.event_start) + ' ' + fmtClock(b.event_start) + '</span></div>'
-                 + '<div class="l2">' + l2 + '</div></div>' + acts + '</div>';
+                 + '<div class="info"><div class="chips">' + chip + '</div><div class="l1"><b>' + esc(betLabel(b)) + '</b>' + (sl ? ' <span class="score">' + esc(sl) + '</span>' : ' <span class="dim">· ' + esc((b.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + '</span>') + '</div>'
+                 + '<div class="l2">' + l2 + '</div></div></div>';
         }).join('');
     }
     // Re-peg / Cancel are SLIP ITEMS, not fire-now buttons (Rob, Oct 4 2026:
@@ -1007,6 +1089,7 @@
             return;
         }
         let html = '';
+        _shownIds = {};
         const rec = { win: 0, loss: 0, push: 0 };
         for (const g of _games) {
             for (const k of ['ml', 'spread', 'total']) {
@@ -1048,8 +1131,13 @@
                   + '<span class="m">' + shortTeam(g.away) + ' @ ' + shortTeam(g.home) + '</span>' + flag + finalChip(g) + sub + '</div>'
                   + '<div class="mbox">' + rows + '</div>'
                   + (_sport === 'NHL' ? hockeySides(g._gi, g) : _sport === 'NBA' ? basketballSides(g._gi, g) : footballSides(g._gi, g))
+                  + myBetsBlock(g)
                   + '</div>';
         }
+        // a pending pre-game bet whose game is not on this sheet (another
+        // rung's market, an app bet, a game the search hides) still shows
+        const lost = _tabPending().filter(b => !b.live && !_shownIds[b.id] && !(words.length && games.length < _games.length));
+        if (lost.length) html = '<div class="day-hdr">My bets not on this sheet</div><div class="mybets" style="margin-bottom:14px">' + lost.map(b => myBetRow(b, true)).join('') + '</div>' + html;
         document.getElementById('games').innerHTML = html;
     }
 
