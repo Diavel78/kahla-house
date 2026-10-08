@@ -13121,6 +13121,10 @@ def api_bet_sheets_place():
     # runs them itself when no box is alive), then the page polls.
     if sb is None:
         return jsonify({"ok": False, "error": "database unavailable"}), 503
+    seen = _hand_orders_by_cid(sb, [(it or {}).get("cid") for it in items])
+    if seen is None:
+        return jsonify({"ok": False, "error": "couldn't check the queue for a repeat "
+                                              "submit — nothing placed, try again"}), 503
     for it in items:
         it = it or {}
         key = it.get("key")
@@ -13128,10 +13132,16 @@ def api_bet_sheets_place():
         if bad:
             results.append({"key": key, "ok": False, "reason": bad})
             continue
+        cid = it.get("cid")
+        if cid in seen:                           # a repeat of a ticket already queued
+            queued.append((seen[cid][0], {"key": key, "ok": True, "queue_id": seen[cid][0],
+                                          "repeat": True}))
+            continue
         row = {"op": "create", "slug": None,      # resolved by the executor
                "synthetic": False, "price_c": None,  # joins the touch at placement time
                "contracts": contracts, "event_start": it.get("event_start"),
-               "payload": {"item": it, "asked_by": g.uid, "contracts": contracts}}
+               "payload": {"item": it, "asked_by": g.uid, "contracts": contracts,
+                           **({"cid": cid} if cid and _HAND_CID_RE.match(str(cid)) else {})}}
         try:
             rid = _hand_order_enqueue(sb, row)
         except Exception as e:
@@ -13221,6 +13231,40 @@ def _hand_orders_ensure(sb) -> bool:
     else:
         app.logger.warning("hand_orders: table probe failed: %s", msg[:160])
     return False
+
+
+_HAND_CID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def _hand_orders_by_cid(sb, cids: list):
+    """{cid: (row id, state)} for queue rows the page already wrote under
+    these ticket ids in the last hour — None when the read fails.
+
+    THE SLIP TICKET (Oct 8 2026, Rob: "I cancelled the duplicates you
+    created"): every slip item carries a client-made `cid`. Safari dropped
+    the RESPONSE to two Place submits ("TypeError: Load failed") after the
+    server had already queued the bets and returned 200 in 2.5s; the page
+    said Failed, Rob pressed Place again, the box placed both copies. A
+    re-sent ticket now returns the row it already made — a submit is safe
+    to repeat. A FAILED row does not count (the slip keeps a failed item
+    so it can be tried again)."""
+    cids = [c for c in dict.fromkeys(cids) if c and _HAND_CID_RE.match(str(c))]
+    if not cids:
+        return {}
+    since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    try:
+        rows = (sb.table("hand_orders").select("id,state,payload->>cid")
+                .in_("payload->>cid", cids).gte("created_at", since)
+                .order("id").execute().data) or []
+    except Exception as e:
+        app.logger.warning("hand_orders: cid lookup failed: %s", e)
+        return None
+    out = {}
+    for r in rows:
+        c = r.get("cid")
+        if c and r.get("state") != "failed":
+            out[c] = (r.get("id"), r.get("state"))
+    return out
 
 
 def _hand_order_enqueue(sb, row: dict) -> int:
@@ -16050,18 +16094,28 @@ def api_bet_sheets_ops():
     if sb is None:
         return jsonify({"ok": False, "error": "database unavailable"}), 503
     results, queued = [], []
+    seen = _hand_orders_by_cid(sb, [(it or {}).get("cid") for it in items[:40]])
+    if seen is None:
+        return jsonify({"ok": False, "error": "couldn't check the queue for a repeat "
+                                              "submit — nothing run, try again"}), 503
     for it in items[:40]:
         key = (it or {}).get("key") or f"op|{(it or {}).get('op')}|{(it or {}).get('pick_id')}"
         op = str((it or {}).get("op") or "").lower()
         res = {"key": key, "op": op, "pick_id": (it or {}).get("pick_id")}
         if op not in ("cancel", "repeg", "rerung"):
             res.update({"ok": False, "reason": "unknown action"}); results.append(res); continue
+        cid = (it or {}).get("cid")
+        if cid in seen:                           # a repeat of a ticket already queued
+            res.update({"queue_id": seen[cid][0], "repeat": True})
+            queued.append((seen[cid][0], res))
+            continue
         r, blob = _bet_sheet_pick(sb, (it or {}).get("pick_id"))
         if not r:
             res.update({"ok": False, "reason": "bet not found (already settled or removed?)"}); results.append(res); continue
         row = {"op": op, "pick_id": r["id"], "slug": blob.get("pmm_slug"),
                "synthetic": bool(blob.get("pmm_synthetic")), "order_id": blob.get("order_id"),
                "payload": {"asked_by": g.uid,
+                           **({"cid": cid} if cid and _HAND_CID_RE.match(str(cid)) else {}),
                            **({"rerung_slug": (it or {}).get("rerung_slug")} if op == "rerung" else {})}}
         try:
             rid = _hand_order_enqueue(sb, row)
