@@ -13441,6 +13441,7 @@ def _hand_status_publish(sb, client) -> dict:
     positions = _pmm_positions_raw(client, fresh=False) or {}
     by_id = {o["id"]: o for o in orders if o.get("id")}
     out, quoted = {}, 0
+    held_slugs: set = set()
     for r in rows:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         slug, syn, oid = blob.get("pmm_slug"), bool(blob.get("pmm_synthetic")), blob.get("order_id")
@@ -13450,6 +13451,8 @@ def _hand_status_publish(sb, client) -> dict:
         if resting and o.get("price_yes") is not None:
             price_c = round((1 - float(o["price_yes"])) * 100, 2) if syn else round(float(o["price_yes"]) * 100, 2)
         held = _bet_sheet_pick_side_held(positions.get(slug), syn) if slug else 0.0
+        if slug and held >= 1.0:
+            held_slugs.add(slug)
         touch_c = cur_c = None
         q = _ws_quote(slug) if slug else None
         if slug and held >= 1.0 and not blob.get("fill_seen") and not blob.get("filled"):
@@ -13485,6 +13488,11 @@ def _hand_status_publish(sb, client) -> dict:
                       "moves": blob.get("chase_moves") or 0, "rejoin_hold": blob.get("rejoin_hold"),
                       "thin_hold": blob.get("thin_hold")},
             "line_hold": blob.get("line_hold")}
+    # A FILLED hand bet has no resting order, so nothing subscribed its
+    # market and the live strip read 'no live quote' (Oct 8 2026). Held lots
+    # join the socket watch set (the touch tape publishes it each tick).
+    global HAND_HELD_SLUGS
+    HAND_HELD_SLUGS = held_slugs
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
         sb.table("lookup_cache").upsert({
@@ -13624,6 +13632,7 @@ def _touch_tape_publish(sb) -> dict:
         cfg = _machine_flag_val("touch_watch", {}) or {}
         want = set(str(x) for x in (cfg.get("slugs") or []) if x)
         want |= set(HAND_LIVE_SLUGS)                   # every resting hand bet is on the tape
+        want |= set(HAND_HELD_SLUGS)                   # and every held lot (live quotes for the strip)
         now_t = _time.time()
         for s_ in TOUCH_WATCH_SLUGS - want:            # just left: linger, keep recording
             _TOUCH_LINGER.setdefault(s_, now_t + _TOUCH_TAPE_LINGER_S)
@@ -15174,12 +15183,99 @@ def api_bet_sheets_mine():
             "line_hold": (bx.get("line_hold") if bx is not None else blob.get("line_hold")),
         })
     try:
+        _bet_sheet_live_enrich(out, now)
+    except Exception as e:
+        app.logger.warning("bet sheet live enrich: %s", e)
+    try:
         tape_dark = _touch_tape_dark(sb)
     except Exception:
         tape_dark = None
     return jsonify({"ok": True, "bets": out, "venue_ok": venue_ok, "tape_dark": tape_dark,
                     "src": ("box" if box is not None else "vercel"),
                     "box_age_s": (box or {}).get("age_s"), "at": now.isoformat()})
+
+
+_BS_LIVE_MAX_H = 6.0          # a pending bet this long past its start is the resolver's, not "live"
+_BS_LIVE_READS = 10           # live book reads per poll (Vercel 429s past a quick burst)
+
+
+def _bs_espn_events(sport: str, dk: str) -> list:
+    """ESPN scoreboard for one sport + ET date. College football needs
+    groups=80&limit=400 or ESPN returns only the featured slate."""
+    pair = _ESPN_PATH.get((sport or "").lower())
+    if not pair:
+        return []
+    if (sport or "").lower() != "ncaaf":
+        return _espn_scoreboard_raw(pair[0], pair[1], dates=dk)
+    import time
+    key = f"cfb-all?{dk}"
+    hit = _ESPN_CACHE.get(key)
+    if hit and (time.time() - hit[0]) < _ESPN_TTL:
+        return hit[1]
+    try:
+        r = _http.get("https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard",
+                      params={"dates": dk, "groups": "80", "limit": "400"}, timeout=8)
+        ev = (r.json() or {}).get("events", []) if r.status_code == 200 else []
+    except Exception:
+        ev = []
+    _ESPN_CACHE[key] = (time.time(), ev or [])
+    return ev or []
+
+
+def _bet_sheet_live_enrich(out: list, now) -> None:
+    """THE LIVE STRIP (Oct 8 2026, Rob: "the bets at the top should be live
+    bets only, and start displaying the live odds… This ALL used to work on
+    pickbot"). The Pick Bot live tracker's recipe on the sheet's own
+    rows: ESPN score (date-keyed), decided 1/0 once final, else the live
+    mid of the bet's OWN slug — the box quote when it has one, else one
+    book read (_live_book_mid, 20s cache). A filled bet has no resting
+    order, so the box never subscribed its market: that is why every
+    in-play row read 'no live quote'. Stamps live/score/win_prob/prob_src."""
+    client = None
+    reads = 0
+    espn: dict = {}
+    for b in out:
+        if b.get("status") != "pending":
+            continue
+        bdt = _parse_iso(b.get("event_start") or "")
+        if not bdt or bdt > now or (now - bdt) > timedelta(hours=_BS_LIVE_MAX_H):
+            continue
+        away, home = _live_split_event(b.get("event_name") or "")
+        m = None
+        if away and home:
+            try:
+                dk = bdt.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+                ck = ((b.get("sport") or "").lower(), dk)
+                if ck not in espn:
+                    espn[ck] = _bs_espn_events(ck[0], dk)
+                m = _live_match_espn(espn[ck], away, home, b.get("event_start"))
+            except Exception:
+                m = None
+        b["live"] = True
+        if m:
+            b["score"] = {k: m.get(k) for k in ("state", "completed", "display_status", "period",
+                                                 "clock", "away_score", "home_score")}
+        wp, src = None, None
+        if m:
+            wp = _live_decided_prob({"market_type": b.get("market_type"), "side": b.get("side"),
+                                     "entry_line": b.get("line")}, m)
+            if wp is not None:
+                src = "decided"
+        if wp is None and b.get("cur_c") is not None:
+            wp, src = round(float(b["cur_c"]) / 100.0, 4), "box"
+        if wp is None and b.get("slug") and reads < _BS_LIVE_READS and not _venue_rl_active():
+            if client is None:
+                try:
+                    client = get_client()
+                except Exception:
+                    client = None
+            if client is not None:
+                reads += 1
+                v = _live_book_mid(client, b["slug"], bool(b.get("synthetic")))
+                if v is not None:
+                    wp, src = v, "book"
+                    b["cur_c"] = round(v * 100.0, 2)
+        b["win_prob"], b["prob_src"] = wp, src
 
 
 def _bet_sheet_cancel(client, oid: str, slug: str):
@@ -15575,6 +15671,7 @@ def _hand_thin_touch(ladder, our_price_c, our_qty, min_pct: float):
     det["why"] = "thin" if thin else "ok"
     return thin, det
 _HAND_CHASE_LAST: dict = {}          # pick_id → monotonic of the last write attempt
+HAND_HELD_SLUGS: set = set()         # slugs holding a hand lot — on the watch set for live quotes
 HAND_LIVE_SLUGS: set = set()         # slugs with a resting hand bet — the socket wakes handbets for these
 
 
