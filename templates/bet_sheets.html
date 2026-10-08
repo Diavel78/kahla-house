@@ -733,6 +733,11 @@
         if (held > 0) return { cls: 'fill', short: 'FILLED', detail: held + ' @ ' + (b.price_c != null ? b.price_c + '¢' : am(b.entry_price)) };
         if (b.line_hold) {
             const lh = b.line_hold;
+            if (lh.why === 'venue_reset') {
+                const rt = 'Polymarket wiped the order' + (lh.qty ? ' · re-placing ' + lh.qty : '') + ' at the touch';
+                return lh.err ? { cls: 'warn', short: 'RE-PLACING', detail: rt + ' · ' + lh.err }
+                              : { cls: 'rest', short: 'RE-PLACING', detail: rt };
+            }
             const txt = 'line moved' + (lh.from_c != null ? ' off ' + lh.from_c + '¢' : '') + (lh.resume_at ? ' · rejoin ~' + fmtClock(lh.resume_at) : '');
             return lh.err ? { cls: 'warn', short: 'SITTING OUT', detail: txt + ' · ' + lh.err }
                           : { cls: 'rest', short: 'SITTING OUT', detail: txt + ' — the box rejoins when it calms' };
