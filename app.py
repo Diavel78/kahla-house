@@ -14083,6 +14083,7 @@ def _hand_move_tick(sb, client, now) -> dict:
     by_id = {o["id"]: o for o in orders if o.get("id")}
     now_ts = _time.time()
     acts = 0
+    fresh_open = None                 # one fresh orders read a tick, only when a venue-reset rejoin needs it
     for r in rows:
         if _time.monotonic() - t0 > 25.0 or acts >= _HAND_MOVE_MAX_ACTS:
             st["gate"] = "budget"
@@ -14108,7 +14109,8 @@ def _hand_move_tick(sb, client, now) -> dict:
                 since = now_ts - datetime.fromisoformat(str(hold.get("at"))).timestamp()
             except (TypeError, ValueError):
                 since = max_wait
-            forced = lead_s <= lead_min * 60.0 or since >= max_wait
+            forced = (lead_s <= lead_min * 60.0 or since >= max_wait
+                      or hold.get("why") == "venue_reset")   # nothing moved — the venue wiped it
             if since < calm_s and not forced:
                 continue
             if not forced and not _hand_calm(side_rows, now_ts):
@@ -14145,8 +14147,24 @@ def _hand_move_tick(sb, client, now) -> dict:
                         "touch_c": touch, "price_c": blob.get("price_c"), "leash_c": leash,
                         "at": now.isoformat(), "sitting_out": True}}}).eq("id", r["id"]).execute()
                 continue
+            if hold.get("why") == "venue_reset":
+                # ONE ORDER PER SLUG: a venue that lists late must not get a
+                # twin. Any BUY already resting on the slug is taken over.
+                if fresh_open is None:
+                    fresh_open = _pmm_open_orders_raw(client, fresh=True)
+                if fresh_open is None:
+                    continue
+                twin = next((o for o in fresh_open if o.get("slug") == slug
+                             and o.get("state") in _OPEN_ORDER_STATES
+                             and o.get("intent") == ("ORDER_INTENT_BUY_SHORT" if syn else "ORDER_INTENT_BUY_LONG")), None)
+                if twin and twin.get("id"):
+                    nb = {k: v for k, v in blob.items() if k != "line_hold"}
+                    nb["order_id"] = twin["id"]
+                    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                    st["adopted_live"] = st.get("adopted_live", 0) + 1
+                    continue
             _HAND_MOVE_LAST[r["id"]] = _time.monotonic()
-            contracts = int(blob.get("contracts") or 1)
+            contracts = int(hold.get("qty") or blob.get("contracts") or 1)   # a reset re-seats the unfilled part
             try:
                 out, code = _manual_order_place(client, slug, syn, touch, contracts, r.get("event_start"))
             except Exception as e:
@@ -14775,6 +14793,9 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
         if oid and oid in by_id and by_id[oid].get("state") in _OPEN_ORDER_STATES:
             _HAND_APP_MISS.pop(r["id"], None)
             continue
+        if _HAND_RESET_STATE.get("mass"):
+            st["retire_skipped"] = "venue_reset"   # many orders gone at once = the venue, not Rob
+            continue
         first = _HAND_APP_MISS.get(r["id"])
         if first is None:
             _HAND_APP_MISS[r["id"]] = _time.monotonic()
@@ -14838,6 +14859,139 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
             app.logger.warning("hand app-retire pick %s %s: order gone, nothing held", r["id"], b.get("pmm_slug"))
         except Exception as e:
             st["skipped"]["retire_del"] = str(e)[:60]
+    return st
+
+
+# THE VENUE RESET (Oct 8 2026, Rob: "Welcome to Polymarket, where some days
+# is a reset, and they just cancel every order! Nothing we did. How do we do
+# these?"): ~04:30 AZ the venue wiped every resting order on the account. The
+# box's own records showed nothing but drops and line-move sit-outs; the one
+# order left standing was the Hawaii bet the box re-placed AFTER the wipe.
+# Every other sheet bet read OFF THE BOOK, and the app-retire path DELETED an
+# app-adopted pick (Indiana −6.5) as "cancelled in the app".
+# One vanished order may be Rob cancelling in the app — leave it (OFF THE
+# BOOK, his call). Several vanishing together is the venue: confirm on a
+# fresh read, then each unfilled remainder sits out under `line_hold` (why
+# venue_reset) and the line-move REJOIN re-places it at the touch — same
+# leash, same chase rules. Our own cancels never qualify: they null
+# order_id and stamp cancelled_at.
+_HAND_RESET_MIN = 3            # vanished at once ⇒ the venue, not a hand cancel
+_HAND_RESET_CONFIRM_S = 45.0   # an order must stay gone this long before it counts
+_HAND_RESET_MISS: dict = {}    # pick_id -> monotonic of the first missing sighting
+_HAND_RESET_STATE: dict = {"mass": False}
+
+
+def _hand_reset_plan(miss: dict, now_mono: float, confirm_s: float, min_n: int) -> list:
+    """Pure: the pick ids to re-seat — every order gone at least confirm_s,
+    but only when at least min_n of them are (fewer is a hand cancel)."""
+    ready = sorted(pid for pid, t0 in (miss or {}).items() if now_mono - float(t0) >= confirm_s)
+    return ready if len(ready) >= max(1, int(min_n)) else []
+
+
+def _hand_reset_tick(sb, client, now) -> dict:
+    st = {"watched": 0, "missing": 0, "reseated": 0}
+    _HAND_RESET_STATE["mass"] = False
+    if not _machine_flag("hand_reset_reseat", True):
+        st["gate"] = "off"
+        return st
+    try:
+        min_n = int(_machine_flag_val("hand_reset_min", _HAND_RESET_MIN))
+    except (TypeError, ValueError):
+        min_n = _HAND_RESET_MIN
+    try:
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .gt("event_start", now.isoformat()).limit(300).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    watch = {}
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if (b.get("order_id") and b.get("pmm_slug") and not b.get("line_hold")
+                and not b.get("cancelled_at") and not b.get("in_play")):
+            watch[r["id"]] = (r, b)
+    st["watched"] = len(watch)
+    for pid in list(_HAND_RESET_MISS):
+        if pid not in watch:
+            _HAND_RESET_MISS.pop(pid, None)
+    if not watch:
+        return st
+    orders = _pmm_open_orders_raw(client, fresh=False)
+    if orders is None:
+        st["gate"] = "orders_unread"
+        return st
+    live = {o.get("id") for o in orders if o.get("state") in _OPEN_ORDER_STATES}
+    mono = _time.monotonic()
+    for pid, (r, b) in watch.items():
+        if b.get("order_id") in live:
+            _HAND_RESET_MISS.pop(pid, None)
+        else:
+            _HAND_RESET_MISS.setdefault(pid, mono)
+    st["missing"] = sum(1 for pid in watch if pid in _HAND_RESET_MISS)
+    if st["missing"] >= min_n:
+        _HAND_RESET_STATE["mass"] = True        # the app-retire path stands down
+    plan = _hand_reset_plan({k: v for k, v in _HAND_RESET_MISS.items() if k in watch},
+                            mono, _HAND_RESET_CONFIRM_S, min_n)
+    if not plan:
+        return st
+    # venue truth, fresh, before anything is re-placed
+    fo = _pmm_open_orders_raw(client, fresh=True)
+    if fo is None:
+        st["gate"] = "fresh_orders_unread"
+        return st
+    live = {o.get("id") for o in fo if o.get("state") in _OPEN_ORDER_STATES}
+    plan = [pid for pid in plan if watch[pid][1].get("order_id") not in live]
+    if len(plan) < min_n:
+        st["gate"] = "came_back"
+        for pid in list(_HAND_RESET_MISS):
+            if watch.get(pid) and watch[pid][1].get("order_id") in live:
+                _HAND_RESET_MISS.pop(pid, None)
+        return st
+    positions = _pmm_positions_raw(client, fresh=True)
+    if positions is None:
+        st["gate"] = "positions_unread"
+        return st
+    why = _hand_positions_partial(sb, positions)
+    if why:
+        st["gate"] = why
+        return st
+    done = []
+    for pid in plan:
+        r, b = watch[pid]
+        held = _bet_sheet_pick_side_held(positions.get(b.get("pmm_slug")), bool(b.get("pmm_synthetic")))
+        if held <= 0.0 and _mirror_shows_held(b.get("pmm_slug")):
+            continue                            # a short map never decides; next tick
+        try:
+            contracts = float(b.get("contracts") or 0)
+        except (TypeError, ValueError):
+            contracts = 0.0
+        qty = int(contracts - max(held, 0.0) + 1e-9)
+        nb = {**b, "order_id": None, "reset_at": now.isoformat(),
+              "venue_resets": int(b.get("venue_resets") or 0) + 1}
+        if held > 0:
+            nb["filled_qty"] = round(held, 2)
+        if qty >= 1:
+            nb["line_hold"] = {"at": now.isoformat(), "why": "venue_reset", "qty": qty,
+                               "from_c": b.get("price_c"), "dead_order": b.get("order_id")}
+        try:
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", pid).execute()
+        except Exception as e:
+            st.setdefault("errors", []).append(f"{pid}: {e}"[:80])
+            continue
+        _HAND_RESET_MISS.pop(pid, None)
+        if qty >= 1:
+            st["reseated"] += 1
+        done.append({"pick_id": pid, "slug": b.get("pmm_slug"), "qty": qty, "held": round(held, 2),
+                     "dead_order": b.get("order_id"), "price_c": b.get("price_c")})
+    if done:
+        try:
+            _probe_log({"hand_venue_reset": True, "n": len(done), "picks": done[:60],
+                        "at": now.isoformat()})
+        except Exception:
+            pass
+        app.logger.warning("hand VENUE RESET: %d orders gone at once — %d re-seating at the touch",
+                           len(done), st["reseated"])
     return st
 
 
@@ -14907,6 +15061,11 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
     try:
         if client is None:
             client = get_client()
+        try:
+            stats["reset"] = _hand_reset_tick(sb, client, now)   # venue wiped our orders → re-seat
+        except Exception as e:
+            stats["reset"] = {"err": str(e)[:80]}
+            _HAND_RESET_STATE["mass"] = False
         try:
             stats["adopt"] = _hand_app_adopt_tick(sb, client, now)   # app bets → sheet picks
         except Exception as e:
