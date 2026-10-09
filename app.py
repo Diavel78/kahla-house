@@ -13432,7 +13432,7 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                "state": out.get("state"), "resting": out.get("resting"),
                "cost": out.get("cost"), "price_c": out.get("price_c")}
         if seat_det and seat_det.get("thin"):
-            res["thin"] = {k: seat_det.get(k) for k in ("touch_c", "touch_q", "below_c", "below_q", "pct")}
+            res["thin"] = {k: seat_det.get(k) for k in ("touch_c", "touch_q", "below_c", "below_q", "stack_q", "rungs", "pct")}
         if out.get("unverified") and deferred is not None:
             res["resting"] = None
             res["verify"] = "pending"               # the batch's one list settles it
@@ -14015,10 +14015,10 @@ def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: flo
 
 
 def _hand_drop_target(ladder, p_c, our_price_c, our_qty, min_pct):
-    """Pure. The rung to drop to after a vanish at p_c: the highest rung
-    under p_c with size (minus ours) that is NOT itself a sliver of the rung
-    beneath it (the thin-touch test, min_pct); else the biggest rung under
-    p_c; None when nothing rests below. Selftest `test_hand_move_plan`."""
+    """Pure. The rung to drop to after a vanish at p_c: the fat seat
+    (`_hand_fat_seat`, the same stacked test the thin-touch guard uses)
+    among the rungs under p_c; None when nothing rests below. Selftest
+    `test_hand_move_plan`."""
     try:
         rows = sorted([(float(p), float(q)) for p, q in (ladder or [])
                        if p is not None and q is not None and float(p) < float(p_c) - 1e-9],
@@ -14032,13 +14032,34 @@ def _hand_drop_target(ladder, p_c, our_price_c, our_qty, min_pct):
     rows = [(p, excl(p, q)) for p, q in rows if excl(p, q) > 0]
     if not rows:
         return None
-    for i, (p, q) in enumerate(rows):
-        if i + 1 >= len(rows):
-            return p
-        nq = rows[i + 1][1]
-        if min_pct is None or float(min_pct) <= 0 or q >= nq * float(min_pct) / 100.0:
-            return p
-    return max(rows, key=lambda x: x[1])[0]
+    j, _ = _hand_fat_seat(rows, min_pct)
+    return rows[j][0]
+
+
+_HAND_SEAT_WINDOW_C = 2.0            # how far under the top rung the stacked thin test looks
+
+
+def _hand_fat_seat(rows, min_pct, window_c: float = _HAND_SEAT_WINDOW_C):
+    """Pure. THE ONE SEAT RULE (Rob, Oct 9 2026, the Duke −6.5 fill: "make
+    it the same"): `rows` = our-side (price, size) best-first, our own size
+    already removed. The seat is the DEEPEST rung j within `window_c` of the
+    top whose size dwarfs everything stacked above it — sum(rows[:j]) under
+    min_pct% of rows[j]. Everything above that rung is a straggler stack.
+    No such rung → the top. Returns (j, stack_q). One rung down this is the
+    old pairwise test exactly; the window adds the stack the pairwise test
+    could not see (Duke: 53¢ 80 over 51.5¢ 96 passed pairwise, but 176
+    together sat on 3,163 at 51¢)."""
+    if not rows or min_pct is None or float(min_pct) <= 0:
+        return 0, 0.0
+    top = rows[0][0]
+    seat, stack, cum = 0, 0.0, 0.0
+    for j in range(1, len(rows)):
+        cum += rows[j - 1][1]
+        if top - rows[j][0] > float(window_c) + 1e-9:
+            break
+        if rows[j][1] > 0 and cum < rows[j][1] * float(min_pct) / 100.0:
+            seat, stack = j, cum
+    return seat, stack
 
 
 def _hand_calm(rows, now_ts: float) -> bool:
@@ -15854,10 +15875,12 @@ def _hand_seat_price(book, syn: bool, event_start, now, min_pct, off_h, our_pric
 
 
 def _hand_thin_touch(ladder, our_price_c, our_qty, min_pct: float):
-    """Pure. (thin, detail). thin ⇔ the touch rung's size, minus our own
-    contracts if we sit there, is under min_pct% of the next rung down
-    (also minus ours). One rung or no second rung → not thin (nothing to
-    compare against). Selftest `test_hand_thin_touch`."""
+    """Pure. (thin, detail). thin ⇔ the fat seat (`_hand_fat_seat`) sits
+    under the touch: the touch, alone or stacked with the rungs between it
+    and a fat rung within 2¢, is under min_pct% of that rung (our own
+    contracts never count as company). `below_c`/`below_q` = the seat;
+    `stack_q` = everything resting above it. One rung → not thin. Selftest
+    `test_hand_thin_touch`."""
     try:
         lad = [(float(p), float(q)) for p, q in (ladder or []) if p is not None and q is not None]
     except (TypeError, ValueError):
@@ -15870,11 +15893,16 @@ def _hand_thin_touch(ladder, our_price_c, our_qty, min_pct: float):
         if our_price_c is not None and abs(p - float(our_price_c)) < 0.01:
             return max(0.0, q - float(our_qty or 0.0))
         return q
-    tc, tq = lad[0][0], excl(*lad[0])
-    bc, bq = lad[1][0], excl(*lad[1])
+    rows = [(p, excl(p, q)) for p, q in lad]
+    tc, tq = rows[0]
+    j, stack = _hand_fat_seat(rows, min_pct)
+    thin = j > 0
+    k = j if thin else 1
+    bc, bq = rows[k]
+    sq = stack if thin else tq
     det = {"touch_c": tc, "touch_q": round(tq, 1), "below_c": bc, "below_q": round(bq, 1),
-           "pct": round(100.0 * tq / bq, 1) if bq > 0 else None, "min_pct": float(min_pct)}
-    thin = bq > 0 and tq < bq * float(min_pct) / 100.0
+           "stack_q": round(sq, 1), "rungs": k,
+           "pct": round(100.0 * sq / bq, 1) if bq > 0 else None, "min_pct": float(min_pct)}
     det["why"] = "thin" if thin else "ok"
     return thin, det
 _HAND_CHASE_LAST: dict = {}          # pick_id → monotonic of the last write attempt

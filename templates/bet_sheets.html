@@ -521,7 +521,7 @@
             if (i.q) {
                 if (i.q.ok) {
                     q = '<div class="q ok">' + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
-                      + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + '</div>';
+                      + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.stack_q || i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + '</div>';
                     cost += n * i.q.price_c / 100; known++;
                 } else if (i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'placing on the box…') + '</div>';
                 else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
@@ -723,7 +723,7 @@
                 return { cls: 'warn', short: 'OUTBID', detail: pre + rest + ' · touch ' + b.touch_c + '¢ · in play — re-peg in the app' };
             let why = '';
             if (ch.thin_hold && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01 && Math.abs((ch.thin_hold.touch_c || 0) - b.touch_c) < 0.26)
-                why = 'thin touch: ' + b.touch_c + '¢ has ' + Math.round(ch.thin_hold.touch_q || 0) + ' over ' + Math.round(ch.thin_hold.below_q || 0) + ' at ' + ch.thin_hold.below_c + '¢, sitting ' + o.price_c + '¢';
+                why = 'thin touch: ' + b.touch_c + '¢ has ' + Math.round(ch.thin_hold.touch_q || 0) + ((ch.thin_hold.rungs || 1) > 1 ? ' (' + Math.round(ch.thin_hold.stack_q || 0) + ' stacked)' : '') + ' over ' + Math.round(ch.thin_hold.below_q || 0) + ' at ' + ch.thin_hold.below_c + '¢, sitting ' + o.price_c + '¢';
             else if (ch.rejoin_hold && ch.rejoin_hold.until && new Date(ch.rejoin_hold.until) > new Date() && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01)
                 why = 'post-move hold · touch ' + b.touch_c + '¢ · until ' + fmtClock(ch.rejoin_hold.until);
             else if (b.outbid) why = 'outbid · touch ' + b.touch_c + '¢ · chasing';
