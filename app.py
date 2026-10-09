@@ -24713,7 +24713,7 @@ _PIN_REFRESH_EARLY_AZ_MIN = 150        # Rob, Sep 26 2026: "Add that extra Pinn 
                                        # pull left those seeds on a 21-hour-old line. Two pulls per AZ day.
 
 
-def _pin_line_from_events(events, away, home, mt):
+def _pin_line_from_events(events, away, home, mt, book=None):
     """Pinnacle's line for one game from a TOA-shaped slate, in the
     executor's rung units: spread → the HOME team's point (negative when
     home is favored, i.e. the home-perspective rung value), total → the
@@ -24723,8 +24723,13 @@ def _pin_line_from_events(events, away, home, mt):
     key = {"spread": "spreads", "total": "totals"}.get(mt)
     if not key:
         return None
+    # `book=None` takes the event's FIRST bookmaker — only safe on a slate
+    # already filtered to one book (the book_lines writer). A three-book
+    # slate lists FanDuel/DraftKings for games Pinnacle doesn't price, so
+    # the sheet and the center ask for "pinnacle" by name (Oct 9 2026: 59
+    # of 108 college games had no Pinnacle line and could read as PIN).
     pick, _opp = _pin_outcomes(events, away, home, key,
-                               "home" if mt == "spread" else "over", book=None)
+                               "home" if mt == "spread" else "over", book=book)
     if not pick or pick.get("point") is None:
         return None
     try:
@@ -24742,7 +24747,7 @@ def _pin_line_center(sb, sport, away, home, mt, now):
         return None
     if not events or age is None or age > _PIN_CENTER_MAX_AGE_S:
         return None
-    return _pin_line_from_events(events, away, home, mt)
+    return _pin_line_from_events(events, away, home, mt, book="pinnacle")
 
 
 _BOOK_PRIORITY = ("pinnacle", "draftkings", "fanduel", "nflverse")   # nflverse = the week's Vegas line (Sep 17 2026)
@@ -31908,12 +31913,31 @@ def _pin_slate(sb, sport: str, now) -> list | None:
         return cached_ev
     r = None
     try:
-        r = _http.get(f"{_PARLAY_BASE}/sports/{sk}/odds",
-                      params={"apiKey": key,
-                              "bookmakers": "pinnacle,draftkings,fanduel",
-                              "markets": "h2h,spreads,totals",
-                              "oddsFormat": "american", "dateFormat": "iso"},
-                      timeout=6)
+        # ONE RETRY (Oct 9 2026): the vendor answers the same request in 3s
+        # one minute and times out (10s) or returns [] the next — measured
+        # back to back from the probe. A second try 3s later is cheap next
+        # to a sheet priced off the book line all day.
+        for _try in range(2):
+            try:
+                r = _http.get(f"{_PARLAY_BASE}/sports/{sk}/odds",
+                              params={"apiKey": key,
+                                      "bookmakers": "pinnacle,draftkings,fanduel",
+                                      "markets": "h2h,spreads,totals",
+                                      "oddsFormat": "american", "dateFormat": "iso"},
+                              timeout=15)
+            except Exception:
+                if _try == 0:
+                    _time.sleep(3)
+                    continue
+                raise
+            try:
+                _body = r.json() if r.status_code == 200 else None
+            except ValueError:
+                _body = None
+            if isinstance(_body, list) and _body:
+                break
+            if _try == 0:
+                _time.sleep(3)
         hdr = {h: r.headers.get(h) for h in ("x-requests-used", "x-requests-remaining",
                                              "x-requests-last")}
         if r.status_code != 200:

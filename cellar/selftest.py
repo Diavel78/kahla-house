@@ -895,6 +895,16 @@ def test_pin_line_center() -> None:
     check("total center = the Over point (59)",
           _app._pin_line_from_events(ev, "Northern Arizona Lumberjacks", "Arizona Wildcats", "total") == 59.0)
     check("unknown game → None", _app._pin_line_from_events(ev, "Texas Longhorns", "Ohio State Buckeyes", "spread") is None)
+    # A THREE-BOOK SLATE (Oct 9 2026): a game Pinnacle doesn't price must not
+    # read FanDuel's line as Pinnacle's.
+    fd = [{"away_team": "Florida A&M", "home_team": "Alabama State",
+           "bookmakers": [{"key": "fanduel", "markets": [
+               {"key": "spreads", "outcomes": [{"name": "Alabama State", "point": -4.5},
+                                               {"name": "Florida A&M", "point": 4.5}]}]}]}]
+    check("FanDuel-only game → no Pinnacle line",
+          _app._pin_line_from_events(fd, "Florida A&M Rattlers", "Alabama State Hornets", "spread", book="pinnacle") is None)
+    check("…while the unfiltered read still takes the first book (book_lines writer)",
+          _app._pin_line_from_events(fd, "Florida A&M Rattlers", "Alabama State Hornets", "spread") == -4.5)
 
 
 def test_dry_run_blackout() -> None:
@@ -3380,11 +3390,13 @@ def test_pin_slate_empty_keeps_cache() -> None:
 
         def json(self):
             return self._b
-    saved = (_app._parlay_state_get, _app._parlay_state_put, _app._parlay_key, _app._http.get)
+    saved = (_app._parlay_state_get, _app._parlay_state_put, _app._parlay_key, _app._http.get,
+             _app._time.sleep)
     try:
         _app._parlay_state_get = lambda sb, k: store.get(k)
         _app._parlay_state_put = lambda sb, k, v, n: store.__setitem__(k, {"v": v, "updated_at": n.isoformat()})
         _app._parlay_key = lambda sb: "k"
+        _app._time.sleep = lambda s: None
         _app._http.get = lambda *a, **kw: R(200, [])
         ev = _app._pin_slate(None, "NFL", now)
         check("empty answer → the cached slate is served", len(ev or []) == 1)
@@ -3399,8 +3411,15 @@ def test_pin_slate_empty_keeps_cache() -> None:
         _app._pin_slate(None, "NFL", now)
         check("a real slate replaces the cache", len(store["pin:NFL"]["v"]["events"]) == 3
               and store["pinlog:NFL"]["v"]["pinnacle_events"] == 3)
+        seq = [R(200, []), R(200, [{"away_team": "E", "home_team": "F",
+                                     "bookmakers": [{"key": "pinnacle"}]}] * 2)]
+        _app._http.get = lambda *a, **kw: seq.pop(0)
+        _app._pin_slate(None, "NFL", now + _td(hours=3))
+        check("an empty first answer is retried once and the retry lands",
+              len(store["pin:NFL"]["v"]["events"]) == 2)
     finally:
-        (_app._parlay_state_get, _app._parlay_state_put, _app._parlay_key, _app._http.get) = saved
+        (_app._parlay_state_get, _app._parlay_state_put, _app._parlay_key, _app._http.get,
+         _app._time.sleep) = saved
 
 
 def test_hand_venue_reset() -> None:

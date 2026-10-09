@@ -116,8 +116,8 @@ def line_hook(sport: str, away: str, home: str) -> dict | None:
     fresh_s = getattr(app, "_SHEET_PIN_FRESH_S", app._PIN_CENTER_MAX_AGE_S)
     if not events or age is None or age * 60.0 > fresh_s:
         return None
-    sp = app._pin_line_from_events(events, away, home, "spread")
-    tt = app._pin_line_from_events(events, away, home, "total")
+    sp = app._pin_line_from_events(events, away, home, "spread", book="pinnacle")
+    tt = app._pin_line_from_events(events, away, home, "total", book="pinnacle")
     if sp is None and tt is None:
         return None
     return {"spread_home": sp, "total": tt, "src": "pinnacle",
