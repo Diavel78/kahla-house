@@ -2796,6 +2796,21 @@ def test_hand_thin_touch() -> None:
     check("pct 0 → off", f([(52.0, 1.0), (51.5, 1800.0)], 51.0, 5, 0)[0] is False)
     check("unsorted ladder is sorted best-first", f([(51.5, 1800.0), (52.0, 10.0)], 51.0, 5, 20.0)[0] is True)
     check("empty → ok", f(None, 51.0, 5, 20.0)[0] is False)
+    # THE STRAGGLER STACK (Oct 9 2026, the Duke −6.5 fill at 53¢): pairwise
+    # 80 over 96 passed; together 176 sat on 3,163 at 51¢ → the seat is 51.
+    duke = [(53.0, 84.8), (51.5, 96.0), (51.0, 3163.2), (50.5, 8772.0), (50.0, 10997.0)]
+    thin, d = f(duke, 53.0, 5, 20.0)
+    check("Duke book: a two-rung straggler stack → thin, seat 51.0",
+          thin and d["below_c"] == 51.0 and d["stack_q"] == 175.8 and d["rungs"] == 2)
+    check("…and the vanish drop lands on the same seat", _app._hand_drop_target(duke, 53.5, None, 0, 20.0) == 51.0)
+    check("the stack test stops at 2¢: a fat rung 2.5¢ down is out of reach",
+          f([(53.0, 80.0), (51.5, 96.0), (50.5, 90000.0)], 51.0, 5, 20.0)[0] is False)
+    thin, d = f([(53.0, 10.0), (52.5, 100.0), (52.0, 5000.0)], 51.0, 5, 20.0)
+    check("two slivers in a row → the DEEPEST fat seat (52.0, not 52.5)", thin and d["below_c"] == 52.0)
+    check("a fat stack is company (1,000 over 3,000) → ok",
+          f([(53.0, 500.0), (52.5, 500.0), (52.0, 3000.0)], 51.0, 5, 20.0)[0] is False)
+    check("drop target with no sliver keeps the first rung under",
+          _app._hand_drop_target([(52.5, 900.0), (52.0, 1000.0)], 53.0, None, 0, 20.0) == 52.5)
     # the chase plan itself is unchanged: the guard sits in the tick between 'move' and the amend
     check("plan still says move", _app._hand_chase_plan(51.0, 52.0, 51.0, 2.0)[0] == "move")
     # the boot fallback: a REST book → our-side ladder (Oct 4 2026, the 28s-after-boot join)
