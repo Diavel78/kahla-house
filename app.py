@@ -3402,10 +3402,12 @@ def api_cellar_health():
             _pa = {"month": _mk, "budget": _PARLAY_BUDGET,
                    "credits": (((_parlay_state_get(sb, _mk) or {}).get("v") or {})
                                .get("credits") or 0), "slates": {}}
-            for _sp in ("NFL", "NCAAF", "NHL"):
+            for _sp in ("NFL", "NCAAF", "NHL", "NBA"):
                 _ev, _age = _pin_slate_cached(sb, _sp, _now)
                 _pa["slates"][_sp] = {"events": len(_ev or []),
-                                      "age_min": round(_age, 1) if _age is not None else None}
+                                      "age_min": round(_age, 1) if _age is not None else None,
+                                      "last_pull": ((_parlay_state_get(sb, f"pinlog:{_sp}") or {})
+                                                    .get("v"))}
             out["parlay"] = _pa
         except Exception as e:
             out["parlay_err"] = f"{type(e).__name__}: {e}"[:160]
@@ -31864,30 +31866,47 @@ def _parlay_key(sb) -> str:
     return ((row or {}).get("v") or {}).get("key") or ""
 
 
+def _pin_pull_log(sb, sport: str, now, rec: dict) -> None:
+    """The last vendor answer per sport (Oct 9 2026 — a 7am pull cached an
+    EMPTY slate for NFL/NCAAF/NHL and nothing said why). Read on
+    /api/cellar/health → parlay.pulls and /api/parlay/probe."""
+    try:
+        _parlay_state_put(sb, f"pinlog:{sport}", {**rec, "at": now.isoformat()}, now)
+    except Exception:
+        pass
+
+
 def _pin_slate(sb, sport: str, now) -> list | None:
     """Pinnacle game lines for one sport's whole slate, DB-cached 90 min,
-    hard monthly budget guard. Returns TOA-shaped events or None."""
+    hard monthly budget guard. Returns TOA-shaped events or None.
+    ⚠ An EMPTY answer never replaces the cache (Oct 9 2026): a 200 with []
+    is the vendor having nothing (or failing quietly), not proof the sport
+    has no games — the cached slate's age still gates every reader."""
     sk = _PARLAY_SPORT_KEY.get(sport)
     if not sk:
         return None
     cache = _parlay_state_get(sb, f"pin:{sport}")
+    cached_ev = ((cache or {}).get("v") or {}).get("events")
     if cache:
         try:
             age = (now - datetime.fromisoformat(
                 str(cache["updated_at"]).replace("Z", "+00:00"))).total_seconds()
-            if age < _PARLAY_CACHE_MIN * 60:
-                return (cache.get("v") or {}).get("events")
+            if age < _PARLAY_CACHE_MIN * 60 and cached_ev:
+                return cached_ev
         except Exception:
             pass
     key = _parlay_key(sb)
     if not key:
+        _pin_pull_log(sb, sport, now, {"ok": False, "why": "no_key"})
         return None
     month_k = "usage:" + now.strftime("%Y-%m")
     used = (((_parlay_state_get(sb, month_k) or {}).get("v") or {})
             .get("credits") or 0)
     if used + _PARLAY_CREDITS_PER_CALL > _PARLAY_BUDGET:
         # Budget exhausted — serve the stale cache rather than nothing.
-        return ((cache or {}).get("v") or {}).get("events")
+        _pin_pull_log(sb, sport, now, {"ok": False, "why": "budget", "credits": used})
+        return cached_ev
+    r = None
     try:
         r = _http.get(f"{_PARLAY_BASE}/sports/{sk}/odds",
                       params={"apiKey": key,
@@ -31895,14 +31914,28 @@ def _pin_slate(sb, sport: str, now) -> list | None:
                               "markets": "h2h,spreads,totals",
                               "oddsFormat": "american", "dateFormat": "iso"},
                       timeout=6)
+        hdr = {h: r.headers.get(h) for h in ("x-requests-used", "x-requests-remaining",
+                                             "x-requests-last")}
         if r.status_code != 200:
-            return ((cache or {}).get("v") or {}).get("events")
+            _pin_pull_log(sb, sport, now, {"ok": False, "status": r.status_code, "hdr": hdr,
+                                           "body": (r.text or "")[:300]})
+            return cached_ev
         events = r.json()
         if not isinstance(events, list):
-            return ((cache or {}).get("v") or {}).get("events")
-    except Exception:
-        return ((cache or {}).get("v") or {}).get("events")
-    _parlay_state_put(sb, f"pin:{sport}", {"events": events}, now)
+            _pin_pull_log(sb, sport, now, {"ok": False, "status": 200, "hdr": hdr,
+                                           "why": "not_a_list", "body": (r.text or "")[:300]})
+            return cached_ev
+    except Exception as e:
+        _pin_pull_log(sb, sport, now, {"ok": False, "why": f"{type(e).__name__}: {e}"[:200],
+                                       "status": getattr(r, "status_code", None)})
+        return cached_ev
+    pin_n = sum(1 for e in events
+                if any(b.get("key") == "pinnacle" for b in (e.get("bookmakers") or [])))
+    _pin_pull_log(sb, sport, now, {"ok": bool(events), "status": 200, "hdr": hdr,
+                                   "events": len(events), "pinnacle_events": pin_n,
+                                   "body": (r.text or "")[:300] if not events else None})
+    if events:
+        _parlay_state_put(sb, f"pin:{sport}", {"events": events}, now)
     # The vendor's x-requests-used header is the credit truth (our ledger
     # undercounted — the props path learned this first); never go below
     # what we already counted.
@@ -31913,7 +31946,58 @@ def _pin_slate(sb, sport: str, now) -> list | None:
         used_now = used + _PARLAY_CREDITS_PER_CALL
     _parlay_state_put(sb, month_k,
                       {"credits": max(used_now, used + _PARLAY_CREDITS_PER_CALL)}, now)
-    return events
+    return events if events else cached_ev
+
+
+@app.route("/api/parlay/probe")
+def api_parlay_probe():
+    """Shared-secret (site-curl): what parlay-api actually answers for the
+    Pinnacle slate. Without `pull=1` it only reads the cache + the last
+    pull log per sport (free). With `pull=1&sport=NFL` it makes ONE raw
+    vendor call (3 credits) and reports status, credit headers, event and
+    bookmaker counts and a body sample; the cache is left alone. The key is
+    never echoed. Built Oct 9 2026 when every 7am slate came back empty."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    now = datetime.now(timezone.utc)
+    out: dict = {"ok": True, "base": _PARLAY_BASE, "sports": {}}
+    for sp in ("NFL", "NCAAF", "NHL", "NBA"):
+        ev, age = _pin_slate_cached(sb, sp, now)
+        out["sports"][sp] = {"cached_events": len(ev or []),
+                             "age_min": round(age, 1) if age is not None else None,
+                             "last_pull": ((_parlay_state_get(sb, f"pinlog:{sp}") or {}).get("v"))}
+    pk = _parlay_key(sb)
+    out["key_source"] = ("env" if (os.environ.get("PARLAY_API_KEY") or "").strip()
+                         else ("db" if pk else "none"))
+    out["key_len"] = len(pk or "")
+    sport = (request.args.get("sport") or "NFL").upper()
+    if request.args.get("pull") and pk and _PARLAY_SPORT_KEY.get(sport):
+        books = request.args.get("books") or "pinnacle,draftkings,fanduel"
+        try:
+            r = _http.get(f"{_PARLAY_BASE}/sports/{_PARLAY_SPORT_KEY[sport]}/odds",
+                          params={"apiKey": pk, "bookmakers": books,
+                                  "markets": "h2h,spreads,totals",
+                                  "oddsFormat": "american", "dateFormat": "iso"},
+                          timeout=10)
+            body = r.json() if "json" in (r.headers.get("content-type") or "") else None
+            evs = body if isinstance(body, list) else []
+            bk: dict = {}
+            for e in evs:
+                for b in (e.get("bookmakers") or []):
+                    bk[b.get("key")] = bk.get(b.get("key"), 0) + 1
+            out["pull"] = {"sport": sport, "books": books, "status": r.status_code,
+                           "hdr": {h: r.headers.get(h) for h in
+                                   ("x-requests-used", "x-requests-remaining", "x-requests-last")},
+                           "events": len(evs), "bookmakers": bk,
+                           "first": ({k: evs[0].get(k) for k in
+                                      ("away_team", "home_team", "commence_time")} if evs else None),
+                           "body": (r.text or "")[:400] if not evs else None}
+        except Exception as e:
+            out["pull"] = {"sport": sport, "error": f"{type(e).__name__}: {e}"[:200]}
+    return jsonify(out)
 
 
 _PIN_MKT_KEY = {"moneyline": "h2h", "spread": "spreads", "total": "totals"}

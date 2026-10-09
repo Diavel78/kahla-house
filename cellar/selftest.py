@@ -3362,6 +3362,47 @@ def test_end_state_rosters() -> None:
           and "workflow_dispatch" in wf)
 
 
+def test_pin_slate_empty_keeps_cache() -> None:
+    """THE EMPTY 7AM SLATE (Oct 9 2026): a vendor 200 with [] must not
+    replace the cached Pinnacle slate, and every pull leaves a log."""
+    import app as _app
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    now = _dt(2026, 10, 9, 14, 0, tzinfo=_tz.utc)
+    store = {"pin:NFL": {"v": {"events": [{"away_team": "A", "home_team": "B",
+                                           "bookmakers": [{"key": "pinnacle"}]}]},
+                         "updated_at": (now - _td(hours=5)).isoformat()}}
+
+    class R:
+        def __init__(self, st, body):
+            self.status_code, self._b = st, body
+            self.headers = {"x-requests-used": "300", "content-type": "application/json"}
+            self.text = str(body)
+
+        def json(self):
+            return self._b
+    saved = (_app._parlay_state_get, _app._parlay_state_put, _app._parlay_key, _app._http.get)
+    try:
+        _app._parlay_state_get = lambda sb, k: store.get(k)
+        _app._parlay_state_put = lambda sb, k, v, n: store.__setitem__(k, {"v": v, "updated_at": n.isoformat()})
+        _app._parlay_key = lambda sb: "k"
+        _app._http.get = lambda *a, **kw: R(200, [])
+        ev = _app._pin_slate(None, "NFL", now)
+        check("empty answer → the cached slate is served", len(ev or []) == 1)
+        check("…and the cache is NOT overwritten", len(store["pin:NFL"]["v"]["events"]) == 1)
+        check("…and the pull is logged with its count", store["pinlog:NFL"]["v"]["events"] == 0
+              and store["pinlog:NFL"]["v"]["ok"] is False)
+        _app._http.get = lambda *a, **kw: R(401, {"error": "bad key"})
+        _app._pin_slate(None, "NFL", now)
+        check("a 401 is logged with its status", store["pinlog:NFL"]["v"]["status"] == 401)
+        _app._http.get = lambda *a, **kw: R(200, [{"away_team": "C", "home_team": "D",
+                                                    "bookmakers": [{"key": "pinnacle"}]}] * 3)
+        _app._pin_slate(None, "NFL", now)
+        check("a real slate replaces the cache", len(store["pin:NFL"]["v"]["events"]) == 3
+              and store["pinlog:NFL"]["v"]["pinnacle_events"] == 3)
+    finally:
+        (_app._parlay_state_get, _app._parlay_state_put, _app._parlay_key, _app._http.get) = saved
+
+
 def test_hand_venue_reset() -> None:
     print("venue reset: many orders gone at once re-seat; one is Rob's call")
     import inspect as _ins
@@ -3513,7 +3554,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
