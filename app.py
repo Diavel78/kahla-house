@@ -15560,8 +15560,10 @@ def api_bet_sheets_mine():
         if st == "void" and _sold:
             st = "sold"                       # closed by a sale in the app, not graded
             pnl_usd = _sold.get("pnl_usd")
-        elif st in ("won", "lost", "push") and price_c is not None:
-            q = float(qty) if qty is not None else float(contracts or 0)
+        elif st in ("won", "lost", "push") and price_c is not None and qty is not None:
+            # NO FILL ON RECORD = NO DOLLARS (Oct 10 2026): the old fallback
+            # priced a never-filled graded pick at its full contracts.
+            q = float(qty)
             if st == "won":
                 pnl_usd = round(q * (100.0 - float(price_c)) / 100.0, 2)
             elif st == "lost":
@@ -15615,7 +15617,15 @@ def api_bet_sheets_mine():
         tape_dark = _touch_tape_dark(sb)
     except Exception:
         tape_dark = None
-    settled = _bet_sheet_settled_today(sb)
+    # SETTLED = YOUR BETS (Oct 10 2026, Rob: "No way this P/L is right, not
+    # even close"): the account-wide venue day carried every leftover machine
+    # lot that settled today. The box adds up today's sheet/app bets that
+    # actually filled — won, lost, push, sold — at their own fill size; the
+    # account day rides along as `account` for the cross-check.
+    _done = [b for b in out if b.get("status") in ("won", "lost", "push", "sold")
+             and b.get("pnl_usd") is not None]
+    settled = {"today": round(sum(float(b["pnl_usd"]) for b in _done), 2), "n": len(_done),
+               "src": "sheet", "account": _bet_sheet_settled_today(sb)}
     return jsonify({"ok": True, "bets": out, "missed": missed, "venue_ok": venue_ok, "tape_dark": tape_dark,
                     "settled": settled,
                     "src": ("box" if box is not None else "vercel"),
@@ -15857,7 +15867,13 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
         if pid is None:
             continue
         outr = res.get("result") if isinstance(res.get("result"), dict) else {}
-        if outr.get("deleted"):
+        # THE RULE (Rob, Oct 10 2026): "If you cancel a bet that I have
+        # resting at kickoff, I want it on the list. That's it." Every
+        # verified kickoff cancel counts unless it shows a FILL. A cancel
+        # whose positions read failed (held None) kept the pick instead of
+        # deleting it — that is still an unfilled bet he wanted; the pick's
+        # own filled_qty (below) decides, never the missing read.
+        if outr.get("deleted") or (outr.get("ok") and not (outr.get("held") or 0) > 0):
             by_pick[int(pid)] = (row.get("at"), res)
         elif outr.get("ok"):
             by_pick.pop(int(pid), None)       # a partial fill: the pick stayed, it is a live bet
@@ -15885,7 +15901,13 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
     taken, names = set(), {}
     for b in bets or []:
         ek = _bs_event_key(b.get("slug") or "")
-        if ek[0] and b.get("market_type") and b.get("side"):
+        _got = (b.get("held") or 0) > 0 or (b.get("filled_qty") or 0) > 0 or b.get("status") == "sold"
+        if b.get("id") in by_pick and _got:
+            by_pick.pop(b["id"], None)                    # the kept pick filled after all
+        # only a bet that actually FILLED on the same game + side takes the
+        # row off (he got it live); a resting app order he is still chasing
+        # does not
+        if _got and ek[0] and b.get("market_type") and b.get("side"):
             taken.add((ek, b["market_type"], b["side"]))
         if ek[0] and b.get("event_name"):
             names.setdefault(ek[0], (b.get("event_name"), b.get("sport")))
@@ -16004,6 +16026,10 @@ def _bet_sheet_cancel_exec(sb, client, pick_id):
         if not gone:
             return {"ok": False, "error": "venue did not cancel it — check the app"}, 502
     pos = _pmm_positions_raw(client, fresh=True)
+    if pos is None:
+        # a failed fresh read left 7 kickoff cancels on Oct 10 2026 kept as
+        # "held unknown" pending picks — the socket-fed mirror is the fallback
+        pos = _pmm_positions_raw(client, fresh=False)
     held = _bet_sheet_pick_side_held((pos or {}).get(slug), syn) if pos is not None else None
     if held is not None and held <= 0.0 and r.get("status") == "pending":
         sb.table("bot_picks").delete().eq("id", r["id"]).execute()
