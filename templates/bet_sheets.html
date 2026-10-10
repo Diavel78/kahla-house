@@ -1021,9 +1021,14 @@
         } catch (e) { return {}; }
     }
     function dismissMissed(id) {
+        // hide here now; the server stamp hides it on every device (iPad → phone)
         const o = _missedDismissed(); o[id] = Date.now();
         try { localStorage.setItem('kh_missed_dismiss_v1', JSON.stringify(o)); } catch (e) {}
         loadBetsRender();
+        authFetch('/api/bet-sheets/missed/dismiss', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ id: id }) })
+            .then(r => { if (r && !r.ok) toast('Hide not saved for other devices', true); })
+            .catch(() => toast('Hide not saved for other devices', true));
     }
     let _lastBetsPayload = null;
     function loadBetsRender() { if (_lastBetsPayload) renderBets(_lastBetsPayload); }

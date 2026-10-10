@@ -3468,6 +3468,11 @@ def test_bet_sheet_missed() -> None:
     class Q:
         def __init__(self, data): self.d = data
         def __getattr__(self, _n): return lambda *a, **k: self
+        def eq(self, k, v):                    # honour result->>flag filters (cancel vs dismiss stamps)
+            if str(k).startswith("result->>"):
+                f = k.split(">>", 1)[1]
+                return Q([r for r in self.d if str((r.get("result") or {}).get(f)).lower() == str(v)])
+            return self
         def execute(self):
             class R: pass
             R.data = self.d
@@ -3546,6 +3551,11 @@ def test_bet_sheet_missed() -> None:
         live2 = [{"slug": army, "market_type": "spread", "side": "away"}]
         check("missed: the OTHER side live does not hide it",
               1 in [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, live2)])
+        tables["exec_probe_runs"].append({"at": now.isoformat(),
+                                          "result": {"hand_missed_dismiss": True, "pick_id": 1}})
+        _g = [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, [])]
+        check("missed: a ✕ on any device (server stamp) hides the row everywhere — the rest stay",
+              1 not in _g and 5 in _g, f"got {_g}")
     finally:
         (_app._bs_espn_events, _app._live_match_espn, _app._live_book_mid, _app.get_client,
          _app._venue_rl_active) = saved

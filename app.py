@@ -15831,6 +15831,23 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
             by_pick.pop(int(pid), None)       # a partial fill: the pick stayed, it is a live bet
     if not by_pick:
         return []
+    # ✕ IS SERVER-SIDE (Oct 10 2026, Rob: "I deleted these on my iPad,
+    # switched to my phone, and they are back"): a hide was localStorage per
+    # device. Each ✕ now stamps exec_probe_runs hand_missed_dismiss.
+    try:
+        for d in (sb.table("exec_probe_runs").select("result")
+                  .eq("result->>hand_missed_dismiss", "true")
+                  .gte("at", (now - timedelta(hours=_BS_MISSED_MAX_H + 2)).isoformat())
+                  .limit(300).execute().data or []):
+            r = d.get("result") if isinstance(d.get("result"), dict) else {}
+            try:
+                by_pick.pop(int(r.get("pick_id")), None)
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass                                   # unreadable hides: show the rows, never lose one
+    if not by_pick:
+        return []
     old = {pid for pid, (_a, res) in by_pick.items() if not isinstance(res.get("bet"), dict)}
     back = _bet_sheet_missed_from_queue(sb, now, old)
     taken, names = set(), {}
@@ -16665,6 +16682,19 @@ def _bet_sheet_queue_op(op: str):
         return jsonify({"ok": True, "queued": True, "queue_id": rid,
                         "note": "queued on the box — it will run shortly"})
     return jsonify(out), (200 if out.get("ok") else 502)
+
+
+@app.route("/api/bet-sheets/missed/dismiss", methods=["POST"])
+@admin_required
+def api_bet_sheets_missed_dismiss():
+    """Hide one 'Not filled, started' row on every device."""
+    body = request.get_json(silent=True) or {}
+    raw = str(body.get("id") or "").lstrip("m")
+    if not raw.isdigit():
+        return jsonify({"ok": False, "error": "bad id"}), 400
+    _probe_log({"hand_missed_dismiss": True, "pick_id": int(raw),
+                "at": datetime.now(timezone.utc).isoformat()})
+    return jsonify({"ok": True, "pick_id": int(raw)})
 
 
 @app.route("/api/bet-sheets/cancel", methods=["POST"])
