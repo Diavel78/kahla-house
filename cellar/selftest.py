@@ -3544,11 +3544,14 @@ def test_bet_sheet_missed() -> None:
               m5.get("period") == "1h" and m5.get("side") == "home" and m5.get("line") == -1.5
               and m5.get("price_c") == 47.0 and m5.get("event_name") == "Tulane Green Wave @ Army Black Knights"
               and m5.get("app") is True, f"got {m5}")
-        live = [{"slug": "asc-cfb-tulane-army-2026-10-10-pos-2pt5", "market_type": "spread", "side": "home"}]
+        live = [{"slug": "asc-cfb-tulane-army-2026-10-10-pos-2pt5", "market_type": "spread", "side": "home", "held": 5.0}]
         _g = [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, live)]
-        check("missed: taking it live (any rung, same game + side) moves it off the list — the 1H bet stays",
+        check("missed: taking it live (a FILL, any rung, same game + side) moves it off the list — the 1H bet stays",
               1 not in _g and 5 in _g, f"got {_g}")
-        live2 = [{"slug": army, "market_type": "spread", "side": "away"}]
+        rest = [{"slug": "asc-cfb-tulane-army-2026-10-10-pos-2pt5", "market_type": "spread", "side": "home", "held": 0}]
+        check("missed: a live app order still RESTING does not hide it (Rob: cancelled at kickoff = on the list)",
+              1 in [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, rest)])
+        live2 = [{"slug": army, "market_type": "spread", "side": "away", "held": 5.0}]
         check("missed: the OTHER side live does not hide it",
               1 in [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, live2)])
         tables["exec_probe_runs"].append({"at": now.isoformat(),
