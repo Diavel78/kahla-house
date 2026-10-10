@@ -32259,7 +32259,8 @@ def api_pinnacle_probe():
                 else:
                     miss.append(r_["event_name"])
             out["match"] = {"ours": hit + len(miss), "matched": hit, "unmatched": miss[:80],
-                            "pin_games": len(evs)}
+                            "pin_games": len(evs),
+                            "pin_names": sorted(f"{e['away_team']} @ {e['home_team']}" for e in evs)}
         except Exception as e:
             out["match"] = {"error": f"{type(e).__name__}: {e}"[:200]}
     return jsonify(out)
