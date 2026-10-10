@@ -953,7 +953,8 @@
         const live = _plMark(held.filter(b => b.live));
         const pre = _plMark(held.filter(b => !b.live));
         const settled = st.today != null ? Number(st.today) : null;
-        const done = bets.filter(b => b.status !== 'pending');
+        // never-filled picks the resolver graded anyway are not money — leave them out
+        const done = bets.filter(b => b.status !== 'pending' && (b.status === 'sold' || Number(b.filled_qty || 0) > 0));
         const sheetSettled = done.reduce((a, b) => a + (b.pnl_usd != null ? Number(b.pnl_usd) : 0), 0);
         const base = settled != null ? settled : sheetSettled;
         const total = base + live.pl + pre.pl;
@@ -1018,10 +1019,17 @@
         // MY BETS NO FILL (Rob, Oct 10 2026: "My bets should JUST be live bets that
         // didn't fill… these I need to handle myself"): a FILLED live bet lives in the
         // Settled + Live P/L box now; pre-game bets sit under their game's boxes.
-        const live = tabBets.filter(b => b.status === 'pending' && b.live && !((b.held || 0) > 0));
+        // ⚠ ONLY BETS STILL WANTED (Rob, Oct 10 2026: "BETS I WANTED, that aren't filled,
+        // not shit final, not shit I already deleted"): a live pick with nothing held AND
+        // no resting order is one he cancelled/deleted around the start — the pick stays
+        // pending for the resolver, it is not a bet. Decided/final games drop too.
+        const _noFill = b => b.status === 'pending' && b.live && !((b.held || 0) > 0)
+            && !!(b.order && b.order.resting) && b.prob_src !== 'decided'
+            && !(b.score && (b.score.completed || b.score.state === 'post'));
+        const live = tabBets.filter(_noFill);
         const waiting = tabBets.filter(b => b.status === 'pending' && !b.live);
         const warn = waiting.filter(b => betState(b).cls === 'warn').length;
-        const liveAll = bets.filter(b => b.status === 'pending' && b.live && !((b.held || 0) > 0)).length;
+        const liveAll = bets.filter(_noFill).length;
         const nMissed = (d.missed || []).filter(m => String(m.sport || '').toUpperCase() === String(_sport || '').toUpperCase() && !_missedDismissed()[m.id]).length;
         document.getElementById('betsMeta').textContent = _sport + ' ' + (live.length + nMissed) + ' live, no fill · ' + waiting.length + ' waiting below' + (warn ? ' (' + warn + ' need you)' : '')
             + (liveAll !== live.length ? ' · ' + liveAll + ' no-fill all tabs' : '')
