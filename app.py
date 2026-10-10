@@ -15547,6 +15547,27 @@ def _bet_sheet_missed_from_queue(sb, now, want: set) -> dict:
         if q.get("op") in ("create", "rerung") and res.get("pick_id") is not None:
             made[int(res["pick_id"])] = q
     out = {}
+    # an APP bet never went through the queue — its adoption stamp has the
+    # label, price, contracts and slug (side and game come off those later)
+    try:
+        apps = (sb.table("exec_probe_runs").select("result")
+                .eq("result->>hand_app_adopt", "true")
+                .in_("result->>pick_id", [str(p) for p in want])
+                .gte("at", (now - timedelta(days=6)).isoformat())
+                .limit(200).execute().data or [])
+    except Exception:
+        apps = []
+    for a in apps:
+        res = a.get("result") if isinstance(a.get("result"), dict) else {}
+        if not res.get("hand_app_adopt"):
+            continue
+        try:
+            pid = int(res.get("pick_id"))
+        except (TypeError, ValueError):
+            continue
+        if pid in want and pid not in made:
+            out[pid] = {"label": res.get("label"), "price_c": res.get("price_c"),
+                        "contracts": res.get("contracts"), "app": True, "synthetic": None}
     for pid in want:
         q, hop = made.get(pid), 0
         if q is None:
@@ -15571,6 +15592,35 @@ def _bet_sheet_missed_from_queue(sb, now, want: set) -> dict:
         bet["synthetic"] = bool(q.get("synthetic")) if q.get("op") == "create" else None
         out[pid] = bet
     return out
+
+
+def _bs_event_key(slug: str):
+    """(event slug, period) for a market slug — a first-half rung
+    (`asc-cfb-ind-nebr-2026-10-10-1h-neg-2pt5`) is the same game, period 1h."""
+    m = re.search(r"-(1h|2h|1q|2q|3q|4q|p1|p2|p3)-", slug or "")
+    per = m.group(1) if m else ""
+    base = re.sub(r"-(1h|2h|1q|2q|3q|4q|p1|p2|p3)-", "-", slug or "", count=1) if per else slug
+    return _event_slug_from_market(base or ""), per
+
+
+def _bs_guess_syn(slug: str, label: str, side: str = None):
+    """Which side of the slug a bet is on, from its label ('Indiana -2.5',
+    'U 48.5') — the adoption stamp carries no side flag. None = can't tell."""
+    lab = (label or "").strip().lower()
+    for cand in (False, True):
+        sl = _slug_side_line(re.sub(r"-(1h|2h|1q|2q|3q|4q|p1|p2|p3)-", "-", slug or "", count=1), cand)
+        if not sl:
+            continue
+        if side and sl[1] == side:
+            return cand
+        if sl[0] == "total" and lab[:1] in ("o", "u"):
+            if (lab[0] == "o") == (sl[1] == "over"):
+                return cand
+        if sl[0] == "spread" and sl[2] is not None:
+            mm = re.search(r"([+-]\d+(?:\.\d+)?)\s*$", lab)
+            if mm and abs(float(mm.group(1)) - float(sl[2])) < 0.01:
+                return cand
+    return None
 
 
 def _bet_sheet_missed(sb, now, bets: list) -> list:
@@ -15604,30 +15654,43 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
         return []
     old = {pid for pid, (_a, res) in by_pick.items() if not isinstance(res.get("bet"), dict)}
     back = _bet_sheet_missed_from_queue(sb, now, old)
-    taken = set()
+    taken, names = set(), {}
     for b in bets or []:
-        ek = _event_slug_from_market(b.get("slug") or "")
-        if ek and b.get("market_type") and b.get("side"):
+        ek = _bs_event_key(b.get("slug") or "")
+        if ek[0] and b.get("market_type") and b.get("side"):
             taken.add((ek, b["market_type"], b["side"]))
+        if ek[0] and b.get("event_name"):
+            names.setdefault(ek[0], (b.get("event_name"), b.get("sport")))
+    for _pid, (_a, _res) in by_pick.items():
+        _bt = _res.get("bet") if isinstance(_res.get("bet"), dict) else back.get(_pid)
+        _ek = _bs_event_key(_res.get("slug") or "")[0]
+        if _ek and _bt and _bt.get("event_name"):
+            names.setdefault(_ek, (_bt.get("event_name"), _bt.get("sport")))
     out, espn, client, reads = [], {}, None, 0
     for pid, (at, res) in by_pick.items():
         bet = res.get("bet") if isinstance(res.get("bet"), dict) else back.get(pid)
         slug = res.get("slug")
         if not bet or not slug:
             continue
+        bet = dict(bet)
+        ekp = _bs_event_key(slug)
         syn = bet.get("synthetic")
+        if syn is None:
+            syn = _bs_guess_syn(slug, bet.get("label"), bet.get("side"))
         if syn is None or not bet.get("market_type") or not bet.get("side"):
+            base_slug = re.sub(r"-(1h|2h|1q|2q|3q|4q|p1|p2|p3)-", "-", slug, count=1)
             for cand in ((syn,) if syn is not None else (False, True)):
-                sl = _slug_side_line(slug, bool(cand))
+                sl = _slug_side_line(base_slug, bool(cand))
                 if sl and (not bet.get("side") or sl[1] == bet.get("side")):
                     bet["market_type"] = bet.get("market_type") or sl[0]
                     bet["side"], syn = bet.get("side") or sl[1], bool(cand)
                     if bet.get("line") is None:
                         bet["line"] = sl[2]
                     break
-        ek = _event_slug_from_market(slug)
-        if ek and (ek, bet.get("market_type"), bet.get("side")) in taken:
+        if ekp[0] and (ekp, bet.get("market_type"), bet.get("side")) in taken:
             continue                                      # he took it live — the live strip has it
+        if not bet.get("event_name") and ekp[0] in names:
+            bet["event_name"], bet["sport"] = names[ekp[0]][0], bet.get("sport") or names[ekp[0]][1]
         st_iso = res.get("start") or bet.get("event_start")
         bdt = _parse_iso(st_iso or "")
         if not bdt or (now - bdt) > timedelta(hours=_BS_MISSED_MAX_H):
@@ -15638,7 +15701,8 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
                 "line": bet.get("line"), "label": bet.get("label"),
                 "price_c": bet.get("price_c") if bet.get("price_c") is not None else bet.get("anchor_c"),
                 "contracts": bet.get("contracts"), "slug": slug, "synthetic": bool(syn),
-                "app": bool(bet.get("app")), "cancelled_at": res.get("at") or at}
+                "app": bool(bet.get("app")), "period": ekp[1] or None,
+                "cancelled_at": res.get("at") or at}
         away, home = _live_split_event(item["event_name"] or "")
         if away and home:
             try:

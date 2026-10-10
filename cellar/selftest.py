@@ -3456,6 +3456,10 @@ def test_bet_sheet_missed() -> None:
                                   "price_c": 49.5, "contracts": 5, "synthetic": True}),
             stamp(2, "tsc-cfb-wake-ncst-2026-10-10-total-57pt5", False),          # partial: stays a live bet
             stamp(3, "tsc-cfb-ucf-okst-2026-10-10-total-53pt5", True),           # old stamp → the queue
+            stamp(5, "asc-cfb-tulane-army-2026-10-10-1h-pos-1pt5", True),       # an APP bet, first half
+            {"at": now.isoformat(), "result": {"hand_app_adopt": True, "pick_id": 5, "label": "Army Black Knights -1.5",
+                                                "price_c": 47.0, "contracts": 5.0,
+                                                "slug": "asc-cfb-tulane-army-2026-10-10-1h-pos-1pt5"}},
             stamp(4, "asc-cfb-ncar-pitt-2026-10-10-neg-3pt5", True,
                   {"sport": "NCAAF", "event_name": "North Carolina Tar Heels @ Pittsburgh Panthers",
                    "market_type": "spread", "side": "home", "line": -3.5, "price_c": 52,
@@ -3499,9 +3503,15 @@ def test_bet_sheet_missed() -> None:
         check("missed: the live price and score ride along",
               next(m for m in got if m["pick_id"] == 1).get("cur_c") == 41.0
               and next(m for m in got if m["pick_id"] == 1).get("score", {}).get("away_score") == 7)
+        m5 = next((m for m in got if m["pick_id"] == 5), {})
+        check("missed: an APP bet recovers off its adoption stamp — 1H, the side off its label, the game off its neighbour",
+              m5.get("period") == "1h" and m5.get("side") == "home" and m5.get("line") == -1.5
+              and m5.get("price_c") == 47.0 and m5.get("event_name") == "Tulane Green Wave @ Army Black Knights"
+              and m5.get("app") is True, f"got {m5}")
         live = [{"slug": "asc-cfb-tulane-army-2026-10-10-pos-2pt5", "market_type": "spread", "side": "home"}]
-        check("missed: taking it live (any rung, same game + side) moves it off the list",
-              1 not in [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, live)])
+        _g = [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, live)]
+        check("missed: taking it live (any rung, same game + side) moves it off the list — the 1H bet stays",
+              1 not in _g and 5 in _g, f"got {_g}")
         live2 = [{"slug": army, "market_type": "spread", "side": "away"}]
         check("missed: the OTHER side live does not hide it",
               1 in [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, live2)])
