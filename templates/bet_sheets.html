@@ -931,10 +931,12 @@
         const warn = waiting.filter(b => betState(b).cls === 'warn').length;
         const done = tabBets.filter(b => b.status !== 'pending');
         const liveAll = bets.filter(b => b.status === 'pending' && b.live).length;
-        let usd = 0, w = 0, l = 0, p = 0;
-        done.forEach(b => { if (b.pnl_usd != null) usd += b.pnl_usd; if (b.status === 'won') w++; else if (b.status === 'lost') l++; else p++; });
+        let usd = 0, w = 0, l = 0, p = 0, sold = 0;
+        // SOLD = Rob sold the lot in the app before the final: its dollars count,
+        // it is not a win or a loss.
+        done.forEach(b => { if (b.pnl_usd != null) usd += b.pnl_usd; if (b.status === 'won') w++; else if (b.status === 'lost') l++; else if (b.status === 'sold') sold++; else p++; });
         document.getElementById('betsMeta').textContent = _sport + ' ' + live.length + ' live · ' + waiting.length + ' waiting below' + (warn ? ' (' + warn + ' need you)' : '')
-            + (done.length ? ' · today ' + w + '-' + l + (p ? '-' + p : '') + ' ' + money(usd) : '')
+            + (done.length ? ' · today ' + w + '-' + l + (p ? '-' + p : '') + (sold ? ' + ' + sold + ' sold' : '') + ' ' + money(usd) : '')
             + (liveAll !== live.length ? ' · ' + liveAll + ' live all tabs' : '')
             + (d.src === 'box' ? '' : ' · ⚠ box not publishing') + (d.venue_ok ? '' : ' · ⚠ venue unreadable')
             + (d.tape_dark ? ' · 🚨 ORDER-BOOK FEED DOWN (' + d.tape_dark[0] + '/' + d.tape_dark[1] + ' bets blind) — NO kickoff or line-move cancels' : '');

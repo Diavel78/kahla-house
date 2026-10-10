@@ -14695,6 +14695,7 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
         st["gate"] = f"picks: {e}"[:120]
         return st
     pending_slugs = set()
+    held_block: set = set()                            # recently SOLD slugs: no held re-adoption yet
     adopted_rows = []
     for r in picks:
         b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
@@ -14714,8 +14715,21 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
                  .limit(500).execute().data or [])
         for r in _done:
             b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
-            if b.get("pmm_slug"):
-                pending_slugs.add(b["pmm_slug"])
+            if not b.get("pmm_slug"):
+                continue
+            sold = b.get("sold") if isinstance(b.get("sold"), dict) else None
+            if sold:
+                # A SOLD pick books nothing: a fresh buy on the slug is a new
+                # bet. Its HELD lot is blocked only while the mirror may still
+                # show the lot that was sold.
+                try:
+                    _sa = datetime.fromisoformat(str(sold.get("at")).replace("Z", "+00:00"))
+                    if (now - _sa).total_seconds() < _HAND_SOLD_REBOOK_S:
+                        held_block.add(b["pmm_slug"])
+                except (TypeError, ValueError):
+                    held_block.add(b["pmm_slug"])
+                continue
+            pending_slugs.add(b["pmm_slug"])
     except Exception as e:
         st["gate"] = f"settled: {e}"[:120]
         return st                                      # can't prove a lot unbooked → adopt nothing
@@ -14782,7 +14796,7 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
             qty = abs(float(pos.get("net") or 0.0))
         except (TypeError, ValueError):
             continue
-        if qty < 1.0 or not slug or slug in pending_slugs or slug in pair:
+        if qty < 1.0 or not slug or slug in pending_slugs or slug in held_block or slug in pair:
             continue
         if not _event_slug_from_market(slug) and not _RENT_SLUG_RE.match(slug):
             continue                                   # props / unknown shapes: not this lane
@@ -14899,6 +14913,162 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
             st["skipped"]["retire_del"] = str(e)[:60]
     return st
 
+
+
+# SOLD BEFORE THE FINAL (Oct 10 2026, Rob: "I sold my -9.5 for profit, went
+# back in at -6.5… this bet on the bet sheet is a mess"): a filled hand bet
+# Rob sells in the app leaves a pending pick with no lot behind it. The
+# app-retire path skips it (a held lot on a started game is the venue's to
+# grade), the strip shows it live and NOT FILLED, and at the final the ESPN
+# grader would score a bet he no longer holds. The trade tape says what
+# happened: our-side SELLs after the pick was booked, covering the lot, and
+# no settlement yet → the pick closes as SOLD (status void, the dollars in
+# signal_blob.sold), off the live strip and out of the W-L record.
+_HAND_SOLD_MAX = 4                  # settles per tick
+_HAND_SOLD_REBOOK_S = 600.0         # a sold slug blocks HELD re-adoption this long (the mirror lags the sale)
+
+
+def _hand_sold_plan(trades: list, syn: bool, since_iso: str | None,
+                    entry_c, filled_qty) -> dict | None:
+    """Pure. Our-side SELL trades (poly_activities rows) at/after since_iso
+    → {qty, proceeds, avg_c, pnl_usd, last_at}; None when they don't cover
+    the lot (≥ filled_qty − 0.5) or there is no lot to cover. Our side =
+    SELL_LONG for a YES lot, SELL_SHORT for a NO lot (the order behind the
+    fill: the aggressor when we crossed, else the passive)."""
+    try:
+        fq = float(filled_qty or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if fq < 0.5:
+        return None
+    want = "SELL_SHORT" if syn else "SELL_LONG"
+
+    def _v(x):
+        if isinstance(x, dict):
+            x = x.get("value")
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+    qty = proceeds = 0.0
+    last = None
+    for a in trades or []:
+        at = str(a.get("at") or "")
+        if since_iso and at and at < since_iso:
+            continue
+        t = (a.get("payload") or {}).get("trade") or {}
+        mo = (t.get("aggressor") if t.get("isAggressor") else t.get("passive")) or {}
+        if _intent_short(mo.get("intent")) != want:
+            continue
+        q = _trade_qty(t)
+        c = _v(t.get("cost"))
+        if not q or c is None:
+            continue
+        qty += q
+        proceeds += c
+        last = max(last or at, at)
+    if qty < fq - 0.5:
+        return None
+    avg_c = round(proceeds / qty * 100.0, 2) if qty else None
+    pnl = None
+    try:
+        pnl = round(proceeds - qty * float(entry_c) / 100.0, 2)
+    except (TypeError, ValueError):
+        pass
+    return {"qty": round(qty, 2), "proceeds": round(proceeds, 2), "avg_c": avg_c,
+            "pnl_usd": pnl, "last_at": last}
+
+
+def _hand_sold_tick(sb, client, now) -> dict:
+    """Close sheet/app picks whose filled lot Rob sold before settlement."""
+    st = {"cands": 0, "sold": 0, "skipped": {}}
+    if not _machine_flag("hand_sold_close", True):
+        st["gate"] = "disabled"
+        return st
+
+    def _skip(k):
+        st["skipped"][k] = st["skipped"].get(k, 0) + 1
+    try:
+        picks = (sb.table("bot_picks").select("id,picked_at,event_start,signal_blob")
+                 .eq("status", "pending").eq("signal_blob->>bet_sheet", "true")
+                 .gte("event_start", (now - timedelta(hours=_HAND_APP_POS_LOOKBACK_H)).isoformat())
+                 .limit(300).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    mirror = _pmm_positions_raw(client, fresh=False) or {}
+    cands = []
+    for r in picks:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        slug = b.get("pmm_slug")
+        if not slug or not (b.get("filled") or float(b.get("filled_qty") or 0) > 0):
+            continue
+        syn = bool(b.get("pmm_synthetic"))
+        if _bet_sheet_pick_side_held(mirror.get(slug), syn) >= 0.5 or _mirror_shows_held(slug):
+            continue                                   # still holding — nothing to close
+        cands.append((r, b, slug, syn))
+    st["cands"] = len(cands)
+    if not cands:
+        return st
+    fresh = None
+    for r, b, slug, syn in cands:
+        if st["sold"] >= _HAND_SOLD_MAX:
+            break
+        try:
+            acts = (sb.table("poly_activities").select("at,type,payload").eq("slug", slug)
+                    .in_("type", ["ACTIVITY_TYPE_TRADE", "ACTIVITY_TYPE_POSITION_RESOLUTION"])
+                    .order("at", desc=True).limit(120).execute().data) or []
+        except Exception:
+            _skip("tape_read"); continue
+        if any(a.get("type") == "ACTIVITY_TYPE_POSITION_RESOLUTION" for a in acts):
+            _skip("settled"); continue                 # the venue settled it — the resolver grades
+        since = None
+        try:
+            since = (datetime.fromisoformat(str(r.get("picked_at")).replace("Z", "+00:00"))
+                     - timedelta(minutes=2)).astimezone(timezone.utc).isoformat()
+        except (TypeError, ValueError):
+            pass
+        fq = b.get("filled_qty") or b.get("contracts")
+        plan = _hand_sold_plan([a for a in acts if a.get("type") == "ACTIVITY_TYPE_TRADE"],
+                               syn, since, b.get("price_c"), fq)
+        if not plan:
+            _skip("no_sell_on_tape"); continue         # tape not mirrored yet, or never sold
+        if fresh is None:                              # venue truth, once, before any write
+            try:
+                fresh = _pmm_positions_raw(client, fresh=True)
+            except Exception:
+                fresh = None
+            if fresh is None:
+                st["gate"] = "positions_read_failed"
+                break
+            why = _hand_positions_partial(sb, fresh)
+            if why:
+                st["gate"] = why
+                break
+        if _bet_sheet_pick_side_held(fresh.get(slug), syn) >= 0.5:
+            _skip("still_held"); continue
+        sold = {**plan, "at": now.isoformat()}
+        try:
+            sb.table("bot_picks").update({
+                "status": "void", "pnl_units": 0, "settled_at": now.isoformat(),
+                "result_score": "sold",
+                "signal_blob": {**b, "sold": sold, "filled": True},
+            }).eq("id", r["id"]).eq("status", "pending").execute()
+        except Exception as e:
+            _skip("update_failed")
+            app.logger.warning("hand sold close %s failed: %s", r["id"], str(e)[:120])
+            continue
+        st["sold"] += 1
+        HAND_LIVE_SLUGS.discard(slug)
+        try:
+            _probe_log({"hand_sold": True, "pick_id": r["id"], "slug": slug,
+                        "label": b.get("label"), "price_c": b.get("price_c"), **plan,
+                        "at": now.isoformat()})
+        except Exception:
+            pass
+        app.logger.warning("hand SOLD pick %s %s: %g @ %s¢ (bought %s¢) pnl $%s", r["id"], slug,
+                           plan["qty"], plan["avg_c"], b.get("price_c"), plan["pnl_usd"])
+    return st
 
 # THE VENUE RESET (Oct 8 2026, Rob: "Welcome to Polymarket, where some days
 # is a reset, and they just cancel every order! Nothing we did. How do we do
@@ -15108,6 +15278,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
             stats["adopt"] = _hand_app_adopt_tick(sb, client, now)   # app bets → sheet picks
         except Exception as e:
             stats["adopt"] = {"err": str(e)[:80]}
+        try:
+            stats["sold"] = _hand_sold_tick(sb, client, now)         # sold in the app → pick closed
+        except Exception as e:
+            stats["sold"] = {"err": str(e)[:80]}
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
         try:
             stats["tape"] = _touch_tape_publish(sb)
@@ -15382,7 +15556,11 @@ def api_bet_sheets_mine():
             (float(o.get("cum") or 0.0) if o else None))
         if qty is None and bx is not None and (bx.get("order") or {}).get("cum") is not None:
             qty = float(bx["order"]["cum"] or 0.0)
-        if st in ("won", "lost", "push") and price_c is not None:
+        _sold = blob.get("sold") if isinstance(blob.get("sold"), dict) else None
+        if st == "void" and _sold:
+            st = "sold"                       # closed by a sale in the app, not graded
+            pnl_usd = _sold.get("pnl_usd")
+        elif st in ("won", "lost", "push") and price_c is not None:
             q = float(qty) if qty is not None else float(contracts or 0)
             if st == "won":
                 pnl_usd = round(q * (100.0 - float(price_c)) / 100.0, 2)
@@ -15416,6 +15594,7 @@ def api_bet_sheets_mine():
                             < float(touch_c) - 0.01)),
             "status": st, "pnl_units": r.get("pnl_units"),
             "pnl_usd": pnl_usd, "result_score": r.get("result_score"),
+            "sold": _sold,
             "venue_ok": venue_ok,
             "chase": (bx.get("chase") if (bx is not None and bx.get("chase") is not None) else
                       {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
