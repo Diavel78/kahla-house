@@ -1030,7 +1030,7 @@ def build_game_blob(g: dict, sport: str, model: dict | None,
     pin = None
     if LINE_HOOK:
         try:
-            pin = LINE_HOOK(sport, g["away"], g["home"])
+            pin = LINE_HOOK(sport, g["away"], g["home"], start=g.get("event_start"))
         except Exception as e:           # a Pinnacle miss is a fallback, never a dark sheet
             log.warning("line hook failed for %s @ %s: %s", g["away"], g["home"], e)
             pin = None

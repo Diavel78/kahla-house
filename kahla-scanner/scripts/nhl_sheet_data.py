@@ -305,24 +305,24 @@ def project_goalie(team: str, side: str, g: dict, goalies: list[dict],
 
 
 # ------------------------------------------------------------- pinnacle
-def pin_odds_from_events(events, away: str, home: str, pin_outcomes) -> dict | None:
+def pin_odds_from_events(events, away: str, home: str, pin_outcomes, start=None) -> dict | None:
     """Pinnacle's ML / puck line / total for one game, in the ESPN odds
     shape the verdicts read, off a TOA-shaped slate. `pin_outcomes` is
     app._pin_outcomes (passed in so this stays a pure, testable function).
     None unless Pinnacle posts the moneyline (the sheet's primary market)."""
     if not events:
         return None
-    mh, ma = pin_outcomes(events, away, home, "h2h", "home")
+    mh, ma = pin_outcomes(events, away, home, "h2h", "home", start=start)
     if not mh or mh.get("price") is None or not ma or ma.get("price") is None:
         return None
     out: dict = {"provider": "pinnacle",
                  "ml_home": _num(mh.get("price")), "ml_away": _num(ma.get("price"))}
-    ov, un = pin_outcomes(events, away, home, "totals", "over")
+    ov, un = pin_outcomes(events, away, home, "totals", "over", start=start)
     if ov and ov.get("point") is not None:
         out["total"] = _num(ov.get("point"))
         out["over_odds"] = _num(ov.get("price"))
         out["under_odds"] = _num((un or {}).get("price"))
-    ph, pa = pin_outcomes(events, away, home, "spreads", "home")
+    ph, pa = pin_outcomes(events, away, home, "spreads", "home", start=start)
     if ph and ph.get("point") is not None:
         out["puck_home"] = _num(ph.get("point"))
         out["puck_home_odds"] = _num(ph.get("price"))
@@ -366,7 +366,7 @@ def pin_overlay(slate: list[dict], spend: bool, sport: str = "NHL") -> dict:
     n = 0
     for g in slate:
         po = pin_odds_from_events(events, g["away"]["name"], g["home"]["name"],
-                                  app._pin_outcomes)
+                                  app._pin_outcomes, start=g.get("start"))
         if po:
             g["odds_espn"] = g["odds"]
             g["odds"] = po

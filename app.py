@@ -24713,7 +24713,7 @@ _PIN_REFRESH_EARLY_AZ_MIN = 150        # Rob, Sep 26 2026: "Add that extra Pinn 
                                        # pull left those seeds on a 21-hour-old line. Two pulls per AZ day.
 
 
-def _pin_line_from_events(events, away, home, mt, book=None):
+def _pin_line_from_events(events, away, home, mt, book=None, start=None):
     """Pinnacle's line for one game from a TOA-shaped slate, in the
     executor's rung units: spread → the HOME team's point (negative when
     home is favored, i.e. the home-perspective rung value), total → the
@@ -24729,7 +24729,7 @@ def _pin_line_from_events(events, away, home, mt, book=None):
     # the sheet and the center ask for "pinnacle" by name (Oct 9 2026: 59
     # of 108 college games had no Pinnacle line and could read as PIN).
     pick, _opp = _pin_outcomes(events, away, home, key,
-                               "home" if mt == "spread" else "over", book=book)
+                               "home" if mt == "spread" else "over", book=book, start=start)
     if not pick or pick.get("point") is None:
         return None
     try:
@@ -32247,7 +32247,8 @@ def api_pinnacle_probe():
                 if " @ " not in (r_.get("event_name") or ""):
                     continue
                 a_, h_ = [x.strip() for x in r_["event_name"].split(" @ ", 1)]
-                if _pin_line_from_events(evs, a_, h_, "spread", book="pinnacle") is not None:
+                if _pin_line_from_events(evs, a_, h_, "spread", book="pinnacle",
+                                         start=r_.get("event_start")) is not None:
                     hit += 1
                 else:
                     miss.append(r_["event_name"])
@@ -32312,17 +32313,35 @@ def _pin_name_q(a: str, b: str) -> float:
 
 
 def _pin_outcomes(events, away: str, home: str, mkt_key: str, side: str,
-                  book: str | None = "pinnacle"):
+                  book: str | None = "pinnacle", start=None):
     """Match (game, market, side) in a TOA-shaped slate → (pick, opp)
     outcomes, or (None, None). The game is the BEST name match over the
     whole slate, either orientation (Pinnacle's college names are short —
     'Miami' must not take 'Miami (OH)''s game, and a neutral site can list
     the teams the other way round); a side is read off the outcome's
     `designation` when the slate carries one (Pinnacle's own feed), else
-    by name."""
+    by name. With `start` (our game's start, datetime or ISO) a slate game
+    more than 12h away never matches — a slate spans days, and the same two
+    teams can meet twice in it (NBA preseason vs opening week, Oct 10 2026)."""
     aw, hm = _pin_norm(away), _pin_norm(home)
+    st0 = None
+    if start is not None:
+        try:
+            st0 = (start if isinstance(start, datetime)
+                   else datetime.fromisoformat(str(start).replace("Z", "+00:00")))
+            if st0.tzinfo is None:
+                st0 = st0.replace(tzinfo=timezone.utc)
+        except Exception:
+            st0 = None
     best, best_q, swapped = None, 0.0, False
     for e in (events or []):
+        if st0 is not None:
+            try:
+                ct = datetime.fromisoformat(str(e.get("commence_time")).replace("Z", "+00:00"))
+                if abs((ct - st0).total_seconds()) > 12 * 3600:
+                    continue
+            except Exception:
+                pass
         ea, eh = _pin_norm(e.get("away_team")), _pin_norm(e.get("home_team"))
         for sw, (x, y) in ((False, (ea, eh)), (True, (eh, ea))):
             qa, qh = _pin_name_q(x, aw), _pin_name_q(y, hm)
