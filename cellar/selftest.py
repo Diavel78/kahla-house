@@ -3423,6 +3423,93 @@ def test_pin_slate_empty_keeps_cache() -> None:
          _app._time.sleep, _app._pin_direct_events) = saved
 
 
+def test_bet_sheet_missed() -> None:
+    """NOT FILLED, STARTED (Oct 10 2026): the kickoff cancel deletes an
+    unfilled pick, so the Bet Sheets list is read off its stamps; a bet Rob
+    takes live in the app (any sheet/app pick on the same game + market +
+    side) or a final game drops the row."""
+    print("bet sheets: not filled, started")
+    import app as _app
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    now = _dt(2026, 10, 10, 16, 30, tzinfo=_tz.utc)
+    start = (now - _td(minutes=30)).isoformat()
+
+    class Q:
+        def __init__(self, data): self.d = data
+        def __getattr__(self, _n): return lambda *a, **k: self
+        def execute(self):
+            class R: pass
+            R.data = self.d
+            return R()
+
+    def stamp(pid, slug, deleted, bet=None):
+        r = {"hand_start_cancel": True, "pick_id": pid, "slug": slug, "start": start,
+             "at": now.isoformat(), "result": {"ok": True, "deleted": deleted}}
+        if bet:
+            r["bet"] = bet
+        return {"at": now.isoformat(), "result": r}
+    army = "asc-cfb-tulane-army-2026-10-10-pos-3pt5"
+    tables = {
+        "exec_probe_runs": [
+            stamp(1, army, True, {"sport": "NCAAF", "event_name": "Tulane Green Wave @ Army Black Knights",
+                                  "market_type": "spread", "side": "home", "line": -3.5,
+                                  "price_c": 49.5, "contracts": 5, "synthetic": True}),
+            stamp(2, "tsc-cfb-wake-ncst-2026-10-10-total-57pt5", False),          # partial: stays a live bet
+            stamp(3, "tsc-cfb-ucf-okst-2026-10-10-total-53pt5", True),           # old stamp → the queue
+            stamp(4, "asc-cfb-ncar-pitt-2026-10-10-neg-3pt5", True,
+                  {"sport": "NCAAF", "event_name": "North Carolina Tar Heels @ Pittsburgh Panthers",
+                   "market_type": "spread", "side": "home", "line": -3.5, "price_c": 52,
+                   "contracts": 5, "synthetic": False}),
+        ],
+        "hand_orders": [
+            {"op": "create", "pick_id": None, "slug": "tsc-cfb-ucf-okst-2026-10-10-total-54pt5",
+             "synthetic": True, "contracts": 5,
+             "payload": {"item": {"sport": "NCAAF", "market_type": "total", "side": "under",
+                                  "line": 54.5, "away": "UCF Knights", "home": "Oklahoma State Cowboys",
+                                  "label": "U 54.5", "event_start": start}},
+             "result": {"pick_id": 10, "price_c": 50}},
+            {"op": "rerung", "pick_id": 10, "slug": "tsc-cfb-ucf-okst-2026-10-10-total-54pt5",
+             "synthetic": True, "contracts": None, "payload": {},
+             "result": {"pick_id": 3, "label": "U 53.5", "to_line": 53.5, "price_c": 51, "contracts": 5}},
+        ],
+    }
+
+    class SB:
+        def table(self, name): return Q(tables.get(name, []))
+    saved = (_app._bs_espn_events, _app._live_match_espn, _app._live_book_mid, _app.get_client,
+             _app._venue_rl_active)
+    try:
+        _app._bs_espn_events = lambda sp, dk: [{}]
+        _app._live_match_espn = lambda ev, a, h, st: ({"state": "post", "completed": True}
+                                                       if "Pittsburgh" in h else
+                                                       {"state": "in", "away_score": 7, "home_score": 3})
+        _app._live_book_mid = lambda c, slug, syn: 0.41
+        _app.get_client = lambda: object()
+        _app._venue_rl_active = lambda: False
+        got = _app._bet_sheet_missed(SB(), now, [])
+        ids = [m["pick_id"] for m in got]
+        check("missed: an unfilled kickoff cancel is listed with the bet it wanted",
+              1 in ids and next(m for m in got if m["pick_id"] == 1)["price_c"] == 49.5, f"got {got}")
+        check("missed: a partial fill is NOT listed (it stays a live bet)", 2 not in ids)
+        check("missed: a final game drops off", 4 not in ids)
+        m3 = next((m for m in got if m["pick_id"] == 3), {})
+        check("missed: an older stamp recovers its bet through the queue (rerung → its create)",
+              m3.get("line") == 53.5 and m3.get("side") == "under" and m3.get("market_type") == "total"
+              and m3.get("event_name") == "UCF Knights @ Oklahoma State Cowboys", f"got {m3}")
+        check("missed: the live price and score ride along",
+              next(m for m in got if m["pick_id"] == 1).get("cur_c") == 41.0
+              and next(m for m in got if m["pick_id"] == 1).get("score", {}).get("away_score") == 7)
+        live = [{"slug": "asc-cfb-tulane-army-2026-10-10-pos-2pt5", "market_type": "spread", "side": "home"}]
+        check("missed: taking it live (any rung, same game + side) moves it off the list",
+              1 not in [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, live)])
+        live2 = [{"slug": army, "market_type": "spread", "side": "away"}]
+        check("missed: the OTHER side live does not hide it",
+              1 in [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, live2)])
+    finally:
+        (_app._bs_espn_events, _app._live_match_espn, _app._live_book_mid, _app.get_client,
+         _app._venue_rl_active) = saved
+
+
 def test_pin_direct_feed() -> None:
     """PINNACLE'S OWN FEED (Oct 10 2026): parlay-api carried a Pinnacle
     spread for under half the college slate (Indiana @ Nebraska read DK
@@ -3699,7 +3786,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
