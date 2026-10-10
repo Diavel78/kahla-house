@@ -25,3 +25,4 @@ jobs:
           python-version: "3.11"
       - run: pip install requests
       - run: python -m scripts.probe_cfb_qb --teams "${{ inputs.teams || '66' }}"
+      - run: python -m scripts.probe_avail_reports
