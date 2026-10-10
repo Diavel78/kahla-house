@@ -15,14 +15,12 @@ import requests
 H = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
                    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15"}
 SEEDS = {
-    "big12": ["https://big12sports.com/", "https://big12sports.com/sports/football",
-              "https://big12sports.com/sports/2026/availability-reports",
-              "https://big12sports.com/sports/football/availability-report"],
-    "big10": ["https://bigten.org/fb/", "https://bigten.org/fb/availability-report/",
-              "https://bigten.org/fb/availability/"],
-    "sec": ["https://www.secsports.com/", "https://www.secsports.com/sport/football",
-            "https://www.secsports.com/availability-report"],
-    "acc": ["https://theacc.com/", "https://theacc.com/sports/football"],
+    "big12": ["https://big12sports.com/sports/2025/8/14/FBreporting.aspx",
+              "https://big12sports.com/sports/2025/8/21/FBReportArchive.aspx"],
+    "big10": ["https://bigten.org/news/2026/8/28/big-ten-announces-changes-to-football-availability-reporting-process.aspx",
+              "https://bigten.org/sports/football"],
+    "sec": ["https://www.secsports.com/news/2024/08/sec-to-provide-public-availability-reports-for-football-basketball-and-baseball",
+            "https://www.secsports.com/availability-reports", "https://www.secsports.com/availability"],
 }
 HREF = re.compile(r'href="([^"]+)"', re.I)
 KEY = re.compile(r"availab|injur", re.I)
@@ -56,6 +54,7 @@ def main():
                                             "ct": r.headers.get("content-type"), "len": len(r.text)}))
             if r.status_code != 200:
                 continue
+            print("AVAIL_SEEDSNIP", json.dumps({"conf": conf, "url": s, "snip": text_snip(r.text, 2500)}))
             for h in HREF.findall(r.text):
                 if KEY.search(h):
                     found[urljoin(r.url, h)] = 1
@@ -65,7 +64,7 @@ def main():
                     found[urljoin(r.url, m.group(1))] = 1
         links = list(found)[:12]
         print("AVAIL_LINKS", json.dumps({"conf": conf, "n": len(found), "links": links}))
-        for u in links[:6]:
+        for u in links[:8]:
             r = get(u)
             if isinstance(r, Exception):
                 continue
@@ -74,7 +73,7 @@ def main():
                 if "html" in ct else []
             print("AVAIL_PAGE", json.dumps({"conf": conf, "url": u, "http": r.status_code, "ct": ct,
                                             "len": len(r.content), "sub": sub,
-                                            "snip": text_snip(r.text) if "html" in ct else None}))
+                                            "snip": text_snip(r.text) if "html" in ct else None, "pdf_head": (r.content[:8].decode("latin1") if "pdf" in ct else None)}))
 
 
 if __name__ == "__main__":
