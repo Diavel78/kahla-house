@@ -938,8 +938,34 @@
             + (liveAll !== live.length ? ' · ' + liveAll + ' live all tabs' : '')
             + (d.src === 'box' ? '' : ' · ⚠ box not publishing') + (d.venue_ok ? '' : ' · ⚠ venue unreadable')
             + (d.tape_dark ? ' · 🚨 ORDER-BOOK FEED DOWN (' + d.tape_dark[0] + '/' + d.tape_dark[1] + ' bets blind) — NO kickoff or line-move cancels' : '');
-        if (!live.length) { document.getElementById('bets').innerHTML = '<div class="empty" style="padding:10px 0">No live ' + esc(_sport) + ' bets right now.</div>'; return; }
-        document.getElementById('bets').innerHTML = live.map(b => {
+        // NOT FILLED, STARTED (Rob, Oct 10 2026: "show the bet I wanted, and if I
+        // get it live, you move it down to the regular live bets… I'll hand take
+        // them"). The box cancelled these at kickoff with nothing filled. Display
+        // only — no buttons that bet; the chase is his, in the app. The server
+        // drops a row once a sheet/app bet lands on that game + side, or the
+        // game goes final; × hides one here.
+        const dis = _missedDismissed();
+        const missed = (d.missed || []).filter(m => String(m.sport || '').toUpperCase() === String(_sport || '').toUpperCase() && !dis[m.id]);
+        const missedOther = (d.missed || []).filter(m => String(m.sport || '').toUpperCase() !== String(_sport || '').toUpperCase() && !dis[m.id]).length;
+        let mhtml = '';
+        if (missed.length) {
+            mhtml = '<div class="day-hdr">Not filled, started · ' + missed.length + (missedOther ? ' <span class="dim">(+' + missedOther + ' other tabs)</span>' : '') + '</div>'
+                + missed.map(m => {
+                    const sl = _scoreLine(m);
+                    const want = m.price_c != null ? Number(m.price_c) : null;
+                    const now = m.cur_c != null ? Number(m.cur_c) : null;
+                    const cheaper = want != null && now != null && now <= want;
+                    const l2 = (want != null ? 'wanted ' + (m.contracts ? m.contracts + ' @ ' : '') + want + '¢ (' + am(_probToAmer(Math.min(0.99, Math.max(0.01, want / 100)))) + ')' : 'wanted ' + (m.contracts || '?'))
+                             + (now != null ? ' · <b' + (cheaper ? ' style="color:var(--green)"' : '') + '>now ' + now + '¢ (' + am(_probToAmer(Math.min(0.99, Math.max(0.01, now / 100)))) + ')</b>' + (cheaper ? ' · cheaper than you wanted' : '') : ' · no live price');
+                    return '<div class="bet"><div class="info"><div class="chips"><span class="chip c-lost">NOT FILLED · STARTED</span>' + (m.app ? '<span class="chip c-push">APP</span>' : '')
+                         + ' <button class="dim" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:0 4px" title="hide" onclick="dismissMissed(\'' + esc(m.id) + '\')">✕</button></div>'
+                         + '<div class="l1"><b>' + esc(betLabel(m)) + '</b>' + (sl ? ' <span class="score">' + esc(sl) + '</span>' : ' <span class="dim">· ' + esc((m.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + '</span>') + '</div>'
+                         + '<div class="l2">' + l2 + '</div></div></div>';
+                }).join('')
+                + (live.length ? '<div class="day-hdr">Live</div>' : '');
+        }
+        if (!live.length) { document.getElementById('bets').innerHTML = mhtml + '<div class="empty" style="padding:10px 0">No live ' + esc(_sport) + ' bets right now.</div>'; return; }
+        document.getElementById('bets').innerHTML = mhtml + live.map(b => {
             const entryP = b.price_c != null ? b.price_c / 100 : impl(b.entry_price);
             const prob = b.win_prob != null ? b.win_prob : (b.cur_c != null ? b.cur_c / 100 : null);
             const tip = (prob != null ? 'now ' + Math.round(prob * 100) + '%' : 'no quote') + (entryP != null ? ' · you bet at ' + Math.round(entryP * 100) + '%' : '');
@@ -983,6 +1009,19 @@
             autoOpenSlip();
         }
         saveSlip(); renderSlip(); loadBetsRender();
+    }
+    function _missedDismissed() {
+        try {
+            const o = JSON.parse(localStorage.getItem('kh_missed_dismiss_v1') || '{}') || {};
+            const cut = Date.now() - 2 * 86400000, keep = {};
+            Object.keys(o).forEach(k => { if (o[k] > cut) keep[k] = o[k]; });
+            return keep;
+        } catch (e) { return {}; }
+    }
+    function dismissMissed(id) {
+        const o = _missedDismissed(); o[id] = Date.now();
+        try { localStorage.setItem('kh_missed_dismiss_v1', JSON.stringify(o)); } catch (e) {}
+        loadBetsRender();
     }
     let _lastBetsPayload = null;
     function loadBetsRender() { if (_lastBetsPayload) renderBets(_lastBetsPayload); }

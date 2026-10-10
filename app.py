@@ -13775,7 +13775,8 @@ def _hand_start_tick(sb, client, now) -> dict:
     except (TypeError, ValueError):
         drop = _HAND_START_DROP_PCT
     try:
-        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob,sport,event_name,"
+                                              "market_type,side,entry_line,entry_price,market_id")
                 .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                 .lte("event_start", now.isoformat()).limit(200).execute().data or [])
     except Exception as e:
@@ -13808,7 +13809,17 @@ def _hand_start_tick(sb, client, now) -> dict:
         if _time.monotonic() - last < 20.0:
             continue
         _HAND_START_DONE[r["id"]] = _time.monotonic()
-        stamp = {"hand_start_cancel": True, "pick_id": r["id"], "slug": slug, "order_id": oid,
+        # the bet itself rides the stamp: an unfilled cancel DELETES the pick,
+        # and the Bet Sheets "Not filled, started" list is read off this row
+        bet = {"sport": r.get("sport"), "event_name": r.get("event_name"),
+               "event_start": r.get("event_start"), "market_id": r.get("market_id"),
+               "market_type": r.get("market_type"), "side": r.get("side"),
+               "line": r.get("entry_line"), "entry_price": r.get("entry_price"),
+               "label": blob.get("label"), "price_c": blob.get("price_c"),
+               "anchor_c": blob.get("anchor_c"), "contracts": blob.get("contracts"),
+               "synthetic": bool(blob.get("pmm_synthetic")), "app": bool(blob.get("app_adopted"))}
+        stamp = {"kind": "hand_start_cancel", "bet": bet,
+                 "hand_start_cancel": True, "pick_id": r["id"], "slug": slug, "order_id": oid,
                  "baseline_q": round(base, 1), "touch_q": round(cur, 1), "drop_pct": seen,
                  "rule_pct": drop, "start": ev.astimezone(timezone.utc).isoformat(),
                  "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1)}
@@ -15417,10 +15428,15 @@ def api_bet_sheets_mine():
     except Exception as e:
         app.logger.warning("bet sheet live enrich: %s", e)
     try:
+        missed = _bet_sheet_missed(sb, now, out)
+    except Exception as e:
+        app.logger.warning("bet sheet missed list: %s", e)
+        missed = []
+    try:
         tape_dark = _touch_tape_dark(sb)
     except Exception:
         tape_dark = None
-    return jsonify({"ok": True, "bets": out, "venue_ok": venue_ok, "tape_dark": tape_dark,
+    return jsonify({"ok": True, "bets": out, "missed": missed, "venue_ok": venue_ok, "tape_dark": tape_dark,
                     "src": ("box" if box is not None else "vercel"),
                     "box_age_s": (box or {}).get("age_s"), "at": now.isoformat()})
 
@@ -15506,6 +15522,152 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
                     wp, src = v, "book"
                     b["cur_c"] = round(v * 100.0, 2)
         b["win_prob"], b["prob_src"] = wp, src
+
+
+_BS_MISSED_MAX_H = 6.0         # a missed bet stays on the list until its game is final, at most this long
+_BS_MISSED_READS = 6           # live book reads per poll for the missed list
+
+
+def _bet_sheet_missed_from_queue(sb, now, want: set) -> dict:
+    """The bet behind a start-cancel stamp that predates the stamp carrying
+    it (Oct 10 2026): the pick is gone, so walk the hand-order queue — the
+    create row that logged the pick, or the rerung row that made it and back
+    through to the create it came from. pick_id → bet fields."""
+    if not want:
+        return {}
+    try:
+        rows = (sb.table("hand_orders").select("op,pick_id,slug,synthetic,contracts,payload,result")
+                .eq("state", "done").gte("created_at", (now - timedelta(days=6)).isoformat())
+                .limit(1000).execute().data or [])
+    except Exception:
+        return {}
+    made = {}
+    for q in rows:
+        res = q.get("result") if isinstance(q.get("result"), dict) else {}
+        if q.get("op") in ("create", "rerung") and res.get("pick_id") is not None:
+            made[int(res["pick_id"])] = q
+    out = {}
+    for pid in want:
+        q, hop = made.get(pid), 0
+        if q is None:
+            continue
+        res = q.get("result") or {}
+        bet = {"price_c": res.get("price_c"), "contracts": res.get("contracts") or q.get("contracts")}
+        if q.get("op") == "rerung":
+            bet.update({"label": res.get("label"), "line": res.get("to_line")})
+        origin = q
+        while origin is not None and origin.get("op") == "rerung" and hop < 6:
+            hop += 1
+            origin = made.get(int(origin["pick_id"])) if origin.get("pick_id") is not None else None
+        item = (((origin or {}).get("payload") or {}).get("item") or {}) if origin else {}
+        for k in ("sport", "market_type", "side", "event_start"):
+            if item.get(k) is not None:
+                bet[k] = item[k]
+        if item.get("away") and item.get("home"):
+            bet["event_name"] = f"{item['away']} @ {item['home']}"
+        if q.get("op") == "create":
+            bet.setdefault("label", item.get("label"))
+            bet.setdefault("line", item.get("line"))
+        bet["synthetic"] = bool(q.get("synthetic")) if q.get("op") == "create" else None
+        out[pid] = bet
+    return out
+
+
+def _bet_sheet_missed(sb, now, bets: list) -> list:
+    """NOT FILLED, STARTED (Rob, Oct 10 2026: "I need a way to show games that
+    didn't fill and got cancelled on game start… show the bet I wanted, and if
+    I get it live, you move it down to the regular live bets… I'll hand take
+    them"). The box's kickoff cancel (`_hand_start_tick`) deletes an unfilled
+    pick, so the list is read off its exec_probe_runs stamps: nothing filled,
+    game not final, no sheet/app bet on the same game + market + side since
+    (an app order Rob places live is adopted as an in_play pick and that row
+    takes over). Display only — no bet buttons; the chase is his, in the app."""
+    try:
+        stamps = (sb.table("exec_probe_runs").select("at,result")
+                  .eq("result->>hand_start_cancel", "true")
+                  .gte("at", (now - timedelta(hours=_BS_MISSED_MAX_H + 1)).isoformat())
+                  .order("at").limit(300).execute().data or [])
+    except Exception:
+        return []
+    by_pick: dict = {}
+    for row in stamps:
+        res = row.get("result") if isinstance(row.get("result"), dict) else {}
+        pid = res.get("pick_id")
+        if pid is None:
+            continue
+        outr = res.get("result") if isinstance(res.get("result"), dict) else {}
+        if outr.get("deleted"):
+            by_pick[int(pid)] = (row.get("at"), res)
+        elif outr.get("ok"):
+            by_pick.pop(int(pid), None)       # a partial fill: the pick stayed, it is a live bet
+    if not by_pick:
+        return []
+    old = {pid for pid, (_a, res) in by_pick.items() if not isinstance(res.get("bet"), dict)}
+    back = _bet_sheet_missed_from_queue(sb, now, old)
+    taken = set()
+    for b in bets or []:
+        ek = _event_slug_from_market(b.get("slug") or "")
+        if ek and b.get("market_type") and b.get("side"):
+            taken.add((ek, b["market_type"], b["side"]))
+    out, espn, client, reads = [], {}, None, 0
+    for pid, (at, res) in by_pick.items():
+        bet = res.get("bet") if isinstance(res.get("bet"), dict) else back.get(pid)
+        slug = res.get("slug")
+        if not bet or not slug:
+            continue
+        syn = bet.get("synthetic")
+        if syn is None or not bet.get("market_type") or not bet.get("side"):
+            for cand in ((syn,) if syn is not None else (False, True)):
+                sl = _slug_side_line(slug, bool(cand))
+                if sl and (not bet.get("side") or sl[1] == bet.get("side")):
+                    bet["market_type"] = bet.get("market_type") or sl[0]
+                    bet["side"], syn = bet.get("side") or sl[1], bool(cand)
+                    if bet.get("line") is None:
+                        bet["line"] = sl[2]
+                    break
+        ek = _event_slug_from_market(slug)
+        if ek and (ek, bet.get("market_type"), bet.get("side")) in taken:
+            continue                                      # he took it live — the live strip has it
+        st_iso = res.get("start") or bet.get("event_start")
+        bdt = _parse_iso(st_iso or "")
+        if not bdt or (now - bdt) > timedelta(hours=_BS_MISSED_MAX_H):
+            continue
+        item = {"id": f"m{pid}", "pick_id": pid, "sport": bet.get("sport") or _slug_sport(slug),
+                "event_name": bet.get("event_name"), "event_start": st_iso,
+                "market_type": bet.get("market_type"), "side": bet.get("side"),
+                "line": bet.get("line"), "label": bet.get("label"),
+                "price_c": bet.get("price_c") if bet.get("price_c") is not None else bet.get("anchor_c"),
+                "contracts": bet.get("contracts"), "slug": slug, "synthetic": bool(syn),
+                "app": bool(bet.get("app")), "cancelled_at": res.get("at") or at}
+        away, home = _live_split_event(item["event_name"] or "")
+        if away and home:
+            try:
+                dk = bdt.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+                ck = ((item["sport"] or "").lower(), dk)
+                if ck not in espn:
+                    espn[ck] = _bs_espn_events(ck[0], dk)
+                m = _live_match_espn(espn[ck], away, home, st_iso)
+            except Exception:
+                m = None
+            if m:
+                if m.get("completed") or m.get("state") == "post":
+                    continue                              # final — nothing left to chase
+                item["score"] = {k: m.get(k) for k in ("state", "completed", "display_status", "period",
+                                                        "clock", "away_score", "home_score")}
+        if reads < _BS_MISSED_READS and not _venue_rl_active():
+            if client is None:
+                try:
+                    client = get_client()
+                except Exception:
+                    client = None
+            if client is not None:
+                reads += 1
+                v = _live_book_mid(client, slug, bool(syn))
+                if v is not None:
+                    item["cur_c"] = round(v * 100.0, 2)
+        out.append(item)
+    out.sort(key=lambda x: (x.get("event_start") or "", x.get("label") or ""))
+    return out
 
 
 def _bet_sheet_cancel(client, oid: str, slug: str):
