@@ -1184,10 +1184,8 @@
             html += '<div class="record">Picks record (plays + leans, graded): <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>'
                   + (rec.win + rec.loss ? ' <span class="dim">(' + Math.round(100 * rec.win / (rec.win + rec.loss)) + '%)</span>' : '') + '</div>';
         }
-        // ORDER (Rob, Oct 3 2026: "live at the top, then next to go live,
-        // finished at the bottom — too much scrolling"): in-play first with a
-        // LIVE flag, then upcoming soonest-first under day headers, then
-        // finals (most recent first). Only upcoming games get side buttons.
+        // ORDER: upcoming soonest-first under day headers, then finals (most
+        // recent first). Only upcoming games get side buttons.
         // NO LIVE SECTION (Rob, Oct 10 2026: "remove live bets from the sheet…
         // if I bet them, they are at the top"): in-play games live only in the
         // strip above (live bets + Not filled, started). Upcoming, then finals.
