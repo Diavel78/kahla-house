@@ -249,9 +249,6 @@
         .c-won { background: #103c2c; color: var(--green); }
         .c-lost { background: #3c1414; color: var(--red); }
         .c-push, .c-off { background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
-        .win-gauge { flex: 0 0 auto; position: relative; width: 44px; height: 44px; }
-        .win-gauge svg { transform: rotate(-90deg); }
-        .win-gauge .wg-num { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
         .toast { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 99; background: #1a2130; border: 1px solid #2b3447;
                  color: var(--text); padding: 10px 16px; border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
         .toast.show { opacity: 1; }
@@ -276,7 +273,7 @@
             <h1>Bet Sheets</h1>
 
             <div class="bets" id="betsSec">
-                <div class="sec-h" onclick="toggleBets()" title="Show / hide my bets"><h2>My bets</h2><span class="sub" id="betsMeta">loading…</span><span class="chev" id="betsChev">▼</span></div>
+                <div class="sec-h" onclick="toggleBets()" title="Show / hide my bets"><h2>My bets no fill</h2><span class="sub" id="betsMeta">loading…</span><span class="chev" id="betsChev">▼</span></div>
                 <div id="bets"></div>
             </div>
 
@@ -886,19 +883,6 @@
 
     // ───────────────────────── my bets ─────────────────────────
     function _probToAmer(p) { return p >= 0.5 ? -100 * p / (1 - p) : 100 * (1 - p) / p; }
-    function winGauge(prob, entryP, tip) {
-        const size = 44, c = size / 2, rO = 17, rI = 10.5;
-        const CO = 2 * Math.PI * rO, CI = 2 * Math.PI * rI;
-        const arc = (r, C, frac, col, w) =>
-            `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${col}" stroke-width="${w}" stroke-linecap="round" stroke-dasharray="${(Math.max(0, Math.min(1, frac)) * C).toFixed(1)} ${C.toFixed(1)}"/>`;
-        const trackO = `<circle cx="${c}" cy="${c}" r="${rO}" fill="none" stroke="#2a2f3a" stroke-width="4"/>`;
-        const trackI = entryP != null ? `<circle cx="${c}" cy="${c}" r="${rI}" fill="none" stroke="#22262e" stroke-width="3"/>` : '';
-        const innerArc = entryP != null ? arc(rI, CI, entryP, 'rgba(255,255,255,0.55)', 3) : '';
-        if (prob == null) return `<div class="win-gauge" title="${esc(tip || '')}"><svg width="${size}" height="${size}">${trackO}${trackI}${innerArc}</svg><span class="wg-num" style="color:var(--muted)">—</span></div>`;
-        const p = Math.max(0, Math.min(1, prob));
-        const col = `hsl(${Math.round(p * 120)},75%,48%)`;
-        return `<div class="win-gauge" title="${esc(tip || '')}"><svg width="${size}" height="${size}">${trackO}${trackI}${arc(rO, CO, p, col, 4)}${innerArc}</svg><span class="wg-num" style="color:${col}">${Math.round(p * 100)}</span></div>`;
-    }
     // The bet itself (team + line), built from the pick's own fields first:
     // an app-adopted order's stored label can be the bare EVENT title
     // ("Indiana vs. Nebraska") — Rob couldn't tell which bet it was (Oct 7 2026).
@@ -1019,18 +1003,16 @@
                   + '#' + _slip.filter(i => i.op).map(i => i.key).join(',');
         if (sig !== _gamesSig) { _gamesSig = sig; if (typeof _games !== 'undefined' && _games && _games.length) { try { renderGames(); } catch (e) {} } }
         const tabBets = bets.filter(b => String(b.sport || '').toUpperCase() === String(_sport || '').toUpperCase());
-        const live = tabBets.filter(b => b.status === 'pending' && b.live);
+        // MY BETS NO FILL (Rob, Oct 10 2026: "My bets should JUST be live bets that
+        // didn't fill… these I need to handle myself"): a FILLED live bet lives in the
+        // Settled + Live P/L box now; pre-game bets sit under their game's boxes.
+        const live = tabBets.filter(b => b.status === 'pending' && b.live && !((b.held || 0) > 0));
         const waiting = tabBets.filter(b => b.status === 'pending' && !b.live);
         const warn = waiting.filter(b => betState(b).cls === 'warn').length;
-        const done = tabBets.filter(b => b.status !== 'pending');
-        const liveAll = bets.filter(b => b.status === 'pending' && b.live).length;
-        let usd = 0, w = 0, l = 0, p = 0, sold = 0;
-        // SOLD = Rob sold the lot in the app before the final: its dollars count,
-        // it is not a win or a loss.
-        done.forEach(b => { if (b.pnl_usd != null) usd += b.pnl_usd; if (b.status === 'won') w++; else if (b.status === 'lost') l++; else if (b.status === 'sold') sold++; else p++; });
-        document.getElementById('betsMeta').textContent = _sport + ' ' + live.length + ' live · ' + waiting.length + ' waiting below' + (warn ? ' (' + warn + ' need you)' : '')
-            + (done.length ? ' · today ' + w + '-' + l + (p ? '-' + p : '') + (sold ? ' + ' + sold + ' sold' : '') + ' ' + money(usd) : '')
-            + (liveAll !== live.length ? ' · ' + liveAll + ' live all tabs' : '')
+        const liveAll = bets.filter(b => b.status === 'pending' && b.live && !((b.held || 0) > 0)).length;
+        const nMissed = (d.missed || []).filter(m => String(m.sport || '').toUpperCase() === String(_sport || '').toUpperCase() && !_missedDismissed()[m.id]).length;
+        document.getElementById('betsMeta').textContent = _sport + ' ' + (live.length + nMissed) + ' live, no fill · ' + waiting.length + ' waiting below' + (warn ? ' (' + warn + ' need you)' : '')
+            + (liveAll !== live.length ? ' · ' + liveAll + ' no-fill all tabs' : '')
             + (d.src === 'box' ? '' : ' · ⚠ box not publishing') + (d.venue_ok ? '' : ' · ⚠ venue unreadable')
             + (d.tape_dark ? ' · 🚨 ORDER-BOOK FEED DOWN (' + d.tape_dark[0] + '/' + d.tape_dark[1] + ' bets blind) — NO kickoff or line-move cancels' : '');
         // NOT FILLED, STARTED (Rob, Oct 10 2026: "show the bet I wanted, and if I
@@ -1057,13 +1039,12 @@
                          + '<div class="l1"><b>' + esc((m.period ? String(m.period).toUpperCase() + ' ' : '') + betLabel(m)) + '</b>' + (sl ? ' <span class="score">' + esc(sl) + '</span>' : ' <span class="dim">· ' + esc((m.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + '</span>') + '</div>'
                          + '<div class="l2">' + l2 + '</div></div></div>';
                 }).join('')
-                + (live.length ? '<div class="day-hdr">Live</div>' : '');
+                + (live.length ? '<div class="day-hdr">Live, not filled</div>' : '');
         }
-        if (!live.length) { document.getElementById('bets').innerHTML = mhtml + '<div class="empty" style="padding:10px 0">No live ' + esc(_sport) + ' bets right now.</div>'; return; }
+        if (!live.length) { document.getElementById('bets').innerHTML = mhtml || '<div class="empty" style="padding:10px 0">No live ' + esc(_sport) + ' bets without a fill — filled ones are in Settled + Live P/L.</div>'; return; }
         document.getElementById('bets').innerHTML = mhtml + live.map(b => {
             const entryP = b.price_c != null ? b.price_c / 100 : impl(b.entry_price);
             const prob = b.win_prob != null ? b.win_prob : (b.cur_c != null ? b.cur_c / 100 : null);
-            const tip = (prob != null ? 'now ' + Math.round(prob * 100) + '%' : 'no quote') + (entryP != null ? ' · you bet at ' + Math.round(entryP * 100) + '%' : '');
             const st = betState(b);
             const held = b.held || 0, o = b.order || {};
             let chip = '';
@@ -1075,8 +1056,7 @@
             const sl = _scoreLine(b);
             const l2 = (prob != null && b.prob_src !== 'decided' ? 'now ' + Math.round(prob * 100) + '% (' + am(_probToAmer(Math.min(0.99, Math.max(0.01, prob)))) + ')' : (prob == null ? 'no live price' : ''))
                      + (entryP != null ? (prob != null && b.prob_src !== 'decided' || prob == null ? ' · ' : '') + 'you ' + Math.round(entryP * 100) + '%' : '');
-            return '<div class="bet">' + winGauge(prob, entryP, tip)
-                 + '<div class="info"><div class="chips">' + chip + '</div><div class="l1"><b>' + esc(betLabel(b)) + '</b>' + (sl ? ' <span class="score">' + esc(sl) + '</span>' : ' <span class="dim">· ' + esc((b.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + '</span>') + '</div>'
+            return '<div class="bet"><div class="info"><div class="chips">' + chip + '</div><div class="l1"><b>' + esc(betLabel(b)) + '</b>' + (sl ? ' <span class="score">' + esc(sl) + '</span>' : ' <span class="dim">· ' + esc((b.event_name || '').split(' @ ').map(shortTeam).join(' @ ')) + '</span>') + '</div>'
                  + '<div class="l2">' + l2 + '</div></div></div>';
         }).join('');
     }
