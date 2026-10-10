@@ -348,8 +348,9 @@ def pin_overlay(slate: list[dict], spend: bool, sport: str = "NHL") -> dict:
     now = datetime.now(timezone.utc)
     st: dict = {"spend": spend}
     try:
-        if spend:
-            app._pin_slate(sb, sport, now)
+        # Pinnacle's own feed every run (free, Oct 10 2026); only a
+        # spend run may fall back to the paid parlay-api pull.
+        app._pin_slate(sb, sport, now, paid=spend)
         events, age = app._pin_slate_cached(sb, sport, now)
     except Exception as e:
         log.warning("pinnacle: slate read failed: %s", e)

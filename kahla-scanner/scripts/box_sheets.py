@@ -77,18 +77,18 @@ _PIN_SLATES: dict = {}          # sport -> (events, age_min) — one cache read 
 
 
 def pin_pull(sports, spend: bool) -> dict:
-    """Refresh the Pinnacle slate for each sport through app._pin_slate
-    (3 credits a sport, 90-min cache, 900/1,000 monthly hard stop — a
-    budget-exhausted pull serves the stale cache) and load it for the
-    line hook. spend=False loads the cache only."""
+    """Refresh the Pinnacle slate for each sport through app._pin_slate and
+    load it for the line hook. EVERY run reads Pinnacle's own feed (free,
+    Oct 10 2026); spend=True (the --pin runs) may also fall back to the
+    paid parlay-api pull (3 credits, 900/1,000 monthly stop) when that
+    feed fails, spend=False then just reads the cache."""
     app = _app()
     sb = app.get_supabase()
     now = datetime.now(ZoneInfo("UTC"))
     out: dict = {}
     for sport in sports:
         try:
-            if spend:
-                ev = app._pin_slate(sb, sport, now)
+            app._pin_slate(sb, sport, now, paid=spend)
             events, age = app._pin_slate_cached(sb, sport, now)
             _PIN_SLATES[sport] = (events, age)
             out[sport] = {"events": len(events or []),
