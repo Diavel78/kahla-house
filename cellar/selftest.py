@@ -3465,6 +3465,9 @@ def test_pin_direct_feed() -> None:
         mk(6, "spread", {"designation": "home", "points": -2.5, "price": -110},
            {"designation": "away", "points": 2.5, "price": -110}),
     ]
+    check("direct: every sheet sport has a Pinnacle league (one table, defined once)",
+          _app._PINDIRECT_LEAGUE == {"NCAAF": 880, "NFL": 889, "NHL": 1456, "NBA": 487}
+          and open(_app.__file__).read().count("\n_PINDIRECT_LEAGUE =") == 1)
     ev = _app._pin_direct_to_events(matchups, markets, now)
     check("direct: started games and child matchups are dropped",
           sorted(e["away_team"] for e in ev) == ["Florida", "Hawaii", "Indiana", "Miami (OH)"],
