@@ -1184,16 +1184,17 @@
             html += '<div class="record">Picks record (plays + leans, graded): <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>'
                   + (rec.win + rec.loss ? ' <span class="dim">(' + Math.round(100 * rec.win / (rec.win + rec.loss)) + '%)</span>' : '') + '</div>';
         }
-        // ORDER (Rob, Oct 3 2026: "live at the top, then next to go live,
-        // finished at the bottom — too much scrolling"): in-play first with a
-        // LIVE flag, then upcoming soonest-first under day headers, then
-        // finals (most recent first). Only upcoming games get side buttons.
+        // ORDER: upcoming soonest-first under day headers, then finals (most
+        // recent first). Only upcoming games get side buttons.
+        // NO LIVE SECTION (Rob, Oct 10 2026: "remove live bets from the sheet…
+        // if I bet them, they are at the top"): in-play games live only in the
+        // strip above (live bets + Not filled, started). Upcoming, then finals.
         games.forEach(g => { g._st = gameStatus(g); });
-        const live = games.filter(g => g._st === 'live');
         const up = games.filter(g => g._st === 'up');
         const fin = games.filter(g => g._st === 'final').reverse();
         let day = null;
-        const ordered = live.concat(up, fin);
+        const ordered = up.concat(fin);
+        if (!ordered.length) html += '<div class="empty">No upcoming games — everything on this sheet is in play.</div>';
         for (const g of ordered) {
             if (g._st === 'live') {
                 if (day !== '__live') { html += '<div class="day-hdr live-hdr">🔴 Live now</div>'; day = '__live'; }
