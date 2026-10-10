@@ -32043,6 +32043,89 @@ def api_parlay_probe():
     return jsonify(out)
 
 
+# Pinnacle's own public odds feed (the one pinnacle.com's pages call).
+# Probe only for now — Oct 10 2026, parlay-api priced 45 of 99 college games.
+_PINDIRECT_BASE = "https://guest.api.arcadia.pinnacle.com/0.1"
+_PINDIRECT_LEAGUE = {"NCAAF": 880, "NFL": 889}
+_PINDIRECT_KEY = "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"
+
+
+@app.route("/api/pinnacle/probe")
+def api_pinnacle_probe():
+    """Shared-secret, read-only: does Pinnacle's own public feed answer from
+    here, and how many games carry a main full-game spread? `sport=NCAAF`
+    (default) / `NFL`, `league=<id>` overrides, `find=<team substr>` lists
+    that game's main markets, `nokey=1` sends no API key."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sport = (request.args.get("sport") or "NCAAF").upper()
+    lid = request.args.get("league") or _PINDIRECT_LEAGUE.get(sport)
+    find = (request.args.get("find") or "").strip().lower()
+    hdr = {"User-Agent": "Mozilla/5.0", "Accept": "application/json",
+           "Referer": "https://www.pinnacle.com/", "Origin": "https://www.pinnacle.com"}
+    if not request.args.get("nokey"):
+        hdr["X-API-Key"] = _PINDIRECT_KEY
+    out: dict = {"ok": True, "sport": sport, "league": lid}
+
+    def _get(path):
+        try:
+            r = _http.get(f"{_PINDIRECT_BASE}{path}", headers=hdr, timeout=12)
+            try:
+                body = r.json()
+            except Exception:
+                body = None
+            return r.status_code, body, (r.text or "")[:300]
+        except Exception as e:
+            return None, None, f"{type(e).__name__}: {e}"[:300]
+
+    st, mu, txt = _get(f"/leagues/{lid}/matchups")
+    out["matchups_status"] = st
+    if not isinstance(mu, list):
+        out["matchups_body"] = txt
+        return jsonify(out)
+    st2, mk, txt2 = _get(f"/leagues/{lid}/markets/straight")
+    out["markets_status"] = st2
+    if not isinstance(mk, list):
+        out["markets_body"] = txt2
+        mk = []
+    games = {}
+    for m in mu:
+        if m.get("parent") or m.get("parentId") or m.get("special"):
+            continue
+        parts = m.get("participants") or []
+        names = {p.get("alignment"): p.get("name") for p in parts}
+        if not names.get("home") or not names.get("away"):
+            continue
+        games[m.get("id")] = {"away": names["away"], "home": names["home"],
+                              "start": m.get("startTime"), "spread": None,
+                              "total": None, "ml": None}
+    for x in mk:
+        g = games.get(x.get("matchupId"))
+        if not g or x.get("period") not in (0, None) or x.get("isAlternate"):
+            continue
+        t = x.get("type")
+        px = [(p.get("designation"), p.get("points"), p.get("price"))
+              for p in (x.get("prices") or [])]
+        if t == "spread" and g["spread"] is None:
+            g["spread"] = px
+        elif t == "total" and g["total"] is None:
+            g["total"] = px
+        elif t == "moneyline" and g["ml"] is None:
+            g["ml"] = px
+    vals = list(games.values())
+    out["raw_counts"] = {"matchups": len(mu), "markets": len(mk)}
+    out["games"] = len(vals)
+    out["with_spread"] = sum(1 for g in vals if g["spread"])
+    out["with_total"] = sum(1 for g in vals if g["total"])
+    out["sample_matchup"] = {k: mu[0].get(k) for k in list(mu[0].keys())[:12]} if mu else None
+    out["sample_market"] = mk[0] if mk else None
+    if find:
+        out["find"] = [g for g in vals if find in (g["away"] + " " + g["home"]).lower()][:6]
+    return jsonify(out)
+
+
 _PIN_MKT_KEY = {"moneyline": "h2h", "spread": "spreads", "total": "totals"}
 
 
