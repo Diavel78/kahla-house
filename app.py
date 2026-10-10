@@ -31993,6 +31993,25 @@ def api_parlay_probe():
         out["sports"][sp] = {"cached_events": len(ev or []),
                              "age_min": round(age, 1) if age is not None else None,
                              "last_pull": ((_parlay_state_get(sb, f"pinlog:{sp}") or {}).get("v"))}
+    game = (request.args.get("game") or "").strip().lower()
+    if game:
+        # free: which cached events carry `game` in a team name, and which
+        # books priced each (spread outcomes per book) — "why is this game
+        # not on Pinnacle" without spending a credit
+        hits = []
+        for sp in ("NFL", "NCAAF", "NHL", "NBA"):
+            ev, _age = _pin_slate_cached(sb, sp, now)
+            for e in (ev or []):
+                if game not in ((e.get("away_team") or "") + " " + (e.get("home_team") or "")).lower():
+                    continue
+                books = {}
+                for b in (e.get("bookmakers") or []):
+                    sm = next((m for m in (b.get("markets") or []) if m.get("key") == "spreads"), None)
+                    books[b.get("key")] = [(o.get("name"), o.get("point"), o.get("price"))
+                                           for o in ((sm or {}).get("outcomes") or [])]
+                hits.append({"sport": sp, "away": e.get("away_team"), "home": e.get("home_team"),
+                             "start": e.get("commence_time"), "books": books})
+        out["game"] = hits[:12]
     pk = _parlay_key(sb)
     out["key_source"] = ("env" if (os.environ.get("PARLAY_API_KEY") or "").strip()
                          else ("db" if pk else "none"))
