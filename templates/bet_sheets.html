@@ -219,7 +219,17 @@
         .bets .sec-h { cursor: pointer; user-select: none; }
         .bets .sec-h .chev { color: var(--muted); font-size: 11px; display: inline-block; transition: transform .15s; margin-left: auto; }
         .bets.collapsed .sec-h .chev { transform: rotate(-90deg); }
-        .bets.collapsed #bets { display: none; }
+        .bets.collapsed #bets, .bets.collapsed #plBody { display: none; }
+        .pl-sum { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+        .pl-sum .box { flex: 1 1 120px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+        .pl-sum .k { font-size: 10.5px; font-weight: 800; letter-spacing: .05em; color: var(--muted); text-transform: uppercase; }
+        .pl-sum .v { font-size: 17px; font-weight: 700; font-family: 'JetBrains Mono', monospace; margin-top: 2px; }
+        .pl-sum .s { font-size: 11px; color: var(--muted); margin-top: 1px; }
+        .pos { color: var(--green); } .neg { color: var(--red); }
+        .pl-row { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+        .pl-row .nm { flex: 1; min-width: 0; }
+        .pl-row .nm .d { font-size: 11.5px; color: var(--muted); }
+        .pl-row .amt { font-family: 'JetBrains Mono', monospace; font-weight: 700; white-space: nowrap; }
         .bet { display: flex; align-items: center; flex-wrap: wrap; column-gap: 12px; row-gap: 6px; padding: 9px 0; border-bottom: 1px solid var(--line); }
         .bet .info { flex: 1; min-width: 0; }
         .bet .info .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
@@ -268,6 +278,11 @@
             <div class="bets" id="betsSec">
                 <div class="sec-h" onclick="toggleBets()" title="Show / hide my bets"><h2>My bets</h2><span class="sub" id="betsMeta">loading…</span><span class="chev" id="betsChev">▼</span></div>
                 <div id="bets"></div>
+            </div>
+
+            <div class="bets" id="plSec">
+                <div class="sec-h" onclick="togglePl()" title="Show / hide P/L"><h2>Settled + Live P/L</h2><span class="sub" id="plMeta">loading…</span><span class="chev">▼</span></div>
+                <div id="plBody"></div>
             </div>
 
             <input class="search" id="search" type="search" placeholder="Search a game or team…"
@@ -452,6 +467,18 @@
         try { localStorage.setItem(BETS_COLLAPSE_KEY, c ? '1' : '0'); } catch (e) {}
     }
     _applyBetsCollapse();
+    const PL_COLLAPSE_KEY = 'kh_pl_collapsed_v1';
+    function _applyPlCollapse() {
+        let c = false; try { c = localStorage.getItem(PL_COLLAPSE_KEY) === '1'; } catch (e) {}
+        document.getElementById('plSec').classList.toggle('collapsed', c);
+    }
+    function togglePl() {
+        const sec = document.getElementById('plSec');
+        const c = !sec.classList.contains('collapsed');
+        sec.classList.toggle('collapsed', c);
+        try { localStorage.setItem(PL_COLLAPSE_KEY, c ? '1' : '0'); } catch (e) {}
+    }
+    _applyPlCollapse();
     let _slip = [];          // [{key, sport, away, home, event_start, market_type, side, line, label, game, q}]
     let _slipOpen = false;
     // THE SLIP STAYS WHERE YOU PUT IT (Rob, Oct 7 2026: "if I hide you, I'll
@@ -912,7 +939,73 @@
     // THE STRIP IS LIVE BETS ONLY (Rob, Oct 8 2026: "the bets at the top
     // should be live bets only, and start displaying the live odds… just
     // games live"). Pre-game bets live under their game's boxes below.
+    // SETTLED + LIVE P/L (Rob, Oct 10 2026: "the last thing missing from the
+    // old Pickbot dashboard? Live value… my live value plus settled value
+    // (include trades!)"). Every sport, not just this tab — it is the day's
+    // money. SETTLED = the venue's own day number (resolutions on the game's
+    // AZ day + app SELLS on the day traded — the dashboard's Today card);
+    // OPEN = every filled lot still pending, marked at its live win % (1/0
+    // once decided) or the current mid, against what it cost.
+    function _plCls(x) { return x == null ? '' : (x > 0.004 ? 'pos' : x < -0.004 ? 'neg' : ''); }
+    function renderPnl(d) {
+        const bets = d.bets || [];
+        const st = d.settled || {};
+        const open = bets.filter(b => b.status === 'pending' && (b.held || 0) > 0);
+        let val = 0, cost = 0, nq = 0;
+        const rows = open.map(b => {
+            const held = Number(b.held), pc = b.price_c != null ? Number(b.price_c) : (impl(b.entry_price) != null ? impl(b.entry_price) * 100 : null);
+            const prob = b.win_prob != null ? Number(b.win_prob) : (b.cur_c != null ? Number(b.cur_c) / 100 : null);
+            const c = pc != null ? held * pc / 100 : null;
+            const v = prob != null ? held * prob : null;
+            if (v != null && c != null) { val += v; cost += c; } else nq++;
+            return { b, held, pc, prob, c, v, pl: (v != null && c != null) ? v - c : null };
+        }).sort((x, y) => (y.b.live ? 1 : 0) - (x.b.live ? 1 : 0) || String(x.b.event_start).localeCompare(String(y.b.event_start)));
+        const openPl = val - cost;
+        const settled = st.today != null ? Number(st.today) : null;
+        const done = bets.filter(b => b.status !== 'pending');
+        const sheetSettled = done.reduce((a, b) => a + (b.pnl_usd != null ? Number(b.pnl_usd) : 0), 0);
+        const total = (settled != null ? settled : sheetSettled) + openPl;
+        document.getElementById('plMeta').innerHTML = '<span class="' + _plCls(total) + '">' + money(total) + '</span> today · settled '
+            + (settled != null ? money(settled) : '—') + ' · open ' + money(openPl);
+        const ageTxt = st.age_s != null ? (st.age_s < 90 ? 'just now' : Math.round(st.age_s / 60) + 'm ago') : '';
+        let h = '<div class="pl-sum">'
+            + '<div class="box"><div class="k">Settled today</div><div class="v ' + _plCls(settled) + '">' + (settled != null ? money(settled) : '—') + '</div>'
+            + '<div class="s">venue · incl. sells' + (ageTxt ? ' · ' + ageTxt : '') + '</div></div>'
+            + '<div class="box"><div class="k">Open P/L</div><div class="v ' + _plCls(openPl) + '">' + money(openPl) + '</div>'
+            + '<div class="s">worth $' + val.toFixed(2) + ' · cost $' + cost.toFixed(2) + (nq ? ' · ' + nq + ' no quote' : '') + '</div></div>'
+            + '<div class="box"><div class="k">Day total</div><div class="v ' + _plCls(total) + '">' + money(total) + '</div>'
+            + '<div class="s">settled + open</div></div></div>';
+        const game = b => (b.event_name || '').split(' @ ').map(shortTeam).join(' @ ');
+        if (rows.length) {
+            h += '<div class="day-hdr">Open · ' + rows.length + '</div>' + rows.map(r => {
+                const b = r.b;
+                const now = r.prob != null ? Math.round(r.prob * 1000) / 10 : null;
+                const tag = b.live ? (b.prob_src === 'decided' ? 'FINAL' : 'LIVE') : 'PRE';
+                const d2 = r.held + ' @ ' + (r.pc != null ? (Math.round(r.pc * 100) / 100) + '¢' : '?') + ' → '
+                         + (now != null ? now + '¢' + (b.prob_src === 'decided' ? '' : ' (' + am(_probToAmer(Math.min(0.99, Math.max(0.01, r.prob)))) + ')') : 'no quote')
+                         + (r.v != null ? ' · worth $' + r.v.toFixed(2) : '');
+                return '<div class="pl-row"><span class="chip ' + (tag === 'PRE' ? 'c-push' : tag === 'FINAL' ? (r.prob >= 0.99 ? 'c-won' : r.prob <= 0.01 ? 'c-lost' : 'c-push') : 'c-fill') + '">' + tag + '</span>'
+                     + '<div class="nm"><b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc(String(b.sport || '')) + ' ' + esc(game(b)) + '</span><div class="d">' + d2 + '</div></div>'
+                     + '<span class="amt ' + _plCls(r.pl) + '">' + (r.pl != null ? money(r.pl) : '—') + '</span></div>';
+            }).join('');
+        } else {
+            h += '<div class="empty" style="padding:6px 0">No filled bets open right now.</div>';
+        }
+        if (done.length) {
+            h += '<div class="day-hdr">Settled today · sheet bets ' + money(sheetSettled) + '</div>' + done.map(b => {
+                const lab = b.status === 'sold' ? 'SOLD' : String(b.status || '').toUpperCase();
+                const cls = b.status === 'won' ? 'c-won' : b.status === 'lost' ? 'c-lost' : b.status === 'sold' ? 'c-fill' : 'c-push';
+                const sd = b.status === 'sold' && b.sold ? 'sold ' + (b.sold.qty != null ? Math.round(b.sold.qty * 100) / 100 : '') + ' @ ' + (b.sold.avg_c != null ? Math.round(b.sold.avg_c * 100) / 100 + '¢' : '?') + ' · bought ' + (b.price_c != null ? b.price_c + '¢' : '?')
+                         : (b.filled_qty != null ? b.filled_qty + ' @ ' : '') + (b.price_c != null ? b.price_c + '¢' : '');
+                return '<div class="pl-row"><span class="chip ' + cls + '">' + esc(lab) + '</span>'
+                     + '<div class="nm"><b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc(String(b.sport || '')) + ' ' + esc(game(b)) + '</span><div class="d">' + esc(sd) + '</div></div>'
+                     + '<span class="amt ' + _plCls(b.pnl_usd) + '">' + (b.pnl_usd != null ? money(b.pnl_usd) : '—') + '</span></div>';
+            }).join('');
+        }
+        document.getElementById('plBody').innerHTML = h;
+    }
     function renderBets(d) {
+        try { renderPnl(d); } catch (e) { document.getElementById('plMeta').textContent = 'P/L render failed'; }
         const bets = d.bets || [];
         _betsById = {}; bets.forEach(b => { _betsById[b.id] = b; });
         const hk = {}, bg = {};
