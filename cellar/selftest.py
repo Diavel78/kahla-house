@@ -3505,6 +3505,21 @@ def test_pin_direct_feed() -> None:
               ("Old Dominion Monarchs", "App State Mountaineers"))] == [-11.0, -12.0, -13.0, -14.0, -15.0, -16.0])
     check("matcher: 'Mississippi State' is not Ole Miss",
           L(alias, "Mississippi State Bulldogs", "Vanderbilt Commodores", "spread", book="pinnacle") is None)
+    two = _app._pin_direct_to_events(
+        [mu(21, "Boston Celtics", "Detroit Pistons", st=(now + _td(hours=3)).isoformat()),
+         mu(22, "Boston Celtics", "Detroit Pistons", st=(now + _td(days=11)).isoformat())],
+        [mk(21, "spread", {"designation": "home", "points": -2.0, "price": -110},
+            {"designation": "away", "points": 2.0, "price": -110}),
+         mk(22, "spread", {"designation": "home", "points": 4.0, "price": -110},
+            {"designation": "away", "points": -4.0, "price": -110})], now)
+    check("matcher: the same two teams twice in a slate → the game on OUR date",
+          L(two, "Boston Celtics", "Detroit Pistons", "spread", book="pinnacle",
+            start=now + _td(days=11, minutes=10)) == 4.0
+          and L(two, "Boston Celtics", "Detroit Pistons", "spread", book="pinnacle",
+                start=(now + _td(hours=3)).isoformat()) == -2.0)
+    check("matcher: a game Pinnacle lists on another date never matches (preseason vs opening week)",
+          L(two, "Boston Celtics", "Detroit Pistons", "spread", book="pinnacle",
+            start=now + _td(days=5)) is None)
     check("matcher: 'Ohio' alone is not 'Ohio State'",
           _app._pin_name_q("ohio", "ohio state buckeyes") > 0
           and _app._pin_name_q("ohio state", "ohio state buckeyes")
