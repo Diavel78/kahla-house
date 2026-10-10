@@ -3488,6 +3488,20 @@ def test_pin_direct_feed() -> None:
     check("matcher: accents/apostrophes and 'St' fold ('Hawai\u2019i' @ 'San José State')",
           L(ev, "Hawai\u2019i Rainbow Warriors", "San José State Spartans", "spread",
             book="pinnacle") == -2.5)
+    alias = _app._pin_direct_to_events(
+        [mu(11, "Mississippi", "Vanderbilt"), mu(12, "Central Florida", "Oklahoma State"),
+         mu(13, "UL Lafayette", "Louisiana Tech"), mu(14, "Miami Ohio", "Massachusetts"),
+         mu(15, "Connecticut", "Temple"), mu(16, "Old Dominion", "Appalachian State")],
+        [mk(i, "spread", {"designation": "home", "points": -float(i), "price": -110},
+            {"designation": "away", "points": float(i), "price": -110}) for i in range(11, 17)], now)
+    check("matcher: Pinnacle's spellings fold to ours (Ole Miss, UCF, Louisiana, Miami OH, UConn, App State)",
+          [L(alias, a, h, "spread", book="pinnacle") for a, h in (
+              ("Ole Miss Rebels", "Vanderbilt Commodores"), ("UCF Knights", "Oklahoma State Cowboys"),
+              ("Louisiana Ragin' Cajuns", "Louisiana Tech Bulldogs"),
+              ("Miami (OH) RedHawks", "Massachusetts Minutemen"), ("UConn Huskies", "Temple Owls"),
+              ("Old Dominion Monarchs", "App State Mountaineers"))] == [-11.0, -12.0, -13.0, -14.0, -15.0, -16.0])
+    check("matcher: 'Mississippi State' is not Ole Miss",
+          L(alias, "Mississippi State Bulldogs", "Vanderbilt Commodores", "spread", book="pinnacle") is None)
     check("matcher: 'Ohio' alone is not 'Ohio State'",
           _app._pin_name_q("ohio", "ohio state buckeyes") > 0
           and _app._pin_name_q("ohio state", "ohio state buckeyes")

@@ -32284,13 +32284,22 @@ def _pin_slate_cached(sb, sport: str, now):
     return ((row.get("v") or {}).get("events")), age
 
 
+# Pinnacle's spelling (whole name, normalized) → ours. Read off
+# /api/pinnacle/probe?match=1 (Oct 10 2026: 40 of 46 matched without these).
+_PIN_ALIAS = {"mississippi": "ole miss", "central florida": "ucf",
+              "connecticut": "uconn", "appalachian state": "app state",
+              "ul lafayette": "louisiana ragin cajuns", "miami ohio": "miami oh"}
+
+
 def _pin_norm(name) -> str:
     """Accent-fold, lowercase, punctuation → space: 'San José State' and
-    'Miami (OH)' compare on letters ('san jose state', 'miami oh')."""
+    'Miami (OH)' compare on letters ('san jose state', 'miami oh');
+    Pinnacle's own spellings fold through _PIN_ALIAS."""
     import unicodedata
     t = unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode().lower()
     t = t.replace("&", " and ").replace("'", "").replace("\u2019", "")
-    return " ".join("".join(c if c.isalnum() else " " for c in t).split())
+    t = " ".join("".join(c if c.isalnum() else " " for c in t).split())
+    return _PIN_ALIAS.get(t, t)
 
 
 def _pin_name_q(a: str, b: str) -> float:
