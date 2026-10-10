@@ -32157,13 +32157,6 @@ def api_parlay_probe():
     return jsonify(out)
 
 
-# Pinnacle's own public odds feed (the one pinnacle.com's pages call).
-# Probe only for now — Oct 10 2026, parlay-api priced 45 of 99 college games.
-_PINDIRECT_BASE = "https://guest.api.arcadia.pinnacle.com/0.1"
-_PINDIRECT_LEAGUE = {"NCAAF": 880, "NFL": 889}
-_PINDIRECT_KEY = "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"
-
-
 @app.route("/api/pinnacle/probe")
 def api_pinnacle_probe():
     """Shared-secret, read-only: does Pinnacle's own public feed answer from
