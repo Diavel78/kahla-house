@@ -31881,7 +31881,105 @@ def _pin_pull_log(sb, sport: str, now, rec: dict) -> None:
         pass
 
 
-def _pin_slate(sb, sport: str, now) -> list | None:
+# PINNACLE'S OWN FEED (Oct 10 2026, Rob: "45 out of 99… dumb"). parlay-api
+# carried a Pinnacle book for 45 of 99 college games and some of those
+# with NO spread (Indiana @ Nebraska read DraftKings all morning while
+# Pinnacle had Nebraska +9). pinnacle.com's pages read a public guest feed
+# — free, keyless for us, the whole league in two calls — so the sheets
+# read Pinnacle first and fall back to parlay-api only when it fails.
+_PINDIRECT_BASE = "https://guest.api.arcadia.pinnacle.com/0.1"
+_PINDIRECT_LEAGUE = {"NCAAF": 880, "NFL": 889, "NHL": 1456, "NBA": 487}
+_PINDIRECT_KEY = "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"   # the site's own public guest key
+_PINDIRECT_HDR = {"User-Agent": "Mozilla/5.0", "Accept": "application/json",
+                  "Referer": "https://www.pinnacle.com/", "Origin": "https://www.pinnacle.com",
+                  "X-API-Key": _PINDIRECT_KEY}
+
+
+def _pin_direct_to_events(matchups, markets, now) -> list:
+    """Pinnacle's matchups + straight markets → TOA-shaped events (one
+    `pinnacle` bookmaker, h2h/spreads/totals, full game, main lines only),
+    so every slate reader works unchanged. Outcomes carry `designation`
+    (home/away/over/under) — _pin_outcomes prefers it over name matching.
+    Started games and child matchups (props, team totals, periods) are
+    dropped."""
+    games: dict = {}
+    seen: set = set()
+    for m in (matchups or []):
+        if not isinstance(m, dict) or m.get("parent") or m.get("parentId") or m.get("special"):
+            continue
+        names = {p.get("alignment"): p.get("name") for p in (m.get("participants") or [])}
+        aw, hm, st = names.get("away"), names.get("home"), m.get("startTime")
+        if not aw or not hm or not st:
+            continue
+        try:
+            if datetime.fromisoformat(str(st).replace("Z", "+00:00")) <= now:
+                continue
+        except Exception:
+            continue
+        k = (aw, hm, st)
+        if k in seen:
+            continue
+        seen.add(k)
+        games[m.get("id")] = {"id": f"pd-{m.get('id')}", "away_team": aw, "home_team": hm,
+                              "commence_time": st, "src": "pinnacle_direct", "_mk": {}}
+    want = {"moneyline": "h2h", "spread": "spreads", "total": "totals"}
+    for x in (markets or []):
+        g = games.get((x or {}).get("matchupId"))
+        mk = want.get((x or {}).get("type"))
+        if not g or not mk or x.get("period") not in (0, None) or x.get("isAlternate"):
+            continue
+        if mk in g["_mk"]:
+            continue
+        outs = []
+        for pr in (x.get("prices") or []):
+            d = pr.get("designation")
+            if d not in ("home", "away", "over", "under") or pr.get("price") is None:
+                continue
+            o = {"name": (g["home_team"] if d == "home" else g["away_team"] if d == "away"
+                          else d.capitalize()),
+                 "designation": d, "price": pr.get("price")}
+            if mk != "h2h":
+                if pr.get("points") is None:
+                    continue
+                o["point"] = pr.get("points")
+            outs.append(o)
+        if len(outs) == 2:
+            g["_mk"][mk] = outs
+    out = []
+    for g in games.values():
+        mks = g.pop("_mk")
+        if not mks:
+            continue
+        g["bookmakers"] = [{"key": "pinnacle", "markets": [{"key": k, "outcomes": v}
+                                                           for k, v in mks.items()]}]
+        out.append(g)
+    return out
+
+
+def _pin_direct_events(sport: str, now):
+    """One sport's slate straight from Pinnacle → (events, why). events is
+    None on any failure, [] only when Pinnacle answered with no games."""
+    lid = _PINDIRECT_LEAGUE.get(sport)
+    if not lid:
+        return None, "no_league"
+    try:
+        r1 = _http.get(f"{_PINDIRECT_BASE}/leagues/{lid}/matchups",
+                       headers=_PINDIRECT_HDR, timeout=12)
+        if r1.status_code != 200:
+            return None, f"matchups_{r1.status_code}"
+        r2 = _http.get(f"{_PINDIRECT_BASE}/leagues/{lid}/markets/straight",
+                       headers=_PINDIRECT_HDR, timeout=12)
+        if r2.status_code != 200:
+            return None, f"markets_{r2.status_code}"
+        mu, mk = r1.json(), r2.json()
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"[:160]
+    if not isinstance(mu, list) or not isinstance(mk, list):
+        return None, "not_a_list"
+    return _pin_direct_to_events(mu, mk, now), None
+
+
+def _pin_slate(sb, sport: str, now, paid: bool = True) -> list | None:
     """Pinnacle game lines for one sport's whole slate, DB-cached 90 min,
     hard monthly budget guard. Returns TOA-shaped events or None.
     ⚠ An EMPTY answer never replaces the cache (Oct 9 2026): a 200 with []
@@ -31892,6 +31990,22 @@ def _pin_slate(sb, sport: str, now) -> list | None:
         return None
     cache = _parlay_state_get(sb, f"pin:{sport}")
     cached_ev = ((cache or {}).get("v") or {}).get("events")
+    # Pinnacle's own feed first — free, so every caller re-reads it.
+    if sport in _PINDIRECT_LEAGUE:
+        dev, why = _pin_direct_events(sport, now)
+        try:
+            _parlay_state_put(sb, f"pinlog_direct:{sport}",
+                              {"ok": bool(dev), "events": len(dev or []), "why": why,
+                               "at": now.isoformat()}, now)
+        except Exception:
+            pass
+        if dev:
+            _parlay_state_put(sb, f"pin:{sport}", {"events": dev, "src": "pinnacle_direct"}, now)
+            _pin_pull_log(sb, sport, now, {"ok": True, "src": "pinnacle_direct",
+                                           "events": len(dev), "pinnacle_events": len(dev)})
+            return dev
+    if not paid:
+        return cached_ev
     if cache:
         try:
             age = (now - datetime.fromisoformat(
@@ -32123,6 +32237,31 @@ def api_pinnacle_probe():
     out["sample_market"] = mk[0] if mk else None
     if find:
         out["find"] = [g for g in vals if find in (g["away"] + " " + g["home"]).lower()][:6]
+    if request.args.get("match"):
+        # our upcoming games (ESPN names) vs the converted slate — the
+        # match rate the sheets will actually get
+        try:
+            sbm = get_supabase()
+            nowm = datetime.now(timezone.utc)
+            rows = (sbm.table("markets").select("event_name,event_start")
+                    .eq("sport", sport).eq("status", "active")
+                    .gte("event_start", nowm.isoformat())
+                    .lte("event_start", (nowm + timedelta(hours=36)).isoformat())
+                    .limit(400).execute().data) or []
+            evs = _pin_direct_to_events(mu, mk, nowm)
+            hit, miss = 0, []
+            for r_ in rows:
+                if " @ " not in (r_.get("event_name") or ""):
+                    continue
+                a_, h_ = [x.strip() for x in r_["event_name"].split(" @ ", 1)]
+                if _pin_line_from_events(evs, a_, h_, "spread", book="pinnacle") is not None:
+                    hit += 1
+                else:
+                    miss.append(r_["event_name"])
+            out["match"] = {"ours": hit + len(miss), "matched": hit, "unmatched": miss[:80],
+                            "pin_games": len(evs)}
+        except Exception as e:
+            out["match"] = {"error": f"{type(e).__name__}: {e}"[:200]}
     return jsonify(out)
 
 
@@ -32144,35 +32283,71 @@ def _pin_slate_cached(sb, sport: str, now):
     return ((row.get("v") or {}).get("events")), age
 
 
+def _pin_norm(name) -> str:
+    """Accent-fold, lowercase, punctuation → space: 'San José State' and
+    'Miami (OH)' compare on letters ('san jose state', 'miami oh')."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode().lower()
+    t = t.replace("&", " and ").replace("'", "").replace("\u2019", "")
+    return " ".join("".join(c if c.isalnum() else " " for c in t).split())
+
+
+def _pin_name_q(a: str, b: str) -> float:
+    """0 unless one name contains the other on word boundaries; else the
+    share of the longer name the shorter covers (1.0 = identical)."""
+    if not a or not b:
+        return 0.0
+    ta, tb = a.split(), b.split()
+    short, long_ = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    n = len(short)
+    for i in range(len(long_) - n + 1):
+        # each word equal, or a 2+ letter abbreviation of it ('st' / 'state')
+        if all(w == long_[i + j] or (len(w) >= 2 and long_[i + j].startswith(w))
+               for j, w in enumerate(short)):
+            return min(len(a), len(b)) / max(len(a), len(b))
+    return 0.0
+
+
 def _pin_outcomes(events, away: str, home: str, mkt_key: str, side: str,
                   book: str | None = "pinnacle"):
     """Match (game, market, side) in a TOA-shaped slate → (pick, opp)
-    outcomes, or (None, None). Team match = two-way substring containment."""
-    aw, hm = (away or "").strip().lower(), (home or "").strip().lower()
+    outcomes, or (None, None). The game is the BEST name match over the
+    whole slate, either orientation (Pinnacle's college names are short —
+    'Miami' must not take 'Miami (OH)''s game, and a neutral site can list
+    the teams the other way round); a side is read off the outcome's
+    `designation` when the slate carries one (Pinnacle's own feed), else
+    by name."""
+    aw, hm = _pin_norm(away), _pin_norm(home)
+    best, best_q, swapped = None, 0.0, False
     for e in (events or []):
-        ea = (e.get("away_team") or "").lower()
-        eh = (e.get("home_team") or "").lower()
-        if not ((ea in aw or aw in ea) and (eh in hm or hm in eh)):
-            continue
-        bm = next((b for b in (e.get("bookmakers") or [])
-                   if book is None or b.get("key") == book), None)
-        mkt = next((m for m in ((bm or {}).get("markets") or [])
-                    if m.get("key") == mkt_key), None)
-        outs = (mkt or {}).get("outcomes") or []
-        if len(outs) < 2:
-            return None, None
-        if mkt_key == "totals":
-            pick = next((o for o in outs
-                         if (o.get("name") or "").lower() == side), None)
-        else:
-            team = hm if side == "home" else aw
-            pick = next((o for o in outs
-                         if team in (o.get("name") or "").lower()
-                         or (o.get("name") or "").lower() in team), None)
-        if not pick:
-            return None, None
-        return pick, next((o for o in outs if o is not pick), None)
-    return None, None
+        ea, eh = _pin_norm(e.get("away_team")), _pin_norm(e.get("home_team"))
+        for sw, (x, y) in ((False, (ea, eh)), (True, (eh, ea))):
+            qa, qh = _pin_name_q(x, aw), _pin_name_q(y, hm)
+            if qa > 0 and qh > 0 and qa + qh > best_q:
+                best, best_q, swapped = e, qa + qh, sw
+    if best is None:
+        return None, None
+    bm = next((b for b in (best.get("bookmakers") or [])
+               if book is None or b.get("key") == book), None)
+    mkt = next((m for m in ((bm or {}).get("markets") or [])
+                if m.get("key") == mkt_key), None)
+    outs = (mkt or {}).get("outcomes") or []
+    if len(outs) < 2:
+        return None, None
+    if mkt_key == "totals":
+        pick = next((o for o in outs if (o.get("name") or "").lower() == side
+                     or o.get("designation") == side), None)
+    elif any(o.get("designation") for o in outs):
+        want = side if not swapped else ("away" if side == "home" else "home")
+        pick = next((o for o in outs if o.get("designation") == want), None)
+    else:
+        team = hm if side == "home" else aw
+        cand = [(_pin_name_q(_pin_norm(o.get("name")), team), i) for i, o in enumerate(outs)]
+        q, i = max(cand)
+        pick = outs[i] if q > 0 else None
+    if not pick:
+        return None, None
+    return pick, next((o for o in outs if o is not pick), None)
 
 
 _PIN_STAMP_MAX_AGE_MIN = 90.0   # a stamp is "contemporaneous" only off a slate this fresh

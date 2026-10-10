@@ -3391,8 +3391,9 @@ def test_pin_slate_empty_keeps_cache() -> None:
         def json(self):
             return self._b
     saved = (_app._parlay_state_get, _app._parlay_state_put, _app._parlay_key, _app._http.get,
-             _app._time.sleep)
+             _app._time.sleep, _app._pin_direct_events)
     try:
+        _app._pin_direct_events = lambda sp, n: (None, "down")    # the vendor fallback path
         _app._parlay_state_get = lambda sb, k: store.get(k)
         _app._parlay_state_put = lambda sb, k, v, n: store.__setitem__(k, {"v": v, "updated_at": n.isoformat()})
         _app._parlay_key = lambda sb: "k"
@@ -3419,7 +3420,100 @@ def test_pin_slate_empty_keeps_cache() -> None:
               len(store["pin:NFL"]["v"]["events"]) == 2)
     finally:
         (_app._parlay_state_get, _app._parlay_state_put, _app._parlay_key, _app._http.get,
-         _app._time.sleep) = saved
+         _app._time.sleep, _app._pin_direct_events) = saved
+
+
+def test_pin_direct_feed() -> None:
+    """PINNACLE'S OWN FEED (Oct 10 2026): parlay-api carried a Pinnacle
+    spread for under half the college slate (Indiana @ Nebraska read DK
+    while Pinnacle had Nebraska +9). The guest feed's matchups + markets
+    become a TOA slate; the matcher survives Pinnacle's short names."""
+    print("pinnacle direct: guest feed → slate, short-name matching, free first")
+    import app as _app
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    now = _dt(2026, 10, 10, 14, 0, tzinfo=_tz.utc)
+    fut = (now + _td(hours=2)).isoformat()
+
+    def mu(i, aw, hm, st=fut, **kw):
+        return {"id": i, "startTime": st, "participants": [
+            {"alignment": "away", "name": aw}, {"alignment": "home", "name": hm}], **kw}
+
+    def mk(i, t, a, b, period=0, alt=False):
+        return {"matchupId": i, "type": t, "period": period, "isAlternate": alt,
+                "prices": [a, b]}
+    matchups = [mu(1, "Indiana", "Nebraska"), mu(2, "Miami (OH)", "Ohio"),
+                mu(3, "Florida", "Florida State"), mu(4, "Old A", "Old B",
+                                                       st=(now - _td(hours=1)).isoformat()),
+                mu(5, "Prop", "Child", parent={"id": 1}), mu(6, "Hawaii", "San Jose St")]
+    markets = [
+        mk(1, "spread", {"designation": "home", "points": 9.0, "price": -108},
+           {"designation": "away", "points": -9.0, "price": -104}),
+        mk(1, "spread", {"designation": "home", "points": 12.5, "price": 150},
+           {"designation": "away", "points": -12.5, "price": -180}, alt=True),
+        mk(1, "spread", {"designation": "home", "points": 4.5, "price": -110},
+           {"designation": "away", "points": -4.5, "price": -110}, period=1),
+        mk(1, "total", {"designation": "over", "points": 48.5, "price": -102},
+           {"designation": "under", "points": 48.5, "price": -115}),
+        mk(1, "moneyline", {"designation": "home", "price": 280},
+           {"designation": "away", "price": -340}),
+        mk(2, "spread", {"designation": "home", "points": -3.5, "price": -110},
+           {"designation": "away", "points": 3.5, "price": -110}),
+        mk(3, "spread", {"designation": "home", "points": -6.5, "price": -110},
+           {"designation": "away", "points": 6.5, "price": -110}),
+        mk(4, "spread", {"designation": "home", "points": -1.5, "price": -110},
+           {"designation": "away", "points": 1.5, "price": -110}),
+        mk(6, "spread", {"designation": "home", "points": -2.5, "price": -110},
+           {"designation": "away", "points": 2.5, "price": -110}),
+    ]
+    ev = _app._pin_direct_to_events(matchups, markets, now)
+    check("direct: started games and child matchups are dropped",
+          sorted(e["away_team"] for e in ev) == ["Florida", "Hawaii", "Indiana", "Miami (OH)"],
+          f"got {[e['away_team'] for e in ev]}")
+    L = _app._pin_line_from_events
+    check("direct: the main full-game spread is the home point (Nebraska +9, not the alt/1H)",
+          L(ev, "Indiana Hoosiers", "Nebraska Cornhuskers", "spread", book="pinnacle") == 9.0)
+    check("direct: the total reads 48.5",
+          L(ev, "Indiana Hoosiers", "Nebraska Cornhuskers", "total", book="pinnacle") == 48.5)
+    mh, ma = _app._pin_outcomes(ev, "Indiana Hoosiers", "Nebraska Cornhuskers", "h2h", "home")
+    check("direct: the moneyline sides come off the designation",
+          (mh or {}).get("price") == 280 and (ma or {}).get("price") == -340)
+    check("matcher: 'Miami (OH)' is the RedHawks' game",
+          L(ev, "Miami (OH) RedHawks", "Ohio Bobcats", "spread", book="pinnacle") == -3.5)
+    check("matcher: 'Miami Hurricanes' does NOT take the RedHawks' game",
+          L(ev, "Miami Hurricanes", "Ohio Bobcats", "spread", book="pinnacle") is None)
+    check("matcher: Florida @ Florida State home side is Florida State (designation, not name)",
+          L(ev, "Florida Gators", "Florida State Seminoles", "spread", book="pinnacle") == -6.5)
+    check("matcher: a neutral site listed the other way round still reads the home team's point",
+          L(ev, "Florida State Seminoles", "Florida Gators", "spread", book="pinnacle") == 6.5)
+    check("matcher: accents/apostrophes and 'St' fold ('Hawai\u2019i' @ 'San José State')",
+          L(ev, "Hawai\u2019i Rainbow Warriors", "San José State Spartans", "spread",
+            book="pinnacle") == -2.5)
+    check("matcher: 'Ohio' alone is not 'Ohio State'",
+          _app._pin_name_q("ohio", "ohio state buckeyes") > 0
+          and _app._pin_name_q("ohio state", "ohio state buckeyes")
+          > _app._pin_name_q("ohio", "ohio state buckeyes"))
+    store: dict = {}
+    saved = (_app._parlay_state_get, _app._parlay_state_put, _app._parlay_key,
+             _app._pin_direct_events, _app._http.get)
+    calls = []
+    try:
+        _app._parlay_state_get = lambda sb, k: store.get(k)
+        _app._parlay_state_put = lambda sb, k, v, n: store.__setitem__(k, {"v": v, "updated_at": n.isoformat()})
+        _app._parlay_key = lambda sb: "k"
+        _app._http.get = lambda *a, **kw: calls.append(a) or (_ for _ in ()).throw(RuntimeError("paid"))
+        _app._pin_direct_events = lambda sp, n: (ev, None)
+        out = _app._pin_slate(None, "NCAAF", now, paid=False)
+        check("slate: Pinnacle's own feed lands in the cache and never touches the vendor",
+              len(out or []) == 4 and store["pin:NCAAF"]["v"]["src"] == "pinnacle_direct"
+              and not calls)
+        _app._pin_direct_events = lambda sp, n: (None, "timeout")
+        out2 = _app._pin_slate(None, "NCAAF", now, paid=False)
+        check("slate: a feed failure on a free run serves the cache, still no vendor call",
+              len(out2 or []) == 4 and not calls
+              and store["pinlog_direct:NCAAF"]["v"]["why"] == "timeout")
+    finally:
+        (_app._parlay_state_get, _app._parlay_state_put, _app._parlay_key,
+         _app._pin_direct_events, _app._http.get) = saved
 
 
 def test_hand_venue_reset() -> None:
@@ -3573,7 +3667,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
