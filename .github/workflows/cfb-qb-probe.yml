@@ -1,0 +1,27 @@
+name: CFB QB — Probe
+
+# Where does ESPN say a college QB is out? Read-only probe from a runner
+# (the Claude sandbox's egress blocks ESPN). Prints CFB_QB_PROBE lines.
+
+on:
+  workflow_dispatch:
+    inputs:
+      teams:
+        description: "ESPN college team ids, comma-separated (66 = Iowa State)"
+        required: false
+        default: "66"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - run: python -m scripts.probe_cfb_qb --teams "${{ inputs.teams || '66' }}"
