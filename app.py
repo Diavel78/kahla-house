@@ -3589,6 +3589,58 @@ def api_bet_sheets_picks():
                     out["rent_key_mid"] = (_RENTLIST_CACHE.get("keys") or {}).get(k)
             except Exception as e:
                 out["slug_market_err"] = str(e)[:160]
+    if request.args.get("fix_markets"):
+        # REPOINT PICKS OFF DEAD GAME ROWS (Oct 11 2026, the live Chicago ML:
+        # an app bet adopted before #188 joined a deactivated 1:25 PM
+        # duplicate of the 10:00 Chicago @ Green Bay row, so the page read it
+        # as unstarted and filed it under 'not on this sheet'). Every pending
+        # bet_sheet pick whose markets row is not active moves to the ACTIVE
+        # row with the same name + sport nearest its start (±24h). Dry unless
+        # &apply=1.
+        fixes, skipped = [], []
+        try:
+            prs = (sb.table("bot_picks").select("id,market_id,event_start,signal_blob")
+                   .eq("status", "pending").eq("signal_blob->>bet_sheet", "true")
+                   .limit(300).execute().data) or []
+            mids = list({p.get("market_id") for p in prs if p.get("market_id")})
+            mrows = {}
+            for i in range(0, len(mids), 100):
+                for m in (sb.table("markets").select("id,sport,event_name,event_start,status")
+                          .in_("id", mids[i:i + 100]).execute().data or []):
+                    mrows[m["id"]] = m
+            for p in prs:
+                m = mrows.get(p.get("market_id"))
+                if not m or m.get("status") == "active":
+                    continue
+                try:
+                    t0 = datetime.fromisoformat(str(m.get("event_start")).replace("Z", "+00:00"))
+                except (TypeError, ValueError):
+                    skipped.append({"pick_id": p["id"], "why": "bad start"})
+                    continue
+                cands = (sb.table("markets").select("id,event_name,event_start,status")
+                         .eq("sport", m.get("sport")).eq("event_name", m.get("event_name"))
+                         .eq("status", "active")
+                         .gte("event_start", (t0 - timedelta(hours=24)).isoformat())
+                         .lte("event_start", (t0 + timedelta(hours=24)).isoformat())
+                         .limit(10).execute().data) or []
+                if not cands:
+                    skipped.append({"pick_id": p["id"], "why": "no active row", "event": m.get("event_name")})
+                    continue
+                cands.sort(key=lambda r: abs((datetime.fromisoformat(str(r["event_start"]).replace("Z", "+00:00"))
+                                               - t0).total_seconds()))
+                to = cands[0]
+                fx = {"pick_id": p["id"], "slug": (p.get("signal_blob") or {}).get("pmm_slug"),
+                      "event": m.get("event_name"), "from": {"id": m["id"], "start": m.get("event_start")},
+                      "to": {"id": to["id"], "start": to.get("event_start")}}
+                if request.args.get("apply"):
+                    sb.table("bot_picks").update({"market_id": to["id"], "event_start": to["event_start"]}) \
+                        .eq("id", p["id"]).execute()
+                    fx["applied"] = True
+                    _probe_log({"hand_market_repoint": True, **fx, "at": datetime.now(timezone.utc).isoformat()})
+                fixes.append(fx)
+        except Exception as e:
+            out["fix_err"] = str(e)[:200]
+        out["market_fixes"], out["market_fix_skipped"] = fixes, skipped
     qn = request.args.get("queue")
     if qn:                                             # the hand-order queue, newest first (Oct 6 2026)
         try:
