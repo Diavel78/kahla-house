@@ -16224,7 +16224,7 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
         return []
     old = {pid for pid, (_a, res) in by_pick.items() if not isinstance(res.get("bet"), dict)}
     back = _bet_sheet_missed_from_queue(sb, now, old)
-    taken, names = set(), {}
+    taken, names, chasing = set(), {}, {}
     for b in bets or []:
         ek = _bs_event_key(b.get("slug") or "")
         _got = (b.get("held") or 0) > 0 or (b.get("filled_qty") or 0) > 0 or b.get("status") == "sold"
@@ -16235,6 +16235,17 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
         # does not
         if _got and ek[0] and b.get("market_type") and b.get("side"):
             taken.add((ek, b["market_type"], b["side"]))
+        # CHASING (Rob, Oct 11 2026: "as soon as I put a resting order in on
+        # it, it should show different… resting not filled"): an unfilled
+        # order he rests on the same game + market + side (any rung, usually
+        # from the app) marks the row instead of hiding it.
+        _o = b.get("order") if isinstance(b.get("order"), dict) else {}
+        if (not _got and _o.get("resting") and b.get("status", "pending") == "pending"
+                and ek[0] and b.get("market_type") and b.get("side")):
+            chasing.setdefault((ek, b["market_type"], b["side"]), {
+                "pick_id": b.get("id"), "label": b.get("label"), "line": b.get("line"),
+                "price_c": _o.get("price_c") if _o.get("price_c") is not None else b.get("price_c"),
+                "leaves": _o.get("leaves"), "outbid": bool(b.get("outbid")), "app": bool(b.get("app"))})
         if ek[0] and b.get("event_name"):
             names.setdefault(ek[0], (b.get("event_name"), b.get("sport")))
     for _pid, (_a, _res) in by_pick.items():
@@ -16278,7 +16289,8 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
                 "price_c": bet.get("price_c") if bet.get("price_c") is not None else bet.get("anchor_c"),
                 "contracts": bet.get("contracts"), "slug": slug, "synthetic": bool(syn),
                 "app": bool(bet.get("app")), "period": ekp[1] or None,
-                "cancelled_at": res.get("at") or at}
+                "cancelled_at": res.get("at") or at,
+                "chasing": chasing.get((ekp, bet.get("market_type"), bet.get("side")))}
         away, home = _live_split_event(item["event_name"] or "")
         if away and home:
             try:
