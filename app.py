@@ -3206,6 +3206,46 @@ def api_bet_sheets_picks():
                             for r in qrows]
         except Exception as e:
             out["queue_err"] = str(e)[:160]
+    swk = (request.args.get("sheet_week") or "").strip()
+    if swk:
+        # WEEK REVIEW (Oct 11 2026, Rob: "grade my week… compare it to your
+        # record… did I bet things you passed on?"): the sheet's base +
+        # final (friday) picks and grade per game, beside every bet_sheet
+        # pick on that sport in the week.
+        ssp = (request.args.get("sport") or "NCAAF").upper()
+
+        def _pk(m):
+            m = m or {}
+            return {k: {kk: (m.get(k) or {}).get(kk) for kk in
+                        ("verdict", "side", "team", "line", "market_home_line", "edge", "edge_pts", "price")}
+                    for k in ("bet_spread", "bet_total")}
+        try:
+            srows = _sb_paged(lambda: sb.table("football_sheets")
+                              .select("event_name,event_start,data_blob")
+                              .eq("week_key", swk).eq("sport", ssp), max_pages=3) or []
+            out["sheet"] = [{"event": r.get("event_name"), "start": r.get("event_start"),
+                             "base": _pk((r.get("data_blob") or {}).get("model")),
+                             "final": _pk(((r.get("data_blob") or {}).get("friday") or {}).get("model")),
+                             "final_at": ((r.get("data_blob") or {}).get("friday") or {}).get("built_at"),
+                             "grade": (r.get("data_blob") or {}).get("grade")}
+                            for r in srows]
+            t0 = datetime.fromisoformat(swk).replace(tzinfo=timezone.utc)
+            prow = _sb_paged(lambda: sb.table("bot_picks")
+                             .select("id,event_name,event_start,market_type,side,entry_line,status,"
+                                     "pnl_units,picked_at,result_score,signal_blob")
+                             .eq("sport", ssp)
+                             .gte("event_start", (t0 - timedelta(days=1)).isoformat())
+                             .lt("event_start", (t0 + timedelta(days=8)).isoformat())
+                             .filter("signal_blob->>bet_sheet", "eq", "true"), max_pages=5) or []
+            out["bets"] = [{**{k: r.get(k) for k in ("id", "event_name", "event_start", "market_type",
+                                                      "side", "entry_line", "status", "picked_at", "result_score")},
+                            **{k: (r.get("signal_blob") or {}).get(k) for k in
+                               ("label", "price_c", "contracts", "filled_qty", "filled", "sold", "sheet_line",
+                                "rung_line", "app_adopted", "in_play", "rerung_from", "placed_via",
+                                "entry_src", "anchor_c")}}
+                           for r in prow]
+        except Exception as e:
+            out["sheet_week_err"] = str(e)[:200]
     if request.args.get("positions"):
         # PAGING AUDIT (Oct 7 2026): page one alone vs every page, and the
         # pending 'filled' picks with no position behind them.
