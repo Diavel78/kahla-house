@@ -165,6 +165,7 @@
         .mk-m { font-size: 15px; color: var(--text2); }
         .mk-m .dim { color: var(--text3); }
         .mk.pass .mk-m { color: var(--text3); }
+        .mk-note { font-size: 14px; color: var(--text3); border: 1px dashed var(--line2); border-radius: 12px; padding: 10px 12px; }
         .mk-x { font-size: 16px; font-family: var(--mono); font-weight: 600; }
         .unrated { color: var(--text3); font-style: italic; }
         .gr { margin-left: 4px; font-family: 'DM Sans', system-ui, sans-serif; }
@@ -389,8 +390,12 @@
         const d = new Date(iso);
         return d.toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' });
     }
+    // "Toronto Maple Leafs" → "Toronto", not "Toronto Maple": two-word nicknames.
+    const _TWO_WORD = /\s(Maple Leafs|Red Wings|Blue Jackets|Golden Knights|Red Sox|White Sox|Blue Jays|Trail Blazers|Golden Bears|Green Wave|Red Raiders|Blue Devils|Tar Heels|Fighting Irish|Yellow Jackets|Crimson Tide|Sun Devils|Golden Gophers|Nittany Lions|Scarlet Knights|Horned Frogs|Demon Deacons|Golden Flashes|Mean Green|Black Knights|Golden Eagles|Ragin' Cajuns|Rainbow Warriors|Golden Hurricane|Red Wolves|Thundering Herd|Blue Hens|Wolf Pack|Fighting Illini)$/;
     function shortTeam(name) {
         if (!name) return '?';
+        const two = name.match(_TWO_WORD);
+        if (two) return name.slice(0, two.index);
         const parts = name.split(' ');
         return parts.length > 1 ? parts.slice(0, -1).join(' ') : name;
     }
@@ -1150,7 +1155,14 @@
     function mkBody(g, up, mt, p, line, label, gradeKey) {
         if (!p || !p.side || line == null) return '';
         if (up) return pickBtn(g._gi, g, mt, p.side, line, label, p.verdict);
-        return p.verdict !== 'pass' ? '<div class="mk-x">' + esc(label) + gradeMark(g, gradeKey) + '</div>' : '';
+        return p.verdict !== 'pass' ? '<div class="mk-x">' + esc(label) + (gradeKey === 'puck' ? puckGrade(g, p) : gradeMark(g, gradeKey)) + '</div>' : '';
+    }
+    // The box's grader doesn't grade the puck line; read it off the final.
+    function puckGrade(g, p) {
+        const f = g.grade && g.grade.final;
+        if (!f || f.home == null || f.away == null || p.line == null) return '';
+        const m = (p.side === 'home' ? f.home - f.away : f.away - f.home) + Number(p.line);
+        return m > 0 ? ' <span class="gr gr-win" title="won">✅</span>' : m < 0 ? ' <span class="gr gr-loss" title="lost">❌</span>' : ' <span class="gr gr-push" title="push">➖</span>';
     }
     function footballMarkets(g, up) {
         const L = g.line || {}, M = g.model, bs = g.spread, bt = g.total, out = [];
@@ -1173,6 +1185,10 @@
         return mkRow('Total', p, mdl + edgeTxt(p, pts),
                      mkBody(g, up, 'total', p, tl, p ? (p.side === 'over' ? 'Over ' : 'Under ') + tl : '', 'total'));
     }
+    // THE CHALK RULE (Rob, Oct 11 2026: "-180 and a -262? Yeah, I ain't
+    // betting that"): a chalky ML pick (server `ml.chalky`, ≤ −150) keeps its
+    // verdict as information but gets no button — the bet is the puck line
+    // (hockey) or the spread (NBA).
     function mlMarket(g, up) {
         const L = g.line || {}, M = g.model, p = g.ml;
         let mdl = '';
@@ -1183,8 +1199,9 @@
         if (p && p.side && L['ml_' + p.side] != null) mdl = nameOf(g, p.side) + ' ' + am(L['ml_' + p.side]) + (mdl ? ' · ' + mdl : '');
         else if (!p && L.ml_away != null && L.ml_home != null) mdl = nameOf(g, 'away') + ' ' + am(L.ml_away) + ' · ' + nameOf(g, 'home') + ' ' + am(L.ml_home) + (mdl ? ' · ' + mdl : '');
         if (!p && !mdl) return '';
-        return mkRow('ML', p, mdl + edgeTxt(p, false),
-                     mkBody(g, up, 'ml', p, 0, p && p.side ? nameOf(g, p.side) + ' ML' : '', 'ml'));
+        let body = mkBody(g, up, 'ml', p, 0, p && p.side ? nameOf(g, p.side) + ' ML' : '', 'ml');
+        if (p && p.chalky && up) body = '<div class="mk-note">Too chalky to bet at ' + am(p.price) + ' — ' + (_sport === 'NHL' ? 'see the puck line' : 'see the spread') + '.</div>';
+        return mkRow('ML', p, mdl + edgeTxt(p, false), body);
     }
     // NBA spread (Hoops IQ: lean-capped, like the total)
     function nbaSpreadMarket(g, up) {
@@ -1197,32 +1214,27 @@
         return mkRow('Spread', p, mdl + edgeTxt(p, false),
                      mkBody(g, up, 'spread', p, ln, p && p.side ? nameOf(g, p.side) + ' ' + sgn(ln, 1) : '', 'spread'));
     }
-    // Hockey puck line: no sheet verdict, so the button is quiet (PASS-style),
-    // on the side whose model cover beats the book's implied price.
+    // Hockey puck line: priced server-side like the ML (`g.puck`, model cover
+    // at the book's line vs the no-vig price — _sheet_puck_pick).
     function puckMarket(g, up) {
-        const L = g.line || {}, M = g.model;
-        const mdl = M && M.spread_home != null ? 'model ' + favLine(g, M.spread_home, 2) : '';
-        if (L.puck_home == null) return mdl ? mkRow('Puck', null, mdl, '') : '';
-        const ph = Number(L.puck_home);
-        const favHome = ph < 0, po = favHome ? L.puck_home_odds : L.puck_away_odds;
-        const lineTxt = favLine(g, ph, 1) + (po != null ? ' ' + am(po) : '');
-        let side = null;
-        if (M && M.home_cover != null && M.away_cover != null) {
-            const ih = impl(L.puck_home_odds), ia = impl(L.puck_away_odds);
-            side = (Number(M.home_cover) - (ih != null ? ih : 0.5)) >= (Number(M.away_cover) - (ia != null ? ia : 0.5)) ? 'home' : 'away';
+        const L = g.line || {}, M = g.model, p = g.puck;
+        let mdl = M && M.spread_home != null ? 'model ' + favLine(g, M.spread_home, 2) : '';
+        if (p && p.side) mdl = nameOf(g, p.side) + ' ' + sgn(p.line, 1) + (p.price != null ? ' ' + am(p.price) : '') + (mdl ? ' · ' + mdl : '');
+        else if (L.puck_home != null) {
+            const po = Number(L.puck_home) < 0 ? L.puck_home_odds : L.puck_away_odds;
+            mdl = 'line ' + favLine(g, L.puck_home, 1) + (po != null ? ' ' + am(po) : '') + (mdl ? ' · ' + mdl : '');
         }
-        const ln = side ? (side === 'home' ? ph : -ph) : null;
-        const p = side ? { side: side, verdict: 'pass' } : null;
-        return mkRow('Puck', null, 'line ' + lineTxt + (mdl ? ' · ' + mdl : ''),
-                     up && p ? pickBtn(g._gi, g, 'spread', side, ln, nameOf(g, side) + ' ' + sgn(ln, 1), 'pass') : '');
+        if (!p && !mdl) return '';
+        return mkRow('Puck', p, mdl + edgeTxt(p, false),
+                     mkBody(g, up, 'spread', p, p ? p.line : null, p && p.side ? nameOf(g, p.side) + ' ' + sgn(p.line, 1) : '', 'puck'));
     }
     function marketsFor(g, up) {
-        if (_sport === 'NHL') return mlMarket(g, up) + totalMarket(g, up, false) + puckMarket(g, up);
+        if (_sport === 'NHL') return mlMarket(g, up) + puckMarket(g, up) + totalMarket(g, up, false);
         if (_sport === 'NBA') return mlMarket(g, up) + nbaSpreadMarket(g, up) + totalMarket(g, up, false);
         return footballMarkets(g, up);
     }
     function hasPick(g) {
-        return ['ml', 'spread', 'total'].some(k => g[k] && (g[k].verdict === 'play' || g[k].verdict === 'lean'));
+        return ['ml', 'spread', 'total', 'puck'].some(k => g[k] && !g[k].chalky && (g[k].verdict === 'play' || g[k].verdict === 'lean'));
     }
 
     async function load() {
