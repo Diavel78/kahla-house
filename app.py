@@ -3150,6 +3150,95 @@ def api_pair_status():
     return jsonify(out)
 
 
+def _sheet_take_sim(sb, srows: list, contracts: int = 5) -> dict:
+    """WHAT IF (Rob, Oct 11 2026: "what would it have been if I waited until
+    final sheet before kick off, and had done all takes and paid the fee?"):
+    every final sheet pick (play + lean), TAKEN at the venue ask on the rung
+    at the sheet's last pre-kickoff refresh, taker fee paid, graded off the
+    final score at the rung actually bought. Ask = the pm_snapshots tape's
+    latest row for that rung at or before the refresh."""
+    out_rows, tot = [], {}
+    miss = []
+    for r in srows:
+        blob = r.get("data_blob") or {}
+        fri = blob.get("friday") or {}
+        fin = (blob.get("grade") or {}).get("final") or {}
+        model = fri.get("model") or blob.get("model") or {}
+        mid = r.get("market_id")
+        t_take = fri.get("built_at") or r.get("event_start")
+        if fin.get("home") is None or not mid or not t_take:
+            continue
+        try:
+            tt = datetime.fromisoformat(str(t_take).replace("Z", "+00:00"))
+            ks = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if tt > ks:
+            tt = ks
+        tape = None
+        for mt, k in (("spread", "bet_spread"), ("total", "bet_total")):
+            pk = model.get(k) or {}
+            if pk.get("verdict") not in ("play", "lean") or pk.get("line") is None:
+                continue
+            side, sl = pk.get("side"), float(pk["line"])
+            if tape is None:
+                try:
+                    tape = _sb_paged(lambda: sb.table("pm_snapshots")
+                                     .select("market_type,side,line,cents,bid_c,ask_c,captured_at")
+                                     .eq("market_id", mid).eq("source", "pmm")
+                                     .in_("market_type", ["spread", "total"])
+                                     .gte("captured_at", (tt - timedelta(hours=36)).isoformat())
+                                     .lte("captured_at", tt.isoformat()), max_pages=10) or []
+                except Exception as e:
+                    tape = []
+                    miss.append(f"{r.get('event_name')}: tape read {e}"[:120])
+            last: dict = {}
+            for x in tape:
+                if x.get("market_type") != mt or x.get("side") != side or x.get("line") is None:
+                    continue
+                ln = float(x["line"])
+                if ln not in last or str(x["captured_at"]) > str(last[ln]["captured_at"]):
+                    last[ln] = x
+            if not last:
+                miss.append(f"{r.get('event_name')} {mt} {side}: no tape")
+                continue
+            # the exact rung, else the nearest MORE FAVORABLE one (the slip's rule)
+            better = (lambda ln: ln >= sl) if (mt == "spread" or side == "under") else (lambda ln: ln <= sl)
+            cands = [ln for ln in last if better(ln)]
+            worse = not cands               # nothing at/better: take the nearest rung there is
+            rung = min(cands or list(last), key=lambda ln: abs(ln - sl))
+            row = last[rung]
+            ask = row.get("ask_c") or ((row.get("cents") or 0) + 1)
+            bid = row.get("bid_c")
+            fee_c = _pmm_taker_fee_cents(ask)
+            hs, aw = float(fin["home"]), float(fin["away"])
+            if mt == "spread":
+                m = (hs - aw if side == "home" else aw - hs) + rung
+            else:
+                m = (hs + aw - rung) if side == "over" else (rung - hs - aw)
+            res = "push" if m == 0 else ("win" if m > 0 else "loss")
+            usd = (contracts * (100 - ask) / 100 if res == "win" else
+                   (-contracts * ask / 100 if res == "loss" else 0.0)) - contracts * fee_c / 100
+            usd = round(usd, 2)
+            b = tot.setdefault(pk["verdict"], {"w": 0, "l": 0, "p": 0, "usd": 0.0, "fees": 0.0, "cost": 0.0})
+            b[res[0]] += 1
+            b["usd"] = round(b["usd"] + usd, 2)
+            b["fees"] = round(b["fees"] + contracts * fee_c / 100, 2)
+            b["cost"] = round(b["cost"] + contracts * ask / 100, 2)
+            age_m = round((tt - datetime.fromisoformat(str(row["captured_at"]).replace("Z", "+00:00"))).total_seconds() / 60)
+            out_rows.append(f"{(r.get('event_start') or '')[5:10]} {r.get('event_name')} | {mt} "
+                            f"{pk.get('team') or side} sheet {sl:+g} → rung {rung:+g}{' (WORSE)' if worse else ''} [{pk['verdict']}] "
+                            f"ask {ask}c bid {bid} fee {fee_c}c/sh | {res} ${usd:+.2f} "
+                            f"| quote {age_m}m old at {tt.isoformat()[5:16]}Z | sheet grade "
+                            f"{(blob.get('grade') or {}).get(mt, '-')}")
+    allb = {"w": 0, "l": 0, "p": 0, "usd": 0.0, "fees": 0.0, "cost": 0.0}
+    for b in tot.values():
+        for k in allb:
+            allb[k] = round(allb[k] + b[k], 2)
+    return {"contracts": contracts, "by_verdict": tot, "all": allb,
+            "rows": sorted(out_rows), "missing": miss}
+
+
 def _sheet_week_review(srows: list, prow: list, acts: dict | None = None) -> dict:
     """Rob's hand bets vs the sheet for one week (Oct 11 2026): each FILLED
     bet classified against the sheet's FINAL (last pre-kickoff) pick and its
@@ -3344,7 +3433,7 @@ def api_bet_sheets_picks():
                     for k in ("bet_spread", "bet_total")}
         try:
             srows = _sb_paged(lambda: sb.table("football_sheets")
-                              .select("event_name,event_start,data_blob")
+                              .select("event_name,event_start,data_blob,market_id")
                               .eq("week_key", swk).eq("sport", ssp), max_pages=3) or []
             part = request.args.get("part") or ""
             off = int(request.args.get("off") or 0)
@@ -3370,6 +3459,9 @@ def api_bet_sheets_picks():
                                 "entry_src", "anchor_c")}}
                            for r in prow][off:off + 80] if part != "sheet" else []
             out["bets_total"] = len(prow)
+            if part == "take":
+                out["sheet"], out["bets"] = [], []
+                out["take"] = _sheet_take_sim(sb, srows, int(request.args.get("contracts") or 5))
             if part == "review":
                 out["sheet"], out["bets"] = [], []
                 acts: dict = {}
