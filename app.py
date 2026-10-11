@@ -13508,11 +13508,25 @@ def _bet_sheet_market_id(sb, sport: str, away: str, home: str, event_start: str)
     lo = (dt - timedelta(hours=12)).isoformat()
     hi = (dt + timedelta(hours=12)).isoformat()
     try:
-        rows = (sb.table("markets").select("id,event_name,event_start")
+        rows = (sb.table("markets").select("id,event_name,event_start,status")
                 .eq("sport", sport).gte("event_start", lo).lte("event_start", hi)
                 .limit(400).execute().data or [])
     except Exception:
         rows = []
+
+    # ACTIVE FIRST, THEN NEAREST THE START (Oct 11 2026, the Chicago ML: two
+    # 'Chicago Bears @ Green Bay Packers' rows sat in the window — the live
+    # one at 10:00 AZ and a deactivated 1:25 PM leftover — and the unordered
+    # read handed back the dead one. The pick carried a 1:25 start, so the
+    # line-move rule thought kickoff was 3½h away and cancelled 7 minutes
+    # before the real kickoff, inside its own 30-minute no-touch window.)
+    def _gap(r):
+        try:
+            t = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+            return abs((t - dt).total_seconds())
+        except (TypeError, ValueError):
+            return float("inf")
+    rows.sort(key=lambda r: (r.get("status") != "active", _gap(r)))
     exact = [r for r in rows if r.get("event_name") == name]
     if exact:
         return exact[0]["id"]
