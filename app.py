@@ -1085,6 +1085,81 @@ def _sheet_game_football(r: dict) -> dict:
             "friday_note": r.get("friday_md")}
 
 
+# THE CHALK RULE (Rob, Oct 11 2026: "-180 and a -262? Yeah, I ain't betting
+# that"): a moneyline pick priced at or past this is not the bet. Hockey
+# plays the puck line instead (`_sheet_puck_pick`), NBA the spread. Same
+# idea as the Pick Bot's ML→spread chalk filter. Both sheet pages read
+# `ml.chalky` and show the ML as information, with no bet on it.
+_SHEET_CHALK_ML = -150
+# Puck-line verdict thresholds = the hockey ML's (nhl_sheet_data ML_*_PP).
+# The puck line is calibrated vs outcomes in the Crease v2 backtest
+# (−1.5 .331 predicted / .329 actual) but has never been scored against
+# closing puck prices — the ML hasn't held up there either since 2023-24.
+_SHEET_PUCK_PLAY_PP, _SHEET_PUCK_LEAN_PP, _SHEET_PUCK_IMPLAUSIBLE_PP = 4.0, 2.0, 12.0
+
+
+def _sheet_chalky(pick: dict | None) -> bool:
+    try:
+        return bool(pick) and pick.get("verdict") != "pass" and float(pick.get("price")) <= _SHEET_CHALK_ML
+    except (TypeError, ValueError):
+        return False
+
+
+def _american_from_p(p: float) -> int | None:
+    if not (0 < p < 1):
+        return None
+    return int(round(-100 * p / (1 - p))) if p >= 0.5 else int(round(100 * (1 - p) / p))
+
+
+def _sheet_chalk_mark(pick: dict | None) -> dict | None:
+    """A copy of the ML pick stamped `chalky` when it is past the chalk line."""
+    if not isinstance(pick, dict):
+        return pick
+    return {**pick, "chalky": True} if _sheet_chalky(pick) else pick
+
+
+def _sheet_puck_pick(line: dict, model: dict | None) -> dict | None:
+    """The puck line priced like the ML: the model's cover probability at
+    the book's line (Crease v2 `home_cover`/`away_cover`, keyed by the
+    team's own line) against the no-vig book price; the side with the
+    bigger edge is the pick. None when the line, either price or the
+    model's cover at that line is missing."""
+    ph = (line or {}).get("puck_home")
+    oh, oa = (line or {}).get("puck_home_odds"), (line or {}).get("puck_away_odds")
+    if ph is None or oh is None or oa is None or not model:
+        return None
+    try:
+        ph, oh, oa = float(ph), float(oh), float(oa)
+    except (TypeError, ValueError):
+        return None
+    hc, ac = model.get("home_cover") or {}, model.get("away_cover") or {}
+    p_home = hc.get(str(ph))
+    if p_home is None and ac.get(str(-ph)) is not None:
+        p_home = 1.0 - float(ac[str(-ph)])
+    if p_home is None:
+        return None
+    p_home = float(p_home)
+
+    def _imp(x):
+        return 100.0 / (x + 100.0) if x > 0 else -x / (-x + 100.0)
+    ih, ia = _imp(oh), _imp(oa)
+    if ih + ia <= 0:
+        return None
+    mh, ma = ih / (ih + ia), ia / (ih + ia)
+    e_home, e_away = (p_home - mh) * 100, ((1 - p_home) - ma) * 100
+    side = "home" if e_home >= e_away else "away"
+    edge = max(e_home, e_away)
+    p_side = p_home if side == "home" else 1 - p_home
+    v = ("play" if edge >= _SHEET_PUCK_PLAY_PP else "lean" if edge >= _SHEET_PUCK_LEAN_PP else "pass")
+    implaus = edge > _SHEET_PUCK_IMPLAUSIBLE_PP
+    if implaus:
+        v = "pass"
+    return {"side": side, "line": ph if side == "home" else -ph,
+            "price": oh if side == "home" else oa, "fair": _american_from_p(p_side),
+            "model_p": round(p_side, 4), "market_p": round(mh if side == "home" else ma, 4),
+            "edge_pp": round(edge, 1), "verdict": v, "model_gap_implausible": implaus}
+
+
 def _sheet_game_nhl(r: dict) -> dict:
     blob = r.get("data_blob") or {}
     g = blob.get("game") or {}
@@ -1108,7 +1183,8 @@ def _sheet_game_nhl(r: dict) -> dict:
             "market_id": r.get("market_id"),
             "away": g.get("away"), "home": g.get("home"),
             "away_short": g.get("away_abbr"), "home_short": g.get("home_abbr"),
-            "line": line, "model": mdl, "ml": picks.get("ml"),
+            "line": line, "model": mdl, "ml": _sheet_chalk_mark(picks.get("ml")),
+            "puck": _sheet_puck_pick(line, model),
             "total": picks.get("total"), "unrated": model is None,
             "grade": blob.get("grade"),
             "goalies": {k: {"name": (v or {}).get("name"), "source": (v or {}).get("source")}
@@ -1136,7 +1212,7 @@ def _sheet_game_nba(r: dict) -> dict:
             "market_id": r.get("market_id"),
             "away": g.get("away"), "home": g.get("home"),
             "away_short": g.get("away_abbr"), "home_short": g.get("home_abbr"),
-            "line": line, "model": mdl, "ml": picks.get("ml"),
+            "line": line, "model": mdl, "ml": _sheet_chalk_mark(picks.get("ml")),
             "spread": picks.get("spread"), "total": picks.get("total"),
             "unrated": model is None, "grade": blob.get("grade"),
             "injuries": blob.get("injuries")}
