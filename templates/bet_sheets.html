@@ -1186,7 +1186,7 @@
     }
     function footballMarkets(g, up) {
         const L = g.line || {}, M = g.model, bs = g.spread, bt = g.total, out = [];
-        let mdl = M ? 'model ' + favLine(g, M.spread_home, 1) + gradeMark(g, 'model', 'spread') : (g.unrated ? '<span class="unrated">unrated</span>' : '');
+        let mdl = M ? 'model ' + favLine(g, M.spread_home, 1) : (g.unrated ? '<span class="unrated">unrated</span>' : '');
         if (L.spread_home != null && !bs) mdl = 'line ' + favLine(g, L.spread_home, 1) + (mdl ? ' · ' + mdl : '');
         let ln = null;
         if (bs && L.spread_home != null) ln = bs.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home);
@@ -1198,7 +1198,7 @@
     }
     function totalMarket(g, up, pts) {
         const L = g.line || {}, M = g.model, p = g.total;
-        let mdl = M && M.total != null ? 'model ' + Number(M.total).toFixed(1) + gradeMark(g, 'model', 'total') : '';
+        let mdl = M && M.total != null ? 'model ' + Number(M.total).toFixed(1) : '';
         const tl = p && p.line != null ? p.line : L.total;
         if (tl != null && !p) mdl = 'line ' + tl + (mdl ? ' · ' + mdl : '');
         if (!p && tl == null && !mdl) return '';
@@ -1214,7 +1214,7 @@
         let mdl = '';
         if (M && M.win_home != null) {
             const wh = Number(M.win_home);
-            mdl = 'model ' + (wh >= 0.5 ? nameOf(g, 'home') + ' ' + pct(wh) : nameOf(g, 'away') + ' ' + pct(1 - wh)) + gradeMark(g, 'model', 'ml');
+            mdl = 'model ' + (wh >= 0.5 ? nameOf(g, 'home') + ' ' + pct(wh) : nameOf(g, 'away') + ' ' + pct(1 - wh));
         } else if (g.unrated) mdl = '<span class="unrated">unrated</span>';
         if (p && p.side && L['ml_' + p.side] != null) mdl = nameOf(g, p.side) + ' ' + am(L['ml_' + p.side]) + (mdl ? ' · ' + mdl : '');
         else if (!p && L.ml_away != null && L.ml_home != null) mdl = nameOf(g, 'away') + ' ' + am(L.ml_away) + ' · ' + nameOf(g, 'home') + ' ' + am(L.ml_home) + (mdl ? ' · ' + mdl : '');
@@ -1226,7 +1226,7 @@
     // NBA spread (Hoops IQ: lean-capped, like the total)
     function nbaSpreadMarket(g, up) {
         const L = g.line || {}, M = g.model, p = g.spread;
-        let mdl = M && M.spread_home != null ? 'model ' + favLine(g, M.spread_home, 1) + gradeMark(g, 'model', 'spread') : '';
+        let mdl = M && M.spread_home != null ? 'model ' + favLine(g, M.spread_home, 1) : '';
         if (!p && L.spread_home != null) mdl = 'line ' + favLine(g, L.spread_home, 1) + (mdl ? ' · ' + mdl : '');
         if (!p && !mdl) return '';
         let ln = null;
