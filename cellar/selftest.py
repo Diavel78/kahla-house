@@ -3723,6 +3723,49 @@ def test_sheet_run_clocks() -> None:
     check("unknown sport -> None", _app._sheet_next_run("MLB", _dt(2026, 10, 10, 8, 0, tzinfo=az)) is None)
 
 
+def test_bet_sheet_market_id_prefers_active() -> None:
+    # Oct 11 2026, the Chicago ML: a live 10:00 AZ row and a deactivated
+    # 1:25 PM leftover for the same game sat in the ±12h window, and the
+    # unordered read handed back the dead row (its start drove the
+    # line-move rule's 30-minute floor). Active first, then nearest start.
+    import app as A
+
+    class _Q:
+        def __init__(self, rows):
+            self.rows = rows
+        def select(self, *a, **k): return self
+        def eq(self, *a, **k): return self
+        def gte(self, *a, **k): return self
+        def lte(self, *a, **k): return self
+        def limit(self, *a, **k): return self
+        def execute(self):
+            return type("R", (), {"data": self.rows})()
+
+    class _SB:
+        def __init__(self, rows):
+            self.rows = rows
+        def table(self, name):
+            return _Q(list(self.rows))
+
+    name = "Chicago Bears @ Green Bay Packers"
+    dead = {"id": "dead", "event_name": name, "status": "inactive",
+            "event_start": "2026-10-11T20:25:00+00:00"}
+    live = {"id": "live", "event_name": name, "status": "active",
+            "event_start": "2026-10-11T17:00:00+00:00"}
+    sb = _SB([dead, live])
+    got = A._bet_sheet_market_id(sb, "NFL", "Chicago Bears", "Green Bay Packers",
+                                 "2026-10-11T17:00:00Z")
+    check("bet-sheet market id: the active row wins over a dead duplicate", got == "live", got)
+    got2 = A._bet_sheet_market_id(sb, "NFL", "Chicago Bears", "Green Bay Packers",
+                                  "2026-10-11T20:25:00Z")
+    check("bet-sheet market id: active wins even when the dead row is nearer", got2 == "live", got2)
+    twin = {"id": "late", "event_name": name, "status": "active",
+            "event_start": "2026-10-11T23:00:00+00:00"}
+    got3 = A._bet_sheet_market_id(_SB([twin, live]), "NFL", "Chicago Bears",
+                                  "Green Bay Packers", "2026-10-11T17:05:00Z")
+    check("bet-sheet market id: among live rows the nearest start wins", got3 == "live", got3)
+
+
 def test_sheet_puck_and_chalk() -> None:
     """Hockey's puck line priced off Crease v2's cover dicts (keyed by the
     team's own line), and the chalk rule (Oct 11 2026, Rob: "-180 and a
@@ -3900,7 +3943,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_sheet_puck_and_chalk, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
