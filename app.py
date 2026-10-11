@@ -3150,6 +3150,98 @@ def api_pair_status():
     return jsonify(out)
 
 
+def _sheet_week_review(srows: list, prow: list) -> dict:
+    """Rob's hand bets vs the sheet for one week (Oct 11 2026): each FILLED
+    bet classified against the sheet's FINAL (last pre-kickoff) pick and its
+    Monday (base) pick, dollars from the fill, plus the sheet's own record."""
+    sheet = {r.get("event_name"): (r.get("data_blob") or {}) for r in srows}
+
+    def _pick(blob, which, mt):
+        m = ((blob.get("friday") or {}).get("model") if which == "final" else None) or blob.get("model") or {}
+        if which == "base":
+            m = blob.get("model") or {}
+        return m.get("bet_spread" if mt != "total" else "bet_total") or {}
+
+    def _cls(pk, side):
+        v = pk.get("verdict")
+        if v not in ("play", "lean"):
+            return "pass"
+        return ("with_" if pk.get("side") == side else "against_") + v
+
+    def _sgn(n):
+        return f"{n:+g}" if isinstance(n, (int, float)) else "?"
+
+    rows, agg = [], {}
+    for r in prow:
+        b = r.get("signal_blob") or {}
+        ev = r.get("event_name")
+        if ev not in sheet:
+            continue
+        blob = sheet[ev]
+        mt, side, st = r.get("market_type"), r.get("side"), r.get("status")
+        q = float(b.get("filled_qty") or 0)
+        p = b.get("price_c")
+        if mt == "moneyline":
+            fin = _pick(blob, "final", "spread")
+            cls_f = ("ml_" + _cls(fin, side)) if fin else "ml"
+            cls_b = "ml_" + _cls(_pick(blob, "base", "spread"), side)
+        else:
+            fin = _pick(blob, "final", mt)
+            cls_f = _cls(fin, side)
+            cls_b = _cls(_pick(blob, "base", mt), side)
+        live = bool(b.get("in_play"))
+        if q <= 0 or p is None:
+            usd = None
+        elif st == "won":
+            usd = round(q * (100 - float(p)) / 100, 2)
+        elif st == "lost":
+            usd = round(-q * float(p) / 100, 2)
+        elif st == "void" and isinstance(b.get("sold"), dict):
+            usd = b["sold"].get("pnl_usd")
+        elif st == "push":
+            usd = 0.0
+        else:
+            usd = None
+        # line value vs the sheet's final number, bettor's perspective (+ = better)
+        el, fl = r.get("entry_line"), fin.get("line")
+        lv = None
+        if mt == "spread" and el is not None and fl is not None and fin.get("side") == side:
+            lv = round(float(el) - float(fl), 1)
+        elif mt == "total" and el is not None and fl is not None:
+            lv = round((float(fl) - float(el)) if side == "over" else (float(el) - float(fl)), 1)
+        key = ("live" if live else cls_f) if q > 0 else "unfilled"
+        a = agg.setdefault(key, {"w": 0, "l": 0, "p": 0, "open": 0, "usd": 0.0})
+        if q > 0:
+            if st in ("won", "lost", "push"):
+                a[st[0]] += 1
+            else:
+                a["open"] += 1
+            a["usd"] = round(a["usd"] + (usd or 0), 2)
+        else:
+            a[(st or "x")[0]] = a.get((st or "x")[0], 0) + 1
+        g = blob.get("grade") or {}
+        rows.append(f"{(r.get('event_start') or '')[5:10]} {b.get('label') or (mt + ' ' + str(side))}"
+                    f" @{p}c q{q:g} {st} {('$' + format(usd, '+.2f')) if usd is not None else '-'}"
+                    f" | final {cls_f} {fin.get('team') or fin.get('side') or ''} {_sgn(fl)}"
+                    f" (lv {lv}) | base {cls_b} | sheet {g.get('spread' if mt != 'total' else 'total', '-')}"
+                    f"{' | LIVE' if live else ''}{' | APP' if b.get('app_adopted') else ''}"
+                    f" | placed {(r.get('picked_at') or '')[5:16]}")
+    # the sheet's own record + the picks Rob did not take
+    taken = {(r.get("event_name"), r.get("market_type"), r.get("side")) for r in prow
+             if float((r.get("signal_blob") or {}).get("filled_qty") or 0) > 0}
+    rec, skipped = {"w": 0, "l": 0, "p": 0}, []
+    for ev, blob in sheet.items():
+        g = blob.get("grade") or {}
+        for mt, k in (("spread", "spread"), ("total", "total")):
+            pk = _pick(blob, "final", mt)
+            res = g.get(k)
+            if pk.get("verdict") in ("play", "lean") and res:
+                rec[res[0]] += 1
+                if (ev, mt, pk.get("side")) not in taken:
+                    skipped.append(f"{ev} {mt} {pk.get('team') or pk.get('side')} {_sgn(pk.get('line'))} [{pk['verdict']}] {res}")
+    return {"rows": sorted(rows), "agg": agg, "sheet_record": rec, "sheet_picks_not_taken": skipped}
+
+
 @app.route("/api/bet-sheets/picks")
 def api_bet_sheets_picks():
     """READ-ONLY (shared-secret, site-curl): every bot_picks row on a slug
@@ -3248,6 +3340,9 @@ def api_bet_sheets_picks():
                                 "entry_src", "anchor_c")}}
                            for r in prow][off:off + 80] if part != "sheet" else []
             out["bets_total"] = len(prow)
+            if part == "review":
+                out["sheet"], out["bets"] = [], []
+                out["review"] = _sheet_week_review(srows, prow)
             # site-curl truncates at 60 KB — strip the noise and read in parts
             out["sheet"] = [{k: v for k, v in g.items() if v not in (None, {}, [])} for g in out["sheet"]]
             out["bets"] = [{k: v for k, v in b.items() if v is not None} for b in out["bets"]]
