@@ -3689,6 +3689,31 @@ def test_pin_direct_feed() -> None:
          _app._pin_direct_events, _app._http.get) = saved
 
 
+def test_sheet_run_clocks() -> None:
+    """Bet Sheets' "next run" (Oct 11 2026): app._SHEET_RUN_CLOCKS must be
+    exactly the sheet Jobs in cellar/batch.py, and the next-run pick must
+    roll to tomorrow (and to Monday's build) correctly."""
+    import app as _app
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _Z
+    from cellar.batch import JOBS
+    want: dict = {}
+    for j in JOBS:
+        sports = (("NCAAF", "NFL") if j.name.startswith("sheets_") and j.name != "sheets_grade"
+                  else ("NHL",) if j.name.startswith("nhl_sheet") else ("NBA",) if j.name.startswith("nba_sheet") else ())
+        for sp in sports:
+            want.setdefault(sp, set()).add((j.hour, j.minute, j.weekday))
+    have = {sp: set(c) for sp, c in _app._SHEET_RUN_CLOCKS.items()}
+    check("sheet clocks mirror the batch jobs", have == want)
+    az = _Z("America/Phoenix")
+    nx = lambda sp, y, mo, d, h, mi: _app._sheet_next_run(sp, _dt(y, mo, d, h, mi, tzinfo=az))
+    check("football 8:00 -> 11:00 same day", nx("NCAAF", 2026, 10, 10, 8, 0).startswith("2026-10-10T11:00"))
+    check("football 19:30 Sat -> Sun 07:00", nx("NFL", 2026, 10, 10, 19, 30).startswith("2026-10-11T07:00"))
+    check("football 19:30 Sun -> Mon 05:00 build", nx("NFL", 2026, 10, 11, 19, 30).startswith("2026-10-12T05:00"))
+    check("NBA 15:45 exactly -> next day 07:05", nx("NBA", 2026, 10, 10, 15, 45).startswith("2026-10-11T07:05"))
+    check("unknown sport -> None", _app._sheet_next_run("MLB", _dt(2026, 10, 10, 8, 0, tzinfo=az)) is None)
+
+
 def test_hand_venue_reset() -> None:
     print("venue reset: many orders gone at once re-seat; one is Rob's call")
     import inspect as _ins
@@ -3840,7 +3865,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

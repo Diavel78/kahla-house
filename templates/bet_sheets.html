@@ -54,6 +54,7 @@
         }
         .wrap { max-width: 920px; margin: 0 auto; padding: 18px 16px 60px; }
         h1 { font-size: 20px; margin: 6px 0 14px; }
+        h1 .runinfo { font-size: 12px; font-weight: 400; color: var(--muted, #8a93a6); margin-left: 8px; white-space: nowrap; }
         .search {
             width: 100%; box-sizing: border-box; margin: 0 0 12px;
             background: var(--surface); border: 1px solid var(--line); color: var(--text);
@@ -270,7 +271,7 @@
         </div>
 
         <div class="wrap">
-            <h1>Bet Sheets</h1>
+            <h1>Bet Sheets<span class="runinfo" id="runInfo"></span></h1>
 
             <div class="bets" id="betsSec">
                 <div class="sec-h" onclick="toggleBets()" title="Show / hide my bets"><h2>My bets no fill</h2><span class="sub" id="betsMeta">loading…</span><span class="chev" id="betsChev">▼</span></div>
@@ -278,7 +279,7 @@
             </div>
 
             <div class="bets" id="plSec">
-                <div class="sec-h" onclick="togglePl()" title="Show / hide P/L"><h2>Settled + Live P/L</h2><span class="sub" id="plMeta">loading…</span><span class="chev">▼</span></div>
+                <div class="sec-h" onclick="togglePl()" title="Show / hide P/L"><h2>Live P/L</h2><span class="sub" id="plMeta">loading…</span><span class="chev">▼</span></div>
                 <div id="plBody"></div>
             </div>
 
@@ -370,6 +371,24 @@
         if (!name) return '?';
         const parts = name.split(' ');
         return parts.length > 1 ? parts.slice(0, -1).join(' ') : name;
+    }
+    // LAST / NEXT SHEET RUN (Rob, Oct 11 2026): beside the title, for the tab
+    // on screen. Last = the newest re-price stamp on the sheet; next = the
+    // box's clock for this sport (/api/pick-sheets next_run_at). AZ time.
+    function azClock(iso) {
+        if (!iso) return '—';
+        const t = new Date(iso);
+        const day = t.toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'short' });
+        const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'short' });
+        const hm = t.toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' })
+            .replace(' AM', 'a').replace(' PM', 'p');
+        return (day === today ? '' : day + ' ') + hm;
+    }
+    function renderRunInfo(d) {
+        const el = document.getElementById('runInfo');
+        if (!el) return;
+        el.textContent = d ? 'last run ' + azClock(d.lines_updated_at) + (d.lines_updated_at ? ' (' + ago(d.lines_updated_at) + ')' : '')
+            + ' · next ' + azClock(d.next_run_at) : '';
     }
     function ago(iso) {
         if (!iso) return 'never';
@@ -923,16 +942,6 @@
     // THE STRIP IS LIVE BETS ONLY (Rob, Oct 8 2026: "the bets at the top
     // should be live bets only, and start displaying the live odds… just
     // games live"). Pre-game bets live under their game's boxes below.
-    // SETTLED + LIVE P/L (Rob, Oct 10 2026: "the last thing missing from the
-    // old Pickbot dashboard? Live value… my live value plus settled value
-    // (include trades!)"). Every sport, not just this tab — it is the day's
-    // money. SETTLED = the venue's own day number (resolutions on the game's
-    // AZ day + app SELLS on the day traded — the dashboard's Today card);
-    // OPEN = LIVE filled lots only (Rob, Oct 10 2026: "Open is LIVE only… you
-    // can have day total count everything, and call it Projected Day Total"):
-    // marked at the live win % (1/0 once decided) against cost. Filled lots on
-    // games not yet started are marked at the current mid and count ONLY in
-    // the projected total, listed apart so the total adds up on screen.
     function _plCls(x) { return x == null ? '' : (x > 0.004 ? 'pos' : x < -0.004 ? 'neg' : ''); }
     function _plMark(list) {
         let val = 0, cost = 0, nq = 0;
@@ -946,59 +955,38 @@
         }).sort((x, y) => String(x.b.event_start).localeCompare(String(y.b.event_start)));
         return { rows, val, cost, nq, pl: val - cost };
     }
+    // LIVE ONLY (Rob, Oct 11 2026: "only show LIVE games. The settled and
+    // pre stuff is on the actual picks. The top section is all live
+    // focused"): filled lots on games in progress, marked at the live win %
+    // (1/0 once decided) against cost. Settled and pre-game bets live under
+    // their game's boxes below.
     function renderPnl(d) {
         const bets = d.bets || [];
-        const st = d.settled || {};
-        const held = bets.filter(b => b.status === 'pending' && (b.held || 0) > 0);
-        const live = _plMark(held.filter(b => b.live));
-        const pre = _plMark(held.filter(b => !b.live));
-        const settled = st.today != null ? Number(st.today) : null;
-        // never-filled picks the resolver graded anyway are not money — leave them out
-        const done = bets.filter(b => b.status !== 'pending' && (b.status === 'sold' || Number(b.filled_qty || 0) > 0));
-        const sheetSettled = done.reduce((a, b) => a + (b.pnl_usd != null ? Number(b.pnl_usd) : 0), 0);
-        const base = settled != null ? settled : sheetSettled;
-        const acct = st.account && st.account.today != null ? Number(st.account.today) : null;
-        const total = base + live.pl + pre.pl;
-        document.getElementById('plMeta').innerHTML = 'settled ' + (settled != null ? money(settled) : '—')
-            + ' · live ' + money(live.pl) + ' · projected <span class="' + _plCls(total) + '">' + money(total) + '</span>';
+        const live = _plMark(bets.filter(b => b.status === 'pending' && (b.held || 0) > 0 && b.live));
+        document.getElementById('plMeta').innerHTML = live.rows.length
+            ? live.rows.length + ' live · <span class="' + _plCls(live.pl) + '">' + money(live.pl) + '</span>'
+            : 'no live games';
+        if (!live.rows.length) {
+            document.getElementById('plBody').innerHTML = '<div class="empty" style="padding:6px 0">No filled bets live right now.</div>';
+            return;
+        }
         let h = '<div class="pl-sum">'
-            + '<div class="box"><div class="k">Settled today</div><div class="v ' + _plCls(settled) + '">' + (settled != null ? money(settled) : '—') + '</div>'
-            + '<div class="s">your filled bets · won · lost · sold' + (acct != null ? ' · whole account ' + money(acct) : '') + '</div></div>'
             + '<div class="box"><div class="k">Open P/L · live</div><div class="v ' + _plCls(live.pl) + '">' + money(live.pl) + '</div>'
-            + '<div class="s">' + live.rows.length + ' live · worth $' + live.val.toFixed(2) + ' · cost $' + live.cost.toFixed(2) + (live.nq ? ' · ' + live.nq + ' no quote' : '') + '</div></div>'
-            + '<div class="box"><div class="k">Projected day total</div><div class="v ' + _plCls(total) + '">' + money(total) + '</div>'
-            + '<div class="s">settled + live' + (pre.rows.length ? ' + pre-game ' + money(pre.pl) : '') + '</div></div></div>';
+            + '<div class="s">' + live.rows.length + ' live · worth $' + live.val.toFixed(2) + ' · cost $' + live.cost.toFixed(2) + (live.nq ? ' · ' + live.nq + ' no quote' : '') + '</div></div></div>';
         const game = b => (b.event_name || '').split(' @ ').map(shortTeam).join(' @ ');
-        const row = (r, tag, cls) => {
-            const b = r.b;
+        h += live.rows.map(r => {
+            const b = r.b, fin = b.prob_src === 'decided';
             const now = r.prob != null ? Math.round(r.prob * 1000) / 10 : null;
             const d2 = r.held + ' @ ' + (r.pc != null ? (Math.round(r.pc * 100) / 100) + '¢' : '?') + ' → '
-                     + (now != null ? now + '¢' + (b.prob_src === 'decided' ? '' : ' (' + am(_probToAmer(Math.min(0.99, Math.max(0.01, r.prob)))) + ')') : 'no quote')
+                     + (now != null ? now + '¢' + (fin ? '' : ' (' + am(_probToAmer(Math.min(0.99, Math.max(0.01, r.prob)))) + ')') : 'no quote')
                      + (r.v != null ? ' · worth $' + r.v.toFixed(2) : '');
-            return '<div class="pl-row"><span class="chip ' + cls + '">' + tag + '</span>'
-                 + '<div class="nm"><b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc(String(b.sport || '')) + ' ' + esc(game(b)) + '</span><div class="d">' + d2 + '</div></div>'
+            const sl = _scoreLine(b);
+            const cls = fin ? (r.prob >= 0.99 ? 'c-won' : r.prob <= 0.01 ? 'c-lost' : 'c-push') : 'c-fill';
+            return '<div class="pl-row"><span class="chip ' + cls + '">' + (fin ? 'FINAL' : 'LIVE') + '</span>'
+                 + '<div class="nm"><b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc(String(b.sport || '')) + ' ' + esc(game(b)) + '</span>'
+                 + '<div class="d">' + d2 + (sl ? ' · ' + esc(sl) : '') + '</div></div>'
                  + '<span class="amt ' + _plCls(r.pl) + '">' + (r.pl != null ? money(r.pl) : '—') + '</span></div>';
-        };
-        h += '<div class="day-hdr">Live · ' + live.rows.length + '</div>';
-        h += live.rows.length ? live.rows.map(r => {
-            const fin = r.b.prob_src === 'decided';
-            return row(r, fin ? 'FINAL' : 'LIVE', fin ? (r.prob >= 0.99 ? 'c-won' : r.prob <= 0.01 ? 'c-lost' : 'c-push') : 'c-fill');
-        }).join('') : '<div class="empty" style="padding:6px 0">No filled bets live right now.</div>';
-        if (done.length) {
-            h += '<div class="day-hdr">Settled today · sheet bets ' + money(sheetSettled) + '</div>' + done.map(b => {
-                const lab = b.status === 'sold' ? 'SOLD' : String(b.status || '').toUpperCase();
-                const cls = b.status === 'won' ? 'c-won' : b.status === 'lost' ? 'c-lost' : b.status === 'sold' ? 'c-fill' : 'c-push';
-                const sd = b.status === 'sold' && b.sold ? 'sold ' + (b.sold.qty != null ? Math.round(b.sold.qty * 100) / 100 : '') + ' @ ' + (b.sold.avg_c != null ? Math.round(b.sold.avg_c * 100) / 100 + '¢' : '?') + ' · bought ' + (b.price_c != null ? b.price_c + '¢' : '?')
-                         : (b.filled_qty != null ? b.filled_qty + ' @ ' : '') + (b.price_c != null ? b.price_c + '¢' : '');
-                return '<div class="pl-row"><span class="chip ' + cls + '">' + esc(lab) + '</span>'
-                     + '<div class="nm"><b>' + esc(betLabel(b)) + '</b> <span class="dim">· ' + esc(String(b.sport || '')) + ' ' + esc(game(b)) + '</span><div class="d">' + esc(sd) + '</div></div>'
-                     + '<span class="amt ' + _plCls(b.pnl_usd) + '">' + (b.pnl_usd != null ? money(b.pnl_usd) : '—') + '</span></div>';
-            }).join('');
-        }
-        if (pre.rows.length) {
-            h += '<div class="day-hdr">Filled, not started · ' + money(pre.pl) + ' <span class="dim">(projected total only)</span></div>'
-               + pre.rows.map(r => row(r, 'PRE', 'c-push')).join('');
-        }
+        }).join('');
         document.getElementById('plBody').innerHTML = h;
     }
     function renderBets(d) {
@@ -1181,7 +1169,8 @@
         if (!r) return;
         if (r.status >= 500) { document.getElementById('metaLine').textContent = 'server error ' + r.status; return; }
         const d = await r.json().catch(() => null);
-        if (!d || !d.ok) { document.getElementById('metaLine').textContent = 'error: ' + (d && d.error || 'unknown'); return; }
+        if (!d || !d.ok) { document.getElementById('metaLine').textContent = 'error: ' + (d && d.error || 'unknown'); renderRunInfo(null); return; }
+        renderRunInfo(d);
 
         const dl = document.getElementById('dlRow') || { innerHTML: '' };   // no PDF row on the bet sheet
         dl.innerHTML = '';

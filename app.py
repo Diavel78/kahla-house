@@ -1155,6 +1155,36 @@ def _nhl_sheet_fallback(sb):
     return r[0] if r else None
 
 
+# THE SHEET CLOCKS (Oct 11 2026, Rob: "Next to 'Bet Sheets' show last run and
+# next run"). AZ wall clock (hour, minute, weekday or None = daily) of every
+# sheet build/refresh per sport. MIRRORS cellar/batch.py's sheet Jobs —
+# selftest test_sheet_run_clocks fails the day the two disagree. The batch
+# lane runs the first due job in list order, so a run lands a few minutes
+# after its clock when two sports share one.
+_SHEET_RUN_CLOCKS = {
+    "NCAAF": ((5, 0, 0), (7, 0, None), (11, 0, None), (15, 30, None), (19, 0, None)),
+    "NFL": ((5, 0, 0), (7, 0, None), (11, 0, None), (15, 30, None), (19, 0, None)),
+    "NHL": ((7, 0, None), (11, 5, None), (14, 0, None), (15, 35, None)),
+    "NBA": ((7, 5, None), (12, 10, None), (15, 45, None)),
+}
+
+
+def _sheet_next_run(sport: str, now: datetime) -> str | None:
+    clocks = _SHEET_RUN_CLOCKS.get(sport)
+    if not clocks:
+        return None
+    az = ZoneInfo("America/Phoenix")
+    local = now.astimezone(az)
+    for d in range(0, 8):
+        day = (local + timedelta(days=d)).date()
+        hits = [datetime(day.year, day.month, day.day, h, m, tzinfo=az)
+                for h, m, wd in clocks if wd is None or day.weekday() == wd]
+        hits = [t for t in hits if t > local]
+        if hits:
+            return min(hits).isoformat()
+    return None
+
+
 @app.route("/api/pick-sheets")
 @app.route("/api/football-picks")
 @bot_required
@@ -1229,6 +1259,7 @@ def api_football_picks():
         "built_at": built_at or wk.get("friday_published_at") or wk.get("published_at"),
         "picks_published_at": wk.get("picks_published_at"),
         "lines_updated_at": lines_updated_at,
+        "next_run_at": _sheet_next_run(sport, datetime.now(timezone.utc)),
     })
 
 
@@ -15952,49 +15983,9 @@ def api_bet_sheets_mine():
         tape_dark = _touch_tape_dark(sb)
     except Exception:
         tape_dark = None
-    # SETTLED = YOUR BETS (Oct 10 2026, Rob: "No way this P/L is right, not
-    # even close"): the account-wide venue day carried every leftover machine
-    # lot that settled today. The box adds up today's sheet/app bets that
-    # actually filled — won, lost, push, sold — at their own fill size; the
-    # account day rides along as `account` for the cross-check.
-    _done = [b for b in out if b.get("status") in ("won", "lost", "push", "sold")
-             and b.get("pnl_usd") is not None]
-    settled = {"today": round(sum(float(b["pnl_usd"]) for b in _done), 2), "n": len(_done),
-               "src": "sheet", "account": _bet_sheet_settled_today(sb)}
     return jsonify({"ok": True, "bets": out, "missed": missed, "venue_ok": venue_ok, "tape_dark": tape_dark,
-                    "settled": settled,
                     "src": ("box" if box is not None else "vercel"),
                     "box_age_s": (box or {}).get("age_s"), "at": now.isoformat()})
-
-
-def _bet_sheet_settled_today(sb) -> dict:
-    """TODAY'S SETTLED DOLLARS for the Bet Sheets P/L box (Oct 10 2026, Rob:
-    "settled + live P/L… include trades!"). Venue truth, the dashboard's own
-    number: `_venue_day_map` — resolutions on the game's AZ day, SELLS on the
-    AZ day they traded. Read off the dashboard precompute (poly_dash_cache,
-    refreshed every ~5 min by the box's mirror lane) so a 15s page poll
-    costs one row; a stale/missing cache falls back to the live compute
-    (4-minute memo per container). Never raises."""
-    try:
-        r = (sb.table("poly_dash_cache").select("derived,computed_at")
-             .eq("id", 1).limit(1).execute().data) or []
-        if r:
-            age = (datetime.now(timezone.utc) - datetime.fromisoformat(
-                str(r[0]["computed_at"]).replace("Z", "+00:00"))).total_seconds()
-            gd = ((r[0].get("derived") or {}).get("gameday_pnl") or {})
-            if age <= _DASH_CACHE_MAX_AGE_S and gd.get("today") is not None:
-                return {"today": gd.get("today"), "age_s": int(age), "src": "cache"}
-    except Exception:
-        pass
-    try:
-        gd = _gameday_pnl_memo(sb) or {}
-        if gd.get("today") is not None:
-            return {"today": gd.get("today"),
-                    "age_s": int(_time.time() - (_GAMEDAY_PNL_MEMO.get("at") or _time.time())),
-                    "src": "live"}
-    except Exception:
-        pass
-    return {"today": None, "age_s": None, "src": None}
 
 
 _BS_LIVE_MAX_H = 6.0          # a pending bet this long past its start is the resolver's, not "live"
