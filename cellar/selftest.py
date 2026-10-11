@@ -3548,9 +3548,18 @@ def test_bet_sheet_missed() -> None:
         _g = [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, live)]
         check("missed: taking it live (a FILL, any rung, same game + side) moves it off the list — the 1H bet stays",
               1 not in _g and 5 in _g, f"got {_g}")
-        rest = [{"slug": "asc-cfb-tulane-army-2026-10-10-pos-2pt5", "market_type": "spread", "side": "home", "held": 0}]
+        rest = [{"id": 77, "slug": "asc-cfb-tulane-army-2026-10-10-pos-2pt5", "market_type": "spread", "side": "home",
+                 "held": 0, "status": "pending", "label": "Army -2.5", "line": -2.5, "app": True,
+                 "order": {"resting": True, "leaves": 5.0, "price_c": 44.0}}]
+        _r = _app._bet_sheet_missed(SB(), now, rest)
+        _m1 = next((m for m in _r if m["pick_id"] == 1), {})
         check("missed: a live app order still RESTING does not hide it (Rob: cancelled at kickoff = on the list)",
-              1 in [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, rest)])
+              bool(_m1), f"got {_r}")
+        check("missed: …it marks the row RESTING with his order's rung, price and size",
+              (_m1.get("chasing") or {}).get("price_c") == 44.0 and (_m1.get("chasing") or {}).get("leaves") == 5.0
+              and (_m1.get("chasing") or {}).get("line") == -2.5, f"got {_m1}")
+        check("missed: …and only on its own row (the 1H bet is not chasing)",
+              next(m for m in _r if m["pick_id"] == 5).get("chasing") is None)
         live2 = [{"slug": army, "market_type": "spread", "side": "away", "held": 5.0}]
         check("missed: the OTHER side live does not hide it",
               1 in [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, live2)])
