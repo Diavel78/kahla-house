@@ -147,13 +147,13 @@ JOBS: tuple[Job, ...] = (
         note="football pick sheets: 7am re-price (box model, THE Pinnacle pull)"),
     Job("sheets_refresh_md", ["scripts.box_sheets", "--mode", "friday", "--commit"],
         hour=11, minute=0, timeout_s=1500,
-        note="football pick sheets: midday re-price (box model, book line)"),
+        note="football pick sheets: midday re-price (box model, Pinnacle feed, no paid fallback)"),
     Job("sheets_refresh_pm", ["scripts.box_sheets", "--mode", "friday", "--commit", "--pin"],
         hour=15, minute=30, timeout_s=1500,
         note="football pick sheets: pre-slate re-price (box model, the 3pm Pinnacle pull)"),
     Job("sheets_refresh_ev", ["scripts.box_sheets", "--mode", "friday", "--commit"],
         hour=19, minute=0, timeout_s=1500,
-        note="football pick sheets: evening re-price (box model, book line)"),
+        note="football pick sheets: evening re-price (box model, Pinnacle feed, no paid fallback)"),
     # Hockey: Crease IQ v2 off the box's own goalie/shot spines (3:00/3:10
     # above), DailyFaceoff goalies + ESPN lines fetched live. Same four
     # clocks the Actions workflow kept (07:00/11:00/14:00/15:30 AZ). The
