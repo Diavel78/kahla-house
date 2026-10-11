@@ -3563,6 +3563,32 @@ def api_bet_sheets_picks():
             except Exception as e:
                 out.setdefault("delete_err", []).append(f"{pid}: {e}"[:120])
         out["deleted"] = deleted
+    mq = (request.args.get("markets") or "").strip()
+    if mq:
+        # WHICH GAME ROW (Oct 11 2026, the Chicago ML read a 1:25 start for a
+        # 10:00 game): every markets row whose name matches, any status, ±4
+        # days, with its notes — and what the football slug resolver returns.
+        try:
+            now_u = datetime.now(timezone.utc)
+            mr = (sb.table("markets").select("id,sport,event_name,event_start,status,notes")
+                  .ilike("event_name", f"%{mq}%")
+                  .gte("event_start", (now_u - timedelta(days=4)).isoformat())
+                  .lte("event_start", (now_u + timedelta(days=4)).isoformat())
+                  .order("event_start").limit(40).execute().data) or []
+            out["markets"] = mr
+        except Exception as e:
+            out["markets_err"] = str(e)[:160]
+        if slug:
+            try:
+                fm = _football_slug_market(sb, slug)
+                out["slug_market"] = fm
+                m = _RENT_SLUG_RE.match(slug)
+                if m:
+                    k = f"{m.group(2)}-{m.group(3)}-{m.group(4)}-{m.group(5)}"
+                    out["rent_key"] = k
+                    out["rent_key_mid"] = (_RENTLIST_CACHE.get("keys") or {}).get(k)
+            except Exception as e:
+                out["slug_market_err"] = str(e)[:160]
     qn = request.args.get("queue")
     if qn:                                             # the hand-order queue, newest first (Oct 6 2026)
         try:
@@ -3749,7 +3775,8 @@ def api_bet_sheets_picks():
     if slug:
         try:
             rows = (sb.table("bot_picks")
-                    .select("id,picked_at,status,pnl_units,market_type,side,entry_price,entry_line,asked_by,signal_blob")
+                    .select("id,picked_at,status,pnl_units,market_type,side,entry_price,entry_line,asked_by,"
+                            "market_id,event_start,signal_blob")
                     .like("signal_blob->>pmm_slug", f"%{slug}%")
                     .order("id", desc=True).limit(60).execute().data) or []
         except Exception as e:
@@ -3758,6 +3785,7 @@ def api_bet_sheets_picks():
         out["rows"] = [{"id": r["id"], "picked_at": r.get("picked_at"), "status": r.get("status"),
                         "pnl_units": r.get("pnl_units"), "mt": r.get("market_type"), "side": r.get("side"),
                         "entry": r.get("entry_price"), "line": r.get("entry_line"),
+                        "market_id": r.get("market_id"), "start": r.get("event_start"),
                         "slug": (r.get("signal_blob") or {}).get("pmm_slug"),
                         "blob": {k: (r.get("signal_blob") or {}).get(k) for k in keep
                                  if (r.get("signal_blob") or {}).get(k) is not None}}
