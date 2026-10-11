@@ -14234,8 +14234,13 @@ def _hand_start_tick(sb, client, now) -> dict:
         slug, oid = blob.get("pmm_slug"), blob.get("order_id")
         if blob.get("in_play"):
             continue                                      # placed live in the app — not ours to cancel
+        # SAT OUT THROUGH THE START (Oct 11 2026): a bet the box took off the
+        # book (line move / venue reset) and never put back is a box cancel
+        # at kickoff — it goes on the missed list and the pick goes, or the
+        # resolver grades a bet that never rested off the final score.
+        sat_out = bool(slug and isinstance(blob.get("line_hold"), dict) and not oid)
         o = by_id.get(oid) if oid else None
-        if not (slug and o and o.get("state") in _OPEN_ORDER_STATES):
+        if not sat_out and not (slug and o and o.get("state") in _OPEN_ORDER_STATES):
             continue
         try:
             ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
@@ -14243,7 +14248,11 @@ def _hand_start_tick(sb, client, now) -> dict:
             continue
         start_ts = ev.astimezone(timezone.utc).timestamp()
         st["cands"] += 1
-        verdict, base, cur, seen = _hand_start_plan(list(TOUCH_TAPE.get(slug) or []), start_ts, now_ts, drop)
+        if sat_out:
+            verdict, base, cur, seen = "started", 0.0, 0.0, None
+            st["sat_out"] = st.get("sat_out", 0) + 1
+        else:
+            verdict, base, cur, seen = _hand_start_plan(list(TOUCH_TAPE.get(slug) or []), start_ts, now_ts, drop)
         if verdict != "started":
             st["wait" if verdict in ("wait", "pre") else "no_baseline"] += 1
             continue
@@ -14265,11 +14274,15 @@ def _hand_start_tick(sb, client, now) -> dict:
                  "baseline_q": round(base, 1), "touch_q": round(cur, 1), "drop_pct": seen,
                  "rule_pct": drop, "start": ev.astimezone(timezone.utc).isoformat(),
                  "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1)}
+        if sat_out:
+            stamp["sat_out"] = blob.get("line_hold")
         try:
             # remember the verdict on the pick first — a partial fill keeps the row
-            sb.table("bot_picks").update({"signal_blob": {**blob, "game_started": {
+            # (and a sat-out pick drops its hold, so a kept row is never re-run)
+            nb0 = {k: v for k, v in blob.items() if not (sat_out and k == "line_hold")}
+            sb.table("bot_picks").update({"signal_blob": {**nb0, "game_started": {
                 "at": now.isoformat(), "baseline_q": round(base, 1), "touch_q": round(cur, 1),
-                "drop_pct": seen}}}).eq("id", r["id"]).execute()
+                "drop_pct": seen, "sat_out": sat_out}}}).eq("id", r["id"]).execute()
             out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
             stamp["result"], stamp["http"] = out, code
             if out.get("ok"):
@@ -14746,6 +14759,23 @@ def _hand_move_tick(sb, client, now) -> dict:
             continue
         _HAND_MOVE_LAST[r["id"]] = _time.monotonic()
         acts += 1
+        # IS IT STILL OURS TO CANCEL? (Oct 11 2026, the Chicago ML: Rob
+        # cancelled his app bet, the mirror still showed it resting, this
+        # cancel "succeeded" on an order that was already gone, and the bet
+        # sat out under line_hold waiting to be RE-PLACED.) A fresh read
+        # first: an order not open on the venue was cancelled or filled
+        # elsewhere — never a sit-out; the retire / fill paths own it.
+        pre = _pmm_open_orders_raw(client, fresh=True)
+        if pre is None:
+            continue
+        if not any(x.get("id") == oid and x.get("state") in _OPEN_ORDER_STATES for x in pre):
+            st["gone_first"] = st.get("gone_first", 0) + 1
+            try:
+                _probe_log({"hand_move_cancel_skip": True, "pick_id": r["id"], "slug": slug,
+                            "order_id": oid, "why": "not_open_before_cancel", "at": now.isoformat()})
+            except Exception:
+                pass
+            continue
         gone, _ords = _bet_sheet_cancel(client, oid, slug)
         stamp = {"hand_move_cancel": True, "pick_id": r["id"], "slug": slug, "order_id": oid,
                  "price_c": price_c, "leaves": leaves, "gone": gone, "lead_s": round(lead_s),
