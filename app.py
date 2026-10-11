@@ -3150,6 +3150,60 @@ def api_pair_status():
     return jsonify(out)
 
 
+def _sheet_take_est(sb, srows: list, t0, contracts: int = 5) -> dict:
+    """The take what-if when the price tape is dark (Oct 11 2026 — the
+    pm_snapshot logger is retired, so no stored venue asks): the SPREAD is
+    measured off the box's own fill stamps (`hand_fill` carries the rung's
+    bid/ask the second a hand bet filled), the at-market rung is priced at
+    mid 50 + half that spread, the taker fee 5·p(1−p) is paid on every
+    bet, and each final sheet pick is graded at its own line (the sheet's
+    grade). Whole-number lines are counted apart: the venue only lists
+    half points, so those picks are an approximation either way."""
+    spreads = []
+    try:
+        st = _sb_paged(lambda: sb.table("exec_probe_runs").select("result")
+                       .gte("at", (t0 - timedelta(days=2)).isoformat())
+                       .filter("result->>hand_fill", "eq", "true"), max_pages=4) or []
+    except Exception:
+        st = []
+    for x in st:
+        res = x.get("result") or {}
+        q = res.get("quote")
+        if "-cfb-" in str(res.get("slug") or "") and isinstance(q, list) and len(q) >= 2 \
+                and q[0] is not None and q[1] is not None:
+            spreads.append(round(float(q[1]) - float(q[0]), 2))
+    spreads.sort()
+    med = spreads[len(spreads) // 2] if spreads else 1.0
+    rec: dict = {}
+    for r in srows:
+        blob = r.get("data_blob") or {}
+        g = blob.get("grade") or {}
+        model = (blob.get("friday") or {}).get("model") or blob.get("model") or {}
+        for mt, k in (("spread", "bet_spread"), ("total", "bet_total")):
+            pk = model.get(k) or {}
+            res = g.get(mt)
+            if pk.get("verdict") not in ("play", "lean") or not res:
+                continue
+            whole = pk.get("line") is not None and float(pk["line"]) == int(float(pk["line"]))
+            b = rec.setdefault(pk["verdict"], {"w": 0, "l": 0, "p": 0, "whole_lines": 0})
+            b[res[0]] += 1
+            b["whole_lines"] += 1 if whole else 0
+
+    def _pnl(b, ask):
+        fee = _pmm_taker_fee_cents(ask)
+        n = b["w"] + b["l"] + b["p"]
+        return round(contracts * (b["w"] * (100 - ask) - b["l"] * ask - n * fee) / 100, 2)
+    allr = {k: sum(b[k] for b in rec.values()) for k in ("w", "l", "p", "whole_lines")}
+    asks = sorted({round(50 + med / 2, 2), 50.5, 51.0, 52.0, 53.0})
+    return {"contracts": contracts,
+            "fill_quotes": {"n": len(spreads), "median_spread_c": med,
+                            "spreads": spreads[:60]},
+            "record": {**rec, "all": allr},
+            "pnl_by_ask": {str(a): {"fee_c_per_sh": _pmm_taker_fee_cents(a),
+                                     "all": _pnl(allr, a),
+                                     **{v: _pnl(b, a) for v, b in rec.items()}} for a in asks}}
+
+
 def _sheet_take_sim(sb, srows: list, contracts: int = 5) -> dict:
     """WHAT IF (Rob, Oct 11 2026: "what would it have been if I waited until
     final sheet before kick off, and had done all takes and paid the fee?"):
@@ -3459,6 +3513,9 @@ def api_bet_sheets_picks():
                                 "entry_src", "anchor_c")}}
                            for r in prow][off:off + 80] if part != "sheet" else []
             out["bets_total"] = len(prow)
+            if part == "take_est":
+                out["sheet"], out["bets"] = [], []
+                out["take_est"] = _sheet_take_est(sb, srows, t0, int(request.args.get("contracts") or 5))
             if part == "take":
                 out["sheet"], out["bets"] = [], []
                 out["take"] = _sheet_take_sim(sb, srows, int(request.args.get("contracts") or 5))
