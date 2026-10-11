@@ -192,6 +192,11 @@
         .xb.st-rest .xs { color: var(--a-tx); } .xb.st-fill .xs { color: var(--g-tx); } .xb.st-warn .xs { color: var(--r-tx); }
         .xb .xd { font-size: 14px; color: var(--text2); }
         .xb .go { color: var(--text3); font-size: 22px; }
+        .fold { width: 100%; margin: 22px 0 8px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line);
+                background: var(--card); color: var(--text2); font: inherit; font-size: 14px; font-weight: 700;
+                text-transform: uppercase; letter-spacing: .08em; display: flex; justify-content: space-between; cursor: pointer; }
+        .fold.open { color: var(--text); }
+        .fold .fa { color: var(--text3); }
         .lostbox { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
         .empty { color: var(--text2); padding: 28px 0; text-align: center; font-size: 15px; }
         .hint { color: var(--text3); font-size: 14px; margin-top: 20px; text-align: center; }
@@ -1307,6 +1312,33 @@
         const c = (f, t) => '<button class="fchip' + (_filter === f ? ' on' : '') + '" onclick="setFilter(\'' + f + '\')">' + t + '</button>';
         document.getElementById('fchips').innerHTML = c('all', 'All games') + c('mine', 'My bets ' + nMine) + c('plays', 'Plays & leans ' + nPick);
     }
+    let _fold = { started: false, passes: false };   // default collapsed, every visit
+    function toggleFold(k) { _fold[k] = !_fold[k]; renderGames(); }
+    function gameCard(g) {
+        const isUp = g._st === 'up', isLive = g._st === 'live';
+        const mk = marketsFor(g, isUp);                       // fills _btnIds
+        const bs = isUp ? betsOnGame(g) : [];
+        const extra = bs.filter(b => !_btnIds[b.id]);
+        let summ = '';
+        if (bs.length) {
+            const n = { fill: 0, rest: 0, warn: 0 };
+            bs.forEach(b => { n[betState(b).cls]++; });
+            summ = n.warn ? '<span class="gs warn">' + n.warn + ' need' + (n.warn === 1 ? 's' : '') + ' you</span>'
+                 : '<span class="gs">' + [n.fill ? n.fill + ' filled' : '', n.rest ? n.rest + ' resting' : ''].filter(Boolean).join(' · ') + '</span>';
+        }
+        const subs = [];
+        if (isLive) subs.push('<span class="final">IN PROGRESS</span>');
+        else if (!isUp && finalChip(g)) subs.push(finalChip(g));
+        if (_sport === 'NHL' && g.goalies) {
+            const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
+            if (ga || gh) subs.push('<span>🥅 ' + esc(ga || '?') + ' vs ' + esc(gh || '?') + '</span>');
+        }
+        return '<div class="gc' + (isUp ? '' : ' done') + '"><div class="gh"><div><div class="gt">'
+             + (isUp ? '' : fmtTime(g.event_start).split(',')[0] + ' ') + clk(g.event_start) + '</div>'
+             + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + '</div></div>' + summ + '</div>'
+             + (subs.length ? '<div class="gsub">' + subs.join('') + '</div>' : '')
+             + mk + extra.map(b => betStrip(b, false)).join('') + '</div>';
+    }
     function renderGames() {
         const q = (document.getElementById('search').value || '').trim().toLowerCase();
         const words = q.split(/\s+/).filter(Boolean);
@@ -1342,50 +1374,49 @@
             const lost = _tabPending().filter(b => !b.live && !_shownIds[b.id]);
             if (lost.length) html += '<div class="day-hdr">My bets not on this sheet</div><div class="lostbox">' + lost.map(b => betStrip(b, true)).join('') + '</div>';
         }
-        // ORDER: upcoming soonest-first under day headers, then finals (most
-        // recent first). NO LIVE GAMES (Rob, Oct 10 2026: "remove live bets
-        // from the sheet… if I bet them, they are at the top").
-        const up = games.filter(g => g._st === 'up');
+        // ORDER: upcoming plays/leans + my bets soonest-first under day
+        // headers, then finals (most recent first), then two COLLAPSED
+        // groups at the very bottom (Rob, Oct 11 2026: "show games at the
+        // very bottom of 'passes', default is collapsed… I just can't see
+        // what we thought in a game we didn't bet"): STARTED games (no
+        // buttons — a live bet of mine is up top in Live) and PASSES
+        // (upcoming games the model has no play or lean on, no bet of mine).
+        // A search opens both, so a typed team is never hidden.
+        const all = _filter === 'all';
+        const upAll = games.filter(g => g._st === 'up');
+        const up = all ? upAll.filter(g => hasPick(g) || mineGames[g._gi]) : upAll;
+        const passes = all ? upAll.filter(g => !(hasPick(g) || mineGames[g._gi])) : [];
+        const started = _filter === 'mine' ? [] : games.filter(g => g._st === 'live');
         const fin = _filter === 'mine' ? [] : games.filter(g => g._st === 'final').reverse();
         const ordered = up.concat(fin);
-        if (!ordered.length) {
+        if (!ordered.length && !passes.length && !started.length) {
             html += '<div class="empty">' + (words.length ? 'No games match "' + esc(q) + '".'
                   : _filter === 'mine' ? 'No bets on upcoming games here.'
                   : _filter === 'plays' ? 'No plays or leans on the board.'
-                  : _games.length ? 'No upcoming games — everything on this sheet is in play.' : 'No games.') + '</div>';
+                  : _games.length ? 'No upcoming games.' : 'No games.') + '</div>';
+        } else if (all && !up.length && upAll.length) {
+            html += '<div class="empty">No plays or leans on the upcoming games — they are under Passes below.</div>';
         }
         let day = null;
         _btnIds = {};
         for (const g of ordered) {
-            const isUp = g._st === 'up';
-            if (!isUp) {
+            if (g._st !== 'up') {
                 if (day !== '__final') { html += '<div class="day-hdr">Final</div>'; day = '__final'; }
             } else {
                 const dstr = fmtTime(g.event_start);
                 if (dstr !== day) { html += '<div class="day-hdr">' + dstr + '</div>'; day = dstr; }
             }
-            const mk = marketsFor(g, isUp);                       // fills _btnIds
-            const bs = isUp ? betsOnGame(g) : [];
-            const extra = bs.filter(b => !_btnIds[b.id]);
-            let summ = '';
-            if (bs.length) {
-                const n = { fill: 0, rest: 0, warn: 0 };
-                bs.forEach(b => { n[betState(b).cls]++; });
-                summ = n.warn ? '<span class="gs warn">' + n.warn + ' need' + (n.warn === 1 ? 's' : '') + ' you</span>'
-                     : '<span class="gs">' + [n.fill ? n.fill + ' filled' : '', n.rest ? n.rest + ' resting' : ''].filter(Boolean).join(' · ') + '</span>';
-            }
-            const subs = [];
-            if (!isUp && finalChip(g)) subs.push(finalChip(g));
-            if (_sport === 'NHL' && g.goalies) {
-                const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
-                if (ga || gh) subs.push('<span>🥅 ' + esc(ga || '?') + ' vs ' + esc(gh || '?') + '</span>');
-            }
-            html += '<div class="gc' + (isUp ? '' : ' done') + '"><div class="gh"><div><div class="gt">'
-                  + (isUp ? '' : fmtTime(g.event_start).split(',')[0] + ' ') + clk(g.event_start) + '</div>'
-                  + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + '</div></div>' + summ + '</div>'
-                  + (subs.length ? '<div class="gsub">' + subs.join('') + '</div>' : '')
-                  + mk + extra.map(b => betStrip(b, false)).join('') + '</div>';
+            html += gameCard(g);
         }
+        const fold = (key, title, list) => {
+            if (!list.length) return '';
+            const open = words.length || _fold[key];
+            return '<button class="fold' + (open ? ' open' : '') + '" onclick="toggleFold(\'' + key + '\')">'
+                 + '<span>' + title + ' · ' + list.length + '</span><span class="fa">' + (open ? '▾' : '▸') + '</span></button>'
+                 + (open ? '<div class="foldbox">' + list.map(gameCard).join('') + '</div>' : '');
+        };
+        html += fold('started', 'Started', started);
+        html += fold('passes', 'Passes', passes);
         document.getElementById('games').innerHTML = html;
     }
 
