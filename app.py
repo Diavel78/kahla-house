@@ -3150,7 +3150,7 @@ def api_pair_status():
     return jsonify(out)
 
 
-def _sheet_week_review(srows: list, prow: list) -> dict:
+def _sheet_week_review(srows: list, prow: list, acts: dict | None = None) -> dict:
     """Rob's hand bets vs the sheet for one week (Oct 11 2026): each FILLED
     bet classified against the sheet's FINAL (last pre-kickoff) pick and its
     Monday (base) pick, dollars from the fill, plus the sheet's own record."""
@@ -3171,7 +3171,7 @@ def _sheet_week_review(srows: list, prow: list) -> dict:
     def _sgn(n):
         return f"{n:+g}" if isinstance(n, (int, float)) else "?"
 
-    rows, agg = [], {}
+    rows, agg, timing = [], {}, {}
     for r in prow:
         b = r.get("signal_blob") or {}
         ev = r.get("event_name")
@@ -3220,12 +3220,36 @@ def _sheet_week_review(srows: list, prow: list) -> dict:
         else:
             a[(st or "x")[0]] = a.get((st or "x")[0], 0) + 1
         g = blob.get("grade") or {}
+        fs = b.get("fill_seen") or {}
+        def _h(a, z):
+            try:
+                return round((datetime.fromisoformat(z) - datetime.fromisoformat(a)).total_seconds() / 3600, 1)
+            except Exception:
+                return None
+        p2f = _h(r.get("picked_at"), fs.get("at")) if fs.get("at") else None
+        f2k = _h(fs.get("at"), r.get("event_start")) if fs.get("at") else None
+        pa = (acts or {}).get(r.get("id")) or {}
+        if q > 0 and not live and cls_f.startswith("with_") and lv is not None:
+            bk = "clv_neg" if lv < 0 else ("clv_pos" if lv > 0 else "clv_zero")
+            t = timing.setdefault(bk, {"n": 0, "w": 0, "fill_known": 0, "p2f": [], "f2k": [],
+                                       "chased": 0, "move_guard": 0, "rerung": 0})
+            t["n"] += 1
+            t["w"] += 1 if st == "won" else 0
+            if p2f is not None:
+                t["fill_known"] += 1
+                t["p2f"].append(p2f)
+                t["f2k"].append(f2k)
+            t["chased"] += 1 if pa.get("hand_chase") else 0
+            t["move_guard"] += 1 if (pa.get("hand_move_cancel") or pa.get("hand_move_drop") or b.get("line_cancels")) else 0
+            t["rerung"] += 1 if b.get("rerung_from") else 0
         rows.append(f"{(r.get('event_start') or '')[5:10]} {b.get('label') or (mt + ' ' + str(side))}"
                     f" @{p}c q{q:g} {st} {('$' + format(usd, '+.2f')) if usd is not None else '-'}"
                     f" | final {cls_f} {fin.get('team') or fin.get('side') or ''} {_sgn(fl)}"
                     f" (lv {lv}) | base {cls_b} | sheet {g.get('spread' if mt != 'total' else 'total', '-')}"
                     f"{' | LIVE' if live else ''}{' | APP' if b.get('app_adopted') else ''}"
-                    f" | placed {(r.get('picked_at') or '')[5:16]}")
+                    f" | placed {(r.get('picked_at') or '')[5:16]}"
+                    f" | fill {(fs.get('at') or '?')[5:16]} p2f {p2f}h f2k {f2k}h"
+                    f"{' | acts ' + ','.join(f'{k[5:]}{v}' for k, v in pa.items()) if pa else ''}")
     # the sheet's own record + the picks Rob did not take
     taken = {(r.get("event_name"), r.get("market_type"), r.get("side")) for r in prow
              if float((r.get("signal_blob") or {}).get("filled_qty") or 0) > 0}
@@ -3239,7 +3263,13 @@ def _sheet_week_review(srows: list, prow: list) -> dict:
                 rec[res[0]] += 1
                 if (ev, mt, pk.get("side")) not in taken:
                     skipped.append(f"{ev} {mt} {pk.get('team') or pk.get('side')} {_sgn(pk.get('line'))} [{pk['verdict']}] {res}")
-    return {"rows": sorted(rows), "agg": agg, "sheet_record": rec, "sheet_picks_not_taken": skipped}
+    for t in timing.values():
+        for k in ("p2f", "f2k"):
+            v = sorted(x for x in t[k] if x is not None)
+            t[k] = {"median": v[len(v) // 2] if v else None, "under_6h": sum(1 for x in v if x < 6),
+                    "n": len(v)}
+    return {"rows": sorted(rows), "agg": agg, "sheet_record": rec, "sheet_picks_not_taken": skipped,
+            "clv_timing": timing}
 
 
 @app.route("/api/bet-sheets/picks")
@@ -3342,7 +3372,21 @@ def api_bet_sheets_picks():
             out["bets_total"] = len(prow)
             if part == "review":
                 out["sheet"], out["bets"] = [], []
-                out["review"] = _sheet_week_review(srows, prow)
+                acts: dict = {}
+                for kind in ("hand_chase", "hand_move_cancel", "hand_move_drop", "hand_move_rejoin"):
+                    try:
+                        st_rows = _sb_paged(lambda kind=kind: sb.table("exec_probe_runs").select("result")
+                                            .gte("at", (t0 - timedelta(days=2)).isoformat())
+                                            .filter(f"result->>{kind}", "eq", "true"), max_pages=4) or []
+                    except Exception as e:
+                        out.setdefault("acts_err", []).append(f"{kind}: {e}"[:120])
+                        st_rows = []
+                    for x in st_rows:
+                        pid = (x.get("result") or {}).get("pick_id")
+                        if pid:
+                            acts.setdefault(pid, {}).setdefault(kind, 0)
+                            acts[pid][kind] += 1
+                out["review"] = _sheet_week_review(srows, prow, acts)
             # site-curl truncates at 60 KB — strip the noise and read in parts
             out["sheet"] = [{k: v for k, v in g.items() if v not in (None, {}, [])} for g in out["sheet"]]
             out["bets"] = [{k: v for k, v in b.items() if v is not None} for b in out["bets"]]
