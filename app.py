@@ -3217,13 +3217,16 @@ def api_bet_sheets_picks():
         def _pk(m):
             m = m or {}
             return {k: {kk: (m.get(k) or {}).get(kk) for kk in
-                        ("verdict", "side", "team", "line", "market_home_line", "edge", "edge_pts", "price")}
+                        ("verdict", "side", "team", "line", "market_home_line", "edge", "edge_pts", "price")
+                        if (m.get(k) or {}).get(kk) is not None}
                     for k in ("bet_spread", "bet_total")}
         try:
             srows = _sb_paged(lambda: sb.table("football_sheets")
                               .select("event_name,event_start,data_blob")
                               .eq("week_key", swk).eq("sport", ssp), max_pages=3) or []
-            out["sheet"] = [{"event": r.get("event_name"), "start": r.get("event_start"),
+            part = request.args.get("part") or ""
+            off = int(request.args.get("off") or 0)
+            out["sheet"] = [] if part == "bets" else [{"event": r.get("event_name"), "start": r.get("event_start"),
                              "base": _pk((r.get("data_blob") or {}).get("model")),
                              "final": _pk(((r.get("data_blob") or {}).get("friday") or {}).get("model")),
                              "final_at": ((r.get("data_blob") or {}).get("friday") or {}).get("built_at"),
@@ -3243,7 +3246,11 @@ def api_bet_sheets_picks():
                                ("label", "price_c", "contracts", "filled_qty", "filled", "sold", "sheet_line",
                                 "rung_line", "app_adopted", "in_play", "rerung_from", "placed_via",
                                 "entry_src", "anchor_c")}}
-                           for r in prow]
+                           for r in prow][off:off + 80] if part != "sheet" else []
+            out["bets_total"] = len(prow)
+            # site-curl truncates at 60 KB — strip the noise and read in parts
+            out["sheet"] = [{k: v for k, v in g.items() if v not in (None, {}, [])} for g in out["sheet"]]
+            out["bets"] = [{k: v for k, v in b.items() if v is not None} for b in out["bets"]]
         except Exception as e:
             out["sheet_week_err"] = str(e)[:200]
     if request.args.get("positions"):
