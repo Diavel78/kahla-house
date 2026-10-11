@@ -300,7 +300,7 @@
             <div class="alerts" id="alerts"></div>
 
             <div class="sec hide" id="betsSec">
-                <div class="sh" onclick="toggleBets()" title="Show / hide"><h2>Missed at kickoff</h2><span class="sub" id="betsMeta"></span><span class="chev">▼</span></div>
+                <div class="sh" onclick="toggleBets()" title="Show / hide"><h2>Missed at game start</h2><span class="sub" id="betsMeta"></span><span class="chev">▼</span></div>
                 <div class="sb-body" id="bets"></div>
             </div>
 
@@ -1075,7 +1075,7 @@
         const tabBets = bets.filter(b => String(b.sport || '').toUpperCase() === String(_sport || '').toUpperCase());
         const warn = tabBets.filter(b => b.status === 'pending' && !b.live && betState(b).cls === 'warn').length;
         const al = [];
-        if (d.tape_dark) al.push(['🚨 ORDER-BOOK FEED DOWN (' + d.tape_dark[0] + '/' + d.tape_dark[1] + ' bets blind) — no kickoff or line-move cancels']);
+        if (d.tape_dark) al.push(['🚨 ORDER-BOOK FEED DOWN (' + d.tape_dark[0] + '/' + d.tape_dark[1] + ' bets blind) — no game-start or line-move cancels']);
         if (d.src !== 'box') al.push(['⚠ The box is not publishing — bet status is read from the venue directly', 'amb']);
         if (!d.venue_ok) al.push(['⚠ Polymarket unreadable — bet status may be stale', 'amb']);
         if (warn) al.push([warn + ' ' + _sport + ' bet' + (warn === 1 ? ' needs' : 's need') + ' you — the red buttons below']);
