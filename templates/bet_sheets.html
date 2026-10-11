@@ -1327,7 +1327,7 @@
         const c = (f, t) => '<button class="fchip' + (_filter === f ? ' on' : '') + '" onclick="setFilter(\'' + f + '\')">' + t + '</button>';
         document.getElementById('fchips').innerHTML = c('all', 'All games') + c('mine', 'My bets ' + nMine) + c('plays', 'Plays & leans ' + nPick);
     }
-    let _fold = { started: false, passes: false };   // default collapsed, every visit
+    let _fold = { started: false };   // default collapsed, every visit
     function toggleFold(k) { _fold[k] = !_fold[k]; renderGames(); }
     function gameCard(g) {
         const isUp = g._st === 'up', isLive = g._st === 'live';
@@ -1392,28 +1392,24 @@
             const lost = _tabPending().filter(b => !b.live && !_shownIds[b.id]);
             if (lost.length) html += '<div class="day-hdr">My bets not on this sheet</div><div class="lostbox">' + lost.map(b => betStrip(b, true)).join('') + '</div>';
         }
-        // ORDER: upcoming plays/leans + my bets soonest-first under day
-        // headers, then finals (most recent first), then two COLLAPSED
-        // groups at the very bottom (Rob, Oct 11 2026: "show games at the
-        // very bottom of 'passes', default is collapsed… I just can't see
-        // what we thought in a game we didn't bet"): STARTED games (no
-        // buttons — a live bet of mine is up top in Live) and PASSES
-        // (upcoming games the model has no play or lean on, no bet of mine).
-        // A search opens both, so a typed team is never hidden.
-        const all = _filter === 'all';
-        const upAll = games.filter(g => g._st === 'up');
-        const up = all ? upAll.filter(g => hasPick(g) || mineGames[g._gi]) : upAll;
-        const passes = all ? upAll.filter(g => !(hasPick(g) || mineGames[g._gi])) : [];
+        // ORDER: upcoming games soonest-first under day headers, then finals
+        // (most recent first), then STARTED games in one COLLAPSED group at
+        // the very bottom (no buttons — a live bet of mine is up top in Live;
+        // a search opens it). The filter chips mean exactly what they say
+        // (Rob, Oct 11 2026: "All games should be all games") — All games
+        // lists every upcoming game in kickoff order, passes included
+        // (dashed/quiet); My bets = games with a bet resting or held; Plays &
+        // leans = games with a play or lean. Passes were briefly folded away
+        // under All games and the Sunday-night game vanished into the fold.
+        const up = games.filter(g => g._st === 'up');
         const started = _filter === 'mine' ? [] : games.filter(g => g._st === 'live');
         const fin = _filter === 'mine' ? [] : games.filter(g => g._st === 'final').reverse();
         const ordered = up.concat(fin);
-        if (!ordered.length && !passes.length && !started.length) {
+        if (!ordered.length && !started.length) {
             html += '<div class="empty">' + (words.length ? 'No games match "' + esc(q) + '".'
                   : _filter === 'mine' ? 'No bets on upcoming games here.'
                   : _filter === 'plays' ? 'No plays or leans on the board.'
                   : _games.length ? 'No upcoming games.' : 'No games.') + '</div>';
-        } else if (all && !up.length && upAll.length) {
-            html += '<div class="empty">No plays or leans on the upcoming games — they are under Passes below.</div>';
         }
         let day = null;
         _btnIds = {};
@@ -1434,7 +1430,6 @@
                  + (open ? '<div class="foldbox">' + list.map(gameCard).join('') + '</div>' : '');
         };
         html += fold('started', 'Started', started);
-        html += fold('passes', 'Passes', passes);
         document.getElementById('games').innerHTML = html;
     }
 
