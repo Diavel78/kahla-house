@@ -160,8 +160,8 @@
         .mk-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
         .mk-l { font-size: 13px; font-weight: 700; color: var(--text3); letter-spacing: .6px; min-width: 54px; text-transform: uppercase; }
         .pill { font-size: 12px; font-weight: 700; border-radius: 6px; padding: 2px 8px; letter-spacing: .3px; }
-        .pill.play { background: var(--text); color: var(--bg); }
-        .pill.lean { border: 1px solid var(--text); color: var(--text); padding: 1px 7px; }
+        .pill.play { background: #8EE4AF; color: #0D1016; }
+        .pill.lean { background: #FCE38A; color: #0D1016; }
         .pill.pass { border: 1px solid var(--line2); color: var(--text3); padding: 1px 7px; }
         .mk-m { font-size: 15px; color: var(--text2); }
         .mk-m .dim { color: var(--text3); }
@@ -315,7 +315,16 @@
         return Math.round(sec / 86400) + 'd ago';
     }
 
-    // Verdict pills are NEUTRAL (Oct 11 2026 redesign, shared with Bet Sheets).
+    // The model's projected final, from its two numbers (Rob, Oct 12 2026):
+    // home = (total − home line) / 2, away = (total + home line) / 2.
+    function modelScore(g) {
+        const M = g.model;
+        if (!M || M.spread_home == null || M.total == null) return '';
+        const t = Number(M.total), s = Number(M.spread_home);
+        const h = (t - s) / 2, a = (t + s) / 2;
+        return '<span>📊 Model ' + esc(nameOf(g, 'away')) + ' ' + a.toFixed(1) + ' – ' + esc(nameOf(g, 'home')) + ' ' + h.toFixed(1) + '</span>';
+    }
+    // Verdict pills: PLAY light green, LEAN light yellow (Rob, Oct 12 2026).
     function verdictBadge(v) {
         const k = v === 'play' ? 'play' : v === 'lean' ? 'lean' : 'pass';
         return '<span class="pill ' + k + '">' + k.toUpperCase() + '</span>';
@@ -612,6 +621,7 @@
                 const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
                 if (ga || gh) subs.push('<span>🥅 ' + esc(ga || '?') + ' vs ' + esc(gh || '?') + '</span>');
             }
+            if (modelScore(g)) subs.push(modelScore(g));
             if (_sport === 'NBA' && g.injuries) {
                 const oa = (g.injuries.away || []), oh = (g.injuries.home || []);
                 if (oa.length || oh.length) subs.push('<span>🩹 OUT ' + esc(nameOf(g, 'away')) + ': ' + esc(oa.join(', ') || '—') + ' · ' + esc(nameOf(g, 'home')) + ': ' + esc(oh.join(', ') || '—') + '</span>');
