@@ -2718,8 +2718,9 @@ def test_slug_side_line() -> None:
 
 
 def test_hand_start_plan() -> None:
-    """The 'game started' rule (Oct 4 2026): both-side touch size 70% off
-    its pre-start high, at or after the listed start, two frames, cancel."""
+    """The 'game started' rule (Oct 4 2026, minimum Oct 12): at or after the
+    listed start, two frames with the touch under 10% of the pre-start high
+    AND 70% off its own trailing high (or under 5% outright) — cancel."""
     import app as _app
     f = _app._hand_start_plan
     S = 1000.0
@@ -2745,6 +2746,19 @@ def test_hand_start_plan() -> None:
     early = [row(S - 80, 100000, 128000), row(S - 26, 50000, 15000)]
     v = f(early + [row(S + 2, 2600, 14700), row(S + 9, 2900, 12700)], S, S + 10, 70)
     assert v[0] == "started" and v[1] == 228000, v
+    # THE MINIMUM (Oct 12 2026, OTT @ NJ, real tape): one maker left on the
+    # LISTED start (467k → 130k, 72% off) while ~130k stayed; the touch sat
+    # 55-62k for seven minutes; the real pull came at puck drop (62k → 10k).
+    ott = [row(S - 30, 300000, 167449), row(S + 1, 100000, 30563), row(S + 2, 100000, 30563)]
+    assert f(ott, S, S + 3, 70)[0] == "wait"                    # 28% left: a ton of bets still there
+    ott += [row(S + 300, 46000, 9000), row(S + 330, 46000, 8900)]
+    assert f(ott, S, S + 331, 70)[0] == "wait"                  # 11.7% left, no cliff: still a time, not the game
+    ott += [row(S + 418, 39000, 8700), row(S + 420, 18800, 1000), row(S + 455, 9300, 2100), row(S + 471, 8200, 2000)]
+    v = f(ott, S, S + 472, 70)
+    assert v[0] == "started" and v[2] == 10200, v               # puck drop: 2% left, a cliff off 62k
+    # a slow drain under the hard 5% floor is the start however it got there
+    drain = [row(S - 30, 200000, 200000)] + [row(S + 60 * i, 200000 // (i + 1), 200000 // (i + 1)) for i in range(1, 30)]
+    assert f(drain, S, S + 60 * 29 + 1, 70)[0] == "started"
     # NO EXPIRY (Oct 5 2026, Rob): a hand bet is good-till-cancel; the makers
     # leaving is the only clock. A positive slack flag restores a GTD backstop.
     from datetime import datetime, timezone
