@@ -14256,42 +14256,41 @@ def _touch_tape_publish(sb) -> dict:
 # and bled to 1-3% over the next ninety seconds. No clock, no ESPN: the
 # depth socket's touch size, both sides, against its own pre-start high.
 HAND_START_CANCEL_ENABLED = True
-_HAND_START_DROP_PCT = 70.0
+_HAND_START_DROP_PCT = 90.0
 _HAND_START_BASE_S = 90.0          # pre-start window the baseline high comes from
 _HAND_START_BASE_FALLBACK_S = 600.0
 _HAND_START_FRAMES = 2             # consecutive post-start samples under the line
 _HAND_START_STALE_S = 90.0         # the newest sample must be this fresh
-# THE MINIMUM (Oct 12 2026, Ottawa @ New Jersey, Rob: "the book HASN'T
-# DROPPED… a bunch of people cancelling at game start, but that's not the
-# actual game start, that's a time"). One 340k maker left on the LISTED
-# 4:00:00 and the touch read 467k → 130k (72%, past the old 70% line), so
-# the box cancelled while ~130k stayed quoting; the real pull came at
-# puck drop, 16:07, when touch went 62k → 10k and the top three rungs
-# 126k → 9k. A drop is the game only when (a) what is LEFT is under
-# FLOOR% of the pre-start book, and (b) it came as a cliff — 70% off the
-# touch's own high over the last CLIFF_S — so a book that drains slowly
-# through the listed time never reads as the start. A touch under
-# HARD_PCT of the pre-start book is the start however it got there.
-_HAND_START_FLOOR_PCT = 10.0
+# 90% OFF THE PRE-START HIGH (Oct 12 2026, Ottawa @ New Jersey, Rob: "the
+# book HASN'T DROPPED… that's not the actual game start, that's a time…
+# I think the 70% is just way too low"). One 340k maker left on the LISTED
+# 4:00:00 and the touch read 467k → 130k (72%), past the old 70% line, so
+# the box cancelled while ~130k stayed quoting; the book sat 55-62k (87-88%
+# off) until puck drop at 16:07, when it went 62k → 10k (98% off). The
+# rule is now 90% off the pre-start high on two frames, AND the last leg
+# must be a cliff — 70% off the touch's own high over the trailing CLIFF_S —
+# so a book drained to 88% by makers leaving on the clock cannot tip over
+# 90% on a stray re-quote. Under HARD_PCT of the pre-start high (95% off)
+# is the start however it got there.
 _HAND_START_HARD_PCT = 5.0
+_HAND_START_CLIFF_PCT = 70.0
 _HAND_START_CLIFF_S = 300.0
 _HAND_START_DONE: dict = {}
 
 
 def _hand_start_plan(samples, start_ts: float, now_ts: float, drop_pct: float,
-                     floor_pct: float = _HAND_START_FLOOR_PCT,
                      hard_pct: float = _HAND_START_HARD_PCT,
+                     cliff_pct: float = _HAND_START_CLIFF_PCT,
                      cliff_s: float = _HAND_START_CLIFF_S):
     """samples = tape rows (ts, bid_c, bid_q, ask_c, ask_q, bid3, ask3).
     -> (verdict, baseline_q, touch_q, drop_pct_seen) with verdict in
     'pre' (listed start not reached), 'no_baseline', 'wait', 'started'.
     Baseline = the HIGH of both-side touch size in the 90s before the listed
     start (else the 10 minutes before it). 'started' = the last N post-start
-    samples ALL sit at or under floor_pct% of that baseline AND at or under
-    (100-drop)% of the touch's own high over the trailing cliff_s (the
-    makers left in a cliff, not a drain), or at or under hard_pct% of the
-    baseline outright; the newest frame must be fresh. Pure; selftest
-    `test_hand_start_plan`."""
+    samples ALL sit drop_pct% (90) or more off that baseline AND cliff_pct%
+    off the touch's own high over the trailing cliff_s (a cliff, not a
+    drain) — or (100-hard_pct)% off the baseline outright; the newest frame
+    must be fresh. Pure; selftest `test_hand_start_plan`."""
     if now_ts < start_ts:
         return ("pre", None, None, None)
     rows = [r for r in (samples or []) if r and r[0] is not None]
@@ -14309,16 +14308,16 @@ def _hand_start_plan(samples, start_ts: float, now_ts: float, drop_pct: float,
         return ("wait", base, tail[-1][2] + tail[-1][4], None)
     cur = tail[-1][2] + tail[-1][4]
     seen = round(100.0 * (1.0 - cur / base), 1)
-    floor_q = base * floor_pct / 100.0
+    line_q = base * (1.0 - drop_pct / 100.0)
     hard_q = base * hard_pct / 100.0
     def _ok(r):
         q = r[2] + r[4]
         if q <= hard_q:
             return True
-        if q > floor_q:
+        if q > line_q:
             return False
         hi = max((x[2] + x[4] for x in rows if r[0] - cliff_s <= x[0] < r[0]), default=0.0)
-        return hi > 0 and q <= hi * (1.0 - drop_pct / 100.0)
+        return hi > 0 and q <= hi * (1.0 - cliff_pct / 100.0)
     if all(_ok(r) for r in tail):
         return ("started", base, cur, seen)
     return ("wait", base, cur, seen)
@@ -14338,10 +14337,6 @@ def _hand_start_tick(sb, client, now) -> dict:
         drop = float(_machine_flag_val("hand_start_drop_pct", _HAND_START_DROP_PCT))
     except (TypeError, ValueError):
         drop = _HAND_START_DROP_PCT
-    try:
-        floor_p = float(_machine_flag_val("hand_start_floor_pct", _HAND_START_FLOOR_PCT))
-    except (TypeError, ValueError):
-        floor_p = _HAND_START_FLOOR_PCT
     try:
         rows = (sb.table("bot_picks").select("id,event_start,signal_blob,sport,event_name,"
                                               "market_type,side,entry_line,entry_price,market_id")
@@ -14378,8 +14373,7 @@ def _hand_start_tick(sb, client, now) -> dict:
             verdict, base, cur, seen = "started", 0.0, 0.0, None
             st["sat_out"] = st.get("sat_out", 0) + 1
         else:
-            verdict, base, cur, seen = _hand_start_plan(list(TOUCH_TAPE.get(slug) or []), start_ts, now_ts, drop,
-                                                        floor_pct=floor_p)
+            verdict, base, cur, seen = _hand_start_plan(list(TOUCH_TAPE.get(slug) or []), start_ts, now_ts, drop)
         if verdict != "started":
             st["wait" if verdict in ("wait", "pre") else "no_baseline"] += 1
             continue
@@ -14399,7 +14393,7 @@ def _hand_start_tick(sb, client, now) -> dict:
         stamp = {"kind": "hand_start_cancel", "bet": bet,
                  "hand_start_cancel": True, "pick_id": r["id"], "slug": slug, "order_id": oid,
                  "baseline_q": round(base, 1), "touch_q": round(cur, 1), "drop_pct": seen,
-                 "rule_pct": drop, "floor_pct": floor_p, "start": ev.astimezone(timezone.utc).isoformat(),
+                 "rule_pct": drop, "start": ev.astimezone(timezone.utc).isoformat(),
                  "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1)}
         if sat_out:
             stamp["sat_out"] = blob.get("line_hold")
