@@ -3641,6 +3641,46 @@ def api_bet_sheets_picks():
         except Exception as e:
             out["fix_err"] = str(e)[:200]
         out["market_fixes"], out["market_fix_skipped"] = fixes, skipped
+    if request.args.get("fix_sides"):
+        # APP BETS ON THE WRONG TEAM (Oct 12 2026, the live Knights ML booked
+        # 'MIN Wild ML'): every pending app-adopted pick whose side disagrees
+        # with its slug's convention (`_app_bet_side`) is re-sided to the
+        # slug's answer. Dry unless &apply=1.
+        sfixes = []
+        try:
+            prs = (sb.table("bot_picks").select("id,event_name,market_type,side,entry_line,signal_blob")
+                   .eq("status", "pending").eq("signal_blob->>bet_sheet", "true")
+                   .eq("signal_blob->>app_adopted", "true").limit(300).execute().data) or []
+            for p in prs:
+                b = p.get("signal_blob") or {}
+                sl = _slug_side_line(b.get("pmm_slug") or "", bool(b.get("pmm_synthetic")))
+                got = _app_bet_side((p.get("market_type"), p.get("side"), p.get("entry_line")), sl)
+                if not got or not got[3]:
+                    continue
+                mt, side, line, _ = got
+                aw, _, hm = str(p.get("event_name") or "").partition(" @ ")
+                team = (hm if side == "home" else aw if side == "away" else "").strip()
+                if mt == "total" and line is not None:
+                    label = f"{'O' if side == 'over' else 'U'} {float(line):g}"
+                elif mt == "spread" and line is not None and team:
+                    label = f"{team} {float(line):+g}"
+                elif mt == "moneyline" and team:
+                    label = f"{team} ML"
+                else:
+                    label = b.get("label")
+                fx = {"pick_id": p["id"], "slug": b.get("pmm_slug"),
+                      "from": {"side": p.get("side"), "line": p.get("entry_line"), "label": b.get("label")},
+                      "to": {"side": side, "line": line, "label": label}}
+                if request.args.get("apply"):
+                    nb = {**b, "label": label, "text_side": p.get("side")}
+                    sb.table("bot_picks").update({"side": side, "entry_line": line, "signal_blob": nb}) \
+                        .eq("id", p["id"]).execute()
+                    fx["applied"] = True
+                    _probe_log({"hand_side_fix": True, **fx, "at": datetime.now(timezone.utc).isoformat()})
+                sfixes.append(fx)
+        except Exception as e:
+            out["side_fix_err"] = str(e)[:200]
+        out["side_fixes"] = sfixes
     qn = request.args.get("queue")
     if qn:                                             # the hand-order queue, newest first (Oct 6 2026)
         try:
@@ -14978,6 +15018,31 @@ def _slug_side_line(slug: str, syn: bool):
     return "spread", ("home" if syn else "away"), (-away_line if syn else away_line)
 
 
+def _app_bet_side(text_cl, slug_cl):
+    """Pure. (market_type, side, line, slug_won) for an app bet, from the
+    venue's market text (`_classify_market`, or None) and the slug
+    convention (`_slug_side_line`, or None). THE SLUG WINS A DISAGREEMENT
+    (Oct 12 2026, the live Knights ML: a BUY_LONG on aec-nhl-veg-min — long
+    is Vegas, it priced 35¢ down 1-0 and 9.5¢ down 0-3 — was booked
+    'MIN Wild ML' off the text, so the page showed the bet on the wrong
+    team). Bet Sheets already refuses to place when the two disagree
+    (`_bet_sheet_slug_disagrees`); an app bet is already placed, so the
+    slug's answer is the one booked. None when neither can read it."""
+    if not slug_cl:
+        return (*text_cl, False) if text_cl else None
+    if not text_cl:
+        return (*slug_cl, False)
+    tm, ts, tl = text_cl
+    sm, ss, sl = slug_cl
+    agree = tm == sm and ts == ss
+    if agree and sm != "moneyline":
+        try:
+            agree = abs(float(tl) - float(sl)) <= 0.01
+        except (TypeError, ValueError):
+            agree = False
+    return (tm, ts, tl, False) if agree else (sm, ss, sl, True)
+
+
 def _event_slug_from_market(slug: str):
     """The venue's EVENT slug from a market slug: strip the family prefix and
     the rung suffix — `aec-cfb-nevada-ndkst-2026-10-17` →
@@ -15073,11 +15138,12 @@ def _hand_app_pick_row(sb, client, owner_uid, o: dict, now) -> dict | None:
     except Exception as _e:
         _venue_rl_trip(_e)
         mt = side = line = None
-    if side is None:
-        sl = _slug_side_line(slug, syn)
-        if not sl:
-            return None
-        mt, side, line = sl
+    text_side = side
+    pick = _app_bet_side((mt, side, line) if side is not None else None,
+                         _slug_side_line(slug, syn))
+    if not pick:
+        return None
+    mt, side, line, slug_won = pick
     qty = float(o.get("qty") or 0.0) or float(o.get("leaves") or 0.0)
     try:
         ev_dt = datetime.fromisoformat(str(mk.get("event_start")).replace("Z", "+00:00"))
@@ -15102,6 +15168,8 @@ def _hand_app_pick_row(sb, client, owner_uid, o: dict, now) -> dict | None:
             "label": label, "sport": mk.get("sport"), "placed_via": "app",
             "in_play": in_play, "venue_flag": "MANUAL",
             "adopted_at": now.isoformat(), "order_created": o.get("created")}
+    if slug_won:                             # the market text read the other team
+        blob["text_side"] = text_side
     if o.get("_filled"):                     # a held POSITION, not a resting order
         blob.update({"filled": True, "filled_qty": qty, "entry_src": "venue_avg",
                      "in_play": False})
