@@ -16094,6 +16094,52 @@ _BS_CUR_C: dict = {}          # slug -> (mono_ts, our-side mid c) — the My bet
 _BS_CUR_C_TTL_S = 75.0
 
 
+_BS_LOT: dict = {}             # slug -> (mono_ts, {qty, cost} | None) — one slug's lot off its fills
+_BS_LOT_TTL_S = 60.0
+
+
+def _hand_lot_price_c(lot, held, price_c, price_qty):
+    """Pure. The cents a held hand lot actually cost, when the pick's price
+    no longer describes it — else None. ADDS IN THE APP (Oct 12 2026, the
+    live Knights ML: 5 at 35¢ grew to 20 as Rob added on the way down, the
+    app said $3.75 cost, the page priced all 20 at 35¢ and read −$5.10 for
+    a −$1.30 position). Only when the slug's own fills COVER the held
+    quantity (`_lot_cost_c`) — never the venue's blended average."""
+    try:
+        held = float(held or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if held <= 0:
+        return None
+    try:
+        if price_qty is not None and abs(float(price_qty) - held) <= 0.01:
+            return None                       # the price already describes this size
+    except (TypeError, ValueError):
+        pass
+    c = _lot_cost_c(lot, held)
+    if c is None:
+        return None
+    return round(c, 2)
+
+
+def _bs_slug_lot(sb, slug):
+    """{qty, cost} for one slug off its own trades in the mirror (cached a
+    minute); None when unreadable."""
+    hit = _BS_LOT.get(slug)
+    if hit and _time.monotonic() - hit[0] < _BS_LOT_TTL_S:
+        return hit[1]
+    try:
+        rows = (sb.table("poly_activities").select(_TRADE_SLIM_SELECT)
+                .eq("type", "ACTIVITY_TYPE_TRADE").eq("slug", slug)
+                .order("at").limit(1000).execute().data) or []
+        lot = _lot_walk(_slim_to_trade_rows(rows)).get(slug)
+    except Exception as e:
+        app.logger.warning("bet sheets: lot read %s failed: %s", slug, str(e)[:80])
+        lot = None
+    _BS_LOT[slug] = (_time.monotonic(), lot)
+    return lot
+
+
 def _bet_sheet_pick_side_held(pos: dict | None, synthetic: bool) -> float:
     """Contracts held on OUR side of a slug off the positions map (net>0 =
     YES, net<0 = NO)."""
@@ -16159,7 +16205,7 @@ def api_bet_sheets_mine():
             positions = pos or {}
         except Exception:
             venue_ok = False
-    out, reads = [], 0
+    out, reads, lot_reads = [], 0, 0
     for r in sorted(rows.values(), key=lambda x: x.get("event_start") or ""):
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         slug = blob.get("pmm_slug")
@@ -16177,11 +16223,32 @@ def api_bet_sheets_mine():
         filled_qty = blob.get("filled_qty")
         if held > 0 and (filled_qty is None or abs(float(filled_qty) - held) > 0.01):
             filled_qty = round(held, 2)
+            blob = {**blob, "filled_qty": filled_qty}
             try:
-                sb.table("bot_picks").update(
-                    {"signal_blob": {**blob, "filled_qty": filled_qty}}).eq("id", r["id"]).execute()
+                sb.table("bot_picks").update({"signal_blob": blob}).eq("id", r["id"]).execute()
             except Exception:
                 pass
+        _pq = blob.get("price_qty")
+        if (held > 0 and slug and lot_reads < 10 and (r.get("status") or "pending") == "pending"
+                and (_pq is None or abs(float(_pq) - held) > 0.01)):
+            lot_reads += 1
+            new_c = _hand_lot_price_c(_bs_slug_lot(sb, slug), held,
+                                      blob.get("price_c"), blob.get("price_qty"))
+            if new_c is not None:
+                upd_blob = {**blob, "price_qty": round(held, 2)}
+                if abs(new_c - float(blob.get("price_c") or 0)) > 0.05:
+                    upd_blob.update({"price_c": new_c, "order_price_c": blob.get("order_price_c", blob.get("price_c")),
+                                     "entry_src": "fills"})
+                blob = upd_blob
+                upd = {"signal_blob": blob}
+                _am = _cents_to_american_py(blob.get("price_c"))
+                if _am is not None and blob.get("entry_src") == "fills":
+                    upd["entry_price"] = _am
+                    r["entry_price"] = _am
+                try:
+                    sb.table("bot_picks").update(upd).eq("id", r["id"]).execute()
+                except Exception:
+                    pass
         try:
             ev_dt = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
             started = ev_dt <= now

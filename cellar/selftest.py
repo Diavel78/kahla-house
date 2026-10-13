@@ -2751,6 +2751,25 @@ def test_app_bet_side() -> None:
           f(None, None) is None)
 
 
+def test_hand_lot_price() -> None:
+    """A held hand lot is priced off its own fills once it outgrows the
+    pick's order (Oct 12 2026, the live Knights ML: 5 at 35c grew to 20 for
+    $3.75 total, the page priced all 20 at 35c)."""
+    import app as _app
+    f = _app._hand_lot_price_c
+    lot = {"qty": 20.0, "cost": 3.75}
+    check("hand lot: 20 held for $3.75 — the pick re-prices to 18.75c",
+          f(lot, 20.0, 35.0, None) == 18.75)
+    check("hand lot: the price already describes this size — no change",
+          f(lot, 20.0, 18.75, 20.0) is None)
+    check("hand lot: fills cover 5 of 20 held (mirror lag) — no guess",
+          f({"qty": 5.0, "cost": 1.75}, 20.0, 35.0, 5.0) is None)
+    check("hand lot: nothing held — no change",
+          f(lot, 0.0, 35.0, None) is None)
+    check("hand lot: no fills on record — no change",
+          f(None, 20.0, 35.0, None) is None)
+
+
 def test_hand_start_plan() -> None:
     """The 'game started' rule (Oct 4 2026, 90% Oct 12): at or after the
     listed start, two frames with the touch 90% off the pre-start high AND
@@ -3991,7 +4010,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_app_bet_side, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
