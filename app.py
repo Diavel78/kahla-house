@@ -3681,6 +3681,34 @@ def api_bet_sheets_picks():
         except Exception as e:
             out["side_fix_err"] = str(e)[:200]
         out["side_fixes"] = sfixes
+    if request.args.get("lot") and slug:
+        # THE LOT CHECK (Oct 12 2026): the slug's own fills vs what the venue
+        # says we hold, and what every pending pick on the slug would re-price
+        # to (`_hand_lot_sync`). Dry unless &apply=1.
+        _BS_LOT.pop(slug, None)
+        lot = _bs_slug_lot(sb, slug)
+        out["lot"] = lot
+        try:
+            pos = _pmm_positions_raw(get_client(), fresh=True) or {}
+            out["venue_pos"] = pos.get(slug)
+        except Exception as e:
+            pos = {}
+            out["venue_pos_err"] = str(e)[:160]
+        lres = []
+        try:
+            prs = (sb.table("bot_picks").select("id,entry_price,signal_blob").eq("status", "pending")
+                   .eq("signal_blob->>pmm_slug", slug).limit(20).execute().data) or []
+            for p in prs:
+                b = p.get("signal_blob") or {}
+                held = _bet_sheet_pick_side_held(pos.get(slug), bool(b.get("pmm_synthetic")))
+                nb, new_c = _hand_lot_sync(sb, p, b, held, lot=lot,
+                                           write=bool(request.args.get("apply")))
+                lres.append({"pick_id": p["id"], "held": held, "price_c": b.get("price_c"),
+                             "price_qty": b.get("price_qty"), "new_c": new_c,
+                             "applied": bool(request.args.get("apply")) and new_c is not None})
+        except Exception as e:
+            out["lot_err"] = str(e)[:200]
+        out["lot_picks"] = lres
     qn = request.args.get("queue")
     if qn:                                             # the hand-order queue, newest first (Oct 6 2026)
         try:
@@ -16140,6 +16168,34 @@ def _bs_slug_lot(sb, slug):
     return lot
 
 
+def _hand_lot_sync(sb, r: dict, blob: dict, held: float, lot=None, write: bool = True):
+    """Re-price pick `r` off its slug's own fills when the held size outgrew
+    the price (`_hand_lot_price_c`). Returns (blob, new_c | None); mutates
+    r['entry_price'] when it writes."""
+    slug = blob.get("pmm_slug")
+    if lot is None and slug:
+        lot = _bs_slug_lot(sb, slug)
+    new_c = _hand_lot_price_c(lot, held, blob.get("price_c"), blob.get("price_qty"))
+    if new_c is None:
+        return blob, None
+    nb = {**blob, "price_qty": round(float(held), 2)}
+    if abs(new_c - float(blob.get("price_c") or 0)) > 0.05:
+        nb.update({"price_c": new_c, "order_price_c": blob.get("order_price_c", blob.get("price_c")),
+                   "entry_src": "fills"})
+    upd = {"signal_blob": nb}
+    _am = _cents_to_american_py(nb.get("price_c"))
+    if _am is not None and nb.get("entry_src") == "fills":
+        upd["entry_price"] = _am
+    if write:
+        try:
+            sb.table("bot_picks").update(upd).eq("id", r["id"]).execute()
+            if "entry_price" in upd:
+                r["entry_price"] = upd["entry_price"]
+        except Exception:
+            return blob, None
+    return nb, new_c
+
+
 def _bet_sheet_pick_side_held(pos: dict | None, synthetic: bool) -> float:
     """Contracts held on OUR side of a slug off the positions map (net>0 =
     YES, net<0 = NO)."""
@@ -16232,23 +16288,7 @@ def api_bet_sheets_mine():
         if (held > 0 and slug and lot_reads < 10 and (r.get("status") or "pending") == "pending"
                 and (_pq is None or abs(float(_pq) - held) > 0.01)):
             lot_reads += 1
-            new_c = _hand_lot_price_c(_bs_slug_lot(sb, slug), held,
-                                      blob.get("price_c"), blob.get("price_qty"))
-            if new_c is not None:
-                upd_blob = {**blob, "price_qty": round(held, 2)}
-                if abs(new_c - float(blob.get("price_c") or 0)) > 0.05:
-                    upd_blob.update({"price_c": new_c, "order_price_c": blob.get("order_price_c", blob.get("price_c")),
-                                     "entry_src": "fills"})
-                blob = upd_blob
-                upd = {"signal_blob": blob}
-                _am = _cents_to_american_py(blob.get("price_c"))
-                if _am is not None and blob.get("entry_src") == "fills":
-                    upd["entry_price"] = _am
-                    r["entry_price"] = _am
-                try:
-                    sb.table("bot_picks").update(upd).eq("id", r["id"]).execute()
-                except Exception:
-                    pass
+            blob, _ = _hand_lot_sync(sb, r, blob, held)
         try:
             ev_dt = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
             started = ev_dt <= now
