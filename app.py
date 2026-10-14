@@ -1625,7 +1625,7 @@ def debug_varsity():
     ev = request.args.get("event", "")
     if request.args.get("raw"):
         prm = dict(x.split("=", 1) for x in request.args.get("p", "").split(",") if "=" in x)
-        return jsonify(cheer_scores.raw_api(request.args["raw"], prm))
+        return jsonify(cheer_scores.raw_api(request.args["raw"], prm, qs=request.args.get("qs")))
     if request.args.get("tab") is not None:
         extra = dict(x.split("=", 1) for x in request.args.get("tab", "").split(",") if "=" in x)
         return jsonify(cheer_scores.results_tab(extra))

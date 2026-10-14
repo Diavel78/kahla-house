@@ -572,10 +572,12 @@ def results_month(month):
     return {"events": events, "error": err}
 
 
-def raw_api(path, params=None):
+def raw_api(path, params=None, qs=None):
     """Probe: GET any tv-admin.varsity.com path, return its shape and the
     first few result-ish objects (anything carrying a score/team field)."""
     url = "https://tv-admin.varsity.com" + (path if path.startswith("/") else "/" + path)
+    if qs:
+        url += "?" + qs   # verbatim, already URL-encoded
     try:
         r = requests.get(url, params=params or None,
                          headers={**_HEADERS, "Accept": "application/json"}, timeout=15)
@@ -603,3 +605,82 @@ def raw_api(path, params=None):
     return {"ok": True, "status": r.status_code, "bytes": len(r.content),
             "n_items": len(items or []), "tables": tinfo, "top_keys": list(j.keys())[:20] if isinstance(j, dict) else None,
             "samples": samples}
+
+
+# ── All-star events: Varsity's STRUCTURED results (results/partial) ─────
+# Found Oct 14 2026 on 2026 NCA All-Star Nationals: no pasted tables; the
+# event hub serves keyed tables instead. Each division is a
+# `title-with-action` item (analytics.extraContext = {class, division,
+# roundName}) followed by a `table` whose cells are keyed: rank,
+# program-team (text = program, subText = team), raw-score, deductions,
+# performance-score, event-score. Paged by limit/offset over divisions.
+
+PARTIAL_API = "https://tv-admin.varsity.com/api/experiences/web/event-hub/{eid}/results/partial"
+
+
+def _cell_text(c):
+    d = (c or {}).get("data") or {}
+    return (d.get("text") or "").strip(), (d.get("subText") or "").strip()
+
+
+def parse_partial(j):
+    """One results/partial page → [{division, round, cls, rows:[...]}]."""
+    items = (((j or {}).get("data") or {}).get("content") or {}).get("items") or []
+    out, ctx = [], {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if it.get("type") == "title-with-action":
+            an = ((it.get("action") or {}).get("analytics") or {}).get("extraContext") or {}
+            ctx = {"division": an.get("division") or it.get("title") or "",
+                   "round": an.get("roundName") or "", "cls": an.get("class") or ""}
+            if not an.get("division") and it.get("title"):
+                ctx["division"] = it["title"]
+            continue
+        if it.get("type") != "table":
+            continue
+        rows = []
+        for r in it.get("rows") or []:
+            cells = {c.get("key"): c for c in (r.get("cells") or []) if isinstance(c, dict)}
+            prog, team = _cell_text(cells.get("program-team") or cells.get("program-name"))
+            rank = _cell_text(cells.get("rank"))[0]
+            num = lambda k: _cell_text(cells.get(k))[0]
+            replay = ((r.get("action") or {}).get("url")) if isinstance(r.get("action"), dict) else None
+            if not prog and not team:
+                continue
+            rows.append({"rank": rank, "program": prog, "team": team,
+                         "raw": num("raw-score"), "ded": num("deductions"),
+                         "perf": num("performance-score"), "score": num("event-score") or num("performance-score"),
+                         "replay": replay})
+        if rows:
+            out.append({**ctx, "rows": rows})
+    return out
+
+
+def fetch_partial(event_id, budget_s=25, page=10):
+    """Every division on an all-star event, paging until a page adds nothing."""
+    t0, blocks, seen, pages = time.time(), [], set(), 0
+    for off in range(0, 5000, page):
+        if time.time() - t0 > budget_s:
+            return blocks, {"pages": pages, "truncated": True}
+        try:
+            r = requests.get(PARTIAL_API.format(eid=event_id),
+                             params={"version": "1.33.2", "limit": str(page), "offset": str(off),
+                                     "tz": "UTC", "isEventHubLayoutEnabled": "true"},
+                             headers={**_HEADERS, "Accept": "application/json"}, timeout=15)
+            j = r.json() if r.status_code == 200 else None
+        except Exception:
+            j = None
+        pages += 1
+        got = parse_partial(j)
+        new = 0
+        for b in got:
+            k = (b["division"], b["round"], b["rows"][0]["program"], b["rows"][0]["team"])
+            if k in seen:
+                continue
+            seen.add(k)
+            blocks.append(b)
+            new += 1
+        if not got or new == 0:
+            break
+    return blocks, {"pages": pages, "truncated": False}
