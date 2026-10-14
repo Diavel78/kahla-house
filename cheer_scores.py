@@ -85,6 +85,8 @@ def _division_for(table):
         t = _clean(prev.get_text())
         if not t or len(t) > 160 or t in parts:
             continue
+        if parts and _ROUND_RE.match(t):
+            continue  # the previous table's round label, not ours
         parts.append(t)
         if not _ROUND_RE.match(t) or len(parts) >= 3:
             break
@@ -286,6 +288,8 @@ def fetch_event(ref, fresh=False):
     title = _clean(soup.title.get_text()) if soup.title else None
     og = soup.find("meta", attrs={"property": "og:title"})
     name = (og.get("content") if og else None) or title
+    if name:
+        name = re.sub(r"\s*-\s*Varsity\s*-\s*Varsity TV\s*$", "", name)
 
     tables = parse_tables(soup)
     blobs = _script_json_blobs(soup, html)
