@@ -205,14 +205,32 @@ function seasonSel(on) {
     return `<div><div class="lbl">Season</div><select onchange="S.season=this.value;S.division='';${on}()">${opts}</select></div>`;
 }
 function divSel(on) {
-    return `<div><div class="lbl">Division</div><select onchange="S.division=this.value;${on}()"><option value="">All divisions</option>${
-        S.divisions.map(d => `<option ${d === S.division ? 'selected' : ''}>${E(d)}</option>`).join('')}</select></div>`;
+    // Type-to-search (datalist): pick a suggestion or keep typing; empty = all.
+    return `<div><div class="lbl">Division</div><input class="search" list="divList" placeholder="All divisions — type to search" value="${E(S.division)}"
+        onchange="setDiv(this.value,'${on}')" oninput="if(!this.value)setDiv('','${on}')" style="padding:11px 12px;font-size:14px">
+        <datalist id="divList">${S.divisions.map(d => `<option value="${E(d)}">`).join('')}</datalist></div>`;
+}
+function setDiv(v, on) {
+    v = (v || '').trim();
+    if (v && !S.divisions.includes(v)) {
+        const hit = S.divisions.find(d => d.toLowerCase() === v.toLowerCase()) || S.divisions.find(d => d.toLowerCase().includes(v.toLowerCase()));
+        if (!hit) return;
+        v = hit;
+    }
+    if (v === S.division) return;
+    S.division = v;
+    window[on]();
 }
 function gymChips(on) {
     return `<div class="chips"><span class="t">GYM TYPE</span>${['All'].concat(GYM).map(g => {
         const v = g === 'All' ? '' : g;
-        return `<button class="chip ${S.cat === v ? 'on' : ''}" onclick="S.cat='${E(v)}';persist();${on}()">${E(g)}</button>`;
+        return `<button class="chip ${S.cat === v ? 'on' : ''}" data-cat="${E(v)}" onclick="setCat(this,'${on}')">${E(g)}</button>`;
     }).join('')}</div>`;
+}
+function setCat(btn, on) {
+    S.cat = btn.dataset.cat; persist();
+    btn.parentElement.querySelectorAll('.chip').forEach(b => b.classList.toggle('on', b === btn));
+    window[on]();
 }
 function modeSeg(on) {
     return `<span class="seg"><button class="${S.mode === 'card' ? 'on' : ''}" onclick="S.mode='card';persist();${on}(true)">CARD</button><button class="${S.mode === 'list' ? 'on' : ''}" onclick="S.mode='list';persist();${on}(true)">LIST</button></span>`;
@@ -221,7 +239,8 @@ function searchBox(ph, on) {
     return `<input class="search" placeholder="${E(ph)}" value="${E(S.q)}" oninput="S.q=this.value;clearTimeout(QT);QT=setTimeout(()=>${on}(),300)">`;
 }
 function perfList(scores) {
-    return `<div class="perfs">${scores.map(p => `<div class="p"><span>${E(p.date)} · ${E(p.event)}${p.round ? ' · ' + E(p.round) : ''}</span>
+    const recent = new Date(Date.now() - 3 * 864e5).toISOString().slice(0, 10);
+    return `<div class="perfs">${scores.map(p => `<div class="p"><span>${p.date >= recent ? '<span class="tag" style="background:rgba(34,197,94,.15);color:#22c55e">NEW</span>' : ''}${E(p.date)} · ${E(p.event)}${p.round ? ' · ' + E(p.round) : ''}</span>
         <span class="r">${p.rank ? '#' + E(p.rank) + ' · ' : ''}${score(p.score)}${p.replay ? ` <a href="https://tv.varsity.com${E(p.replay)}" target="_blank" onclick="event.stopPropagation()">▶</a>` : ''}</span></div>`).join('')}</div>`;
 }
 
@@ -434,7 +453,10 @@ async function showFo() {
     drawFo();
 }
 function drawFo() {
-    document.getElementById('out').innerHTML = teamsHtml(DATA.rows, false) || `<div class="empty">None of your teams scored in ${E(S.season)}.</div>`;
+    DATA.rows.sort((a, b) => (b.scores[b.scores.length - 1] || {}).date > (a.scores[a.scores.length - 1] || {}).date ? 1 : -1);
+    DATA.rows.forEach((r, i) => { if (S.open['t' + i] === undefined) S.open['t' + i] = true; });
+    document.getElementById('out').innerHTML = `<div class="count">Newest performances first · scores refresh every 30 min on competition weekends</div>` +
+        (teamsHtml(DATA.rows, false) || `<div class="empty">None of your teams scored in ${E(S.season)}.</div>`);
 }
 </script>
 </body>

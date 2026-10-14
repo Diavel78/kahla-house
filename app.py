@@ -1577,6 +1577,8 @@ def api_cheer_ingest():
         return jsonify({"ok": False, "error": "forbidden"}), 403
     import cheer_store
     seasons = [request.args["season"]] if request.args.get("season") else None
+    if not seasons and request.args.get("recent") == "1":
+        seasons = [_cheer_season_now()]
     if not seasons:
         cur = _cheer_season_now()
         y = int(cur[:4])

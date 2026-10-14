@@ -154,7 +154,7 @@ def _needs_fetch(existing, now):
         if end and end > today:
             return age > 3 * 86400          # upcoming: refresh the listing now and then
         return age > (2 * 3600 if recent else 7 * 86400)
-    return recent and age > 3600
+    return recent and age > 1500
 
 
 def discover(months):
