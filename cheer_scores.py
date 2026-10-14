@@ -708,11 +708,19 @@ _LIST_PARAMS = {"version": "1.33.2", "tz": "UTC", "isEventHubLayoutEnabled": "tr
                 "isEventHubBracketsEnabled": "false", "isNextGenEventHub": "false", "site_id": "20"}
 
 
+_GJ_STATS = {}
+
+
 def _get_json(url, params):
     try:
         r = requests.get(url, params=params, headers={**_HEADERS, "Accept": "application/json"}, timeout=15)
+        k = str(r.status_code)
+        _GJ_STATS[k] = _GJ_STATS.get(k, 0) + 1
+        if r.status_code != 200:
+            _GJ_STATS["last_bad"] = r.url[:300] + " → " + r.text[:200]
         return r.json() if r.status_code == 200 else None
-    except Exception:
+    except Exception as e:
+        _GJ_STATS["exc"] = f"{type(e).__name__}: {e}"[:200]
         return None
 
 
@@ -741,11 +749,17 @@ def fetch_structured(event_id, budget_s=30, page=100):
         if not got or new == 0:
             break
     want = [b for b in blocks if b.get("more")]
+    sample_empty = []
+    _GJ_STATS.clear()
 
     def full(b):
         facets = json.dumps({"class": b.get("cls") or "Cheer", "division": b["division"],
                              "roundName": b["round"]}, separators=(",", ":"))
-        got = parse_partial(_get_json(LIST_API.format(eid=event_id), {**_LIST_PARAMS, "facets": facets}))
+        jj = _get_json(LIST_API.format(eid=event_id), {**_LIST_PARAMS, "facets": facets})
+        got = parse_partial(jj)
+        if not got and jj is not None and not sample_empty:
+            sample_empty.append({"facets": facets, "keys": list(jj.keys())[:12],
+                                 "items": len(_items_of(jj))})
         return b, (got[0]["rows"] if got else None)
     filled = 0
     left = max(5.0, budget_s + 25 - (time.time() - t0))
@@ -760,7 +774,8 @@ def fetch_structured(event_id, budget_s=30, page=100):
                 b["rows"] = rows
                 filled += 1
     return blocks, {"pages": pages, "divisions": len(blocks), "view_all": len(want),
-                    "filled": filled, "secs": round(time.time() - t0, 1)}
+                    "filled": filled, "secs": round(time.time() - t0, 1), "http": dict(_GJ_STATS),
+                    "sample_empty": sample_empty}
 
 
 def page_api_calls(path):
