@@ -465,6 +465,25 @@ def fetch_event(ref, fresh=False):
                 "image": m.get("assetUrl")}
         views = [v for _p, v in _walk(j)
                  if isinstance(v, dict) and isinstance(v.get("htmlContent"), str)]
+        # An event can carry several result sets (one per competition in
+        # it); the API embeds only the first and LINKS the rest as
+        # .../results/?resultId=N. Fetch each linked set the same way.
+        have = {str(v.get("id")) for v in views}
+        linked = sorted({m for _p, v in _walk(j) if isinstance(v, str)
+                         for m in re.findall(r"resultId=(\d+)", v)} - have)
+        diag["result_ids"] = sorted(have) + linked
+        for rid in linked[:12]:
+            try:
+                rr = requests.get(api_url, params={**_API_PARAMS, "resultId": rid},
+                                  headers={**_HEADERS, "Accept": "application/json"}, timeout=12)
+                jj = rr.json() if rr.status_code == 200 else None
+            except Exception:
+                jj = None
+            for _p, v in _walk(jj):
+                if (isinstance(v, dict) and isinstance(v.get("htmlContent"), str)
+                        and str(v.get("id")) not in have):
+                    have.add(str(v.get("id")))
+                    views.append(v)
         diag["html_views"] = [v.get("id") for v in views]
         for v in views:
             blocks.extend(dict(t, source="api", result_id=v.get("id"))

@@ -1572,7 +1572,10 @@ def debug_varsity():
     if ev:
         out = cheer_scores.fetch_event(ev, fresh=True)
         out.get("diag", {}).pop("api_hints", None)
-        out["divisions"] = (out.get("divisions") or [])[:12]
+        divs = out.get("divisions") or []
+        out["n_divisions"] = len(divs)
+        out["division_names"] = [d.get("division") for d in divs]
+        out["divisions"] = divs[:3]
         for d in out.get("divisions") or []:
             d["rows"] = d.get("rows", [])[:5]
             d["teams"] = d.get("teams", [])[:5]
