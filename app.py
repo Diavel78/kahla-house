@@ -1565,8 +1565,12 @@ def debug_varsity():
         return jsonify({"ok": False, "error": "forbidden"}), 403
     import cheer_scores
     ev = request.args.get("event", "")
+    if ev and request.args.get("api") == "1":
+        return jsonify(cheer_scores.fetch_event_api(cheer_scores.parse_event_ref(ev)[0]))
     if ev:
         out = cheer_scores.fetch_event(ev, fresh=True)
+        out.get("diag", {}).pop("api_hints", None)
+        out["divisions"] = (out.get("divisions") or [])[:12]
         for d in out.get("divisions") or []:
             d["rows"] = d.get("rows", [])[:5]
             d["teams"] = d.get("teams", [])[:5]

@@ -71,15 +71,26 @@ def _clean(s):
 _HEAD_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "caption")
 
 
+_ROUND_RE = re.compile(r"^(finals?|prelim(inarie)?s?|preliminaries|semi[- ]?finals?|day \d+|round \d+|results?)$", re.I)
+
+
 def _division_for(table):
+    """Nearest heading above the table. A round label ('Finals',
+    'Preliminaries') is joined to the division heading above it."""
     cap = table.find("caption")
     if cap and _clean(cap.get_text()):
         return _clean(cap.get_text())
+    parts = []
     for prev in table.find_all_previous(list(_HEAD_TAGS) + ["strong", "b"]):
         t = _clean(prev.get_text())
-        if t and len(t) < 160:
-            return t
-    return None
+        if not t or len(t) > 160 or t in parts:
+            continue
+        parts.append(t)
+        if not _ROUND_RE.match(t) or len(parts) >= 3:
+            break
+    if not parts:
+        return None
+    return " · ".join(reversed(parts))
 
 
 def parse_tables(soup):
@@ -307,6 +318,38 @@ def fetch_event(ref, fresh=False):
     if not blocks:
         out["error"] = "Page loaded but no score tables were found in it (see diagnostics)."
     _CACHE[ck] = (time.time(), out)
+    return out
+
+
+API = "https://tv-admin.varsity.com/api/experiences/web/event-hub/{eid}/results"
+
+
+def fetch_event_api(event_id):
+    """Varsity's own JSON behind the results page (found in the page's
+    transfer state Oct 14 2026). Probe-only for now."""
+    url = API.format(eid=event_id)
+    params = {"version": "1.33.2", "tz": "UTC", "isEventHubLayoutEnabled": "true",
+              "isEventHubBracketsEnabled": "false", "isNextGenEventHub": "false", "site_id": "20"}
+    try:
+        r = requests.get(url, params=params, headers={**_HEADERS, "Accept": "application/json"}, timeout=12)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    out = {"status": r.status_code, "bytes": len(r.content), "ct": r.headers.get("content-type")}
+    try:
+        j = r.json()
+    except Exception:
+        out["head"] = r.text[:1500]
+        return out
+
+    def shape(o, d=0):
+        if d > 6:
+            return "…"
+        if isinstance(o, dict):
+            return {k: shape(v, d + 1) for k, v in list(o.items())[:25]}
+        if isinstance(o, list):
+            return [len(o), shape(o[0], d + 1)] if o else []
+        return o if not isinstance(o, str) else o[:80]
+    out["shape"] = shape(j)
     return out
 
 
