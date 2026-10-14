@@ -3516,6 +3516,12 @@ def test_hand_sold_plan() -> None:
     short = [tr("2026-10-10T16:05:00+00:00", "ORDER_INTENT_SELL_SHORT", 5, 2.0)]
     assert _app._hand_sold_plan(short, True, since, 50, 5)["pnl_usd"] == -0.5
     assert _app._hand_sold_plan(sells, False, since, 48.5, 0) is None              # no lot
+    # the box's Postgres returns Arizona-offset times; the cutoff is UTC
+    # (Oct 13 2026, the Predators sale skipped as 'before booking')
+    az = [tr("2026-10-13T19:07:04.54-07:00", "ORDER_INTENT_SELL_SHORT", 5, 2.27, aggr=False)]
+    p2 = _app._hand_sold_plan(az, True, "2026-10-14T01:38:24+00:00", 25.8, 5)
+    assert p2 and p2["qty"] == 5.0 and p2["pnl_usd"] == round(2.27 - 5 * 0.258, 2), p2
+    assert _app._hand_sold_plan(az, True, "2026-10-14T02:10:00+00:00", 25.8, 5) is None    # truly before booking
     src = open(_app.__file__).read()
     assert 'stats["sold"] = _hand_sold_tick(' in src, "sold tick not wired into handbets"
     print("  ok")
