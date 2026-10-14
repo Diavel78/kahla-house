@@ -1531,6 +1531,49 @@ def grocery_page():
     return resp
 
 
+@app.route("/cheer")
+def cheer_page():
+    """Cheer Scoring — competition results read off tv.varsity.com
+    (cheer_scores.py). Admin-only for now (client-side via /api/me;
+    server gate is @admin_required on the API)."""
+    resp = make_response(render_template("cheer.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+@app.route("/api/cheer/event")
+@admin_required
+def api_cheer_event():
+    import cheer_scores
+    return jsonify(cheer_scores.fetch_event(request.args.get("event", ""),
+                                            fresh=request.args.get("fresh") == "1"))
+
+
+@app.route("/api/cheer/events")
+@admin_required
+def api_cheer_events():
+    import cheer_scores
+    return jsonify(cheer_scores.list_events())
+
+
+@app.route("/debug-varsity")
+def debug_varsity():
+    """Shared-secret probe (site-curl bridge): ?event=<id> reads one event,
+    no event = the /results index. Same reader the page uses."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    import cheer_scores
+    ev = request.args.get("event", "")
+    if ev:
+        out = cheer_scores.fetch_event(ev, fresh=True)
+        for d in out.get("divisions") or []:
+            d["rows"] = d.get("rows", [])[:5]
+            d["teams"] = d.get("teams", [])[:5]
+        return jsonify(out)
+    return jsonify(cheer_scores.list_events())
+
+
 # ---------------------------------------------------------------------------
 # Polymarket SDK client
 # ---------------------------------------------------------------------------

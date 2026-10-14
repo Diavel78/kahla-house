@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kahla House — Cheer Scoring</title>
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Cheer">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script>
+firebase.initializeApp({
+    apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+    authDomain: "kahla-house.firebaseapp.com",
+    projectId: "kahla-house",
+    storageBucket: "kahla-house.firebasestorage.app",
+    messagingSenderId: "1029771942929",
+    appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+});
+</script>
+<style>
+:root {
+    --bg:#0b0e13; --surface:#13171e; --surface-2:#1a1f2b; --border:#1e2530; --border-light:#2a3140;
+    --text:#e2e8f0; --text-secondary:#8890a8; --text-muted:#555d78;
+    --pink:#ec4899; --pink-dim:rgba(236,72,153,0.10); --blue:#4a7cff; --gold:#f5c542;
+    --red:#ef4444; --green:#22c55e;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+html { overflow-x:hidden; }
+body { font-family:'DM Sans',-apple-system,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+.top-bar { display:flex; align-items:center; justify-content:space-between; padding:0 20px; height:56px;
+    background:var(--surface); border-bottom:1px solid var(--border); }
+.top-left { display:flex; align-items:center; gap:14px; }
+.logo { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,var(--pink),var(--blue));
+    display:flex; align-items:center; justify-content:center; font:700 14px 'JetBrains Mono',monospace; color:#fff; }
+.nav a { color:var(--text-secondary); text-decoration:none; font-size:13px; font-weight:600; padding:6px 12px; border-radius:8px; }
+.nav a.active { color:var(--text); background:var(--surface-2); }
+.logout { background:none; border:1px solid var(--border-light); color:var(--text-secondary); border-radius:8px; padding:6px 12px; cursor:pointer; }
+.wrap { max-width:960px; margin:0 auto; padding:24px 16px 60px; }
+h1 { font-size:26px; letter-spacing:-0.5px; }
+.sub { color:var(--text-secondary); font-size:14px; margin-top:4px; }
+.bar { display:flex; gap:8px; margin:20px 0 12px; flex-wrap:wrap; }
+.bar input { flex:1; min-width:220px; background:var(--surface); border:1px solid var(--border-light); color:var(--text);
+    border-radius:10px; padding:11px 14px; font-size:15px; }
+.btn { background:var(--pink); color:#fff; border:0; border-radius:10px; padding:11px 18px; font-weight:700; cursor:pointer; font-size:14px; }
+.btn.ghost { background:var(--surface-2); color:var(--text-secondary); border:1px solid var(--border-light); }
+.row-ctl { display:flex; gap:12px; align-items:center; color:var(--text-secondary); font-size:13px; flex-wrap:wrap; }
+.row-ctl input[type=text] { background:var(--surface); border:1px solid var(--border-light); color:var(--text); border-radius:8px; padding:7px 10px; }
+.status { margin:14px 0; font-size:14px; color:var(--text-secondary); }
+.status.err { color:var(--red); }
+.event-head { margin:18px 0 6px; }
+.event-head h2 { font-size:20px; }
+.event-head .meta { color:var(--text-muted); font-size:12px; margin-top:2px; }
+.div-card { background:var(--surface); border:1px solid var(--border); border-radius:14px; margin:14px 0; overflow:hidden; }
+.div-card h3 { font-size:15px; padding:12px 16px; border-bottom:1px solid var(--border); background:var(--surface-2); }
+.team { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--border); }
+.team:last-child { border-bottom:0; }
+.rk { width:30px; font:700 15px 'JetBrains Mono',monospace; color:var(--text-muted); text-align:center; }
+.rk.r1 { color:var(--gold); } .rk.r2 { color:#cbd5e1; } .rk.r3 { color:#d38b4a; }
+.tn { flex:1; font-weight:600; font-size:14px; }
+.sc { font:700 15px 'JetBrains Mono',monospace; color:var(--pink); }
+.team.hl { background:var(--pink-dim); }
+details.raw { padding:8px 16px 12px; font-size:12px; color:var(--text-secondary); }
+details.raw table { border-collapse:collapse; width:100%; margin-top:8px; display:block; overflow-x:auto; }
+details.raw td, details.raw th { border:1px solid var(--border); padding:4px 6px; white-space:nowrap; text-align:left; }
+.events { display:grid; gap:6px; margin-top:8px; }
+.ev { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:10px 14px; cursor:pointer; font-size:14px; }
+.ev:hover { border-color:var(--pink); }
+details.diag { margin-top:24px; font-size:12px; color:var(--text-muted); }
+details.diag pre { white-space:pre-wrap; word-break:break-all; background:var(--surface); padding:12px; border-radius:10px; margin-top:8px; }
+#gate { display:flex; align-items:center; justify-content:center; height:100vh; color:var(--text-muted); }
+@media (max-width:600px) { .nav a:not(.active) { display:none; } }
+</style>
+</head>
+<body>
+<div id="gate">Loading…</div>
+<div id="app" style="display:none">
+    <div class="top-bar">
+        <div class="top-left">
+            <div class="logo">KH</div>
+            <div class="nav"><a href="/">Home</a><a href="/cheer" class="active">Cheer Scoring</a></div>
+        </div>
+        <button class="logout" onclick="firebase.auth().signOut().then(()=>location.href='/')">Logout</button>
+    </div>
+    <div class="wrap">
+        <h1>Cheer Scoring</h1>
+        <div class="sub">Scores pulled straight from Varsity TV. Paste an event link or number, or pick a recent event.</div>
+        <div class="bar">
+            <input id="evIn" placeholder="tv.varsity.com/events/11267707… or 11267707" onkeydown="if(event.key==='Enter')load(true)">
+            <button class="btn" onclick="load(true)">Get scores</button>
+            <button class="btn ghost" onclick="loadEvents()">Recent events</button>
+        </div>
+        <div class="row-ctl">
+            <label><input type="checkbox" id="auto" onchange="setAuto()"> Auto-refresh every 2 min</label>
+            <input type="text" id="find" placeholder="Highlight a gym / team…" oninput="render()">
+        </div>
+        <div id="status" class="status"></div>
+        <div id="events" class="events"></div>
+        <div id="out"></div>
+        <details class="diag"><summary>Diagnostics</summary><pre id="diag"></pre></details>
+    </div>
+</div>
+<script>
+function _gateServerError(detail) {
+    document.getElementById('gate').innerHTML = '<div style="text-align:center;max-width:420px;padding:24px">'
+        + '<div style="font-size:18px;font-weight:600;color:#e2e8f0;margin-bottom:8px">Server error — not a permissions problem</div>'
+        + '<div style="margin-bottom:14px">You are still signed in. ' + String(detail || '') + '</div>'
+        + '<button class="btn" onclick="location.reload()">Retry</button></div>';
+}
+let TOKEN = null, DATA = null, TIMER = null;
+const E = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+firebase.auth().onAuthStateChanged(async user => {
+    if (!user) { location.href = '/'; return; }
+    try {
+        TOKEN = await user.getIdToken();
+        const r = await fetch('/api/me', { headers: { Authorization: 'Bearer ' + TOKEN } });
+        if (r.status >= 500) { _gateServerError('/api/me returned ' + r.status); return; }
+        if (!r.ok) { location.href = '/'; return; }
+        const me = await r.json();
+        if (!me.approved || me.role !== 'admin') { location.href = '/'; return; }
+    } catch (e) { _gateServerError('sign-in check failed: ' + e); return; }
+    document.getElementById('gate').style.display = 'none';
+    document.getElementById('app').style.display = '';
+    try {
+        const last = localStorage.getItem('kh_cheer_event');
+        if (last) { document.getElementById('evIn').value = last; load(false); }
+        document.getElementById('find').value = localStorage.getItem('kh_cheer_find') || '';
+    } catch (e) {}
+});
+
+async function api(path) {
+    TOKEN = await firebase.auth().currentUser.getIdToken();
+    const r = await fetch(path, { headers: { Authorization: 'Bearer ' + TOKEN } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+}
+
+function setStatus(t, err) {
+    const s = document.getElementById('status');
+    s.textContent = t || ''; s.className = 'status' + (err ? ' err' : '');
+}
+
+async function load(fresh) {
+    const ref = document.getElementById('evIn').value.trim();
+    if (!ref) return;
+    try { localStorage.setItem('kh_cheer_event', ref); } catch (e) {}
+    document.getElementById('events').innerHTML = '';
+    setStatus('Pulling scores from Varsity…');
+    try {
+        DATA = await api('/api/cheer/event?event=' + encodeURIComponent(ref) + (fresh ? '&fresh=1' : ''));
+    } catch (e) { setStatus('Request failed: ' + e.message, true); return; }
+    document.getElementById('diag').textContent = JSON.stringify(DATA.diag || DATA, null, 2);
+    if (!DATA.ok) { setStatus(DATA.error || 'No scores found.', true); document.getElementById('out').innerHTML = ''; return; }
+    setStatus('');
+    render();
+}
+
+function render() {
+    const out = document.getElementById('out');
+    if (!DATA || !DATA.ok) return;
+    const q = document.getElementById('find').value.trim().toLowerCase();
+    try { localStorage.setItem('kh_cheer_find', q); } catch (e) {}
+    const when = DATA.fetched_at ? new Date(DATA.fetched_at * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+    let h = `<div class="event-head"><h2>${E(DATA.event_name || 'Event ' + DATA.event_id)}</h2>
+        <div class="meta">${DATA.divisions.length} division${DATA.divisions.length === 1 ? '' : 's'} · updated ${E(when)} · <a style="color:var(--text-muted)" href="${E(DATA.diag && DATA.diag.url)}" target="_blank">open on Varsity</a></div></div>`;
+    for (const d of DATA.divisions) {
+        const teams = d.teams || [];
+        if (q && !teams.some(t => (t.team || '').toLowerCase().includes(q)) && !(d.division || '').toLowerCase().includes(q)) continue;
+        h += `<div class="div-card"><h3>${E(d.division || 'Division')}</h3>`;
+        teams.forEach((t, i) => {
+            const rk = t.rank || (i + 1);
+            const hl = q && (t.team || '').toLowerCase().includes(q) ? ' hl' : '';
+            h += `<div class="team${hl}"><div class="rk r${E(rk)}">${E(rk)}</div><div class="tn">${E(t.team)}</div><div class="sc">${E(t.score)}</div></div>`;
+        });
+        h += `<details class="raw"><summary>All columns</summary><table><tr>${(d.columns || []).map(c => `<th>${E(c)}</th>`).join('')}</tr>`
+            + (d.rows || []).map(r => `<tr>${r.map(c => `<td>${E(c)}</td>`).join('')}</tr>`).join('') + `</table></details></div>`;
+    }
+    out.innerHTML = h;
+}
+
+async function loadEvents() {
+    setStatus('Loading recent events…');
+    let d;
+    try { d = await api('/api/cheer/events'); } catch (e) { setStatus('Request failed: ' + e.message, true); return; }
+    document.getElementById('diag').textContent = JSON.stringify(d.diag || d, null, 2);
+    if (!d.ok || !d.events.length) { setStatus(d.error || 'No events found on the Varsity results page.', true); return; }
+    setStatus('');
+    document.getElementById('out').innerHTML = '';
+    document.getElementById('events').innerHTML = d.events.map(ev =>
+        `<div class="ev" onclick="pick('${E(ev.id)}')">${E(ev.name)}</div>`).join('');
+}
+
+function pick(id) { document.getElementById('evIn').value = id; load(true); }
+
+function setAuto() {
+    clearInterval(TIMER);
+    if (document.getElementById('auto').checked) TIMER = setInterval(() => load(true), 120000);
+}
+</script>
+</body>
+</html>
