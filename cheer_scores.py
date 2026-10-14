@@ -497,3 +497,49 @@ def fetch_event(ref, fresh=False):
            "fetched_at": int(time.time()), "diag": diag}
     _CACHE[ck] = (time.time(), out)
     return out
+
+
+TAB_API = "https://tv-admin.varsity.com/api/experiences/web/results/tab"
+
+
+def results_tab(extra=None):
+    """Varsity's results index API (month tabs + event cards). `extra`
+    params override/add to the defaults (e.g. a month's tab params).
+    Returns {tabs:[{id,title,url,api}], events:[{id,title,sub,...}]}."""
+    params = {"site_id": "20", "isEventHubLayoutEnabled": "true", "limit": "100",
+              "offset": "0", "tz": "America/Phoenix", "version": "1.33.2"}
+    params.update(extra or {})
+    try:
+        r = requests.get(TAB_API, params=params,
+                         headers={**_HEADERS, "Accept": "application/json"}, timeout=15)
+        j = r.json() if r.status_code == 200 else None
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    if not isinstance(j, dict):
+        return {"ok": False, "status": r.status_code, "head": r.text[:500]}
+    tabs, events, seen = [], [], set()
+    for _p, v in _walk(j):
+        if not isinstance(v, dict):
+            continue
+        if v.get("type") == "tab":
+            act = v.get("action") or {}
+            tabs.append({"id": v.get("id"), "title": v.get("title"), "active": v.get("active"),
+                         "url": act.get("url"), "api": act.get("apiCall") or act.get("mergeParams")})
+        u = v.get("url") if isinstance(v.get("url"), str) else None
+        m = re.search(r"/events/(\d+)", u or "")
+        if m and m.group(1) not in seen and v.get("title"):
+            seen.add(m.group(1))
+            events.append({"id": m.group(1), "title": v.get("title"), "url": u})
+    # Event cards: parent objects carrying a title plus labels/footers.
+    cards = []
+    for _p, v in _walk(j):
+        if isinstance(v, dict) and isinstance(v.get("title"), str) and (v.get("label1") or v.get("footer1") or v.get("subtitle1")):
+            act = v.get("action") or {}
+            u = act.get("url") if isinstance(act, dict) else None
+            m = re.search(r"/events/(\d+)", u or "")
+            cards.append({"id": m.group(1) if m else None, "title": v.get("title"),
+                          "sub1": v.get("subtitle1"), "sub2": v.get("subtitle2"),
+                          "label1": v.get("label1"), "footer1": v.get("footer1"), "url": u})
+    return {"ok": True, "status": r.status_code, "bytes": len(r.content),
+            "tabs": tabs, "events": events[:200], "cards": cards[:200],
+            "sections": [s.get("id") for s in (j.get("sections") or []) if isinstance(s, dict)]}

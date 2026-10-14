@@ -1565,6 +1565,9 @@ def debug_varsity():
         return jsonify({"ok": False, "error": "forbidden"}), 403
     import cheer_scores
     ev = request.args.get("event", "")
+    if request.args.get("tab") is not None:
+        extra = dict(x.split("=", 1) for x in request.args.get("tab", "").split(",") if "=" in x)
+        return jsonify(cheer_scores.results_tab(extra))
     if ev and request.args.get("api") == "1":
         out = cheer_scores.fetch_event_api(cheer_scores.parse_event_ref(ev)[0], find=request.args.get("find"))
         out.pop("shape", None)
