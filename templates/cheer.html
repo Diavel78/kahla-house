@@ -25,7 +25,7 @@ firebase.initializeApp({
 :root {
     --bg:#0b0e13; --surface:#13171e; --surface-2:#1a1f2b; --border:#1e2530; --border-light:#2a3140;
     --text:#e2e8f0; --text-secondary:#8890a8; --text-muted:#555d78;
-    --pink:#ec4899; --pink-dim:rgba(236,72,153,0.10); --blue:#4a7cff; --gold:#f5c542;
+    --pink:#06b6d4; --pink-dim:rgba(6,182,212,0.10); --blue:#4a7cff; --gold:#f5c542;
     --red:#ef4444; --green:#22c55e;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -34,7 +34,7 @@ body { font-family:'DM Sans',-apple-system,sans-serif; background:var(--bg); col
 .top-bar { display:flex; align-items:center; justify-content:space-between; padding:0 20px; height:56px;
     background:var(--surface); border-bottom:1px solid var(--border); }
 .top-left { display:flex; align-items:center; gap:14px; }
-.logo { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,var(--pink),var(--blue));
+.logo { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,var(--blue),#a855f7);
     display:flex; align-items:center; justify-content:center; font:700 14px 'JetBrains Mono',monospace; color:#fff; }
 .nav a { color:var(--text-secondary); text-decoration:none; font-size:13px; font-weight:600; padding:6px 12px; border-radius:8px; }
 .nav a.active { color:var(--text); background:var(--surface-2); }
@@ -45,7 +45,7 @@ h1 { font-size:26px; letter-spacing:-0.5px; }
 .bar { display:flex; gap:8px; margin:20px 0 12px; flex-wrap:wrap; }
 .bar input { flex:1; min-width:220px; background:var(--surface); border:1px solid var(--border-light); color:var(--text);
     border-radius:10px; padding:11px 14px; font-size:15px; }
-.btn { background:var(--pink); color:#fff; border:0; border-radius:10px; padding:11px 18px; font-weight:700; cursor:pointer; font-size:14px; }
+.btn { background:var(--blue); color:#fff; border:0; border-radius:10px; padding:11px 18px; font-weight:700; cursor:pointer; font-size:14px; }
 .btn.ghost { background:var(--surface-2); color:var(--text-secondary); border:1px solid var(--border-light); }
 .row-ctl { display:flex; gap:12px; align-items:center; color:var(--text-secondary); font-size:13px; flex-wrap:wrap; }
 .row-ctl input[type=text] { background:var(--surface); border:1px solid var(--border-light); color:var(--text); border-radius:8px; padding:7px 10px; }
