@@ -74,14 +74,15 @@ def _num(s):
 
 def compact(ev):
     """fetch_event output → the stored results list. Row =
-    [rank, program, team, score, raw, ded, replay]. School events have
+    [rank, program, team, score, raw, ded, replay, event_total]. School events have
     no team name (the school IS the program)."""
     out = []
     for d in ev.get("divisions") or []:
         if d.get("structured"):
             div, rnd = d.get("division_name") or d.get("division") or "", d.get("round") or ""
             rows = [[r.get("rank") or "", r.get("program") or "", r.get("team") or "",
-                     _num(r.get("score")), _num(r.get("raw")), _num(r.get("ded")), r.get("replay")]
+                     _num(r.get("score")), _num(r.get("raw")), _num(r.get("ded")), r.get("replay"),
+                     _num(r.get("event"))]
                     for r in d.get("rows") or [] if (r.get("program") or r.get("team"))]
             if rows:
                 out.append({"div": div, "round": rnd, "cat": category(div, d.get("cls")), "rows": rows})
@@ -115,7 +116,7 @@ def compact(ev):
     return out
 
 
-SCHEMA = 2   # bump to re-read every stored event on the next ingest
+SCHEMA = 3   # bump to re-read every stored event on the next ingest
 
 
 def save_event(db, ev, listing=None):
@@ -223,23 +224,67 @@ def load_season(db, season):
     evs.sort(key=lambda e: e.get("start") or "")
     perfs = []
     for ev in evs:
+        # One entry per (team, division) per competition: Day 1 / Day 2,
+        # prelims / semis / finals collapse into the event's total score.
+        ents = {}
         for blk in ev["results"]:
             for row in blk["rows"]:
                 if len(row) >= 7:
                     rank, prog, team, score = row[0], row[1], row[2], row[3]
                     replay = row[6]
+                    etot = row[7] if len(row) >= 8 else None
                 else:                       # v1 rows (pre-program/team split)
-                    rank, prog, team, score, replay = row[0], row[1], "", row[2], None
+                    rank, prog, team, score, replay, etot = row[0], row[1], "", row[2], None, None
                 if score is None or not (0 < score <= 1000):
                     continue
-                perfs.append({"event": ev.get("name"), "event_id": ev.get("id"),
-                              "date": (ev.get("start") or "")[:10], "div": blk["div"],
-                              "round": blk.get("round") or "", "cat": blk.get("cat"),
-                              "rank": rank, "program": prog, "team": team, "score": score,
-                              "replay": replay})
+                k = (prog, team, blk["div"])
+                e = ents.setdefault(k, {"event": ev.get("name"), "event_id": ev.get("id"),
+                                        "date": (ev.get("start") or "")[:10], "div": blk["div"],
+                                        "cat": blk.get("cat"), "program": prog, "team": team,
+                                        "rounds": [], "_et": []})
+                e["rounds"].append({"round": blk.get("round") or "", "score": score,
+                                    "rank": rank, "replay": replay})
+                if etot is not None and 0 < etot <= 1000:
+                    e["_et"].append(etot)
+        for e in ents.values():
+            rs = sorted(e["rounds"], key=lambda r: _round_order(r["round"]))
+            e["rounds"] = rs
+            last = rs[-1]
+            et = e.pop("_et")
+            if et:
+                e["total"] = max(et)
+                # A two-day total can be the SUM of the days (~190 vs ~95);
+                # rank on the per-round equivalent so averages stay comparable.
+                top = max(r["score"] for r in rs)
+                e["score"] = round(e["total"] / len(rs), 4) if len(rs) > 1 and e["total"] > 1.5 * top else e["total"]
+            elif len(rs) > 1 and _round_order(last["round"]) > 0:
+                e["score"] = last["score"]
+            else:
+                e["score"] = max(r["score"] for r in rs)
+            e["rank"] = last["rank"]
+            e["replay"] = last["replay"]
+            e["round"] = " + ".join(r["round"] for r in rs if r["round"])
+            perfs.append(e)
     data = {"events": evs, "perfs": perfs}
     _LB_CACHE[season] = (time.time(), data)
     return data
+
+
+def _round_order(r):
+    """Earlier rounds first: Day 1 / prelims / semis → Day 2 / finals."""
+    t = (r or "").lower()
+    m = re.search(r"day\s*(\d)", t)
+    if m:
+        return int(m.group(1))
+    if "final" in t and "semi" not in t and "quarter" not in t:
+        return 9
+    if "semi" in t:
+        return 5
+    if "quarter" in t:
+        return 4
+    if "prelim" in t or "qualif" in t:
+        return 1
+    return 0
 
 
 def seasons(db):
@@ -266,7 +311,8 @@ def _match(p, division=None, cat=None, q=None):
 
 def _summ(ps):
     sc = [p["score"] for p in ps]
-    return {"events": len({p["event_id"] for p in ps}), "performances": len(sc),
+    return {"events": len({p["event_id"] for p in ps}),
+            "performances": sum(len(p.get("rounds") or [1]) for p in ps),
             "avg": round(sum(sc) / len(sc), 4) if sc else None, "high": max(sc) if sc else None,
             "wins": sum(1 for p in ps if str(p["rank"]).strip() == "1")}
 
