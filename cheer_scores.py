@@ -591,7 +591,15 @@ def raw_api(path, params=None):
         if isinstance(o, list):
             return [len(o), shape(o[0], d + 1)] if o else []
         return o if not isinstance(o, str) else o[:100]
+    tables = [v for _p, v in _walk(j) if isinstance(v, dict) and v.get("type") == "table"]
+    if tables:
+        tinfo = [{"id": t.get("id"), "rows": len(t.get("rows") or [])} for t in tables[:20]]
+    else:
+        tinfo = []
     items = (((j.get("data") or {}).get("content") or {}).get("items")) if isinstance(j, dict) else None
+    if not items and isinstance(j, dict):
+        items = [v for _p, v in _walk(j) if isinstance(v, dict) and v.get("type") in ("table", "title-with-action")][:4]
     samples = [json.dumps(x)[:3500] for x in (items or [])[:4]]
     return {"ok": True, "status": r.status_code, "bytes": len(r.content),
-            "n_items": len(items or []), "samples": samples}
+            "n_items": len(items or []), "tables": tinfo, "top_keys": list(j.keys())[:20] if isinstance(j, dict) else None,
+            "samples": samples}
