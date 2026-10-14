@@ -42,22 +42,26 @@ def split_division(name):
     return " · ".join(parts), ""
 
 
-def category(div):
-    """Coarse bucket for the leaderboard filter, read off the division name."""
+def category(div, cls=None):
+    """CheerStats-style gym type, read off the division name (+ class):
+    CheerABILITIES · Rec · School · Worlds · D2 · Small Gym · D1 · Dance."""
     d = (div or "").lower()
-    if re.search(r"\brec\b|recreation|\baff\b|\d+u\b", d):
-        return "Rec"
-    if re.search(r"college|university|\bnaia\b|\bd-?i\b|\bdivision i", d):
-        return "College"
-    if re.search(r"high school|varsity|junior varsity|\bjv\b|freshman|junior high|middle school|elementary|game ?day|\bhs\b|\bjh\b|crowdleader|band chant|fight song|sideline|mascot|stunt", d):
-        return "School"
-    if re.search(r"pom|jazz|hip ?hop|kick|dance|contemporary|lyrical", d):
-        return "Dance"
+    c = (cls or "").lower()
     if re.search(r"abilities|special needs|adaptive", d):
         return "CheerABILITIES"
-    if re.search(r"worlds?|level ?7|l7|international open|\bu16\b|\bu18\b", d):
+    if re.search(r"\brec\b|recreation|\baff\b|\b\d+u\b|traditional rec", d):
+        return "Rec"
+    if re.search(r"college|university|\bnaia\b|high school|\bvarsity\b|junior varsity|\bjv\b|freshman|junior high|middle school|elementary|game ?day|\bhs\b|\bjh\b|crowdleader|band chant|fight song|sideline|mascot|show cheer|pep flag", d):
+        return "School"
+    if c == "dance" or re.search(r"\bpom\b|jazz|hip ?hop|\bkick\b|contemporary|lyrical|\bdance\b", d):
+        return "Dance"
+    if re.search(r"international|\bopen\b|\bu1[68]\b|\bl7\b|level 7|\bl6\b|level 6|worlds?", d):
         return "Worlds"
-    return "All Star"
+    if re.search(r"small gym|\bsg\b", d):
+        return "Small Gym"
+    if re.search(r"\bd2\b|\bdii\b|division ii", d):
+        return "D2"
+    return "D1"
 
 
 def _num(s):
@@ -69,9 +73,19 @@ def _num(s):
 
 
 def compact(ev):
-    """fetch_event output → the stored results list."""
+    """fetch_event output → the stored results list. Row =
+    [rank, program, team, score, raw, ded, replay]. School events have
+    no team name (the school IS the program)."""
     out = []
     for d in ev.get("divisions") or []:
+        if d.get("structured"):
+            div, rnd = d.get("division") or "", d.get("round") or ""
+            rows = [[r.get("rank") or "", r.get("program") or "", r.get("team") or "",
+                     _num(r.get("score")), _num(r.get("raw")), _num(r.get("ded")), r.get("replay")]
+                    for r in d.get("rows") or [] if (r.get("program") or r.get("team"))]
+            if rows:
+                out.append({"div": div, "round": rnd, "cat": category(div, d.get("cls")), "rows": rows})
+            continue
         div, rnd = split_division(d.get("division") or "")
         cols = d.get("columns") or []
         lc = [c.lower() for c in cols]
@@ -82,16 +96,19 @@ def compact(ev):
                     if n in c:
                         return i
             return None
-        ri = idx("raw")
-        di = idx("deduction")
+        ri, di = idx("raw"), idx("deduction")
         rows = []
         for t, r in zip(d.get("teams") or [], d.get("rows") or []):
-            team = (t.get("team") or "").strip()
-            if not team:
+            name = (t.get("team") or "").strip()
+            if not name:
                 continue
-            rows.append([t.get("rank") or "", team, _num(t.get("score")),
+            prog, team = name, ""
+            m = re.match(r"^(.+?)\s+[-–]\s+(.+)$", name)
+            if m and category(div) not in ("School",):
+                prog, team = m.group(1), m.group(2)
+            rows.append([t.get("rank") or "", prog, team, _num(t.get("score")),
                          _num(r[ri]) if ri is not None and ri < len(r) else None,
-                         _num(r[di]) if di is not None and di < len(r) else None])
+                         _num(r[di]) if di is not None and di < len(r) else None, None])
         if rows:
             out.append({"div": div or d.get("division") or "", "round": rnd,
                         "cat": category(div or d.get("division")), "rows": rows})
@@ -221,7 +238,12 @@ def leaderboard(db, season, division=None, cat=None, q=None, rank_by="avg", limi
             if cat and blk.get("cat") != cat:
                 continue
             for row in blk["rows"]:
-                team, score = row[1], row[2]
+                # v2 rows: [rank, program, team, score, raw, ded, replay];
+                # v1 rows: [rank, name, score, raw, ded]
+                if len(row) >= 7:
+                    team, score = " · ".join(x for x in (row[1], row[2]) if x), row[3]
+                else:
+                    team, score = row[1], row[2]
                 if score is None or not (0 < score <= 1000):
                     continue
                 k = (team, div)
