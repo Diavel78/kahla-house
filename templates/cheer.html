@@ -71,6 +71,28 @@ details.raw td, details.raw th { border:1px solid var(--border); padding:4px 6px
 .ev:hover { border-color:var(--pink); }
 details.diag { margin-top:24px; font-size:12px; color:var(--text-muted); }
 details.diag pre { white-space:pre-wrap; word-break:break-all; background:var(--surface); padding:12px; border-radius:10px; margin-top:8px; }
+.tabs { display:flex; gap:6px; margin:18px 0 4px; border-bottom:1px solid var(--border); }
+.tab { background:none; border:0; color:var(--text-secondary); font:600 14px 'DM Sans',sans-serif; padding:10px 14px; cursor:pointer; border-bottom:2px solid transparent; }
+.tab.on { color:var(--text); border-bottom-color:var(--pink); }
+.filters { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:14px; margin:14px 0; display:grid; gap:10px; }
+.frow { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.filters select, .filters input { background:var(--bg); border:1px solid var(--border-light); color:var(--text); border-radius:10px; padding:10px 12px; font-size:14px; }
+.filters input.grow, .filters select.grow { flex:1; min-width:200px; }
+.chip { background:var(--bg); border:1px solid var(--border-light); color:var(--text-secondary); border-radius:999px; padding:7px 13px; font-size:13px; font-weight:600; cursor:pointer; }
+.chip.on { background:var(--pink-dim); border-color:var(--pink); color:var(--text); }
+.seg { display:inline-flex; border:1px solid var(--border-light); border-radius:10px; overflow:hidden; }
+.seg button { background:var(--bg); border:0; color:var(--text-secondary); padding:9px 13px; font-weight:600; cursor:pointer; }
+.seg button.on { background:var(--blue); color:#fff; }
+.lb { background:var(--surface); border:1px solid var(--border); border-radius:14px; overflow:hidden; }
+.lbr { display:grid; grid-template-columns:34px 1fr auto auto; gap:10px; align-items:center; padding:10px 14px; border-bottom:1px solid var(--border); cursor:pointer; }
+.lbr:last-child { border-bottom:0; }
+.lbr .nm { font-weight:600; font-size:14px; }
+.lbr .dv { color:var(--text-muted); font-size:12px; margin-top:2px; }
+.lbr .big { font:700 15px 'JetBrains Mono',monospace; color:var(--pink); text-align:right; }
+.lbr .sm { font:500 11px 'JetBrains Mono',monospace; color:var(--text-muted); text-align:right; }
+.lbx { grid-column:1/-1; font-size:12px; color:var(--text-secondary); padding:4px 0 2px 44px; }
+.lbx div { display:flex; justify-content:space-between; gap:10px; padding:3px 0; border-top:1px dashed var(--border); }
+.count { color:var(--text-muted); font-size:12px; margin:6px 2px; }
 #gate { display:flex; align-items:center; justify-content:center; height:100vh; color:var(--text-muted); }
 @media (max-width:600px) { .nav a:not(.active) { display:none; } }
 </style>
@@ -87,19 +109,47 @@ details.diag pre { white-space:pre-wrap; word-break:break-all; background:var(--
     </div>
     <div class="wrap">
         <h1>Cheer Scoring</h1>
-        <div class="sub">Scores pulled straight from Varsity TV. Paste an event link or number, or pick a recent event.</div>
-        <div class="bar">
-            <input id="evIn" placeholder="tv.varsity.com/events/11267707… or 11267707" onkeydown="if(event.key==='Enter')load(true)">
-            <button class="btn" onclick="load(true)">Get scores</button>
-            <button class="btn ghost" onclick="loadEvents()">Recent events</button>
+        <div class="sub">Every Varsity TV result, ranked. Season leaderboards by division, plus any single event.</div>
+        <div class="tabs">
+            <button class="tab on" id="tLb" onclick="showTab('lb')">Leaderboards</button>
+            <button class="tab" id="tEv" onclick="showTab('ev')">Events</button>
+            <button class="tab" id="tLk" onclick="showTab('lk')">Look up</button>
         </div>
-        <div class="row-ctl">
-            <label><input type="checkbox" id="auto" onchange="setAuto()"> Auto-refresh every 2 min</label>
-            <input type="text" id="find" placeholder="Highlight a gym / team…" oninput="render()">
+
+        <div id="paneLb">
+            <div class="filters">
+                <div class="frow">
+                    <select id="fSeason" onchange="seasonChanged()"></select>
+                    <input id="fQ" class="grow" placeholder="Search a program or team…" oninput="debLb()">
+                </div>
+                <div class="frow">
+                    <select id="fDiv" class="grow" onchange="loadLb()"><option value="">All divisions</option></select>
+                    <span class="seg"><button id="rAvg" class="on" onclick="setRank('avg')">Average</button><button id="rHigh" onclick="setRank('high')">High score</button></span>
+                </div>
+                <div class="frow" id="fCats"></div>
+            </div>
+            <div class="count" id="lbCount"></div>
+            <div class="lb" id="lb"></div>
         </div>
-        <div id="status" class="status"></div>
-        <div id="events" class="events"></div>
-        <div id="out"></div>
+
+        <div id="paneEv" style="display:none">
+            <div class="count" id="evCount"></div>
+            <div id="evList" class="events"></div>
+        </div>
+
+        <div id="paneLk" style="display:none">
+            <div class="bar">
+                <input id="evIn" placeholder="tv.varsity.com/events/11267707… or 11267707" onkeydown="if(event.key==='Enter')load(true)">
+                <button class="btn" onclick="load(true)">Get scores</button>
+            </div>
+            <div class="row-ctl">
+                <label><input type="checkbox" id="auto" onchange="setAuto()"> Auto-refresh every 2 min</label>
+                <input type="text" id="find" placeholder="Highlight a gym / team…" oninput="render()">
+            </div>
+            <div id="status" class="status"></div>
+            <div id="events" class="events"></div>
+            <div id="out"></div>
+        </div>
         <details class="diag"><summary>Diagnostics</summary><pre id="diag"></pre></details>
     </div>
 </div>
@@ -127,9 +177,10 @@ firebase.auth().onAuthStateChanged(async user => {
     document.getElementById('app').style.display = '';
     try {
         const last = localStorage.getItem('kh_cheer_event');
-        if (last) { document.getElementById('evIn').value = last; load(false); }
+        if (last) document.getElementById('evIn').value = last;
         document.getElementById('find').value = localStorage.getItem('kh_cheer_find') || '';
     } catch (e) {}
+    initLb();
 });
 
 async function api(path) {
@@ -194,7 +245,75 @@ async function loadEvents() {
         `<div class="ev" onclick="pick('${E(ev.id)}')">${E(ev.name)}</div>`).join('');
 }
 
-function pick(id) { document.getElementById('evIn').value = id; load(true); }
+function pick(id) { showTab('lk'); document.getElementById('evIn').value = id; load(false); }
+
+/* ===== Leaderboards ===== */
+const CATS = ['School', 'College', 'All Star', 'Worlds', 'Rec', 'Dance', 'CheerABILITIES'];
+let LB = { season: '', cat: '', rank: 'avg' }, LBT = null, LBDATA = null, OPEN = {};
+function showTab(t) {
+    for (const [k, id, pane] of [['lb', 'tLb', 'paneLb'], ['ev', 'tEv', 'paneEv'], ['lk', 'tLk', 'paneLk']]) {
+        document.getElementById(id).classList.toggle('on', k === t);
+        document.getElementById(pane).style.display = k === t ? '' : 'none';
+    }
+    if (t === 'ev') loadSeasonEvents();
+}
+async function initLb() {
+    document.getElementById('fCats').innerHTML = ['<button class="chip on" data-c="">All</button>'].concat(
+        CATS.map(c => `<button class="chip" data-c="${E(c)}">${E(c)}</button>`)).join('');
+    document.querySelectorAll('#fCats .chip').forEach(b => b.onclick = () => {
+        LB.cat = b.dataset.c;
+        document.querySelectorAll('#fCats .chip').forEach(x => x.classList.toggle('on', x === b));
+        loadLb();
+    });
+    let d;
+    try { d = await api('/api/cheer/seasons'); } catch (e) { document.getElementById('lbCount').textContent = 'Could not load seasons: ' + e.message; return; }
+    const ss = d.seasons || [];
+    const sel = document.getElementById('fSeason');
+    if (!ss.length) { sel.innerHTML = `<option>${E(d.current)}</option>`; document.getElementById('lbCount').textContent = 'No events saved yet — the first data pull is still running.'; return; }
+    sel.innerHTML = ss.map(x => `<option value="${E(x.season)}">${E(x.season)} season · ${x.events} events</option>`).join('');
+    LB.season = ss[0].season;
+    loadLb(true);
+}
+function seasonChanged() { LB.season = document.getElementById('fSeason').value; document.getElementById('fDiv').value = ''; loadLb(true); }
+function setRank(r) { LB.rank = r; document.getElementById('rAvg').classList.toggle('on', r === 'avg'); document.getElementById('rHigh').classList.toggle('on', r === 'high'); loadLb(); }
+function debLb() { clearTimeout(LBT); LBT = setTimeout(loadLb, 300); }
+async function loadLb(newSeason) {
+    const qs = new URLSearchParams({ season: LB.season, rank: LB.rank, cat: LB.cat,
+        division: document.getElementById('fDiv').value, q: document.getElementById('fQ').value.trim() });
+    document.getElementById('lbCount').textContent = 'Loading…';
+    try { LBDATA = await api('/api/cheer/leaderboard?' + qs); } catch (e) { document.getElementById('lbCount').textContent = 'Failed: ' + e.message; return; }
+    if (newSeason) {
+        const dv = document.getElementById('fDiv');
+        dv.innerHTML = '<option value="">All divisions</option>' + (LBDATA.divisions || []).map(x => `<option>${E(x)}</option>`).join('');
+    }
+    OPEN = {};
+    drawLb();
+}
+function drawLb() {
+    const d = LBDATA;
+    document.getElementById('lbCount').textContent = `${d.total} teams · ${d.events_with_results} events with scores${d.total > d.rows.length ? ' · showing top ' + d.rows.length : ''}`;
+    const key = LB.rank === 'high' ? 'high' : 'avg';
+    document.getElementById('lb').innerHTML = d.rows.map((r, i) => {
+        const id = 'r' + i;
+        const ex = OPEN[id] ? `<div class="lbx">${r.scores.map(s => `<div><span>${E(s.date)} · ${E(s.event)}</span><span>#${E(s.rank)} · ${E(s.score)}</span></div>`).join('')}</div>` : '';
+        return `<div class="lbr" onclick="OPEN['${id}']=!OPEN['${id}'];drawLb()">
+            <div class="rk r${i + 1}">${i + 1}</div>
+            <div><div class="nm">${E(r.team)}</div><div class="dv">${E(r.division)} · ${E(r.cat)}</div></div>
+            <div class="sm">${r.n} comp${r.n === 1 ? '' : 's'}${r.wins ? ' · ' + r.wins + ' 🏆' : ''}</div>
+            <div class="big">${Number(r[key]).toFixed(key === 'avg' ? 2 : 1)}</div>${ex}</div>`;
+    }).join('') || '<div class="team">Nothing matches.</div>';
+}
+async function loadSeasonEvents() {
+    const box = document.getElementById('evList');
+    box.innerHTML = '';
+    document.getElementById('evCount').textContent = 'Loading…';
+    let d;
+    try { d = await api('/api/cheer/season-events?season=' + encodeURIComponent(LB.season || '')); } catch (e) { document.getElementById('evCount').textContent = 'Failed: ' + e.message; return; }
+    const evs = d.events || [];
+    document.getElementById('evCount').textContent = `${evs.length} events · ${LB.season} season`;
+    box.innerHTML = evs.map(ev => `<div class="ev" onclick="pick('${E(ev.id)}')"><div style="font-weight:600">${E(ev.name)}</div>
+        <div style="color:var(--text-muted);font-size:12px;margin-top:2px">${ev.start ? E(new Date(ev.start).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })) + ' · ' : ''}${ev.divisions ? ev.divisions + ' divisions · ' + ev.scores + ' scores' : 'no scores posted'}</div></div>`).join('');
+}
 
 function setAuto() {
     clearInterval(TIMER);

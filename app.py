@@ -1556,6 +1556,64 @@ def api_cheer_events():
     return jsonify(cheer_scores.list_events())
 
 
+def _cheer_months(season):
+    """'2025-26' → ['2025-07-01', … '2026-06-01']."""
+    y = int(season[:4])
+    return [f"{y + (m < 7)}-{m:02d}-01" for m in list(range(7, 13)) + list(range(1, 7))]
+
+
+def _cheer_season_now():
+    import cheer_store
+    return cheer_store.season_of(datetime.now(ZoneInfo("America/Phoenix")).strftime("%Y-%m-%d"))
+
+
+@app.route("/api/cheer/ingest")
+def api_cheer_ingest():
+    """Shared-secret ingest (site-curl bridge + the nightly workflow).
+    ?season=2025-26 walks that season's month tabs; default = this season
+    and last. Bounded per call — repeat until remaining is 0."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    import cheer_store
+    seasons = [request.args["season"]] if request.args.get("season") else None
+    if not seasons:
+        cur = _cheer_season_now()
+        y = int(cur[:4])
+        seasons = [cur, f"{y - 1}-{y % 100:02d}"]
+    months = request.args.get("months")
+    months = months.split(",") if months else [m for s_ in seasons for m in _cheer_months(s_)]
+    today = datetime.now(ZoneInfo("America/Phoenix")).strftime("%Y-%m-01")
+    months = [m for m in months if m <= today]
+    out = cheer_store.ingest(get_db(), months, budget_s=float(request.args.get("budget", 40)))
+    out["seasons"] = seasons
+    return jsonify(out)
+
+
+@app.route("/api/cheer/seasons")
+@admin_required
+def api_cheer_seasons():
+    import cheer_store
+    return jsonify({"seasons": cheer_store.seasons(get_db()), "current": _cheer_season_now()})
+
+
+@app.route("/api/cheer/leaderboard")
+@admin_required
+def api_cheer_leaderboard():
+    import cheer_store
+    a = request.args
+    return jsonify(cheer_store.leaderboard(
+        get_db(), a.get("season") or _cheer_season_now(), division=a.get("division") or None,
+        cat=a.get("cat") or None, q=a.get("q") or None, rank_by=a.get("rank") or "avg"))
+
+
+@app.route("/api/cheer/season-events")
+@admin_required
+def api_cheer_season_events():
+    import cheer_store
+    return jsonify({"events": cheer_store.events_list(get_db(), request.args.get("season") or _cheer_season_now())})
+
+
 @app.route("/debug-varsity")
 def debug_varsity():
     """Shared-secret probe (site-curl bridge): ?event=<id> reads one event,

@@ -543,3 +543,23 @@ def results_tab(extra=None):
     return {"ok": True, "status": r.status_code, "bytes": len(r.content),
             "tabs": tabs, "events": events[:200], "cards": cards[:200],
             "sections": [s.get("id") for s in (j.get("sections") or []) if isinstance(s, dict)]}
+
+
+def results_month(month):
+    """Every event card on Varsity's results index for one month
+    ('2026-02-01'), paging limit/offset until a page adds nothing."""
+    events, seen, err = [], set(), None
+    for off in range(0, 1000, 100):
+        page = results_tab({"date": month, "offset": str(off)})
+        if not page.get("ok"):
+            err = page.get("error") or page.get("status")
+            break
+        new = 0
+        for c in page.get("cards") or []:
+            if c.get("id") and c["id"] not in seen:
+                seen.add(c["id"])
+                new += 1
+                events.append({"id": c["id"], "title": c.get("title"), "location": c.get("sub1")})
+        if new < 100:
+            break
+    return {"events": events, "error": err}

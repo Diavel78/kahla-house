@@ -1,0 +1,45 @@
+name: cheer-ingest
+# Cheer Scoring: pull new/updated Varsity TV results into Firestore
+# (/api/cheer/ingest walks this season + last season's month tabs; each
+# call is bounded, so it repeats until nothing is left). Daily, plus
+# manual dispatch for backfills (season=2025-26).
+on:
+  schedule:
+    - cron: "17 9 * * *"     # 2:17am Arizona
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "Season to backfill, e.g. 2025-26 (blank = this + last)"
+        required: false
+        type: string
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: ingest until done
+        env:
+          CRON_KEY: ${{ secrets.FILLS_CRON_SECRET }}
+          SEASON: ${{ inputs.season }}
+        run: |
+          KEY="$(printf '%s' "$CRON_KEY" | tr -d '[:space:]')"
+          Q=""
+          [ -n "$SEASON" ] && Q="&season=${SEASON}"
+          for i in $(seq 1 40); do
+            OUT=$(curl -sSL --max-time 90 "https://www.thekahlahouse.com/api/cheer/ingest?key=${KEY}${Q}" || true)
+            echo "=== pass $i ==="
+            echo "$OUT" | python3 -c 'import json,sys
+          try:
+              d=json.load(sys.stdin)
+          except Exception:
+              print("bad response"); sys.exit(0)
+          print({k:d.get(k) for k in ("discovered","todo","done","remaining","secs")})
+          for e in d.get("events") or []: print("  +", e.get("season"), e.get("name"), e.get("divs"), "divs", e.get("scores"), "scores")
+          for e in d.get("errors") or []: print("  !", e)
+          open("/tmp/rem","w").write(str(d.get("remaining", 1)))'
+            REM=$(cat /tmp/rem 2>/dev/null || echo 1)
+            [ "$REM" = "0" ] && break
+            sleep 3
+          done
+          exit 0
