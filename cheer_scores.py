@@ -591,4 +591,7 @@ def raw_api(path, params=None):
         if isinstance(o, list):
             return [len(o), shape(o[0], d + 1)] if o else []
         return o if not isinstance(o, str) else o[:100]
-    return {"ok": True, "status": r.status_code, "bytes": len(r.content), "shape": shape(j)}
+    items = (((j.get("data") or {}).get("content") or {}).get("items")) if isinstance(j, dict) else None
+    samples = [json.dumps(x)[:3500] for x in (items or [])[:4]]
+    return {"ok": True, "status": r.status_code, "bytes": len(r.content),
+            "n_items": len(items or []), "samples": samples}
