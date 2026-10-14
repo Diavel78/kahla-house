@@ -716,7 +716,7 @@ def _get_json(url, params):
         return None
 
 
-def fetch_structured(event_id, budget_s=30, page=10):
+def fetch_structured(event_id, budget_s=30, page=100):
     """All-star events: every division, every round, every team. The
     preview pages (results/partial) list the divisions with their top 3;
     each division with a View All is re-read in full from results/list
@@ -749,7 +749,7 @@ def fetch_structured(event_id, budget_s=30, page=10):
         return b, (got[0]["rows"] if got else None)
     filled = 0
     left = max(5.0, budget_s + 25 - (time.time() - t0))
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=12) as ex:
         futs = [ex.submit(full, b) for b in want]
         for f in futs:
             try:

@@ -16,7 +16,7 @@ on:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - name: ingest until done
         env:
@@ -26,8 +26,8 @@ jobs:
           KEY="$(printf '%s' "$CRON_KEY" | tr -d '[:space:]')"
           Q=""
           [ -n "$SEASON" ] && Q="&season=${SEASON}"
-          for i in $(seq 1 40); do
-            OUT=$(curl -sSL --max-time 90 "https://www.thekahlahouse.com/api/cheer/ingest?key=${KEY}${Q}" || true)
+          for i in $(seq 1 120); do
+            OUT=$(curl -sSL --max-time 290 "https://www.thekahlahouse.com/api/cheer/ingest?key=${KEY}${Q}" || true)
             echo "=== pass $i ==="
             echo "$OUT" | python3 -c 'import json,sys
           try:
