@@ -3688,6 +3688,23 @@ def api_bet_sheets_picks():
         _BS_LOT.pop(slug, None)
         lot = _bs_slug_lot(sb, slug)
         out["lot"] = lot
+        try:                                           # the slug's raw trades (Oct 13 2026: an app sale the sold tick missed)
+            ta = (sb.table("poly_activities").select("at,payload").eq("type", "ACTIVITY_TYPE_TRADE")
+                  .eq("slug", slug).order("at").limit(60).execute().data) or []
+            tl = []
+            for a in ta:
+                t = (a.get("payload") or {}).get("trade") or {}
+                tl.append({"at": a.get("at"), "keys": sorted(t.keys())[:40],
+                           "isAggressor": t.get("isAggressor"),
+                           "aggr": {k: (t.get("aggressor") or {}).get(k) for k in ("intent", "side", "manualOrderIndicator")},
+                           "pass": {k: (t.get("passive") or {}).get(k) for k in ("intent", "side", "manualOrderIndicator")},
+                           "qty": _trade_qty(t), "cost": t.get("cost"), "price": t.get("price"),
+                           "realizedPnl": t.get("realizedPnl"),
+                           "before": (t.get("beforePosition") or {}).get("netPosition"),
+                           "after": (t.get("afterPosition") or {}).get("netPosition")})
+            out["trades"] = tl
+        except Exception as e:
+            out["trades_err"] = str(e)[:160]
         try:
             pos = _pmm_positions_raw(get_client(), fresh=True) or {}
             out["venue_pos"] = pos.get(slug)
