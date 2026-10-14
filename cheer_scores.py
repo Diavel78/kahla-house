@@ -694,7 +694,11 @@ def parse_partial(j):
             rows.append({"rank": num("rank"), "program": prog, "team": team,
                          "raw": num("raw-score"), "ded": num("deductions"),
                          "perf": num("performance-score"),
-                         "score": num("event-score") or num("performance-score"), "replay": replay})
+                         # Per-PERFORMANCE score: the event score repeats across
+                         # rounds (it is the combined result), so averages and
+                         # highs read the round's own performance score.
+                         "event": num("event-score"),
+                         "score": num("performance-score") or num("event-score"), "replay": replay})
         if rows:
             out.append({**ctx, "rows": rows})
     return out
