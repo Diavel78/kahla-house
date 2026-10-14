@@ -509,8 +509,12 @@ def results_tab(extra=None):
     params = {"site_id": "20", "isEventHubLayoutEnabled": "true", "limit": "100",
               "offset": "0", "tz": "America/Phoenix", "version": "1.33.2"}
     params.update(extra or {})
+    # The month is a PATH segment (results/tab/2026-02-01), read off the
+    # page's own transfer state Oct 14 2026 — a ?date= query is ignored.
+    month = params.pop("date", None)
+    url = TAB_API + (f"/{month}" if month else "")
     try:
-        r = requests.get(TAB_API, params=params,
+        r = requests.get(url, params=params,
                          headers={**_HEADERS, "Accept": "application/json"}, timeout=15)
         j = r.json() if r.status_code == 200 else None
     except Exception as e:
@@ -534,10 +538,12 @@ def results_tab(extra=None):
     # Event cards: parent objects carrying a title plus labels/footers.
     cards = []
     for _p, v in _walk(j):
-        if isinstance(v, dict) and isinstance(v.get("title"), str) and (v.get("label1") or v.get("footer1") or v.get("subtitle1")):
-            act = v.get("action") or {}
-            u = act.get("url") if isinstance(act, dict) else None
-            m = re.search(r"/events/(\d+)", u or "")
+        if not (isinstance(v, dict) and isinstance(v.get("title"), str)):
+            continue
+        act = v.get("action") if isinstance(v.get("action"), dict) else {}
+        u = act.get("url") or (v.get("url") if isinstance(v.get("url"), str) else None)
+        m = re.search(r"/events/(\d+)", u or "")
+        if m and v.get("title") not in ("Results", "View All", "View Results"):
             cards.append({"id": m.group(1) if m else None, "title": v.get("title"),
                           "sub1": v.get("subtitle1"), "sub2": v.get("subtitle2"),
                           "label1": v.get("label1"), "footer1": v.get("footer1"), "url": u})
