@@ -570,3 +570,25 @@ def results_month(month):
         if new < 100:
             break
     return {"events": events, "error": err}
+
+
+def raw_api(path, params=None):
+    """Probe: GET any tv-admin.varsity.com path, return its shape and the
+    first few result-ish objects (anything carrying a score/team field)."""
+    url = "https://tv-admin.varsity.com" + (path if path.startswith("/") else "/" + path)
+    try:
+        r = requests.get(url, params=params or None,
+                         headers={**_HEADERS, "Accept": "application/json"}, timeout=15)
+        j = r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    def shape(o, d=0):
+        if d > 7:
+            return "…"
+        if isinstance(o, dict):
+            return {k: shape(v, d + 1) for k, v in list(o.items())[:30]}
+        if isinstance(o, list):
+            return [len(o), shape(o[0], d + 1)] if o else []
+        return o if not isinstance(o, str) else o[:100]
+    return {"ok": True, "status": r.status_code, "bytes": len(r.content), "shape": shape(j)}
