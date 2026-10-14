@@ -3522,6 +3522,12 @@ def test_hand_sold_plan() -> None:
     p2 = _app._hand_sold_plan(az, True, "2026-10-14T01:38:24+00:00", 25.8, 5)
     assert p2 and p2["qty"] == 5.0 and p2["pnl_usd"] == round(2.27 - 5 * 0.258, 2), p2
     assert _app._hand_sold_plan(az, True, "2026-10-14T02:10:00+00:00", 25.8, 5) is None    # truly before booking
+    # sold, then bought back: a held slug closes only with a re-buy after the sale
+    rebuy = [tr("2026-10-13T19:28:08-07:00", "ORDER_INTENT_BUY_SHORT", 5, 1.14, aggr=False)]
+    assert _app._hand_rebought_after(az + rebuy, True, p2["last_at"])
+    assert not _app._hand_rebought_after(az, True, p2["last_at"])
+    assert not _app._hand_rebought_after(az + rebuy, False, p2["last_at"])            # other side's buy
+    assert not _app._hand_rebought_after(rebuy, True, "2026-10-14T03:00:00+00:00")     # buy before the sale
     src = open(_app.__file__).read()
     assert 'stats["sold"] = _hand_sold_tick(' in src, "sold tick not wired into handbets"
     print("  ok")

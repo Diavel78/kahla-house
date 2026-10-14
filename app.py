@@ -15698,6 +15698,29 @@ def _hand_sold_plan(trades: list, syn: bool, since_iso: str | None,
             "pnl_usd": pnl, "last_at": last}
 
 
+def _hand_rebought_after(trades: list, syn: bool, after_at) -> bool:
+    """Pure. An our-side BUY (BUY_LONG for a YES lot, BUY_SHORT for a NO
+    lot) on the tape strictly after `after_at` — the re-buy that makes a
+    held slug a NEW bet after a sale."""
+    def _ts(x):
+        try:
+            d = datetime.fromisoformat(str(x).replace("Z", "+00:00"))
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+    cut = _ts(after_at) if after_at else None
+    if cut is None:
+        return False
+    want = "BUY_SHORT" if syn else "BUY_LONG"
+    for a in trades or []:
+        t = (a.get("payload") or {}).get("trade") or {}
+        mo = (t.get("aggressor") if t.get("isAggressor") else t.get("passive")) or {}
+        at = _ts(a.get("at"))
+        if at and at > cut and _intent_short(mo.get("intent")) == want and (_trade_qty(t) or 0) > 0:
+            return True
+    return False
+
+
 def _hand_sold_tick(sb, client, now) -> dict:
     """Close sheet/app picks whose filled lot Rob sold before settlement."""
     st = {"cands": 0, "sold": 0, "skipped": {}}
@@ -15723,14 +15746,29 @@ def _hand_sold_tick(sb, client, now) -> dict:
         if not slug or not (b.get("filled") or float(b.get("filled_qty") or 0) > 0):
             continue
         syn = bool(b.get("pmm_synthetic"))
-        if _bet_sheet_pick_side_held(mirror.get(slug), syn) >= 0.5 or _mirror_shows_held(slug):
-            continue                                   # still holding — nothing to close
-        cands.append((r, b, slug, syn))
+        held_now = (_bet_sheet_pick_side_held(mirror.get(slug), syn) >= 0.5
+                    or _mirror_shows_held(slug))
+        if held_now:
+            # SOLD AND BOUGHT BACK (Oct 13 2026, the Predators: sold 5 at
+            # ~45¢, re-bought 5 at 22.8¢ twenty minutes later). A held slug
+            # can still hide a closed round trip — the tell is a lot whose
+            # cost no longer matches the pick's price. Only then is the tape
+            # read; the plan below still has to find sells covering the lot
+            # AND a buy after them.
+            lot = _bs_slug_lot(sb, slug)
+            try:
+                lc = float(lot["cost"]) / float(lot["qty"]) * 100.0 if lot and float(lot["qty"]) >= 0.5 else None
+                drift = lc is not None and abs(lc - float(b.get("price_c"))) >= 0.5
+            except (TypeError, ValueError, KeyError, ZeroDivisionError):
+                drift = False
+            if not drift:
+                continue                               # still holding the same lot — nothing to close
+        cands.append((r, b, slug, syn, held_now))
     st["cands"] = len(cands)
     if not cands:
         return st
     fresh = None
-    for r, b, slug, syn in cands:
+    for r, b, slug, syn, held_now in cands:
         if st["sold"] >= _HAND_SOLD_MAX:
             break
         try:
@@ -15752,6 +15790,9 @@ def _hand_sold_tick(sb, client, now) -> dict:
                                syn, since, b.get("price_c"), fq)
         if not plan:
             _skip("no_sell_on_tape"); continue         # tape not mirrored yet, or never sold
+        if held_now and not _hand_rebought_after(
+                [a for a in acts if a.get("type") == "ACTIVITY_TYPE_TRADE"], syn, plan.get("last_at")):
+            _skip("held_no_rebuy"); continue
         if fresh is None:                              # venue truth, once, before any write
             try:
                 fresh = _pmm_positions_raw(client, fresh=True)
@@ -15764,9 +15805,9 @@ def _hand_sold_tick(sb, client, now) -> dict:
             if why:
                 st["gate"] = why
                 break
-        if _bet_sheet_pick_side_held(fresh.get(slug), syn) >= 0.5:
+        if not held_now and _bet_sheet_pick_side_held(fresh.get(slug), syn) >= 0.5:
             _skip("still_held"); continue
-        sold = {**plan, "at": now.isoformat()}
+        sold = {**plan, "at": now.isoformat(), **({"rebought": True} if held_now else {})}
         try:
             sb.table("bot_picks").update({
                 "status": "void", "pnl_units": 0, "settled_at": now.isoformat(),
