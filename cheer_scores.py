@@ -328,7 +328,7 @@ def fetch_event(ref, fresh=False):
 API = "https://tv-admin.varsity.com/api/experiences/web/event-hub/{eid}/results"
 
 
-def fetch_event_api(event_id):
+def fetch_event_api(event_id, find=None):
     """Varsity's own JSON behind the results page (found in the page's
     transfer state Oct 14 2026). Probe-only for now."""
     url = API.format(eid=event_id)
@@ -354,6 +354,32 @@ def fetch_event_api(event_id):
             return [len(o), shape(o[0], d + 1)] if o else []
         return o if not isinstance(o, str) else o[:80]
     out["shape"] = shape(j)
+    # Where do the scores live? Paths to a known team string, plus every
+    # follow-up apiCall / results-ish URL the payload references.
+    needle = (find or "").lower()
+    hits, calls = [], []
+    for path, v in _walk(j):
+        if isinstance(v, str):
+            if needle and needle in v.lower() and len(hits) < 8:
+                hits.append(path)
+            if ("api" in v or "/results" in v) and v.startswith(("http", "/")) and len(calls) < 60:
+                calls.append(v)
+        if isinstance(v, dict) and v.get("apiCall") and len(calls) < 60:
+            calls.append(json.dumps(v.get("apiCall"))[:400])
+    out["hits"] = hits
+    out["calls"] = sorted(set(calls))
+    if hits:
+        # the parent objects of the first hit, from the outside in
+        p = hits[0]
+        segs = re.findall(r"\.([^.\[]+)|\[(\d+)\]", p)
+        node, chain = j, []
+        for k, i in segs:
+            node = node[k] if k else node[int(i)]
+            chain.append(node)
+        for anc in reversed(chain[:-1]):
+            if isinstance(anc, dict) and len(json.dumps(anc)) > 600:
+                out["hit_parent"] = json.dumps(anc)[:6000]
+                break
     return out
 
 

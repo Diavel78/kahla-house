@@ -1566,7 +1566,9 @@ def debug_varsity():
     import cheer_scores
     ev = request.args.get("event", "")
     if ev and request.args.get("api") == "1":
-        return jsonify(cheer_scores.fetch_event_api(cheer_scores.parse_event_ref(ev)[0]))
+        out = cheer_scores.fetch_event_api(cheer_scores.parse_event_ref(ev)[0], find=request.args.get("find"))
+        out.pop("shape", None)
+        return jsonify(out)
     if ev:
         out = cheer_scores.fetch_event(ev, fresh=True)
         out.get("diag", {}).pop("api_hints", None)
