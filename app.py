@@ -1641,7 +1641,7 @@ def debug_varsity():
             d["rows"] = d.get("rows", [])[:5]
             d["teams"] = d.get("teams", [])[:5]
         return jsonify(out)
-    return jsonify(cheer_scores.list_events())
+    return jsonify(cheer_scores.list_events(request.args.get("date")))
 
 
 # ---------------------------------------------------------------------------

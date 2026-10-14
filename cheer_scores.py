@@ -383,10 +383,10 @@ def fetch_event_api(event_id, find=None):
     return out
 
 
-def list_events():
+def list_events(date=None):
     """Event links off the public /results index -> [{id, name, url}].
     Best effort: whatever /events/{id} anchors the page carries."""
-    url = BASE + "/results"
+    url = BASE + "/results" + (f"?date={date}" if date else "")
     hit = _CACHE.get(url)
     if hit and time.time() - hit[0] < 600:
         return hit[1]
@@ -410,7 +410,7 @@ def list_events():
         seen.add(m.group(1))
         events.append({"id": m.group(1), "name": name[:160],
                        "url": f"{BASE}/events/{m.group(1)}/results"})
-    diag["api_hints"] = api_hints(r.text)
+    diag["api_hints"] = [h[:400] for h in api_hints(r.text) if "results/tab" in h]
     out = {"ok": True, "events": events[:150], "diag": diag}
     _CACHE[url] = (time.time(), out)
     return out
