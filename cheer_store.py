@@ -348,10 +348,18 @@ def leaderboard(db, season, division=None, cat=None, q=None, rank_by="avg", limi
     for p in data["perfs"]:
         divs.add(p["div"])
         cats.add(p["cat"])
-        if not _match(p, division, cat, ql):
-            continue
         groups.setdefault(_team_key(p), []).append(p)
-    rows = [_team_row(ps) for ps in groups.values()]
+    # Filters pick the TEAMS (competed in that division / gym type at least
+    # once); the stats are always the team's whole season, so a team reads
+    # the same here as on its program page.
+    rows = []
+    for ps in groups.values():
+        if not any(_match(p, division, cat, ql) for p in ps):
+            continue
+        r = _team_row(ps)
+        if division:
+            r["division"] = division
+        rows.append(r)
     key = (lambda r: (-r["high"], -r["avg"])) if rank_by == "high" else (lambda r: (-r["avg"], -r["high"]))
     rows.sort(key=key)
     return {"season": season, "events_with_results": sum(1 for e in data["events"] if e.get("has_results")),
