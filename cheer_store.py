@@ -79,7 +79,7 @@ def compact(ev):
     out = []
     for d in ev.get("divisions") or []:
         if d.get("structured"):
-            div, rnd = d.get("division") or "", d.get("round") or ""
+            div, rnd = d.get("division_name") or d.get("division") or "", d.get("round") or ""
             rows = [[r.get("rank") or "", r.get("program") or "", r.get("team") or "",
                      _num(r.get("score")), _num(r.get("raw")), _num(r.get("ded")), r.get("replay")]
                     for r in d.get("rows") or [] if (r.get("program") or r.get("team"))]
@@ -115,15 +115,21 @@ def compact(ev):
     return out
 
 
-def save_event(db, ev):
+SCHEMA = 2   # bump to re-read every stored event on the next ingest
+
+
+def save_event(db, ev, listing=None):
     meta = ev.get("meta") or {}
     res = compact(ev) if ev.get("ok") else []
+    teams = {(r[1], r[2]) for b in res for r in b["rows"]}
     doc = {
-        "id": str(ev.get("event_id")), "name": ev.get("event_name"),
+        "id": str(ev.get("event_id")), "name": ev.get("event_name") or (listing or {}).get("title"),
+        "location": (listing or {}).get("location"),
         "start": meta.get("start"), "end": meta.get("end"), "status": meta.get("status"),
-        "season": season_of(meta.get("start")), "fetched_at": int(time.time()),
-        "n_divisions": len(res), "n_scores": sum(len(x["rows"]) for x in res),
-        "has_results": bool(res), "source": ev.get("source"),
+        "season": season_of(meta.get("start")), "fetched_at": int(time.time()), "v": SCHEMA,
+        "n_divisions": len({b["div"] for b in res}), "n_scores": sum(len(x["rows"]) for x in res),
+        "n_teams": len(teams), "has_results": bool(res), "source": ev.get("source"),
+        "cats": sorted({b["cat"] for b in res}),
         "results": json.dumps(res, separators=(",", ":")),
     }
     db.collection(COLL).document(doc["id"]).set(doc)
@@ -131,16 +137,19 @@ def save_event(db, ev):
 
 
 def _needs_fetch(existing, now):
-    """Fetch a never-seen event; refresh one whose results could still
-    change (no results yet, or ended within the last 10 days); leave
-    concluded older events alone."""
-    if existing is None:
+    """Fetch a never-seen event or one stored by an older reader; refresh
+    one whose results could still change (none yet, or ended in the last
+    10 days); leave concluded older events alone."""
+    if existing is None or (existing.get("v") or 1) < SCHEMA:
         return True
     age = now - (existing.get("fetched_at") or 0)
     end = existing.get("end") or existing.get("start") or ""
+    today = time.strftime("%Y-%m-%d", time.gmtime(now))
     recent = end >= time.strftime("%Y-%m-%d", time.gmtime(now - 10 * 86400))
     if not existing.get("has_results"):
-        return age > (6 * 3600 if recent else 7 * 86400)
+        if end and end > today:
+            return age > 3 * 86400          # upcoming: refresh the listing now and then
+        return age > (2 * 3600 if recent else 7 * 86400)
     return recent and age > 3600
 
 
@@ -157,9 +166,9 @@ def discover(months):
     return found, diag
 
 
-def ingest(db, months, budget_s=40, max_events=60):
-    """Discover → fetch what's new/stale → store. Bounded per call; call
-    again until `remaining` is 0."""
+def ingest(db, months, budget_s=20, max_events=80):
+    """Discover → fetch what's new/stale → store. Starts no new event
+    after `budget_s`; call again until `remaining` is 0."""
     t0 = time.time()
     found, diag = discover(months)
     now = time.time()
@@ -167,7 +176,7 @@ def ingest(db, months, budget_s=40, max_events=60):
     ids = list(found)
     for i in range(0, len(ids), 30):
         refs = [db.collection(COLL).document(x) for x in ids[i:i + 30]]
-        for snap in db.get_all(refs, field_paths=["fetched_at", "has_results", "end", "start"]):
+        for snap in db.get_all(refs, field_paths=["fetched_at", "has_results", "end", "start", "v"]):
             if snap.exists:
                 existing[snap.id] = snap.to_dict()
     todo = [x for x in ids if _needs_fetch(existing.get(x), now)]
@@ -177,9 +186,10 @@ def ingest(db, months, budget_s=40, max_events=60):
             break
         try:
             ev = cs.fetch_event(eid, fresh=True)
-            doc = save_event(db, ev)
-            done.append({"id": eid, "name": doc["name"], "season": doc["season"],
-                         "divs": doc["n_divisions"], "scores": doc["n_scores"]})
+            doc = save_event(db, ev, found.get(eid))
+            done.append({"id": eid, "name": doc["name"], "season": doc["season"], "divs": doc["n_divisions"],
+                         "scores": doc["n_scores"], "src": doc["source"],
+                         "struct": (ev.get("diag") or {}).get("structured")})
         except Exception as e:
             errors.append({"id": eid, "err": f"{type(e).__name__}: {e}"[:200]})
     _LB_CACHE.clear()
@@ -207,8 +217,25 @@ def load_season(db, season):
             d["results"] = []
         evs.append(d)
     evs.sort(key=lambda e: e.get("start") or "")
-    _LB_CACHE[season] = (time.time(), evs)
-    return evs
+    perfs = []
+    for ev in evs:
+        for blk in ev["results"]:
+            for row in blk["rows"]:
+                if len(row) >= 7:
+                    rank, prog, team, score = row[0], row[1], row[2], row[3]
+                    replay = row[6]
+                else:                       # v1 rows (pre-program/team split)
+                    rank, prog, team, score, replay = row[0], row[1], "", row[2], None
+                if score is None or not (0 < score <= 1000):
+                    continue
+                perfs.append({"event": ev.get("name"), "event_id": ev.get("id"),
+                              "date": (ev.get("start") or "")[:10], "div": blk["div"],
+                              "round": blk.get("round") or "", "cat": blk.get("cat"),
+                              "rank": rank, "program": prog, "team": team, "score": score,
+                              "replay": replay})
+    data = {"events": evs, "perfs": perfs}
+    _LB_CACHE[season] = (time.time(), data)
+    return data
 
 
 def seasons(db):
@@ -221,61 +248,131 @@ def seasons(db):
     return [{"season": s, "events": n} for s, n in sorted(out.items(), reverse=True)]
 
 
+def _match(p, division=None, cat=None, q=None):
+    if division and p["div"] != division:
+        return False
+    if cat and p["cat"] != cat:
+        return False
+    if q:
+        hay = f"{p['program']} {p['team']}".lower()
+        if q not in hay:
+            return False
+    return True
+
+
+def _summ(ps):
+    sc = [p["score"] for p in ps]
+    return {"events": len({p["event_id"] for p in ps}), "performances": len(sc),
+            "avg": round(sum(sc) / len(sc), 4) if sc else None, "high": max(sc) if sc else None,
+            "wins": sum(1 for p in ps if str(p["rank"]).strip() == "1")}
+
+
 def leaderboard(db, season, division=None, cat=None, q=None, rank_by="avg", limit=300):
-    """One row per (team, division): every event it scored at this season,
-    the event's FINAL score when a finals round exists else its best round,
-    then average / high across events."""
-    evs = load_season(db, season)
-    perf = {}
-    divs = {}
-    for ev in evs:
-        best = {}
-        for blk in ev["results"]:
-            div, rnd = blk["div"], (blk.get("round") or "").lower()
-            divs[div] = blk.get("cat")
-            if division and div != division:
-                continue
-            if cat and blk.get("cat") != cat:
-                continue
-            for row in blk["rows"]:
-                # v2 rows: [rank, program, team, score, raw, ded, replay];
-                # v1 rows: [rank, name, score, raw, ded]
-                if len(row) >= 7:
-                    team, score = " · ".join(x for x in (row[1], row[2]) if x), row[3]
-                else:
-                    team, score = row[1], row[2]
-                if score is None or not (0 < score <= 1000):
-                    continue
-                k = (team, div)
-                is_final = rnd.startswith("final")
-                cur = best.get(k)
-                if cur is None or (is_final and not cur[1]) or (is_final == cur[1] and score > cur[0]):
-                    best[k] = (score, is_final, row[0], blk.get("cat"))
-        for (team, div), (score, _f, rank, c) in best.items():
-            p = perf.setdefault((team, div), {"team": team, "division": div, "cat": c, "scores": []})
-            p["scores"].append({"event": ev.get("name"), "event_id": ev.get("id"),
-                                "date": (ev.get("start") or "")[:10], "score": score, "rank": rank})
-    rows = []
+    """One row per team in a division (program + team + division):
+    events, performances, average and high over every performance."""
+    data = load_season(db, season)
     ql = (q or "").lower().strip()
-    for p in perf.values():
-        if ql and ql not in p["team"].lower() and ql not in p["division"].lower():
+    groups, divs, cats = {}, set(), set()
+    for p in data["perfs"]:
+        divs.add(p["div"])
+        cats.add(p["cat"])
+        if not _match(p, division, cat, ql):
             continue
-        sc = [s["score"] for s in p["scores"]]
-        p["n"] = len(sc)
-        p["avg"] = round(sum(sc) / len(sc), 3)
-        p["high"] = max(sc)
-        p["wins"] = sum(1 for s in p["scores"] if str(s["rank"]).strip() == "1")
-        rows.append(p)
+        groups.setdefault((p["program"], p["team"], p["div"]), []).append(p)
+    rows = []
+    for (prog, team, div), ps in groups.items():
+        ps.sort(key=lambda x: x["date"])
+        rows.append({"program": prog, "team": team, "division": div, "cat": ps[0]["cat"],
+                     **_summ(ps), "scores": ps})
     key = (lambda r: (-r["high"], -r["avg"])) if rank_by == "high" else (lambda r: (-r["avg"], -r["high"]))
     rows.sort(key=key)
-    return {"season": season, "events": len(evs),
-            "events_with_results": sum(1 for e in evs if e.get("has_results")),
+    return {"season": season, "events_with_results": sum(1 for e in data["events"] if e.get("has_results")),
             "total": len(rows), "rows": rows[:limit],
-            "divisions": sorted(d for d in divs if d), "cats": sorted({c for c in divs.values() if c})}
+            "divisions": sorted(d for d in divs if d), "cats": sorted(c for c in cats if c)}
 
 
-def events_list(db, season):
-    evs = load_season(db, season)
-    return [{"id": e.get("id"), "name": e.get("name"), "start": e.get("start"),
-             "status": e.get("status"), "divisions": e.get("n_divisions"),
-             "scores": e.get("n_scores")} for e in reversed(evs)]
+def programs(db, season, division=None, cat=None, q=None, sort="alpha", limit=400):
+    data = load_season(db, season)
+    ql = (q or "").lower().strip()
+    groups = {}
+    for p in data["perfs"]:
+        if not _match(p, division, cat, ql):
+            continue
+        groups.setdefault(p["program"], []).append(p)
+    rows = []
+    for prog, ps in groups.items():
+        rows.append({"program": prog, "teams": len({(p["team"], p["div"]) for p in ps}),
+                     "cats": sorted({p["cat"] for p in ps}), **_summ(ps)})
+    if sort == "avg":
+        rows.sort(key=lambda r: -r["avg"])
+    elif sort == "high":
+        rows.sort(key=lambda r: -r["high"])
+    elif sort == "teams":
+        rows.sort(key=lambda r: (-r["teams"], r["program"].lower()))
+    else:
+        rows.sort(key=lambda r: r["program"].lower())
+    return {"season": season, "total": len(rows), "rows": rows[:limit]}
+
+
+def program_detail(db, season, program):
+    data = load_season(db, season)
+    ps = [p for p in data["perfs"] if p["program"] == program]
+    teams = {}
+    for p in ps:
+        teams.setdefault((p["team"], p["div"]), []).append(p)
+    out = []
+    for (team, div), tp in teams.items():
+        tp.sort(key=lambda x: x["date"])
+        out.append({"program": program, "team": team, "division": div, "cat": tp[0]["cat"], **_summ(tp), "scores": tp})
+    out.sort(key=lambda r: -r["avg"])
+    return {"program": program, "season": season, **_summ(ps), "teams": out}
+
+
+def events_split(db, season):
+    """Past (scored) and upcoming events for the Events tab."""
+    data = load_season(db, season)
+    today = time.strftime("%Y-%m-%d")
+    past, upcoming = [], []
+    for e in data["events"]:
+        row = {"id": e.get("id"), "name": e.get("name"), "location": e.get("location"),
+               "start": e.get("start"), "end": e.get("end"), "teams": e.get("n_teams") or 0,
+               "divisions": e.get("n_divisions") or 0, "cats": e.get("cats") or []}
+        if (e.get("start") or "")[:10] > today and not e.get("has_results"):
+            upcoming.append(row)
+        elif e.get("has_results"):
+            past.append(row)
+    upcoming.sort(key=lambda r: r["start"] or "")
+    past.sort(key=lambda r: r["start"] or "", reverse=True)
+    return {"past": past, "upcoming": upcoming}
+
+
+def event_detail(db, eid):
+    snap = db.collection(COLL).document(str(eid)).get()
+    if not snap.exists:
+        return None
+    d = snap.to_dict()
+    d["results"] = json.loads(d.get("results") or "[]")
+    return d
+
+
+# ── following (per user) ────────────────────────────────────────────────
+
+FOLLOW = "cheer_follow"
+
+
+def follow_get(db, uid):
+    snap = db.collection(FOLLOW).document(uid).get()
+    d = snap.to_dict() if snap.exists else {}
+    return {"teams": d.get("teams") or [], "programs": d.get("programs") or [], "events": d.get("events") or []}
+
+
+def follow_set(db, uid, kind, key, on):
+    if kind not in ("teams", "programs", "events") or not key:
+        raise ValueError("bad follow")
+    cur = follow_get(db, uid)
+    lst = [k for k in cur[kind] if k != key]
+    if on:
+        lst.append(key)
+    cur[kind] = lst[-500:]
+    db.collection(FOLLOW).document(uid).set({**cur, "updated_at": int(time.time())})
+    return cur

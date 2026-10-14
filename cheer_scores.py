@@ -488,6 +488,25 @@ def fetch_event(ref, fresh=False):
         for v in views:
             blocks.extend(dict(t, source="api", result_id=v.get("id"))
                           for t in parse_tables(_soup(v["htmlContent"])))
+    if not blocks and isinstance(j, dict):
+        sblocks, sdiag = fetch_structured(event_id)
+        diag["structured"] = sdiag
+        if sblocks:
+            out = {"ok": True, "event_id": event_id, "event_name": name, "meta": meta,
+                   "source": "api:list", "fetched_at": int(time.time()), "diag": diag,
+                   "divisions": [dict(b, structured=True,
+                                      teams=[{"rank": r["rank"], "team": " · ".join(x for x in (r["program"], r["team"]) if x),
+                                              "score": r["score"]} for r in b["rows"]],
+                                      columns=["Rank", "Program", "Team", "Raw", "Ded", "Perf", "Score"])
+                                 for b in sblocks]}
+            for d in out["divisions"]:
+                d["division"] = d["division"] + (" · " + d["round"] if d.get("round") else "")
+                d["division_name"] = d["division"].rsplit(" · ", 1)[0]
+            _CACHE[ck] = (time.time(), out)
+            return out
+        # A listed event with no scores yet (upcoming) still has metadata.
+        return {"ok": False, "event_id": event_id, "event_name": name, "meta": meta,
+                "source": "api", "divisions": [], "error": "No results posted yet.", "diag": diag}
     if not blocks:
         out = fetch_event_page(ref, fresh=fresh)
         out.setdefault("diag", {})["api_fallback"] = diag
@@ -623,59 +642,97 @@ def _cell_text(c):
     return (d.get("text") or "").strip(), (d.get("subText") or "").strip()
 
 
+_RND_TAIL = re.compile(r"\s+(finals?|prelims?|preliminaries|semi-?finals?|day \d+|round \d+)$", re.I)
+
+
+def _items_of(j):
+    j = j or {}
+    for path in (("data", "content"), ("container",)):
+        node = j
+        for k in path:
+            node = node.get(k) if isinstance(node, dict) else None
+        if isinstance(node, dict) and isinstance(node.get("items"), list):
+            return node["items"]
+    return []
+
+
 def parse_partial(j):
-    """One results/partial page → [{division, round, cls, rows:[...]}]."""
-    items = (((j or {}).get("data") or {}).get("content") or {}).get("items") or []
+    """A results/partial or results/list page → [{division, round, cls,
+    more, rows:[...]}]. `more` = the division has a View All (the preview
+    holds only its top 3)."""
     out, ctx = [], {}
-    for it in items:
+    for it in _items_of(j):
         if not isinstance(it, dict):
             continue
         if it.get("type") == "title-with-action":
-            an = ((it.get("action") or {}).get("analytics") or {}).get("extraContext") or {}
-            ctx = {"division": an.get("division") or it.get("title") or "",
-                   "round": an.get("roundName") or "", "cls": an.get("class") or ""}
-            if not an.get("division") and it.get("title"):
-                ctx["division"] = it["title"]
+            acts = [it.get("action")] + list(it.get("actions") or [])
+            ex, more = {}, False
+            for a in acts:
+                if not isinstance(a, dict):
+                    continue
+                e = (a.get("analytics") or {}).get("extraContext") or {}
+                if e.get("division"):
+                    ex = e
+                if "view-all" in (a.get("url") or ""):
+                    more = True
+            title = it.get("title") or ""
+            ctx = {"division": ex.get("division") or _RND_TAIL.sub("", title).strip(),
+                   "round": ex.get("roundName") or (_RND_TAIL.search(title).group(1) if _RND_TAIL.search(title) else ""),
+                   "cls": ex.get("class") or "", "more": more}
             continue
         if it.get("type") != "table":
             continue
+        if not ctx.get("round"):
+            m = re.search(r"-(\w+)$", it.get("id") or "")
+            if m:
+                ctx["round"] = m.group(1)
         rows = []
         for r in it.get("rows") or []:
             cells = {c.get("key"): c for c in (r.get("cells") or []) if isinstance(c, dict)}
             prog, team = _cell_text(cells.get("program-team") or cells.get("program-name"))
-            rank = _cell_text(cells.get("rank"))[0]
-            num = lambda k: _cell_text(cells.get(k))[0]
-            replay = ((r.get("action") or {}).get("url")) if isinstance(r.get("action"), dict) else None
             if not prog and not team:
                 continue
-            rows.append({"rank": rank, "program": prog, "team": team,
+            num = lambda k: _cell_text(cells.get(k))[0]
+            replay = (r.get("action") or {}).get("url") if isinstance(r.get("action"), dict) else None
+            rows.append({"rank": num("rank"), "program": prog, "team": team,
                          "raw": num("raw-score"), "ded": num("deductions"),
-                         "perf": num("performance-score"), "score": num("event-score") or num("performance-score"),
-                         "replay": replay})
+                         "perf": num("performance-score"),
+                         "score": num("event-score") or num("performance-score"), "replay": replay})
         if rows:
             out.append({**ctx, "rows": rows})
     return out
 
 
-def fetch_partial(event_id, budget_s=25, page=10):
-    """Every division on an all-star event, paging until a page adds nothing."""
+LIST_API = "https://tv-admin.varsity.com/api/experiences/web/event-hub/{eid}/results/list"
+_LIST_PARAMS = {"version": "1.33.2", "tz": "UTC", "isEventHubLayoutEnabled": "true",
+                "isEventHubBracketsEnabled": "false", "isNextGenEventHub": "false", "site_id": "20"}
+
+
+def _get_json(url, params):
+    try:
+        r = requests.get(url, params=params, headers={**_HEADERS, "Accept": "application/json"}, timeout=15)
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def fetch_structured(event_id, budget_s=30, page=10):
+    """All-star events: every division, every round, every team. The
+    preview pages (results/partial) list the divisions with their top 3;
+    each division with a View All is re-read in full from results/list
+    (facets = class/division/round), 6 at a time."""
+    from concurrent.futures import ThreadPoolExecutor
     t0, blocks, seen, pages = time.time(), [], set(), 0
-    for off in range(0, 5000, page):
+    url = PARTIAL_API.format(eid=event_id)
+    for off in range(0, 6000, page):
         if time.time() - t0 > budget_s:
-            return blocks, {"pages": pages, "truncated": True}
-        try:
-            r = requests.get(PARTIAL_API.format(eid=event_id),
-                             params={"version": "1.33.2", "limit": str(page), "offset": str(off),
-                                     "tz": "UTC", "isEventHubLayoutEnabled": "true"},
-                             headers={**_HEADERS, "Accept": "application/json"}, timeout=15)
-            j = r.json() if r.status_code == 200 else None
-        except Exception:
-            j = None
+            break
+        j = _get_json(url, {"version": "1.33.2", "limit": str(page), "offset": str(off),
+                            "tz": "UTC", "isEventHubLayoutEnabled": "true"})
         pages += 1
-        got = parse_partial(j)
-        new = 0
+        got, new = parse_partial(j), 0
         for b in got:
-            k = (b["division"], b["round"], b["rows"][0]["program"], b["rows"][0]["team"])
+            k = (b["division"], b["round"])
             if k in seen:
                 continue
             seen.add(k)
@@ -683,7 +740,27 @@ def fetch_partial(event_id, budget_s=25, page=10):
             new += 1
         if not got or new == 0:
             break
-    return blocks, {"pages": pages, "truncated": False}
+    want = [b for b in blocks if b.get("more")]
+
+    def full(b):
+        facets = json.dumps({"class": b.get("cls") or "Cheer", "division": b["division"],
+                             "roundName": b["round"]}, separators=(",", ":"))
+        got = parse_partial(_get_json(LIST_API.format(eid=event_id), {**_LIST_PARAMS, "facets": facets}))
+        return b, (got[0]["rows"] if got else None)
+    filled = 0
+    left = max(5.0, budget_s + 25 - (time.time() - t0))
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = [ex.submit(full, b) for b in want]
+        for f in futs:
+            try:
+                b, rows = f.result(timeout=left)
+            except Exception:
+                continue
+            if rows and len(rows) >= len(b["rows"]):
+                b["rows"] = rows
+                filled += 1
+    return blocks, {"pages": pages, "divisions": len(blocks), "view_all": len(want),
+                    "filled": filled, "secs": round(time.time() - t0, 1)}
 
 
 def page_api_calls(path):

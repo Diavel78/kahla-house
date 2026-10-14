@@ -1583,11 +1583,15 @@ def api_cheer_ingest():
         seasons = [cur, f"{y - 1}-{y % 100:02d}"]
     months = request.args.get("months")
     months = months.split(",") if months else [m for s_ in seasons for m in _cheer_months(s_)]
-    today = datetime.now(ZoneInfo("America/Phoenix")).strftime("%Y-%m-01")
-    months = [m for m in months if m <= today]
-    out = cheer_store.ingest(get_db(), months, budget_s=float(request.args.get("budget", 40)))
+    out = cheer_store.ingest(get_db(), months, budget_s=float(request.args.get("budget", 20)))
     out["seasons"] = seasons
     return jsonify(out)
+
+
+def _cheer_args():
+    a = request.args
+    return dict(season=a.get("season") or _cheer_season_now(), division=a.get("division") or None,
+                cat=a.get("cat") or None, q=a.get("q") or None)
 
 
 @app.route("/api/cheer/seasons")
@@ -1601,17 +1605,52 @@ def api_cheer_seasons():
 @admin_required
 def api_cheer_leaderboard():
     import cheer_store
-    a = request.args
-    return jsonify(cheer_store.leaderboard(
-        get_db(), a.get("season") or _cheer_season_now(), division=a.get("division") or None,
-        cat=a.get("cat") or None, q=a.get("q") or None, rank_by=a.get("rank") or "avg"))
+    return jsonify(cheer_store.leaderboard(get_db(), rank_by=request.args.get("rank") or "avg", **_cheer_args()))
 
 
-@app.route("/api/cheer/season-events")
+@app.route("/api/cheer/programs")
 @admin_required
-def api_cheer_season_events():
+def api_cheer_programs():
     import cheer_store
-    return jsonify({"events": cheer_store.events_list(get_db(), request.args.get("season") or _cheer_season_now())})
+    return jsonify(cheer_store.programs(get_db(), sort=request.args.get("sort") or "alpha", **_cheer_args()))
+
+
+@app.route("/api/cheer/program")
+@admin_required
+def api_cheer_program():
+    import cheer_store
+    return jsonify(cheer_store.program_detail(get_db(), request.args.get("season") or _cheer_season_now(),
+                                              request.args.get("name", "")))
+
+
+@app.route("/api/cheer/events-list")
+@admin_required
+def api_cheer_events_list():
+    import cheer_store
+    return jsonify(cheer_store.events_split(get_db(), request.args.get("season") or _cheer_season_now()))
+
+
+@app.route("/api/cheer/stored-event")
+@admin_required
+def api_cheer_stored_event():
+    import cheer_store
+    d = cheer_store.event_detail(get_db(), request.args.get("id", ""))
+    return jsonify(d or {"error": "not found"}), (200 if d else 404)
+
+
+@app.route("/api/cheer/follow", methods=["GET", "POST"])
+@admin_required
+def api_cheer_follow():
+    import cheer_store
+    db = get_db()
+    if request.method == "GET":
+        return jsonify(cheer_store.follow_get(db, g.uid))
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(cheer_store.follow_set(db, g.uid, body.get("kind"), str(body.get("key") or "")[:300],
+                                              bool(body.get("on"))))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/debug-varsity")
