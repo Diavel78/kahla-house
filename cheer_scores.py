@@ -524,7 +524,8 @@ def results_tab(extra=None):
         if v.get("type") == "tab":
             act = v.get("action") or {}
             tabs.append({"id": v.get("id"), "title": v.get("title"), "active": v.get("active"),
-                         "url": act.get("url"), "api": act.get("apiCall") or act.get("mergeParams")})
+                         "url": act.get("url"), "api": act.get("apiCall") or act.get("mergeParams"),
+                         "raw": json.dumps(act)[:1200] if not tabs else None})
         u = v.get("url") if isinstance(v.get("url"), str) else None
         m = re.search(r"/events/(\d+)", u or "")
         if m and m.group(1) not in seen and v.get("title"):
