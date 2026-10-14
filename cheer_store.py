@@ -125,8 +125,12 @@ def save_event(db, ev, listing=None):
     doc = {
         "id": str(ev.get("event_id")), "name": ev.get("event_name") or (listing or {}).get("title"),
         "location": (listing or {}).get("location"),
-        "start": meta.get("start"), "end": meta.get("end"), "status": meta.get("status"),
-        "season": season_of(meta.get("start")), "fetched_at": int(time.time()), "v": SCHEMA,
+        "start": meta.get("start") or (listing or {}).get("month"), "end": meta.get("end"),
+        "status": meta.get("status"),
+        # Some events carry no start date; date them by the results-index
+        # month they were listed under.
+        "season": season_of(meta.get("start") or (listing or {}).get("month")),
+        "fetched_at": int(time.time()), "v": SCHEMA,
         "n_divisions": len({b["div"] for b in res}), "n_scores": sum(len(x["rows"]) for x in res),
         "n_teams": len(teams), "has_results": bool(res), "source": ev.get("source"),
         "cats": sorted({b["cat"] for b in res}),
@@ -140,7 +144,7 @@ def _needs_fetch(existing, now):
     """Fetch a never-seen event or one stored by an older reader; refresh
     one whose results could still change (none yet, or ended in the last
     10 days); leave concluded older events alone."""
-    if existing is None or (existing.get("v") or 1) < SCHEMA:
+    if existing is None or (existing.get("v") or 1) < SCHEMA or not existing.get("season"):
         return True
     age = now - (existing.get("fetched_at") or 0)
     end = existing.get("end") or existing.get("start") or ""
@@ -162,7 +166,7 @@ def discover(months):
         for e in page.get("events") or []:
             if "rebroadcast" in (e.get("title") or "").lower():
                 continue
-            found.setdefault(e["id"], e)
+            found.setdefault(e["id"], dict(e, month=mo))
     return found, diag
 
 
@@ -176,7 +180,7 @@ def ingest(db, months, budget_s=20, max_events=80):
     ids = list(found)
     for i in range(0, len(ids), 30):
         refs = [db.collection(COLL).document(x) for x in ids[i:i + 30]]
-        for snap in db.get_all(refs, field_paths=["fetched_at", "has_results", "end", "start", "v"]):
+        for snap in db.get_all(refs, field_paths=["fetched_at", "has_results", "end", "start", "v", "season"]):
             if snap.exists:
                 existing[snap.id] = snap.to_dict()
     todo = [x for x in ids if _needs_fetch(existing.get(x), now)]
