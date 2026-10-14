@@ -684,3 +684,15 @@ def fetch_partial(event_id, budget_s=25, page=10):
         if not got or new == 0:
             break
     return blocks, {"pages": pages, "truncated": False}
+
+
+def page_api_calls(path):
+    """Probe: load a tv.varsity.com page and list the tv-admin API calls
+    its server render made (they sit in the Angular transfer state)."""
+    try:
+        r = requests.get(BASE + path, headers=_HEADERS, timeout=15)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    calls = sorted(set(re.findall(r"https://tv-admin\.varsity\.com/api/[^&\"'\s]*(?:&a;[^&\"'\s]*)*", r.text)))
+    calls = [c.replace("&a;", "&")[:600] for c in calls if "partials/" not in c]
+    return {"ok": True, "status": r.status_code, "bytes": len(r.content), "calls": calls[:20]}

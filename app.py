@@ -1623,6 +1623,8 @@ def debug_varsity():
         return jsonify({"ok": False, "error": "forbidden"}), 403
     import cheer_scores
     ev = request.args.get("event", "")
+    if request.args.get("page"):
+        return jsonify(cheer_scores.page_api_calls(request.args["page"]))
     if request.args.get("raw"):
         prm = dict(x.split("=", 1) for x in request.args.get("p", "").split(",") if "=" in x)
         return jsonify(cheer_scores.raw_api(request.args["raw"], prm, qs=request.args.get("qs")))
