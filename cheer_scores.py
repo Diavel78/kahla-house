@@ -646,14 +646,11 @@ _RND_TAIL = re.compile(r"\s+(finals?|prelims?|preliminaries|semi-?finals?|day \d
 
 
 def _items_of(j):
-    j = j or {}
-    for path in (("data", "content"), ("container",)):
-        node = j
-        for k in path:
-            node = node.get(k) if isinstance(node, dict) else None
-        if isinstance(node, dict) and isinstance(node.get("items"), list):
-            return node["items"]
-    return []
+    """Every division title + results table in document order, wherever
+    the response nests them (results/partial: data.content.items;
+    results/list: deeper inside container)."""
+    return [v for _p, v in _walk(j or {})
+            if isinstance(v, dict) and v.get("type") in ("title-with-action", "table")]
 
 
 def parse_partial(j):
