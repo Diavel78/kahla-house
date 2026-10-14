@@ -15656,11 +15656,23 @@ def _hand_sold_plan(trades: list, syn: bool, since_iso: str | None,
             return float(x)
         except (TypeError, ValueError):
             return None
+    def _ts(x):
+        # PARSE, never string-compare (Oct 13 2026, the Predators sale): the
+        # box's Postgres hands `at` back in Arizona time ('…T19:07-07:00')
+        # while since_iso is UTC ('…T01:38+00:00' the next day) — as text the
+        # sale sorted BEFORE the booking and was skipped every tick.
+        try:
+            d = datetime.fromisoformat(str(x).replace("Z", "+00:00"))
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+    since_dt = _ts(since_iso) if since_iso else None
     qty = proceeds = 0.0
-    last = None
+    last = last_dt = None
     for a in trades or []:
         at = str(a.get("at") or "")
-        if since_iso and at and at < since_iso:
+        at_dt = _ts(at) if at else None
+        if since_dt and at_dt and at_dt < since_dt:
             continue
         t = (a.get("payload") or {}).get("trade") or {}
         mo = (t.get("aggressor") if t.get("isAggressor") else t.get("passive")) or {}
@@ -15672,7 +15684,8 @@ def _hand_sold_plan(trades: list, syn: bool, since_iso: str | None,
             continue
         qty += q
         proceeds += c
-        last = max(last or at, at)
+        if at_dt and (last_dt is None or at_dt > last_dt):
+            last, last_dt = at, at_dt
     if qty < fq - 0.5:
         return None
     avg_c = round(proceeds / qty * 100.0, 2) if qty else None
