@@ -284,7 +284,7 @@ function perfList(scores) {
         const rs = p.rounds || [];
         const multi = rs.length > 1;
         return `<div class="p"><span>${p.date >= recent ? '<span class="tag" style="background:rgba(34,197,94,.15);color:#22c55e">NEW</span>' : ''}${E(p.date)} · ${E(p.event)}${!multi && p.round ? ' · ' + E(p.round) : ''}</span>
-        <span class="r">${p.rank ? '#' + E(p.rank) + ' · ' : ''}${p.total && p.total !== p.score ? score(p.total) + ' total' : score(p.score)}${multi ? '' : rep(p)}</span></div>`
+        <span class="r">${p.rank ? '#' + E(p.rank) + ' · ' : ''}${score(p.score)}${multi ? ' final' : ''}${multi ? '' : rep(p)}</span></div>`
         + (multi ? rs.map(r => `<div class="rd"><span>${E(r.round || 'Round')}</span><span class="r">${r.rank ? '#' + E(r.rank) + ' · ' : ''}${score(r.score)}${rep(r)}</span></div>`).join('') : '');
     }).join('')}</div>`;
 }
@@ -337,7 +337,7 @@ function teamsHtml(rows, ranked) {
             <div class="stat"><div class="k">AVG</div><div class="v ${S.rank === 'avg' ? 'big' : ''}">${score(r.avg)}</div></div>
             <div class="stat"><div class="k">HIGH</div><div class="v ${S.rank === 'high' ? 'big' : ''}">${score(r.high)}</div></div>
         </div>
-        <div class="kv"><div class="k">DIVISION</div><div>${E(r.division)}</div><div class="k">GYM TYPE</div><div><span class="tag">${E(r.cat)}</span>${r.wins ? ` 🏆 ${r.wins} win${r.wins > 1 ? 's' : ''}` : ''}</div></div>
+        <div class="kv"><div class="k">DIVISION</div><div>${E(r.division)}${(r.divisions || []).length > 1 ? `<div style="color:var(--text-2);font-size:12px;margin-top:2px">also ${(r.divisions || []).filter(d => d !== r.division).map(E).join(' · ')}</div>` : ''}</div><div class="k">GYM TYPE</div><div><span class="tag">${E(r.cat)}</span>${r.wins ? ` 🏆 ${r.wins} win${r.wins > 1 ? 's' : ''}` : ''}</div></div>
         ${S.open['t' + i] ? perfList(r.scores) : ''}</div>`;
     }).join('');
 }

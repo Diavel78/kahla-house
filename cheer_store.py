@@ -250,14 +250,11 @@ def load_season(db, season):
             rs = sorted(e["rounds"], key=lambda r: _round_order(r["round"]))
             e["rounds"] = rs
             last = rs[-1]
-            et = e.pop("_et")
-            if et:
-                e["total"] = max(et)
-                # A two-day total can be the SUM of the days (~190 vs ~95);
-                # rank on the per-round equivalent so averages stay comparable.
-                top = max(r["score"] for r in rs)
-                e["score"] = round(e["total"] / len(rs), 4) if len(rs) > 1 and e["total"] > 1.5 * top else e["total"]
-            elif len(rs) > 1 and _round_order(last["round"]) > 0:
+            e.pop("_et", None)
+            # Two-day competitions grade Day 1 at 25% and Day 2 at 75%.
+            if len(rs) == 2:
+                e["score"] = round(0.25 * rs[0]["score"] + 0.75 * rs[1]["score"], 4)
+            elif len(rs) > 2 and _round_order(last["round"]) > 0:
                 e["score"] = last["score"]
             else:
                 e["score"] = max(r["score"] for r in rs)
@@ -309,6 +306,31 @@ def _match(p, division=None, cat=None, q=None):
     return True
 
 
+def _base_div(d):
+    """'L3 Senior Coed - D2 - Small - A' → 'L3 Senior Coed' (the size / tier /
+    split suffixes vary event to event for the same team)."""
+    return re.split(r"\s+[-–]\s+", d or "")[0].strip()
+
+
+def _team_key(p):
+    """One team = program + team name, whatever each event called its
+    division. Schools have no team name; their division base tells the
+    squads apart."""
+    return (p["program"], p["team"]) if p["team"] else (p["program"], "", _base_div(p["div"]))
+
+
+def _team_row(ps):
+    ps.sort(key=lambda x: x["date"])
+    cnt = {}
+    for p in ps:
+        cnt[p["div"]] = cnt.get(p["div"], 0) + 1
+    # Label with the most recent division (ties → most used).
+    div = ps[-1]["div"]
+    return {"program": ps[0]["program"], "team": ps[0]["team"], "division": div,
+            "divisions": sorted(cnt, key=lambda d: -cnt[d]), "cat": ps[-1]["cat"],
+            **_summ(ps), "scores": ps}
+
+
 def _summ(ps):
     sc = [p["score"] for p in ps]
     return {"events": len({p["event_id"] for p in ps}),
@@ -328,12 +350,8 @@ def leaderboard(db, season, division=None, cat=None, q=None, rank_by="avg", limi
         cats.add(p["cat"])
         if not _match(p, division, cat, ql):
             continue
-        groups.setdefault((p["program"], p["team"], p["div"]), []).append(p)
-    rows = []
-    for (prog, team, div), ps in groups.items():
-        ps.sort(key=lambda x: x["date"])
-        rows.append({"program": prog, "team": team, "division": div, "cat": ps[0]["cat"],
-                     **_summ(ps), "scores": ps})
+        groups.setdefault(_team_key(p), []).append(p)
+    rows = [_team_row(ps) for ps in groups.values()]
     key = (lambda r: (-r["high"], -r["avg"])) if rank_by == "high" else (lambda r: (-r["avg"], -r["high"]))
     rows.sort(key=key)
     return {"season": season, "events_with_results": sum(1 for e in data["events"] if e.get("has_results")),
@@ -351,7 +369,7 @@ def programs(db, season, division=None, cat=None, q=None, sort="alpha", limit=40
         groups.setdefault(p["program"], []).append(p)
     rows = []
     for prog, ps in groups.items():
-        rows.append({"program": prog, "teams": len({(p["team"], p["div"]) for p in ps}),
+        rows.append({"program": prog, "teams": len({_team_key(p) for p in ps}),
                      "cats": sorted({p["cat"] for p in ps}), **_summ(ps)})
     if sort == "avg":
         rows.sort(key=lambda r: -r["avg"])
@@ -369,11 +387,8 @@ def program_detail(db, season, program):
     ps = [p for p in data["perfs"] if p["program"] == program]
     teams = {}
     for p in ps:
-        teams.setdefault((p["team"], p["div"]), []).append(p)
-    out = []
-    for (team, div), tp in teams.items():
-        tp.sort(key=lambda x: x["date"])
-        out.append({"program": program, "team": team, "division": div, "cat": tp[0]["cat"], **_summ(tp), "scores": tp})
+        teams.setdefault(_team_key(p), []).append(p)
+    out = [_team_row(tp) for tp in teams.values()]
     out.sort(key=lambda r: -r["avg"])
     return {"program": program, "season": season, **_summ(ps), "teams": out}
 
