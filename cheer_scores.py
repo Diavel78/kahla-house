@@ -253,7 +253,7 @@ def normalize(block):
 
 # ── entry point ─────────────────────────────────────────────────────────
 
-def fetch_event(ref, fresh=False):
+def fetch_event_page(ref, fresh=False):
     event_id, url = parse_event_ref(ref)
     if not url:
         return {"ok": False, "error": "Couldn't read an event id from that. Paste a tv.varsity.com event link or its number."}
@@ -413,4 +413,68 @@ def list_events():
     diag["api_hints"] = api_hints(r.text)
     out = {"ok": True, "events": events[:150], "diag": diag}
     _CACHE[url] = (time.time(), out)
+    return out
+
+
+_API_PARAMS = {"version": "1.33.2", "tz": "UTC", "isEventHubLayoutEnabled": "true",
+               "isEventHubBracketsEnabled": "false", "isNextGenEventHub": "false", "site_id": "20"}
+
+
+def _soup(html):
+    from bs4 import BeautifulSoup
+    try:
+        return BeautifulSoup(html, "lxml")
+    except Exception:
+        return BeautifulSoup(html, "html.parser")
+
+
+def fetch_event(ref, fresh=False):
+    """Varsity's JSON API first. Its results are CMS `html-view` items
+    whose `htmlContent` is pasted spreadsheet HTML (found Oct 14 2026 —
+    there is no structured score field), so we read the JSON for the
+    event metadata and parse the tables inside each htmlContent. Falls
+    back to the public results page when the API answers nothing usable."""
+    event_id, url = parse_event_ref(ref)
+    if not event_id:
+        return {"ok": False, "error": "Couldn't read an event id from that. Paste a tv.varsity.com event link or its number."}
+    ck = "api:" + event_id
+    hit = _CACHE.get(ck)
+    if hit and not fresh and time.time() - hit[0] < _CACHE_TTL_S:
+        return {**hit[1], "cached": True}
+    api_url = API.format(eid=event_id)
+    diag = {"url": url, "api": api_url}
+    t0 = time.time()
+    try:
+        r = requests.get(api_url, params=_API_PARAMS,
+                         headers={**_HEADERS, "Accept": "application/json"}, timeout=12)
+        diag.update({"status": r.status_code, "bytes": len(r.content),
+                     "ms": int((time.time() - t0) * 1000)})
+        j = r.json() if r.status_code == 200 else None
+    except Exception as e:
+        diag["error"] = str(e)
+        j = None
+    blocks, name, meta = [], None, {}
+    if isinstance(j, dict):
+        try:
+            name = j["header"]["title"]["text"]
+        except Exception:
+            name = (j.get("analytics") or {}).get("name")
+        m = j.get("metadata") or {}
+        meta = {"start": m.get("startAt"), "end": m.get("endAt"),
+                "status": m.get("liveEventStatus"), "days": m.get("numberOfDays"),
+                "image": m.get("assetUrl")}
+        views = [v for _p, v in _walk(j)
+                 if isinstance(v, dict) and isinstance(v.get("htmlContent"), str)]
+        diag["html_views"] = [v.get("id") for v in views]
+        for v in views:
+            blocks.extend(dict(t, source="api", result_id=v.get("id"))
+                          for t in parse_tables(_soup(v["htmlContent"])))
+    if not blocks:
+        out = fetch_event_page(ref, fresh=fresh)
+        out.setdefault("diag", {})["api_fallback"] = diag
+        return out
+    out = {"ok": True, "event_id": event_id, "event_name": name, "meta": meta,
+           "source": "api", "divisions": [normalize(b) for b in blocks],
+           "fetched_at": int(time.time()), "diag": diag}
+    _CACHE[ck] = (time.time(), out)
     return out

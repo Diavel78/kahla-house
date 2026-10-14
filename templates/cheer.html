@@ -166,7 +166,7 @@ function render() {
     try { localStorage.setItem('kh_cheer_find', q); } catch (e) {}
     const when = DATA.fetched_at ? new Date(DATA.fetched_at * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
     let h = `<div class="event-head"><h2>${E(DATA.event_name || 'Event ' + DATA.event_id)}</h2>
-        <div class="meta">${DATA.divisions.length} division${DATA.divisions.length === 1 ? '' : 's'} · updated ${E(when)} · <a style="color:var(--text-muted)" href="${E(DATA.diag && DATA.diag.url)}" target="_blank">open on Varsity</a></div></div>`;
+        <div class="meta">${DATA.meta && DATA.meta.start ? E(new Date(DATA.meta.start).toLocaleDateString([], {month:'short', day:'numeric', year:'numeric'})) + ' · ' : ''}${DATA.meta && DATA.meta.status ? E(DATA.meta.status.toLowerCase()) + ' · ' : ''}${DATA.divisions.length} division${DATA.divisions.length === 1 ? '' : 's'} · updated ${E(when)} · <a style="color:var(--text-muted)" href="${E(DATA.diag && DATA.diag.url)}" target="_blank">open on Varsity</a></div></div>`;
     for (const d of DATA.divisions) {
         const teams = d.teams || [];
         if (q && !teams.some(t => (t.team || '').toLowerCase().includes(q)) && !(d.division || '').toLowerCase().includes(q)) continue;
