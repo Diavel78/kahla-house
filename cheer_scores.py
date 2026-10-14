@@ -721,7 +721,7 @@ def _get_json(url, params):
         return None
 
 
-def fetch_structured(event_id, budget_s=30, page=100):
+def fetch_structured(event_id, budget_s=60, page=100):
     """All-star events: every division, every round, every team. The
     preview pages (results/partial) list the divisions with their top 3;
     each division with a View All is re-read in full from results/list
