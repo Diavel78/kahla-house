@@ -1600,7 +1600,23 @@ def _cheer_args():
 @admin_required
 def api_cheer_seasons():
     import cheer_store
-    return jsonify({"seasons": cheer_store.seasons(get_db()), "current": _cheer_season_now()})
+    last = None
+    try:
+        snap = get_db().collection("cheer_meta").document("ingest").get()
+        last = (snap.to_dict() or {}).get("last_run") if snap.exists else None
+    except Exception:
+        pass
+    return jsonify({"seasons": cheer_store.seasons(get_db()), "current": _cheer_season_now(), "last_run": last})
+
+
+@app.route("/api/cheer/refresh", methods=["POST"])
+@admin_required
+def api_cheer_refresh():
+    """The page's Update button: one bounded ingest pass over this season.
+    The page calls it again while `remaining` > 0."""
+    import cheer_store
+    months = _cheer_months(_cheer_season_now())
+    return jsonify(cheer_store.ingest(get_db(), months, budget_s=40))
 
 
 @app.route("/api/cheer/leaderboard")

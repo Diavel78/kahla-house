@@ -181,12 +181,40 @@ async function api(path, opts) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
 }
+function ago(ts) {
+    const m = Math.round((Date.now() / 1000 - ts) / 60);
+    if (m < 2) return 'just now';
+    if (m < 60) return m + 'm ago';
+    const h = Math.round(m / 60);
+    return h < 36 ? h + 'h ago' : Math.round(h / 24) + 'd ago';
+}
+async function updateNow() {
+    const b = document.getElementById('updBtn');
+    if (!b || b.disabled) return;
+    b.disabled = true;
+    let done = 0;
+    try {
+        for (let i = 0; i < 20; i++) {
+            b.textContent = done ? `Updating… ${done} events` : 'Checking Varsity…';
+            const r = await api('/api/cheer/refresh', { method: 'POST', body: '{}' });
+            done += r.done || 0;
+            if (!r.remaining) break;
+        }
+        S.lastRun = Date.now() / 1000;
+        b.textContent = done ? `✓ ${done} updated` : '✓ Up to date';
+        setTimeout(() => showLb(), 1200);
+    } catch (e) {
+        b.textContent = 'Failed — tap to retry';
+        b.disabled = false;
+    }
+}
 async function init() {
     try {
         const [ss, fo] = await Promise.all([api('/api/cheer/seasons'), api('/api/cheer/follow')]);
         S.seasons = ss.seasons || [];
         S.season = (S.seasons[0] || {}).season || ss.current;
         S.follow = fo;
+        S.lastRun = ss.last_run || null;
     } catch (e) { view().innerHTML = `<div class="empty">Could not load: ${E(e.message)}</div>`; return; }
     go(S.view || 'lb');
 }
@@ -293,7 +321,8 @@ function perfList(scores) {
 function showLb(keepData) {
     view().innerHTML = `<h1>Leaderboards</h1>
         <div class="lead">Compare performance across divisions, programs, and the teams on your radar.</div>
-        <div class="pill-note">🏆 Pulled from Varsity TV results · updated nightly</div>
+        <div class="pill-note">🏆 Varsity TV results · ${S.lastRun ? 'updated ' + ago(S.lastRun) : 'updated daily'}
+            <button id="updBtn" onclick="updateNow()" style="margin-left:6px;background:transparent;border:1px solid var(--border-light);color:var(--accent);border-radius:9px;padding:4px 10px;font-size:12px;font-weight:600">⟳ Update now</button></div>
         <div class="panel">
             ${searchBox('Search a program or team', 'loadLb')}
             <div class="grid2">${seasonSel('loadLb')}${divSel('loadLb')}</div>

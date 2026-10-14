@@ -1,12 +1,12 @@
 name: cheer-ingest
 # Cheer Scoring: pull new/updated Varsity TV results into Firestore
 # (/api/cheer/ingest walks this season + last season's month tabs; each
-# call is bounded, so it repeats until nothing is left). Daily, plus
-# manual dispatch for backfills (season=2025-26).
+# call is bounded, so it repeats until nothing is left). Once a day (the
+# page's Update button covers anything sooner), plus manual dispatch for
+# backfills (season=2025-26).
 on:
   schedule:
     - cron: "17 9 * * *"           # nightly 2:17am Arizona: this season + last
-    - cron: "*/30 * * * 5,6,0"     # competition weekends (UTC Fri-Sun): this season, new scores
   workflow_dispatch:
     inputs:
       season:
@@ -27,8 +27,6 @@ jobs:
           KEY="$(printf '%s' "$CRON_KEY" | tr -d '[:space:]')"
           Q=""
           [ -n "$SEASON" ] && Q="&season=${SEASON}"
-          # the weekend half-hourly schedule only walks the current season
-          [ "${{ github.event.schedule }}" = "*/30 * * * 5,6,0" ] && Q="&recent=1"
           for i in $(seq 1 120); do
             OUT=$(curl -sSL --max-time 290 "https://www.thekahlahouse.com/api/cheer/ingest?key=${KEY}${Q}" || true)
             echo "=== pass $i ==="

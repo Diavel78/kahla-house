@@ -198,6 +198,11 @@ def ingest(db, months, budget_s=20, max_events=80):
         except Exception as e:
             errors.append({"id": eid, "err": f"{type(e).__name__}: {e}"[:200]})
     _LB_CACHE.clear()
+    try:
+        db.collection("cheer_meta").document("ingest").set(
+            {"last_run": int(time.time()), "done": len(done), "remaining": max(0, len(todo) - len(done) - len(errors))})
+    except Exception:
+        pass
     return {"ok": True, "discovered": len(found), "todo": len(todo), "done": len(done),
             "remaining": max(0, len(todo) - len(done) - len(errors)), "events": done,
             "errors": errors, "months": diag, "secs": round(time.time() - t0, 1)}
