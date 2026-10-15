@@ -832,7 +832,13 @@ def _search_event(client, sport: str, away: str, home: str,
         slug = matched.get("slug") if isinstance(matched, dict) else getattr(matched, "slug", None)
         existing_markets = matched.get("markets") if isinstance(matched, dict) else getattr(matched, "markets", None)
         existing_markets = existing_markets or []
-        if not existing_markets and slug:
+        # ALWAYS fetch the full list (Oct 15 2026): events.list used to send
+        # an EMPTY markets array, so this ran only `if not existing_markets`.
+        # The venue now embeds the MONEYLINE alone on NHL events, the guard
+        # skipped the fetch, and every puck line + total vanished — the bet
+        # sheet refused DET −1.5 on a 100k-deep book. Embedded markets are a
+        # partial list; the fetched list wins and keeps any embedded extras.
+        if slug:
             fetched_markets: list = []
             # Primary: markets.list(eventSlug=[slug]) — returns markets
             # with embedded bestBidQuote/bestAskQuote. PAGED (Aug 21 2026,
@@ -887,6 +893,15 @@ def _search_event(client, sport: str, away: str, home: str,
                     if diag is not None:
                         diag["retrieve_by_slug_error"] = str(e)[:200]
             # Attach fetched markets back onto the matched event.
+            if fetched_markets and existing_markets:
+                _have = {(m.get("slug") or m.get("id")) if isinstance(m, dict)
+                         else (getattr(m, "slug", None) or getattr(m, "id", None))
+                         for m in fetched_markets}
+                for m in existing_markets:
+                    mk = ((m.get("slug") or m.get("id")) if isinstance(m, dict)
+                          else (getattr(m, "slug", None) or getattr(m, "id", None)))
+                    if mk not in _have:
+                        fetched_markets.append(m)
             if fetched_markets:
                 if isinstance(matched, dict):
                     matched["markets"] = fetched_markets
