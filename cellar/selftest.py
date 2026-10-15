@@ -3804,6 +3804,58 @@ def test_sheet_run_clocks() -> None:
     check("unknown sport -> None", _app._sheet_next_run("UFC", _dt(2026, 10, 10, 8, 0, tzinfo=az)) is None)
 
 
+def test_bet_sheet_reads() -> None:
+    """The model's read on a stopped bet (Oct 15 2026): each option priced
+    by the sheet's own model at its own line and price; recommend the
+    playable option that earns more per dollar, else cancel."""
+    print("bet sheets: the model's read on a moved line")
+    import app as _app
+    # football: the sheet's ECU@UAB shape — model total 49.6 (cal), stay O 47.5
+    # @ 52¢ vs move O 48.5 @ 49¢; snapshot fit = identity, sd 13.
+    snap = {"params": {"total_fit": {"alpha": 0.0, "beta": 1.0, "sd": 13.0, "mean": 0.0},
+                       "spread_fit": {"alpha": 0.0, "beta": 1.0, "sd": 13.0, "mean": 0.0}}}
+    old = _app._power_snapshot
+    _app._power_snapshot = lambda sb, sport: snap
+    try:
+        fb = {"model": {"total_raw": 49.6, "total_cal": 49.6, "margin_raw": 5.0, "margin_cal": 5.0}}
+        stay = _app._bs_option_read(None, "NCAAF", fb, "total", "over", 47.5, 52.0)
+        move = _app._bs_option_read(None, "NCAAF", fb, "total", "over", 48.5, 49.0)
+        check("football stay O 47.5: +2.1 pts = PLAY", stay["pts"] == 2.1 and stay["verdict"] == "play", str(stay))
+        check("football move O 48.5: +1.1 pts = LEAN", move["pts"] == 1.1 and move["verdict"] == "lean", str(move))
+        check("a higher over line is a smaller model %", move["model_p"] < stay["model_p"])
+        check("value = model % − price", abs(stay["value_c"] - (stay["model_p"] * 100 - 52.0)) < 0.06)
+        under = _app._bs_option_read(None, "NCAAF", fb, "total", "under", 48.5, 49.0)
+        check("the under at the same line reads the mirror", under["verdict"] == "pass"
+              and abs(under["model_p"] + move["model_p"] - 1.0) < 1e-3)
+        away = _app._bs_option_read(None, "NFL", fb, "spread", "away", 7.5, 50.0)
+        check("football spread: away +7.5 vs home margin 5 = +2.5 pts", away["pts"] == 2.5 and away["verdict"] == "play", str(away))
+        check("a whole-number line is not priced (push mass)",
+              _app._bs_option_read(None, "NCAAF", fb, "total", "over", 48.0, 49.0) is None)
+    finally:
+        _app._power_snapshot = old
+    nba = {"model": {"mu": 4.0, "sd": 12.0, "tu": 224.0, "tsd": 18.0}}
+    o = _app._bs_option_read(None, "NBA", nba, "total", "over", 220.5, 50.0)
+    check("NBA total: Φ((tu − L)/tsd), lean-capped", 0.57 < o["model_p"] < 0.59 and o["verdict"] == "lean", str(o))
+    nhl = {"model": {"over": {"6.5": 0.44}, "home_cover": {"-1.5": 0.35}, "away_cover": {"1.5": 0.65}}}
+    o = _app._bs_option_read(None, "NHL", nhl, "total", "under", 6.5, 50.0)
+    check("NHL under 6.5 reads 1 − over, +6¢ = lean", o["model_p"] == 0.56 and o["verdict"] == "lean", str(o))
+    check("NHL line the model never priced = None",
+          _app._bs_option_read(None, "NHL", nhl, "total", "over", 7.5, 40.0) is None)
+    o = _app._bs_option_read(None, "NHL", nhl, "spread", "away", 1.5, 60.0)
+    check("NHL puck +1.5 off away_cover, +5¢ = play", o["verdict"] == "play", str(o))
+    mlb = {"model": {"win_home": 0.6}, "model_meta": {"run_line_shares": {"home": 0.6, "away": 0.7}}}
+    o = _app._bs_option_read(None, "MLB", mlb, "spread", "home", -1.5, 30.0)
+    check("MLB home −1.5 = p × home share", abs(o["model_p"] - 0.36) < 1e-9 and o["verdict"] == "lean", str(o))
+    R = _app._bs_recommend
+    a = {"verdict": "play", "value_c": 3.2, "price_c": 52.0}
+    m = {"verdict": "lean", "value_c": 4.0, "price_c": 49.0}
+    check("both playable → more value per dollar wins (move)", R(a, m) == "move")
+    check("move a pass → stay and re-peg", R(a, {**m, "verdict": "pass"}) == "repeg")
+    check("negative value at the price is not playable", R({**a, "value_c": -1.0}, {**m, "verdict": "pass"}) == "cancel")
+    check("neither priced → no recommendation", R(None, None) is None)
+    check("no rung found → re-peg or cancel only", R(a, None) == "repeg" and R({**a, "verdict": "pass"}, None) == "cancel")
+
+
 def test_mlb_sheet() -> None:
     """MLB sheet (Oct 15 2026): the run line is P(win) × P(win by 2+ |
     win); every verdict is lean at most; the API shape carries no total
@@ -4059,7 +4111,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

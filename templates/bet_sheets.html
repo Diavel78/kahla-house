@@ -225,6 +225,14 @@
         .abtn.dng { border-color: var(--r-bd2); color: var(--r-tx); }
         .abtn.on { background: var(--blue); border-color: var(--blue); color: var(--bg); font-weight: 700; }
         .abtn.dng.on { background: var(--r-bd); border-color: var(--r-bd); color: #fff; }
+        .abtn.dng.pri { background: var(--r-bd); border-color: var(--r-bd); color: #fff; }
+        /* the model's read on a stopped bet: each option + the recommendation */
+        .rd { background: var(--card2); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+        .rd .rh { font-size: 13px; color: var(--text2); letter-spacing: .3px; }
+        .rd .rec { font-size: 17px; font-weight: 700; }
+        .rd .rec.go { color: #8EE4AF; } .rd .rec.no { color: var(--r-tx); }
+        .rd .ro { font-size: 14px; color: var(--text2); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .rd .ro b { color: var(--text); font-family: var(--mono); font-weight: 600; }
 
         /* the slip */
         .slip {
@@ -793,6 +801,12 @@
     // stopped and wants a hand (manual re-peg, line moved, off the book, a
     // rejoin that errored, outbid in-play); green = filled and done;
     // yellow = resting and the box has it (chasing, thin touch, holds).
+    function recShort(b, rr) {
+        const r = b.read.rec;
+        return r === 'move' ? '★ model says move to ' + rungLabel(b, rr && rr.line)
+             : r === 'repeg' ? '★ model says ' + (rr ? 'stay and ' : '') + 're-peg — still a play'
+             : '★ model says cancel — no longer a play';
+    }
     function betState(b) {
         const o = b.order || {}, held = b.held || 0, ch = b.chase || {}, hold = ch.hold;
         const rr = (hold && hold.rerung && hold.rerung.slug) ? hold.rerung : null;
@@ -803,9 +817,9 @@
         if (o.resting) {
             const pre = held > 0 ? fill + ' · ' : '';
             if (hold && hold.touch_c != null && rr)
-                return { cls: 'warn', short: 'LINE MOVED', detail: pre + rest + ' · touch ' + touch + '¢ here · current line ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — move it or cancel' };
+                return { cls: 'warn', short: 'LINE MOVED', detail: pre + rest + ' · touch ' + touch + '¢ here · current line ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') };
             if (hold && hold.touch_c != null)
-                return { cls: 'warn', short: 'RE-PEG', detail: pre + rest + ' · touch ' + touch + '¢' + (ch.anchor_c != null ? ', ' + Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : ' past the leash') + ' — the box stopped chasing' };
+                return { cls: 'warn', short: 'RE-PEG', detail: pre + rest + ' · touch ' + touch + '¢' + (ch.anchor_c != null ? ', ' + Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : ' past the leash') + ' — ' + (b.read ? recShort(b, null) : 'the box stopped chasing') };
             if (b.outbid && b.in_play)
                 return { cls: 'warn', short: 'OUTBID', detail: pre + rest + ' · touch ' + b.touch_c + '¢ · in play — re-peg in the app' };
             let why = '';
@@ -944,9 +958,12 @@
         if (b.status === 'pending' && o.resting && !b.started) {
             const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id)), rx = inSlip(opKey('rerung', b.id));
             const rr = (b.chase && b.chase.hold && b.chase.hold.rerung && b.chase.hold.rerung.slug) ? b.chase.hold.rerung : null;
-            if (rr) acts.push('<button class="abtn' + (rx ? ' on' : ' pri') + '" onclick="sheetOp(\'rerung\')">' + (rx ? '✓ On the slip: move to ' : 'Move to ') + esc(rungLabel(b, rr.line)) + (rr.bid_c != null ? ' @ ' + rr.bid_c + '¢' : '') + '</button>');
-            acts.push('<button class="abtn' + (rp ? ' on' : (rr ? '' : ' pri')) + '" onclick="sheetOp(\'repeg\')">' + (rp ? '✓ On the slip: re-peg to touch' : 'Re-peg to touch') + '</button>');
-            acts.push('<button class="abtn dng' + (cn ? ' on' : '') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : 'Cancel order') + '</button>');
+            const rd = b.read || null, rec = rd ? rd.rec : (rr ? 'move' : 'repeg');
+            if (rd) h += readBlock(b, rd, rr);
+            const star = k => (rd && rd.rec === k ? '★ ' : '');
+            if (rr) acts.push('<button class="abtn' + (rx ? ' on' : rec === 'move' ? ' pri' : '') + '" onclick="sheetOp(\'rerung\')">' + (rx ? '✓ On the slip: move to ' : star('move') + 'Move to ') + esc(rungLabel(b, rr.line)) + (rr.bid_c != null ? ' @ ' + rr.bid_c + '¢' : '') + '</button>');
+            acts.push('<button class="abtn' + (rp ? ' on' : rec === 'repeg' ? ' pri' : '') + '" onclick="sheetOp(\'repeg\')">' + (rp ? '✓ On the slip: re-peg to touch' : star('repeg') + 'Re-peg to touch') + '</button>');
+            acts.push('<button class="abtn dng' + (cn ? ' on' : rec === 'cancel' ? ' pri' : '') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : star('cancel') + 'Cancel order') + '</button>');
         } else if (b.status === 'pending' && o.resting && b.started) {
             h += '<div class="note">The game has started — manage this one in the app.</div>';
         }
@@ -957,6 +974,31 @@
         acts.push('<button class="abtn" onclick="closeSheet()">Close</button>');
         h += '<div class="acts">' + acts.join('') + '</div>';
         document.getElementById('as').innerHTML = h;
+    }
+
+    // The model's read on a stopped bet (Rob, Oct 15 2026: "it doesn't tell
+    // me if it's still a play… give me your recommendation"): each option
+    // priced by the sheet's own model at its own line and price — verdict
+    // (the sheet's rule), model %, points past the line (football), and
+    // value = model % minus the price. Server: _bet_sheet_reads.
+    function readBlock(b, rd, rr) {
+        const opt = (tag, x, lbl) => {
+            if (!x) return '<div class="ro">' + tag + ' <b>' + esc(lbl) + '</b> · the model can\'t price this line</div>';
+            const bits = ['model ' + Math.round(x.model_p * 1000) / 10 + '%'];
+            if (x.pts != null) bits.push(sgn(x.pts) + ' pts');
+            if (x.value_c != null) bits.push((x.value_c >= 0 ? '+' : '−') + Math.abs(x.value_c).toFixed(1) + '¢ value');
+            return '<div class="ro">' + tag + ' <b>' + esc(lbl) + (x.price_c != null ? ' @ ' + x.price_c + '¢' : '') + '</b>'
+                 + (x.verdict ? verdictBadge(x.verdict) : '') + ' ' + bits.join(' · ') + '</div>';
+        };
+        const recTxt = rd.rec === 'move' ? 'Move to ' + rungLabel(b, rr && rr.line)
+                     : rd.rec === 'repeg' ? 'Stay on ' + betLabel(b) + ' — re-peg to the touch'
+                     : 'Cancel — no longer a play at either line';
+        const why = rd.rec === 'cancel' ? '' : ' <span class="g" style="font-weight:500;font-size:13px;color:var(--text2)">· more value per dollar</span>';
+        let h = '<div class="rd"><div class="rh">THE MODEL\'S READ</div>'
+              + '<div class="rec ' + (rd.rec === 'cancel' ? 'no' : 'go') + '">★ ' + esc(recTxt) + why + '</div>';
+        if (rr) h += opt('Move', rd.move, rungLabel(b, rr.line));
+        h += opt(rr ? 'Stay' : 'Re-peg', rd.stay, betLabel(b));
+        return h + '</div>';
     }
 
     // ───────────────────────── my bets ─────────────────────────
