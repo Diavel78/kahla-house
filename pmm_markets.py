@@ -879,6 +879,22 @@ def _search_event(client, sport: str, away: str, home: str,
                     _RL_TRIP(e)
                 if diag is not None:
                     diag["markets_list_error"] = str(e)[:200]
+            # ONLY THIS EVENT'S MARKETS (Oct 15 2026): markets.list ignored
+            # eventSlug for nhl-phi-det-2026-10-15 and returned unrelated
+            # futures/election markets. A market belongs to the event when its
+            # eventSlug says so, or its slug carries the event's core key
+            # ('phi-det-2026-10-15' inside 'asc-nhl-phi-det-2026-10-15-neg-1pt5').
+            _core = slug.split("-", 1)[-1] if "-" in slug else slug
+
+            def _own(m):
+                g = m.get if isinstance(m, dict) else (lambda k, d=None: getattr(m, k, d))
+                es = g("eventSlug")
+                if es:
+                    return es == slug
+                return _core in str(g("slug") or "")
+            if diag is not None:
+                diag["markets_list_raw"] = len(fetched_markets)
+            fetched_markets = [m for m in fetched_markets if _own(m)]
             # Secondary fallback: events.retrieve_by_slug. Rarely needed
             # in practice but cheap to keep as a safety net.
             if not fetched_markets:

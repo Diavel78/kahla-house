@@ -8584,6 +8584,43 @@ def debug_pmm():
         out["get_client"] = {"ok": False, "ms": round((_t.time() - t0) * 1000),
                              "error": f"{type(e).__name__}: {str(e)[:300]}"}
         return jsonify(out)
+    # ?ev=<event slug>: every way of asking the venue for one event's
+    # markets, side by side (Oct 15 2026 — markets.list(eventSlug=[…])
+    # returned unrelated futures for nhl-phi-det-2026-10-15).
+    _ev = request.args.get("ev")
+    if _ev:
+        def _mk(m):
+            g = m.get if isinstance(m, dict) else (lambda k, d=None: getattr(m, k, d))
+            return {"slug": g("slug"), "eventSlug": g("eventSlug"),
+                    "v2": g("sportsMarketTypeV2"), "q": (g("question") or "")[:70]}
+
+        def _probe(name, fn):
+            t1 = _t.time()
+            try:
+                r = fn()
+                ev = (r.get("event") if isinstance(r, dict) else None)
+                ms = ((ev or {}).get("markets") if ev is not None else
+                      ((r.get("markets") if isinstance(r, dict) else None) or []))
+                out[name] = {"n": len(ms or []), "ms": round((_t.time() - t1) * 1000),
+                             "sample": [_mk(m) for m in (ms or [])[:8]],
+                             "own": sum(1 for m in (ms or []) if _ev.split("-", 1)[-1] in str(_mk(m)["slug"]))}
+            except Exception as e:
+                out[name] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+        _probe("list_eventSlug_list", lambda: client.markets.list({"eventSlug": [_ev], "closed": False, "limit": 100}))
+        _probe("list_eventSlug_str", lambda: client.markets.list({"eventSlug": _ev, "closed": False, "limit": 100}))
+        _probe("list_eventSlug_noclosed", lambda: client.markets.list({"eventSlug": [_ev], "limit": 100}))
+        _probe("event_by_slug", lambda: client.events.retrieve_by_slug(_ev))
+        _core = _ev.split("-", 1)[-1]
+        _sp = _ev.split("-", 1)[0]
+        _probe("list_by_slugs", lambda: client.markets.list({"slug": [
+            f"aec-{_ev}", f"asc-{_ev}-neg-1pt5", f"asc-{_ev}-pos-1pt5", f"tsc-{_ev}-6pt5", f"tsc-{_ev}-5pt5"],
+            "limit": 20}))
+        _probe("events_list_slug", lambda: (lambda r: {"markets": [m for e in ((r or {}).get("events") or [])
+                                                                      for m in (e.get("markets") or [])]})(
+            client.events.list({"slug": [_ev], "limit": 5})))
+        out["core"] = _core
+        out["sport_prefix"] = _sp
+        return jsonify(out)
     # 2) Discovery: test the ACTUAL slugs (tagSlug='mlb' etc.) with the REAL
     # query shape the lookup uses (tag + time window + relatedTags), plus a
     # no-tag sample so we can see what events/tags Polymarket actually exposes
