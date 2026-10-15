@@ -13791,6 +13791,15 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
             return {"ok": False, "reason": "Polymarket is rate-limiting us — wait 20s and submit again"}
         _BET_SHEET_MISS[miss_key] = _time.time()
         return {"ok": False, "reason": "Polymarket has not listed this game"}
+    if mt != "ml" and not pmm.get(mt):
+        # Oct 15 2026: NHL games listed with the moneyline ONLY (no puck line,
+        # no total) read "no spread market for that side" — it is the game.
+        _have = [k for k in ("ml", "spread", "total") if pmm.get(k)]
+        _nm = {"ml": "moneyline", "spread": ("puck line" if sport == "NHL" else
+                                            "run line" if sport == "MLB" else "spread"),
+               "total": "total"}
+        return {"ok": False, "reason": f"Polymarket lists no {_nm[mt]} for this game"
+                + (f" — only the {', '.join(_nm[k] for k in _have)}" if _have else "")}
     entry, why = _bet_sheet_rung(pmm.get(mt), mt, side, item.get("line"))
     if entry is None:
         return {"ok": False, "reason": why}
