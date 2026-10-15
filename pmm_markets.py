@@ -874,6 +874,14 @@ def _search_event(client, sport: str, away: str, home: str,
                     fetched_markets.extend(fresh)
                     if len(ms) < 100 or not fresh:
                         break
+                    # The venue IGNORES eventSlug now (Oct 15 2026: the list
+                    # came back futures/election/old NFL) — a page with none
+                    # of this event's markets ends the walk; the retrieve
+                    # fallback below reads the event itself (all markets).
+                    _c0 = slug.split("-", 1)[-1]
+                    if not any(_c0 in str((m.get("slug") if isinstance(m, dict)
+                                           else getattr(m, "slug", "")) or "") for m in fresh):
+                        break
             except Exception as e:
                 if _RL_TRIP is not None:
                     _RL_TRIP(e)
