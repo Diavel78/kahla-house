@@ -312,6 +312,7 @@
             <div class="seg">
                 <button class="tab on" data-sport="NHL" onclick="switchSport('NHL')">NHL</button>
                 <button class="tab" data-sport="NBA" onclick="switchSport('NBA')">NBA</button>
+                <button class="tab" data-sport="MLB" onclick="switchSport('MLB')">MLB</button>
                 <button class="tab" data-sport="NCAAF" onclick="switchSport('NCAAF')">College</button>
                 <button class="tab" data-sport="NFL" onclick="switchSport('NFL')">NFL</button>
             </div>
@@ -379,7 +380,7 @@
     }
 
     let _sport = 'NHL';
-    const _daily = () => _sport === 'NHL' || _sport === 'NBA';   // daily-slate sports (no week key)
+    const _daily = () => _sport === 'NHL' || _sport === 'NBA' || _sport === 'MLB';   // daily-slate sports (no week key)
     function switchSport(s) {
         _sport = s;
         document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.sport === s));
@@ -1229,7 +1230,7 @@
         else if (!p && L.ml_away != null && L.ml_home != null) mdl = nameOf(g, 'away') + ' ' + am(L.ml_away) + ' · ' + nameOf(g, 'home') + ' ' + am(L.ml_home) + (mdl ? ' · ' + mdl : '');
         if (!p && !mdl) return '';
         let body = mkBody(g, up, 'ml', p, 0, p && p.side ? nameOf(g, p.side) + ' ML' : '', 'ml');
-        if (p && p.chalky && up) body = '<div class="mk-note">Too chalky to bet at ' + am(p.price) + ' — ' + (_sport === 'NHL' ? 'see the puck line' : 'see the spread') + '.</div>';
+        if (p && p.chalky && up) body = '<div class="mk-note">Too chalky to bet at ' + am(p.price) + ' — ' + (_sport === 'NHL' ? 'see the puck line' : _sport === 'MLB' ? 'see the run line' : 'see the spread') + '.</div>';
         return mkRow('ML', p, mdl + edgeTxt(p, false), body);
     }
     // NBA spread (Hoops IQ: lean-capped, like the total)
@@ -1240,7 +1241,7 @@
         if (!p && !mdl) return '';
         let ln = null;
         if (p && p.side) ln = p.line != null ? Number(p.line) : (L.spread_home != null ? (p.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home)) : null);
-        return mkRow('Spread', p, mdl + edgeTxt(p, false),
+        return mkRow(_sport === 'MLB' ? 'Run line' : 'Spread', p, mdl + edgeTxt(p, false),
                      mkBody(g, up, 'spread', p, ln, p && p.side ? nameOf(g, p.side) + ' ' + sgn(ln, 1) : '', 'spread'));
     }
     // Hockey puck line: priced server-side like the ML (`g.puck`, model cover
@@ -1259,7 +1260,7 @@
     }
     function marketsFor(g, up) {
         if (_sport === 'NHL') return mlMarket(g, up) + puckMarket(g, up) + totalMarket(g, up, false);
-        if (_sport === 'NBA') return mlMarket(g, up) + nbaSpreadMarket(g, up) + totalMarket(g, up, false);
+        if (_sport === 'NBA' || _sport === 'MLB') return mlMarket(g, up) + nbaSpreadMarket(g, up) + totalMarket(g, up, false);
         return footballMarkets(g, up);
     }
     function hasPick(g) {
@@ -1316,7 +1317,7 @@
     }
     // 'up' = not started; 'final' = graded final or started > FINAL_AFTER_H
     // ago (a grade lands within ~5 min of the final); 'live' = in between.
-    const FINAL_AFTER_H = { NHL: 3.5, NBA: 3.0, NFL: 4.5, NCAAF: 4.5 };
+    const FINAL_AFTER_H = { NHL: 3.5, NBA: 3.0, MLB: 3.5, NFL: 4.5, NCAAF: 4.5 };
     function gameStatus(g) {
         const t = g.event_start ? new Date(g.event_start).getTime() : null;
         if (t === null || t > Date.now()) return 'up';
@@ -1359,6 +1360,12 @@
         if (_sport === 'NHL' && g.goalies) {
             const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
             if (ga || gh) subs.push('<span>🥅 ' + esc(ga || '?') + ' vs ' + esc(gh || '?') + '</span>');
+        }
+        if (_sport === 'MLB') {
+            const st = g.starters || {}, sa = st.away || {}, sh = st.home || {};
+            const nm = x => esc(x.name || 'TBD') + (x.name && !x.rated ? '*' : '');
+            if (sa.name || sh.name) subs.push('<span title="* = no starts on record — priced as a league-average arm">⚾ ' + nm(sa) + ' vs ' + nm(sh) + '</span>');
+            if (g.series) subs.push('<span>' + esc(g.series) + '</span>');
         }
         if (modelScore(g)) subs.push(modelScore(g));
         return '<div class="gc' + (isUp ? '' : ' done') + '"><div class="gh"><div><div class="gt">'

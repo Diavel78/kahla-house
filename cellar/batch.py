@@ -178,11 +178,23 @@ JOBS: tuple[Job, ...] = (
         hour=12, minute=10, timeout_s=1500, note="NBA pick sheet (box, book line)"),
     Job("nba_sheet_1545", ["scripts.nba_sheet_data", "--days", "1", "--commit", "--pin"],
         hour=15, minute=45, timeout_s=1500, note="NBA pick sheet (box, pre-tip injuries, the 3pm Pinnacle pull)"),
+    # Baseball: Diamond IQ (the ITER3 champion) walked fresh off the
+    # mlb_pitcher_games / mlb_batter_games spines every run (no snapshot
+    # table — the sheet is the only consumer), ESPN probables + lines,
+    # Pinnacle's own (free) feed — NO --pin: the paid parlay-api fallback's
+    # worst-case month has no room for two more pulls a day (selftest).
+    # Lean-capped: the model trails the market.
+    Job("mlb_sheet_07", ["scripts.mlb_sheet_data", "--days", "1", "--commit"],
+        hour=7, minute=10, timeout_s=1500, note="MLB pick sheet (box, Pinnacle feed)"),
+    Job("mlb_sheet_11", ["scripts.mlb_sheet_data", "--days", "1", "--commit"],
+        hour=11, minute=15, timeout_s=1500, note="MLB pick sheet (box, Pinnacle feed)"),
+    Job("mlb_sheet_1550", ["scripts.mlb_sheet_data", "--days", "1", "--commit"],
+        hour=15, minute=50, timeout_s=1500, note="MLB pick sheet (box, pre-game probables, Pinnacle feed)"),
     # Yesterday's sheet record, every sport, stamped to exec_probe_runs
     # (kind=sheet_grade) so a sandbox can read it through the site.
     Job("sheets_grade", ["scripts.grade_football_sheets", "--sport", "NFL",
                          "--sport", "NCAAF", "--sport", "NHL",
-                         "--sport", "NBA", "--days-back", "2", "--stamp", "--write"],
+                         "--sport", "NBA", "--sport", "MLB", "--days-back", "2", "--stamp", "--write"],
         hour=9, minute=0, timeout_s=600, note="pick-sheet record (yesterday + day before)"),
     # Intraday ✅/❌ ride the `grader` lane every ~5 min (cellar/lanes.py
     # lane_grader) — this job owns only the stamped daily record.

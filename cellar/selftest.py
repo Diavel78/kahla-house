@@ -3695,7 +3695,7 @@ def test_pin_direct_feed() -> None:
            {"designation": "away", "points": 2.5, "price": -110}),
     ]
     check("direct: every sheet sport has a Pinnacle league (one table, defined once)",
-          _app._PINDIRECT_LEAGUE == {"NCAAF": 880, "NFL": 889, "NHL": 1456, "NBA": 487}
+          _app._PINDIRECT_LEAGUE == {"NCAAF": 880, "NFL": 889, "NHL": 1456, "NBA": 487, "MLB": 246}
           and open(_app.__file__).read().count("\n_PINDIRECT_LEAGUE =") == 1)
     ev = _app._pin_direct_to_events(matchups, markets, now)
     check("direct: started games and child matchups are dropped",
@@ -3788,7 +3788,8 @@ def test_sheet_run_clocks() -> None:
     want: dict = {}
     for j in JOBS:
         sports = (("NCAAF", "NFL") if j.name.startswith("sheets_") and j.name != "sheets_grade"
-                  else ("NHL",) if j.name.startswith("nhl_sheet") else ("NBA",) if j.name.startswith("nba_sheet") else ())
+                  else ("NHL",) if j.name.startswith("nhl_sheet") else ("NBA",) if j.name.startswith("nba_sheet")
+                  else ("MLB",) if j.name.startswith("mlb_sheet") else ())
         for sp in sports:
             want.setdefault(sp, set()).add((j.hour, j.minute, j.weekday))
     have = {sp: set(c) for sp, c in _app._SHEET_RUN_CLOCKS.items()}
@@ -3799,7 +3800,43 @@ def test_sheet_run_clocks() -> None:
     check("football 19:30 Sat -> Sun 07:00", nx("NFL", 2026, 10, 10, 19, 30).startswith("2026-10-11T07:00"))
     check("football 19:30 Sun -> Mon 05:00 build", nx("NFL", 2026, 10, 11, 19, 30).startswith("2026-10-12T05:00"))
     check("NBA 15:45 exactly -> next day 07:05", nx("NBA", 2026, 10, 10, 15, 45).startswith("2026-10-11T07:05"))
-    check("unknown sport -> None", _app._sheet_next_run("MLB", _dt(2026, 10, 10, 8, 0, tzinfo=az)) is None)
+    check("MLB 15:50 exactly -> next day 07:10", nx("MLB", 2026, 10, 10, 15, 50).startswith("2026-10-11T07:10"))
+    check("unknown sport -> None", _app._sheet_next_run("UFC", _dt(2026, 10, 10, 8, 0, tzinfo=az)) is None)
+
+
+def test_mlb_sheet() -> None:
+    """MLB sheet (Oct 15 2026): the run line is P(win) × P(win by 2+ |
+    win); every verdict is lean at most; the API shape carries no total
+    pick and keeps the model's runs."""
+    print("pick sheets: MLB")
+    import app as _app
+    from scripts import mlb_sheet_data as msd
+    sh = {"home": 0.6, "away": 0.7}
+    check("run line: home −1.5 = p × home share", abs(msd.run_line_p(0.6, -1.5, sh) - 0.36) < 1e-9)
+    check("run line: home +1.5 = 1 − (1−p) × road share", abs(msd.run_line_p(0.4, 1.5, sh) - 0.58) < 1e-9)
+    check("run line: an alt line is not priced", msd.run_line_p(0.5, -2.5, sh) is None)
+    big = msd._side_pick(0.70, -110, -110, "home", "away", {}, {})
+    check("MLB verdicts never reach PLAY", big["verdict"] in ("lean", "pass"), str(big))
+    check("a >12pp gap is flagged and passed", big["model_gap_implausible"] and big["verdict"] == "pass")
+    check("4pp over the no-vig price is a lean",
+          msd._side_pick(0.55, -110, -110, "home", "away", {}, {})["verdict"] == "lean")
+    check("team codes are the spine's (statsapi) dialect",
+          (msd.team_code("Arizona Diamondbacks"), msd.team_code("Chicago White Sox"),
+           msd.team_code("Boston Red Sox")) == ("AZ", "CWS", "BOS"))
+    row = {"event_name": "Los Angeles Dodgers @ Milwaukee Brewers · 2026-10-15",
+           "event_start": "2026-10-15T23:08:00+00:00", "market_id": "m1",
+           "data_blob": {"game": {"away": "Los Angeles Dodgers", "home": "Milwaukee Brewers",
+                                  "series": "LAD leads 2-1"},
+                         "lines": {"ml_home": 120, "ml_away": -140, "total": 8.5},
+                         "model": {"win_home": 0.45, "exp_home": 3.9, "exp_away": 4.4,
+                                   "exp_margin": -0.5, "exp_total": 8.3},
+                         "picks": {"ml": {"side": "away", "verdict": "lean", "price": -140}},
+                         "starters": {"home": {"name": "X", "rated": True}}}}
+    g = _app._sheet_game_mlb(row)
+    check("MLB API: no total pick, model runs + starters + series ride along",
+          g["total"] is None and g["model"]["runs"] == {"home": 3.9, "away": 4.4}
+          and g["starters"] and g["series"] == "LAD leads 2-1" and g["market_id"] == "m1")
+    check("MLB is a sheet sport", "MLB" in _app._SHEET_SPORTS)
 
 
 def test_bet_sheet_market_id_prefers_active() -> None:
@@ -4022,7 +4059,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

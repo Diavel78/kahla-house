@@ -1041,7 +1041,7 @@ def football_picks_page():
     return render_template("football_picks.html")
 
 
-_SHEET_SPORTS = ("NHL", "NBA", "NCAAF", "NFL")
+_SHEET_SPORTS = ("NHL", "NBA", "MLB", "NCAAF", "NFL")
 _SHEET_NHL_LOOKBACK_H = 36   # hockey sheet keeps last night's graded games on the page
 
 
@@ -1218,6 +1218,24 @@ def _sheet_game_nba(r: dict) -> dict:
             "injuries": blob.get("injuries")}
 
 
+def _sheet_game_mlb(r: dict) -> dict:
+    """Diamond IQ sheet row → the NBA shape (ml + run line as `spread` +
+    total). Every verdict is lean-capped upstream (scripts/mlb_sheet_data —
+    the model trails the market) and the total is the model's number only.
+    The row's event_name carries the AZ date (a series replays the same
+    matchup on back-to-back days); bets match the card by market id."""
+    out = _sheet_game_nba(r)
+    blob = r.get("data_blob") or {}
+    model = blob.get("model")
+    if model:
+        out["model"]["runs"] = {"home": model.get("exp_home"), "away": model.get("exp_away")}
+    out["total"] = None
+    out["starters"] = blob.get("starters")
+    out["series"] = (blob.get("game") or {}).get("series")
+    out.pop("injuries", None)
+    return out
+
+
 def _nhl_sheet_fallback(sb):
     """Bridge until the box DB's sport CHECK is widened
     (supabase/pick_sheets_sports.sql): the mirror endpoint parks a
@@ -1242,6 +1260,7 @@ _SHEET_RUN_CLOCKS = {
     "NFL": ((5, 0, 0), (7, 0, None), (11, 0, None), (15, 30, None), (19, 0, None)),
     "NHL": ((7, 0, None), (11, 5, None), (14, 0, None), (15, 35, None)),
     "NBA": ((7, 5, None), (12, 10, None), (15, 45, None)),
+    "MLB": ((7, 10, None), (11, 15, None), (15, 50, None)),
 }
 
 
@@ -1284,7 +1303,7 @@ def api_football_picks():
             q = (sb.table("football_sheets")
                  .select("market_id,event_name,event_start,tier,data_blob,friday_md,data_built_at")
                  .eq("week_key", wk["week_key"]).eq("sport", sport))
-            if sport in ("NHL", "NBA"):
+            if sport in ("NHL", "NBA", "MLB"):
                 # A daily slate: the sheet shows what's still to play PLUS
                 # the last ~36h, so last night's games stay up with their
                 # ✅/❌ grade (Oct 3 2026) until the next slate rolls on.
@@ -1315,6 +1334,7 @@ def api_football_picks():
     for r in rows:
         games.append(_sheet_game_nhl(r) if sport == "NHL"
                      else _sheet_game_nba(r) if sport == "NBA"
+                     else _sheet_game_mlb(r) if sport == "MLB"
                      else _sheet_game_football(r))
         blob = r.get("data_blob") or {}
         stamp = (blob.get("friday") or {}).get("built_at") or r.get("data_built_at")
@@ -4184,7 +4204,7 @@ def api_cellar_health():
             _pa = {"month": _mk, "budget": _PARLAY_BUDGET,
                    "credits": (((_parlay_state_get(sb, _mk) or {}).get("v") or {})
                                .get("credits") or 0), "slates": {}}
-            for _sp in ("NFL", "NCAAF", "NHL", "NBA"):
+            for _sp in ("NFL", "NCAAF", "NHL", "NBA", "MLB"):
                 _ev, _age = _pin_slate_cached(sb, _sp, _now)
                 _pa["slates"][_sp] = {"events": len(_ev or []),
                                       "age_min": round(_age, 1) if _age is not None else None,
@@ -33367,7 +33387,7 @@ def _pin_pull_log(sb, sport: str, now, rec: dict) -> None:
 # — free, keyless for us, the whole league in two calls — so the sheets
 # read Pinnacle first and fall back to parlay-api only when it fails.
 _PINDIRECT_BASE = "https://guest.api.arcadia.pinnacle.com/0.1"
-_PINDIRECT_LEAGUE = {"NCAAF": 880, "NFL": 889, "NHL": 1456, "NBA": 487}
+_PINDIRECT_LEAGUE = {"NCAAF": 880, "NFL": 889, "NHL": 1456, "NBA": 487, "MLB": 246}
 _PINDIRECT_KEY = "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"   # the site's own public guest key
 _PINDIRECT_HDR = {"User-Agent": "Mozilla/5.0", "Accept": "application/json",
                   "Referer": "https://www.pinnacle.com/", "Origin": "https://www.pinnacle.com",
@@ -33581,7 +33601,7 @@ def api_parlay_probe():
     sb = get_supabase()
     now = datetime.now(timezone.utc)
     out: dict = {"ok": True, "base": _PARLAY_BASE, "sports": {}}
-    for sp in ("NFL", "NCAAF", "NHL", "NBA"):
+    for sp in ("NFL", "NCAAF", "NHL", "NBA", "MLB"):
         ev, age = _pin_slate_cached(sb, sp, now)
         out["sports"][sp] = {"cached_events": len(ev or []),
                              "age_min": round(age, 1) if age is not None else None,
@@ -33592,7 +33612,7 @@ def api_parlay_probe():
         # books priced each (spread outcomes per book) — "why is this game
         # not on Pinnacle" without spending a credit
         hits = []
-        for sp in ("NFL", "NCAAF", "NHL", "NBA"):
+        for sp in ("NFL", "NCAAF", "NHL", "NBA", "MLB"):
             ev, _age = _pin_slate_cached(sb, sp, now)
             for e in (ev or []):
                 if game not in ((e.get("away_team") or "") + " " + (e.get("home_team") or "")).lower():
