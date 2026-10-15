@@ -16643,6 +16643,10 @@ def api_bet_sheets_mine():
     except Exception as e:
         app.logger.warning("bet sheet live enrich: %s", e)
     try:
+        _bet_sheet_reads(sb, out)
+    except Exception as e:
+        app.logger.warning("bet sheet reads: %s", e)
+    try:
         missed = _bet_sheet_missed(sb, now, out)
     except Exception as e:
         app.logger.warning("bet sheet missed list: %s", e)
@@ -16654,6 +16658,196 @@ def api_bet_sheets_mine():
     return jsonify({"ok": True, "bets": out, "missed": missed, "venue_ok": venue_ok, "tape_dark": tape_dark,
                     "src": ("box" if box is not None else "vercel"),
                     "box_age_s": (box or {}).get("age_s"), "at": now.isoformat()})
+
+
+# ── THE BOX'S READ ON A STOPPED BET (Oct 15 2026, Rob, on a LINE MOVED
+# sheet: "it doesn't tell me if it's still a play… give me your
+# recommendation. Recommended move, recommended pass"). Each option the
+# sheet offers is priced by the SAME model the sheet used, at that option's
+# own line and price: stay = the bet's line re-pegged to the touch, move =
+# the rung the box found. Verdict = the sheet's own rule for that market
+# (football: model points past the line, 1.5 play / 0.75 lean — mirrors
+# football_sheet_data; the other sheets: model % past the price, the
+# per-market pp bars in nhl/nba/mlb_sheet_data). Value = model % minus the
+# price in cents. Recommendation = the playable option (play/lean AND
+# positive value) that earns more per dollar staked; none playable =
+# cancel. A line the model cannot price reads None, never a guess.
+_BS_READ_FB_PLAY_PTS, _BS_READ_FB_LEAN_PTS = 1.5, 0.75
+_BS_READ_FB_GAP_PTS = {"spread": 12.0, "total": 7.0}
+_BS_READ_PP = {   # (play, lean, implausible) in pp — None play = lean-capped
+    ("NHL", "spread"): (4.0, 2.0, 12.0), ("NHL", "total"): (None, 4.0, 12.0),
+    ("NBA", "spread"): (None, 4.0, 12.0), ("NBA", "total"): (None, 4.0, 12.0),
+    ("MLB", "spread"): (None, 4.0, 12.0),
+}
+
+
+def _bs_ncdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _bs_sheet_blob(sb, sport: str, market_id, event_name, cache: dict):
+    """The newest sheet row's data_blob for one game (market id first —
+    MLB names carry the date; else the event name)."""
+    key = (sport, market_id or "", event_name or "")
+    if key in cache:
+        return cache[key]
+    blob = None
+    try:
+        for col, val in (("market_id", market_id), ("event_name", event_name)):
+            if not val:
+                continue
+            rows = (sb.table("football_sheets").select("data_blob")
+                    .eq("sport", sport).eq(col, val)
+                    .order("week_key", desc=True).limit(1).execute().data) or []
+            if rows:
+                blob = rows[0].get("data_blob")
+                break
+    except Exception:
+        blob = None
+    cache[key] = blob if isinstance(blob, dict) else None
+    return cache[key]
+
+
+def _bs_line_prob(sb, sport: str, blob: dict, mt: str, side: str, line):
+    """(model P(this side wins at this line), football points past the
+    line or None). None when the sheet's model cannot price the line."""
+    try:
+        L = float(line)
+    except (TypeError, ValueError):
+        return None
+    if mt not in ("spread", "total") or side not in ("home", "away", "over", "under"):
+        return None
+    if sport in ("NFL", "NCAAF"):
+        m = (blob.get("friday") or {}).get("model") or blob.get("model") or {}
+        snap = _power_snapshot(sb, sport) or {}
+        params = snap.get("params") or {}
+        if mt == "total":
+            raw, cal = m.get("total_raw"), m.get("total_cal", m.get("total_raw"))
+            if raw is None or cal is None:
+                return None
+            p = _gridiron_over_p(params, raw, L)
+            if p is None:
+                return None
+            pts = (cal - L) if side == "over" else (L - cal)
+            return (p if side == "over" else 1.0 - p), round(pts, 1)
+        raw, cal = m.get("margin_raw"), m.get("margin_cal", m.get("margin_raw"))
+        if raw is None or cal is None:
+            return None
+        hl = L if side == "home" else -L          # the home side's own line
+        p = _gridiron_cover_p(params, raw, hl)
+        if p is None:
+            return None
+        pts = (cal + hl) if side == "home" else -(cal + hl)
+        return (p if side == "home" else 1.0 - p), round(pts, 1)
+    m = blob.get("model") or {}
+    if sport == "NHL":
+        if mt == "total":
+            po = (m.get("over") or {}).get(str(L))
+            if po is None:
+                return None
+            return (float(po) if side == "over" else 1.0 - float(po)), None
+        pc = (m.get("home_cover" if side == "home" else "away_cover") or {}).get(str(L))
+        return (float(pc), None) if pc is not None else None
+    if sport == "NBA":
+        try:
+            if mt == "total":
+                po = _bs_ncdf((float(m["tu"]) - L) / float(m["tsd"]))
+                return (po if side == "over" else 1.0 - po), None
+            hl = L if side == "home" else -L
+            ph = _bs_ncdf((float(m["mu"]) + hl) / float(m["sd"]))
+            return (ph if side == "home" else 1.0 - ph), None
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return None
+    if sport == "MLB" and mt == "spread":
+        sh = (blob.get("model_meta") or {}).get("run_line_shares") or {}
+        wh = m.get("win_home")
+        if wh is None or sh.get("home") is None or sh.get("away") is None:
+            return None
+        hl = L if side == "home" else -L
+        if hl == -1.5:
+            ph = float(wh) * float(sh["home"])
+        elif hl == 1.5:
+            ph = 1.0 - (1.0 - float(wh)) * float(sh["away"])
+        else:
+            return None
+        return (ph if side == "home" else 1.0 - ph), None
+    return None
+
+
+def _bs_option_read(sb, sport, blob, mt, side, line, price_c):
+    """One option priced: model %, fair, value vs the price, verdict."""
+    got = _bs_line_prob(sb, sport, blob, mt, side, line)
+    if got is None:
+        return None
+    p, pts = got
+    p = max(0.005, min(0.995, p))
+    out = {"line": line, "model_p": round(p, 4), "fair": _american_from_p(p), "pts": pts,
+           "price_c": price_c,
+           "value_c": (round(p * 100.0 - float(price_c), 1) if price_c is not None else None)}
+    if sport in ("NFL", "NCAAF"):
+        e = pts or 0.0
+        v = "play" if e >= _BS_READ_FB_PLAY_PTS else "lean" if e >= _BS_READ_FB_LEAN_PTS else "pass"
+        if abs(e) > _BS_READ_FB_GAP_PTS.get(mt, 99.0):
+            v = "pass"
+    else:
+        play, lean, imp = _BS_READ_PP.get((sport, mt), (None, 4.0, 12.0))
+        e = out["value_c"]
+        if e is None:
+            v = None
+        else:
+            v = "play" if (play is not None and e >= play) else "lean" if e >= lean else "pass"
+            if e > imp:
+                v = "pass"
+    out["verdict"] = v
+    return out
+
+
+def _bs_recommend(stay, move):
+    """'move' / 'repeg' / 'cancel' (None = the model could price neither)."""
+    if stay is None and move is None:
+        return None
+    rank = {"play": 2, "lean": 1}
+
+    def _ok(x):
+        return (x is not None and x.get("verdict") in rank
+                and x.get("value_c") is not None and x["value_c"] > 0)
+    def _roi(x):                      # value per dollar staked — what the money earns
+        return x["value_c"] / max(float(x.get("price_c") or 1.0), 1.0)
+    best = None
+    for name, x in (("repeg", stay), ("move", move)):
+        if _ok(x) and (best is None or _roi(x) > _roi(best[1])):
+            best = (name, x)
+    return best[0] if best else "cancel"
+
+
+def _bet_sheet_reads(sb, out: list) -> None:
+    """Stamp `read` on every pre-game resting bet the box stopped chasing
+    (manual re-peg or line moved): {stay, move, rec}."""
+    cache: dict = {}
+    for b in out:
+        if b.get("status") != "pending" or b.get("started"):
+            continue
+        if not (b.get("order") or {}).get("resting"):
+            continue
+        hold = (b.get("chase") or {}).get("hold")
+        if not isinstance(hold, dict):
+            continue
+        mt, side = b.get("market_type"), b.get("side")
+        sport = (b.get("sport") or "").upper()
+        if mt not in ("spread", "total") or b.get("line") is None:
+            continue
+        blob = _bs_sheet_blob(sb, sport, b.get("market_id"), b.get("event_name"), cache)
+        if not blob:
+            continue
+        touch = b.get("touch_c") if b.get("touch_c") is not None else hold.get("touch_c")
+        stay = _bs_option_read(sb, sport, blob, mt, side, b.get("line"), touch)
+        rr = hold.get("rerung") if isinstance(hold.get("rerung"), dict) else None
+        move = (_bs_option_read(sb, sport, blob, mt, side, rr.get("line"), rr.get("bid_c"))
+                if rr and rr.get("slug") and rr.get("line") is not None else None)
+        rec = _bs_recommend(stay, move if rr else None)
+        if rec is None:
+            continue
+        b["read"] = {"stay": stay, "move": move, "rec": rec}
 
 
 _BS_LIVE_MAX_H = 6.0          # a pending bet this long past its start is the resolver's, not "live"
