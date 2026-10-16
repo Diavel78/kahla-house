@@ -2812,6 +2812,12 @@ def test_hand_start_plan() -> None:
     # a slow drain under the hard 5% floor is the start however it got there
     drain = [row(S - 30, 200000, 200000)] + [row(S + 60 * i, 200000 // (i + 1), 200000 // (i + 1)) for i in range(1, 30)]
     assert f(drain, S, S + 60 * 29 + 1, 90)[0] == "started"
+    # 95 EVERYWHERE (Oct 15 2026, UTA @ EDM, real stamp): 572k → 54k at
+    # listed +2:05 is 90.6% off — the listed-time maker exit, not the start.
+    edm = [row(S - 30, 300000, 272386), row(S + 120, 30000, 23834), row(S + 125, 30000, 23834)]
+    assert f(edm, S, S + 126, 90)[0] == "started"
+    assert _app._HAND_START_DROP_PCT == 95.0
+    assert f(edm, S, S + 126, _app._HAND_START_DROP_PCT)[0] == "wait"
     # NO EXPIRY (Oct 5 2026, Rob): a hand bet is good-till-cancel; the makers
     # leaving is the only clock. A positive slack flag restores a GTD backstop.
     from datetime import datetime, timezone
