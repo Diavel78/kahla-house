@@ -49,7 +49,8 @@ from _lib import diamond_iq as di  # noqa: E402
 from scripts.backtest_diamond_iq import (load_rows, load_batter_rows,  # noqa: E402
                                          group_games, _team_update_rows)
 from scripts.compute_diamond_iq import MASCOT_CODE  # noqa: E402
-from scripts.football_sheet_data import _espn_get, sb_upsert, week_key_default  # noqa: E402
+from scripts.football_sheet_data import (_espn_get, sb_delete, sb_select, sb_upsert,  # noqa: E402
+                                         week_key_default)  # noqa: E402
 from scripts.nhl_sheet_data import _american, _no_vig, _parse_odds, pin_overlay  # noqa: E402
 
 log = logging.getLogger("mlb_sheet_data")
@@ -146,13 +147,18 @@ def build_state(sb):
 
 
 def espn_slate(days: int):
+    """Every game still to play, today + `days` (AZ). None when ESPN is dark
+    for EVERY day; `.complete` on the list says whether every day read —
+    only a complete read may retire rows (prune_gone)."""
     today = datetime.now(AZ).date()
-    events, ok = [], False
+    events, ok, complete = [], False, True
     for i in range(days + 1):
         d = _espn_get(_SB, {"dates": f"{today + timedelta(days=i):%Y%m%d}"})
         if d is not None:
             ok = True
             events.extend(d.get("events") or [])
+        else:
+            complete = False
     if not ok:
         return None
     out, seen = [], set()
@@ -165,6 +171,8 @@ def espn_slate(days: int):
         comp = (ev.get("competitions") or [{}])[0]
         if ((ev.get("status") or {}).get("type") or {}).get("state") != "pre":
             continue
+        if series_over(comp.get("series")):
+            continue                      # an "if necessary" game after a clinch
         sides = {}
         for c in comp.get("competitors") or []:
             t = c.get("team") or {}
@@ -193,7 +201,56 @@ def espn_slate(days: int):
                     "series": ((comp.get("series") or {}).get("summary")),
                     "broadcast": ", ".join(b for bl in (comp.get("broadcasts") or [])
                                            for b in (bl.get("names") or []))})
-    return sorted(out, key=lambda g: g["start"])
+    out = Slate(sorted(out, key=lambda g: g["start"]))
+    out.complete = complete
+    return out
+
+
+class Slate(list):
+    complete = True
+
+
+def series_over(series) -> bool:
+    """A postseason series already decided: ESPN keeps listing the
+    remaining "if necessary" games as scheduled (Oct 16 2026 — Game 5 of
+    MIL-LAD after Milwaukee's sweep)."""
+    if not isinstance(series, dict):
+        return False
+    if series.get("completed") is True:
+        return True
+    try:
+        n = int(series.get("totalCompetitions") or 0)
+        wins = [int(c.get("wins") or 0) for c in (series.get("competitors") or [])]
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return n > 0 and bool(wins) and max(wins) >= n // 2 + 1
+
+
+def prune_gone(wk: str, slate, now: datetime, horizon_end: datetime) -> list[str]:
+    """Retire this week's sheet rows for games that are still in the future
+    but no longer on ESPN's slate (a clinched series' leftover game, a
+    postponement). Without it a row lives on the page forever — rows are
+    only ever upserted. A partial ESPN read never deletes."""
+    if not getattr(slate, "complete", False):
+        return []
+    keep = {g["espn_id"] for g in slate}
+    try:
+        rows = sb_select("football_sheets", {
+            "select": "event_name,espn_id,event_start", "week_key": f"eq.{wk}",
+            "sport": "eq.MLB",
+            "event_start": [f"gt.{now.isoformat()}", f"lt.{horizon_end.isoformat()}"]})
+    except Exception as e:
+        log.warning("prune: sheet read failed: %s", e)
+        return []
+    gone = [r["event_name"] for r in rows if str(r.get("espn_id")) not in keep]
+    for name in gone:
+        try:
+            sb_delete("football_sheets", {"week_key": f"eq.{wk}", "sport": "eq.MLB",
+                                          "event_name": f"eq.{name}"})
+            log.info("prune: %s is off ESPN's slate — row retired", name)
+        except Exception as e:
+            log.warning("prune: delete %s failed: %s", name, e)
+    return gone
 
 
 def market_id(sb, name: str, start: datetime):
@@ -314,6 +371,10 @@ def run(days: int, commit: bool, pin: bool | None = None) -> dict:
             "line": g["odds"], "starters": blob["starters"],
             "model": blob.get("model"), "picks": blob.get("picks")}, default=str))
     summary["games"] = len(out_rows)
+    if commit:
+        end = datetime.combine(datetime.now(AZ).date() + timedelta(days=days + 1),
+                               datetime.min.time(), AZ)
+        summary["pruned"] = prune_gone(wk, slate, datetime.now(timezone.utc), end)
     if commit and out_rows:
         sb_upsert("football_sheets", out_rows, "week_key,sport,event_name")
         sb_upsert("football_sheet_weeks", [{"week_key": wk, "sport": "MLB",
