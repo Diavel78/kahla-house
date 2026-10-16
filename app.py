@@ -16548,7 +16548,10 @@ def api_bet_sheets_mine():
     if sb is None:
         return jsonify({"ok": False, "error": "database unavailable"}), 503
     now = datetime.now(timezone.utc)
-    cols = ("id,sport,event_name,event_start,market_type,side,entry_price,"
+    # market_id IS LOAD-BEARING (Oct 16 2026, the Cleveland ML): MLB cards
+    # carry the AZ date in their event_name, so the page can match a bet to
+    # its card ONLY by market id — and this select used to leave it out.
+    cols = ("id,sport,market_id,event_name,event_start,market_type,side,entry_price,"
             "entry_line,status,pnl_units,settled_at,result_score,signal_blob")
     rows: dict = {}
     try:
