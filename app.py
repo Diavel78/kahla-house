@@ -14599,6 +14599,13 @@ _HAND_START_STALE_S = 90.0         # the newest sample must be this fresh
 # 90% on a stray re-quote. Under HARD_PCT of the pre-start high (95% off)
 # is the start however it got there.
 _HAND_START_HARD_PCT = 5.0
+# HOCKEY NEEDS 95 (Oct 15 2026, Rob: "Why was my Edmonton bet cancelled?
+# We had a 90% drop??"). The listed-time maker exit kept landing just past
+# 90: UTA@EDM 572k → 54k = 90.6% at listed +2:05, STL@MIN 90.3% at +1:56,
+# SJ@NAS 91.2% at +0:32 — while the real puck drop (~7 min after the listed
+# time) reads 98-99.9% (OTT@NJ 98%, WPG@CHI 99.9% at +9:17). Per-sport floor
+# on the rule; `machine_flags hand_start_drop_pct_<sport>` overrides.
+_HAND_START_DROP_PCT_SPORT = {"NHL": 95.0}
 _HAND_START_CLIFF_PCT = 70.0
 _HAND_START_CLIFF_S = 300.0
 _HAND_START_DONE: dict = {}
@@ -14695,11 +14702,19 @@ def _hand_start_tick(sb, client, now) -> dict:
             continue
         start_ts = ev.astimezone(timezone.utc).timestamp()
         st["cands"] += 1
+        _d = drop
         if sat_out:
             verdict, base, cur, seen = "started", 0.0, 0.0, None
             st["sat_out"] = st.get("sat_out", 0) + 1
         else:
-            verdict, base, cur, seen = _hand_start_plan(list(TOUCH_TAPE.get(slug) or []), start_ts, now_ts, drop)
+            _sp = str(r.get("sport") or "").upper()
+            try:
+                _d = float(_machine_flag_val(f"hand_start_drop_pct_{_sp.lower()}",
+                                             _HAND_START_DROP_PCT_SPORT.get(_sp, drop)))
+            except (TypeError, ValueError):
+                _d = _HAND_START_DROP_PCT_SPORT.get(_sp, drop)
+            _d = max(drop, _d)
+            verdict, base, cur, seen = _hand_start_plan(list(TOUCH_TAPE.get(slug) or []), start_ts, now_ts, _d)
         if verdict != "started":
             st["wait" if verdict in ("wait", "pre") else "no_baseline"] += 1
             continue
@@ -14719,7 +14734,7 @@ def _hand_start_tick(sb, client, now) -> dict:
         stamp = {"kind": "hand_start_cancel", "bet": bet,
                  "hand_start_cancel": True, "pick_id": r["id"], "slug": slug, "order_id": oid,
                  "baseline_q": round(base, 1), "touch_q": round(cur, 1), "drop_pct": seen,
-                 "rule_pct": drop, "start": ev.astimezone(timezone.utc).isoformat(),
+                 "rule_pct": _d, "start": ev.astimezone(timezone.utc).isoformat(),
                  "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1)}
         if sat_out:
             stamp["sat_out"] = blob.get("line_hold")
