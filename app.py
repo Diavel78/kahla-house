@@ -14582,7 +14582,7 @@ def _touch_tape_publish(sb) -> dict:
 # and bled to 1-3% over the next ninety seconds. No clock, no ESPN: the
 # depth socket's touch size, both sides, against its own pre-start high.
 HAND_START_CANCEL_ENABLED = True
-_HAND_START_DROP_PCT = 90.0
+_HAND_START_DROP_PCT = 95.0
 _HAND_START_BASE_S = 90.0          # pre-start window the baseline high comes from
 _HAND_START_BASE_FALLBACK_S = 600.0
 _HAND_START_FRAMES = 2             # consecutive post-start samples under the line
@@ -14599,13 +14599,13 @@ _HAND_START_STALE_S = 90.0         # the newest sample must be this fresh
 # 90% on a stray re-quote. Under HARD_PCT of the pre-start high (95% off)
 # is the start however it got there.
 _HAND_START_HARD_PCT = 5.0
-# HOCKEY NEEDS 95 (Oct 15 2026, Rob: "Why was my Edmonton bet cancelled?
-# We had a 90% drop??"). The listed-time maker exit kept landing just past
-# 90: UTA@EDM 572k → 54k = 90.6% at listed +2:05, STL@MIN 90.3% at +1:56,
-# SJ@NAS 91.2% at +0:32 — while the real puck drop (~7 min after the listed
-# time) reads 98-99.9% (OTT@NJ 98%, WPG@CHI 99.9% at +9:17). Per-sport floor
-# on the rule; `machine_flags hand_start_drop_pct_<sport>` overrides.
-_HAND_START_DROP_PCT_SPORT = {"NHL": 95.0}
+# 95 FOR EVERY SPORT (Oct 15 2026, Rob: "Why was my Edmonton bet
+# cancelled? We had a 90% drop??" → "Make them all 95%"). The listed-time
+# maker exit kept landing just past 90: UTA@EDM 572k → 54k = 90.6% at listed
+# +2:05, STL@MIN 90.3% at +1:56, SJ@NAS 91.2% at +0:32 — while the real
+# start reads 98-99.9% (OTT@NJ 98%, WPG@CHI 99.9% at +9:17). Per-sport
+# overrides: `machine_flags hand_start_drop_pct_<sport>` (or this dict).
+_HAND_START_DROP_PCT_SPORT: dict = {}
 _HAND_START_CLIFF_PCT = 70.0
 _HAND_START_CLIFF_S = 300.0
 _HAND_START_DONE: dict = {}
