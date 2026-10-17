@@ -157,6 +157,11 @@ def walk(cache):
                               + list(params["coef"][1:]))
                     rec["lv"][k] = ci2.price(st, p2, g["home"], g["away"], d,
                                              g["starter_h"], g["starter_a"], totals=lines)
+                    if k == "lvl30":
+                        # NO GOALIE NEWS: the open is often posted before the
+                        # starters are known — price with league-average goalies
+                        rec["lv"]["nogk30"] = ci2.price(st, p2, g["home"], g["away"], d,
+                                                        None, None, totals=lines)
                 out[(g["date"], g["home"], g["away"])] = rec
             st.update(g)
             _lv_add(lv, g)
@@ -299,8 +304,9 @@ def main():
             continue
         ys = [r["y"] for r in rs]
         out = {"n": len(rs), "market_open": br([r["pm"] for r in rs], ys),
-               "model": br([r["p"] for r in rs], ys), "lvl30": br([r["lvl30"] for r in rs], ys)}
-        for v in ("p", "lvl30"):
+               "model": br([r["p"] for r in rs], ys), "lvl30": br([r["lvl30"] for r in rs], ys),
+               "nogk30": br([r["nogk30"] for r in rs], ys)}
+        for v in ("p", "lvl30", "nogk30"):
             for thr in (3.0, 5.0, 8.0):
                 n = u = clv = 0.0
                 for r in rs:
