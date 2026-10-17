@@ -160,6 +160,7 @@
         .gh { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
         .gh .gt { font-size: 13px; color: var(--text3); }
         .gh .gm { font-size: 19px; font-weight: 700; }
+        .gh .gm .tv { font-size: 12px; font-weight: 600; color: var(--text3); border: 1px solid var(--line2); border-radius: 5px; padding: 1px 6px; margin-left: 8px; vertical-align: 3px; white-space: nowrap; }
         .gh .gs { font-size: 13px; color: var(--text2); text-align: right; }
         .gh .gs.warn { color: var(--r-tx); font-weight: 700; }
         .gsub { font-size: 14px; color: var(--text2); margin-top: -8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -485,6 +486,9 @@
         if (r === 'push') return ' <span class="gr gr-push" title="push">➖</span>';
         return '';
     }
+    // the game's TV channel(s), off ESPN's scoreboard (/api/pick-sheets → tv)
+    function tvText(g) { return g.tv && g.tv.length ? g.tv.slice(0, 2).join(' / ') : ''; }
+    function tvChip(g) { const t = tvText(g); return t ? '<span class="tv">📺 ' + esc(t) + '</span>' : ''; }
     function finalChip(g) {
         const f = g.grade && g.grade.final;
         if (!f || f.away === undefined || f.home === undefined) return '';
@@ -1579,7 +1583,7 @@
             let tag = clk(g.event_start);
             if (st === 'final') tag = f && f.away != null && f.home != null ? 'FINAL ' + f.away + '-' + f.home : 'FINAL';
             else if (st === 'live') tag = 'LIVE';
-            out.push(shortTeam(g.away) + ' @ ' + shortTeam(g.home) + ' · ' + tag);
+            out.push(shortTeam(g.away) + ' @ ' + shortTeam(g.home) + ' · ' + tag + (st === 'up' && tvText(g) ? ' · ' + tvText(g) : ''));
             if (!plays.length) { out.push(priced ? '  Pass' : '  No line yet'); return; }
             plays.forEach(x => {
                 const r = st === 'up' ? null : playGrade(g, x);
@@ -1645,7 +1649,7 @@
         if (modelScore(g)) subs.push(modelScore(g));
         return '<div class="gc' + (isUp ? '' : ' done') + '"><div class="gh"><div><div class="gt">'
              + (isUp ? '' : fmtTime(g.event_start).split(',')[0] + ' ') + clk(g.event_start) + '</div>'
-             + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + '</div></div>' + summ + '</div>'
+             + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + tvChip(g) + '</div></div>' + summ + '</div>'
              + (subs.length ? '<div class="gsub">' + subs.join('') + '</div>' : '')
              + mk + extra.map(b => betStrip(b, false, flips[b.id])).join('') + '</div>';
     }

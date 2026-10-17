@@ -1344,6 +1344,131 @@ def _sheet_next_run(sport: str, now: datetime) -> str | None:
     return None
 
 
+# TV CHANNELS ON THE SHEETS (Rob, Oct 17 2026: "next to the team names…
+# what channel it'll be on"). ESPN's scoreboard carries each game's
+# broadcasts: `broadcasts[] {market, names[]}` and `geoBroadcasts[] {type,
+# market{type}, media{shortName}}`. National channels win; a game carried only
+# by the teams' regional networks shows those. College football needs
+# groups=80&limit=400 or ESPN returns only the featured slate. 10-min cache;
+# any failure means no channel, never a broken sheet.
+_SHEET_TV_LEAGUE = {"NFL": "nfl", "NCAAF": "ncaaf", "NHL": "nhl", "NBA": "nba", "MLB": "mlb"}
+_SHEET_TV_CACHE: dict = {}
+_SHEET_TV_TTL_S = 600
+
+
+def _espn_tv_names(comp: dict) -> list:
+    nat, loc = [], []
+
+    def add(lst, n):
+        n = str(n or "").strip()
+        if n and n not in nat and n not in lst:
+            lst.append(n)
+    for b in comp.get("broadcasts") or []:
+        mk = b.get("market")
+        mk = (mk.get("type") if isinstance(mk, dict) else mk) or ""
+        for n in b.get("names") or []:
+            add(nat if str(mk).lower() == "national" else loc, n)
+    for gb in comp.get("geoBroadcasts") or []:
+        mk = str(((gb.get("market") or {}).get("type")) or "").lower()
+        n = (gb.get("media") or {}).get("shortName")
+        add(nat if mk == "national" else loc, n)
+    loc = [n for n in loc if n not in nat]
+    return nat or loc[:2]
+
+
+def _sheet_tv_map(sport: str, starts: list) -> dict:
+    """{(away_key, home_key, ET date): [channels]} for ESPN's games across the ET
+    dates the sheet's games cover. Keys are _pair_team_key of displayName,
+    shortDisplayName and location, so the join tolerates either naming."""
+    pair = _ESPN_PATH.get(_SHEET_TV_LEAGUE.get(sport, ""))
+    if not pair or not starts:
+        return {}
+    et = ZoneInfo("America/New_York")
+    days = sorted({datetime.fromisoformat(str(x).replace("Z", "+00:00")).astimezone(et).date()
+                   for x in starts if x})
+    if not days:
+        return {}
+    dates = (days[0].strftime("%Y%m%d") if len(days) == 1
+             else days[0].strftime("%Y%m%d") + "-" + days[-1].strftime("%Y%m%d"))
+    key = f"{sport}:{dates}"
+    now = _time.time()
+    hit = _SHEET_TV_CACHE.get(key)
+    if hit and now - hit[0] < _SHEET_TV_TTL_S:
+        return hit[1]
+    params = {"dates": dates, "limit": 400}
+    if sport == "NCAAF":
+        params["groups"] = 80
+    out: dict = {}
+    try:
+        r = _http.get(f"https://site.api.espn.com/apis/site/v2/sports/{pair[0]}/{pair[1]}/scoreboard",
+                      params=params, timeout=8)
+        events = (r.json() or {}).get("events", []) if r.status_code == 200 else None
+    except Exception:
+        events = None
+    if events is None:
+        return hit[1] if hit else {}
+    for ev in events:
+        comp = (ev.get("competitions") or [{}])[0]
+        names = _espn_tv_names(comp)
+        if not names:
+            continue
+        side = {}
+        for c in comp.get("competitors") or []:
+            t = c.get("team") or {}
+            side[c.get("homeAway")] = {_pair_team_key(t.get(f)) for f in
+                                       ("displayName", "shortDisplayName", "location", "name")
+                                       if t.get(f)}
+        try:
+            d = datetime.fromisoformat(str(ev.get("date")).replace("Z", "+00:00")).astimezone(et).date()
+        except Exception:
+            continue
+        for a in side.get("away") or ():
+            for h in side.get("home") or ():
+                out[(a, h, d)] = names
+    _SHEET_TV_CACHE[key] = (now, out)
+    return out
+
+
+def _sheet_attach_tv(sport: str, games: list) -> None:
+    try:
+        m = _sheet_tv_map(sport, [g.get("event_start") for g in games])
+    except Exception:
+        return
+    et = ZoneInfo("America/New_York")
+    for g in games:
+        try:
+            d = datetime.fromisoformat(str(g.get("event_start")).replace("Z", "+00:00")).astimezone(et).date()
+        except Exception:
+            continue
+        tv = m.get((_pair_team_key(g.get("away")), _pair_team_key(g.get("home")), d))
+        if tv:
+            g["tv"] = tv
+
+
+@app.route("/api/sheet-tv")
+def api_sheet_tv():
+    """Shared-secret read of the channel join, for checking it from a
+    sandbox: ?sport=NCAAF → each sheet game's tv (or none)."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sport = (request.args.get("sport") or "NCAAF").upper()
+    sb = get_supabase()
+    wk = (sb.table("football_sheet_weeks").select("week_key").eq("sport", sport)
+          .order("week_key", desc=True).limit(1).execute().data or [{}])[0]
+    rows = (sb.table("football_sheets").select("market_id,event_name,event_start,tier,data_blob,friday_md,data_built_at")
+            .eq("week_key", wk.get("week_key")).eq("sport", sport)
+            .gte("event_start", (datetime.now(timezone.utc) - timedelta(hours=36)).isoformat())
+            .order("event_start").limit(400).execute().data or [])
+    shape = {"NHL": _sheet_game_nhl, "NBA": _sheet_game_nba, "MLB": _sheet_game_mlb}.get(sport, _sheet_game_football)
+    games = [shape(r) for r in rows]
+    _sheet_attach_tv(sport, games)
+    return jsonify({"ok": True, "sport": sport, "n": len(games),
+                    "with_tv": sum(1 for g in games if g.get("tv")),
+                    "games": [{"game": f"{g.get('away')} @ {g.get('home')}", "start": g.get("event_start"),
+                               "tv": g.get("tv")} for g in games]})
+
+
 @app.route("/api/pick-sheets")
 @app.route("/api/football-picks")
 @bot_required
@@ -1410,6 +1535,7 @@ def api_football_picks():
         b = r.get("data_built_at")
         if b and (built_at is None or b < built_at):
             built_at = b
+    _sheet_attach_tv(sport, games)
     return jsonify({
         "ok": True, "sport": sport, "week_key": wk.get("week_key"),
         "games": games,
