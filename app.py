@@ -3960,6 +3960,10 @@ def api_bet_sheets_picks():
                              "base": _pk((r.get("data_blob") or {}).get("model")),
                              "final": _pk(((r.get("data_blob") or {}).get("friday") or {}).get("model")),
                              "final_at": ((r.get("data_blob") or {}).get("friday") or {}).get("built_at"),
+                             "picks": {k: {kk: v.get(kk) for kk in ("side", "price", "line", "verdict",
+                                                                     "edge_pp", "model_p", "market_p")}
+                                       for k, v in ((r.get("data_blob") or {}).get("picks") or {}).items()
+                                       if isinstance(v, dict)},
                              "grade": (r.get("data_blob") or {}).get("grade")}
                             for r in srows]
             t0 = datetime.fromisoformat(swk).replace(tzinfo=timezone.utc)
