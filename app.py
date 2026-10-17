@@ -14913,6 +14913,16 @@ def _hand_start_tick(sb, client, now) -> dict:
             verdict, base, cur, seen = _hand_start_plan(list(TOUCH_TAPE.get(slug) or []), start_ts, now_ts, _d)
         if verdict != "started":
             st["wait" if verdict in ("wait", "pre") else "no_baseline"] += 1
+            if (verdict == "no_baseline" and now_ts - start_ts > 120.0
+                    and not blob.get("start_blind")):
+                # no pre-start book to measure the drop against (the 9:00:55
+                # restart, Oct 17 2026): this rule will never fire for this
+                # bet, so say so — the page puts it in front of Rob
+                try:
+                    sb.table("bot_picks").update({"signal_blob": {**blob, "start_blind": now.isoformat()}}
+                                                 ).eq("id", r["id"]).execute()
+                except Exception:
+                    pass
             continue
         last = _HAND_START_DONE.get(r["id"], 0.0)
         if _time.monotonic() - last < 20.0:
@@ -16876,6 +16886,7 @@ def api_bet_sheets_mine():
             "order_id": oid,
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
             "live_snipe": bool(blob.get("live_snipe")),
+            "start_seen": bool(blob.get("game_started")), "start_blind": bool(blob.get("start_blind")),
             "order": (bx.get("order") if bx is not None else
                       ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
                         "price_c": (round((1 - float(o["price_yes"])) * 100, 2) if syn
