@@ -1394,7 +1394,68 @@
     }
     function renderFilters(nMine, nPick) {
         const c = (f, t) => '<button class="fchip' + (_filter === f ? ' on' : '') + '" onclick="setFilter(\'' + f + '\')">' + t + '</button>';
-        document.getElementById('fchips').innerHTML = c('all', 'All games') + c('mine', 'My bets ' + nMine) + c('plays', 'Plays & leans ' + nPick);
+        document.getElementById('fchips').innerHTML = c('all', 'All games') + c('mine', 'My bets ' + nMine) + c('plays', 'Plays & leans ' + nPick)
+            + '<button class="fchip" onclick="copyPicks()">📋 Copy picks</button>';
+    }
+    // COPY PICKS (Rob, Oct 17 2026: "copy the picks (not my bets)… game,
+    // pick(s), then next game… paste it into an iMessage"): the sheet's own
+    // picks for the upcoming games on screen (tab + search + filter), as text.
+    function pickLine(g, k) {
+        const L = g.line || {}, p = g[k];
+        if (!p || !p.side || (p.verdict !== 'play' && p.verdict !== 'lean') || p.chalky) return null;
+        let t = null, price = p.price;
+        if (k === 'ml') {
+            t = nameOf(g, p.side) + ' ML';
+            if (price == null) price = L['ml_' + p.side];
+        } else if (k === 'puck') {
+            if (p.line == null) return null;
+            t = nameOf(g, p.side) + ' ' + sgn(p.line, 1);
+        } else if (k === 'spread') {
+            // football reads the line the way its card does (off the market home line)
+            const own = (_sport === 'NFL' || _sport === 'NCAAF') ? null : p.line;
+            const ln = own != null ? Number(own)
+                     : (L.spread_home != null ? (p.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home)) : null);
+            if (ln == null) return null;
+            t = nameOf(g, p.side) + ' ' + sgn(ln, 1);
+        } else if (k === 'total') {
+            const tl = p.line != null ? p.line : L.total;
+            if (tl == null) return null;
+            t = (p.side === 'over' ? 'Over ' : 'Under ') + tl;
+        }
+        return t + (price != null && price !== '' ? ' ' + am(price) : '') + (p.verdict === 'lean' ? ' (lean)' : '');
+    }
+    function picksText(games) {
+        const keys = _sport === 'NHL' ? ['ml', 'puck', 'total'] : (_sport === 'NBA' || _sport === 'MLB') ? ['ml', 'spread', 'total'] : ['spread', 'total'];
+        const out = [], day = {};
+        games.forEach(g => {
+            const d = fmtTime(g.event_start);
+            if (!day[d]) { day[d] = 1; out.push((out.length ? '\n' : '') + _sport + ' · ' + d); }
+            const L = g.line || {};
+            const lines = keys.map(k => pickLine(g, k)).filter(Boolean);
+            const priced = Object.keys(L).some(k => L[k] != null);
+            out.push(shortTeam(g.away) + ' @ ' + shortTeam(g.home) + ' · ' + clk(g.event_start));
+            out.push(lines.length ? lines.map(x => '  ' + x).join('\n') : (priced ? '  Pass' : '  No line yet'));
+        });
+        return out.join('\n');
+    }
+    async function copyPicks() {
+        const q = (document.getElementById('search').value || '').trim().toLowerCase();
+        const words = q.split(/\s+/).filter(Boolean);
+        let games = _games.filter(g => gameStatus(g) === 'up' && gameMatches(g, words));
+        if (_filter === 'plays') games = games.filter(g => hasPick(g));
+        else if (_filter === 'mine') games = games.filter(g => betsOnGame(g).length);
+        if (!games.length) { toast('No upcoming games to copy', true); return; }
+        const txt = picksText(games);
+        let ok = false;
+        try { await navigator.clipboard.writeText(txt); ok = true; } catch (e) {}
+        if (!ok) {
+            const ta = document.createElement('textarea');
+            ta.value = txt; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, txt.length);
+            try { ok = document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta);
+        }
+        toast(ok ? 'Copied picks for ' + games.length + ' game' + (games.length === 1 ? '' : 's') : 'Copy failed', !ok);
     }
     let _fold = { started: false };   // default collapsed, every visit
     function toggleFold(k) { _fold[k] = !_fold[k]; renderGames(); }
