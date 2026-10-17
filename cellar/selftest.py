@@ -2556,6 +2556,22 @@ def test_bet_sheet_rung() -> None:
     check("empty ladder → reason, no crash", e is None and why)
 
 
+def test_rejoin_hold_until() -> None:
+    """The post-move rejoin hold never runs past T-30 (Oct 17 2026, the Pitt
+    −6.5: rejoined a cent under the market at T-45, held off until T-15)."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    import app as _app
+    U = _app._rejoin_hold_until
+    now = _dt(2026, 10, 17, 15, 15, tzinfo=_tz.utc)
+    ev = _dt(2026, 10, 17, 16, 0, tzinfo=_tz.utc)               # game start T-45
+    check("rejoin hold: a T-45 rejoin holds only until T-30",
+          U(now, ev, 1800, 30) == ev - _td(minutes=30))
+    far = _dt(2026, 10, 18, 16, 0, tzinfo=_tz.utc)
+    check("rejoin hold: a day out keeps the full 30 min", U(now, far, 1800, 30) == now + _td(seconds=1800))
+    inside = _dt(2026, 10, 17, 15, 30, tzinfo=_tz.utc)          # already inside T-30
+    check("rejoin hold: inside T-30 there is no hold", U(now, inside, 1800, 30) == now)
+
+
 def test_hand_move_plan() -> None:
     """Line-movement cancel (Oct 4 2026): our-side touch size 70% off its
     60-90s high AND re-posted a rung or two lower (depth below the old touch
@@ -4127,7 +4143,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

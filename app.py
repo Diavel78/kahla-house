@@ -5029,7 +5029,7 @@ def _cellar_health(sb) -> dict:
                 if _l["lane"] == "handbets" and _l["state"] in ("ok", "idle"):
                     _l["state"] = "error"
                     _l["error"] = (f"TAPE DARK: {_td[0]} of {_td[1]} hand bets have "
-                                   f"no order-book frames — sockets down; no kickoff "
+                                   f"no order-book frames — sockets down; no game-start "
                                    f"cancel, no line-move cancel")
                     bad += 1
     except Exception:
@@ -15217,7 +15217,7 @@ def _hand_move_tick(sb, client, now) -> dict:
                            "rejoined_at": now.isoformat(),
                            # the chase may not climb off this rung until the hold expires
                            "rejoin_hold": {"cap_c": touch, "at": now.isoformat(),
-                                           "until": (now + timedelta(seconds=float(hold_s))).isoformat()}})
+                                           "until": _rejoin_hold_until(now, ev, hold_s, lead_min).isoformat()}})
                 sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
                 st["rejoined"] += 1
                 HAND_LIVE_SLUGS.add(slug)
@@ -15276,7 +15276,7 @@ def _hand_move_tick(sb, client, now) -> dict:
                       "line_drops": int(blob.get("line_drops") or 0) + 1,
                       "dropped_at": now.isoformat(),
                       "rejoin_hold": {"cap_c": float(tgt), "at": now.isoformat(), "why": "vanish_drop",
-                                      "until": (now + timedelta(seconds=float(hold_s))).isoformat()}}
+                                      "until": _rejoin_hold_until(now, ev, hold_s, lead_min).isoformat()}}
                 nb.pop("chase_hold", None)
                 nb.pop("thin_hold", None)
                 sb.table("bot_picks").update({"signal_blob": nb,
@@ -17735,6 +17735,21 @@ HAND_HELD_SLUGS: set = set()         # slugs holding a hand lot — on the watch
 HAND_LIVE_SLUGS: set = set()         # slugs with a resting hand bet — the socket wakes handbets for these
 
 
+def _rejoin_hold_until(now, ev, hold_s, lead_min):
+    """When a post-move REJOIN HOLD ends: hold_s after it starts, but never
+    later than `lead_min` before game start (Rob, Oct 17 2026, the Pitt −6.5:
+    cancelled at T-49, rejoined a cent under the market at T-45, and the 30-min
+    hold kept the chase off until T-15. "Regardless of the 30-minute cutoff,
+    you should always rejoin 30 minutes before." Inside the lead floor the
+    line-move rule is off, so the chase must be free to reach the market."""
+    end = now + timedelta(seconds=float(hold_s))
+    try:
+        floor = ev.astimezone(timezone.utc) - timedelta(minutes=float(lead_min))
+        return min(end, max(now, floor))
+    except Exception:
+        return end
+
+
 def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c, cap_c=None):
     """Pure. ('stay'|'move'|'hold', target_c, note). Our-side cents in,
     our-side cents out. `anchor_c` None → the current price is the anchor.
@@ -17855,6 +17870,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
             return dflt
     thin_pct = _fl("hand_join_min_pct", _HAND_JOIN_MIN_PCT)
     thin_off_h = _fl("hand_join_thin_off_h", _HAND_JOIN_THIN_OFF_H)
+    lead_min = _fl("hand_move_min_lead_min", _HAND_MOVE_MIN_LEAD_MIN)
     t0 = _time.monotonic()
     try:
         rows = (sb.table("bot_picks").select("id,event_start,signal_blob,sport,event_name,market_type,side")
@@ -17904,7 +17920,9 @@ def _hand_chase_tick(sb, client, now) -> dict:
         rh = blob.get("rejoin_hold") if isinstance(blob.get("rejoin_hold"), dict) else None
         if rh:
             try:
-                if datetime.fromisoformat(str(rh.get("until")).replace("Z", "+00:00")) > now:
+                # a hold set before this rule may run past T-30: the read caps it too
+                if (datetime.fromisoformat(str(rh.get("until")).replace("Z", "+00:00"))
+                        > now and _rejoin_hold_until(now, ev, 1e9, lead_min) > now):
                     cap_c = rh.get("cap_c")
             except (TypeError, ValueError):
                 pass
