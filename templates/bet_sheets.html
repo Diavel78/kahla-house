@@ -128,13 +128,15 @@
            "Blob is ugly… logo's??"). Logos come from /league-logo/<code>.png;
            a logo that fails to load leaves just the name. */
         .seg { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-top: 26px; }
-        .tab { height: 66px; padding: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        .tab { height: 48px; padding: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
                gap: 5px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--text3);
                font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color .15s, background .15s; }
         .tab .lg { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; }
         .tab .lg img { max-width: 30px; max-height: 30px; object-fit: contain; opacity: .5; filter: grayscale(.7);
                        transition: opacity .15s, filter .15s; }
         .tab .lg.nolg { display: none; }
+        .tab .tl { display: none; }                      /* one line: the logo IS the tab (Rob: "don't need 2 lines") */
+        .tab .lg.nolg + .tl { display: block; font-size: 13px; }   /* no logo → the name stands in */
         .tab.on { border-color: var(--text2); background: var(--card2); color: var(--text); font-weight: 700; }
         .tab.on .lg img { opacity: 1; filter: none; }
         .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
@@ -335,11 +337,11 @@
             </div>
 
             <div class="seg">
-                <button class="tab on" data-sport="NHL" onclick="switchSport('NHL')"><span class="lg"><img src="/league-logo/NHL.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NHL</span></button>
-                <button class="tab" data-sport="NBA" onclick="switchSport('NBA')"><span class="lg"><img src="/league-logo/NBA.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NBA</span></button>
-                <button class="tab" data-sport="MLB" onclick="switchSport('MLB')"><span class="lg"><img src="/league-logo/MLB.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">MLB</span></button>
-                <button class="tab" data-sport="NCAAF" onclick="switchSport('NCAAF')"><span class="lg"><img src="/league-logo/NCAAF.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">College</span></button>
-                <button class="tab" data-sport="NFL" onclick="switchSport('NFL')"><span class="lg"><img src="/league-logo/NFL.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NFL</span></button>
+                <button class="tab on" data-sport="NHL" aria-label="NHL" onclick="switchSport('NHL')"><span class="lg"><img src="/league-logo/NHL.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NHL</span></button>
+                <button class="tab" data-sport="NBA" aria-label="NBA" onclick="switchSport('NBA')"><span class="lg"><img src="/league-logo/NBA.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NBA</span></button>
+                <button class="tab" data-sport="MLB" aria-label="MLB" onclick="switchSport('MLB')"><span class="lg"><img src="/league-logo/MLB.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">MLB</span></button>
+                <button class="tab" data-sport="NCAAF" aria-label="College football" onclick="switchSport('NCAAF')"><span class="lg"><img src="/league-logo/NCAAF.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">College</span></button>
+                <button class="tab" data-sport="NFL" aria-label="NFL" onclick="switchSport('NFL')"><span class="lg"><img src="/league-logo/NFL.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NFL</span></button>
             </div>
             <div class="chips" id="fchips"></div>
             <input class="search" id="search" type="search" placeholder="Search a game or team…"
