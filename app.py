@@ -16744,7 +16744,7 @@ def api_bet_sheets_mine():
 _BS_READ_FB_PLAY_PTS, _BS_READ_FB_LEAN_PTS = 1.5, 0.75
 _BS_READ_FB_GAP_PTS = {"spread": 12.0, "total": 7.0}
 _BS_READ_PP = {   # (play, lean, implausible) in pp — None play = lean-capped
-    ("NHL", "spread"): (4.0, 2.0, 12.0), ("NHL", "total"): (5.0, 3.0, 12.0),
+    ("NHL", "spread"): (4.0, 2.0, 12.0), ("NHL", "total"): (5.0, 5.0, 12.0),
     ("NBA", "spread"): (None, 4.0, 12.0), ("NBA", "total"): (None, 4.0, 12.0),
     ("MLB", "spread"): (None, 4.0, 12.0),
 }
