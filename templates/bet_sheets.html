@@ -272,6 +272,7 @@
         .si .tag { font-size: 11px; padding: 1px 6px; margin-right: 6px; background: var(--blue); color: var(--bg); vertical-align: 1px; }
         .si .tag.cancel { background: var(--r-bd); color: #fff; }
         .si .tag.rerung { background: var(--a-bd); color: var(--bg); }
+        .si .tag.live { background: #8b5cf6; color: #fff; }
         .slip-cost { color: var(--text2); font-size: 14px; font-family: var(--mono); }
         .toast { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 99; background: var(--card2); border: 1px solid var(--line2);
                  color: var(--text); padding: 12px 16px; border-radius: 12px; font-size: 15px; opacity: 0; transition: opacity .2s;
@@ -607,13 +608,15 @@
                 const lv = (o.leaves != null) ? o.leaves : i.leaves;
                 let line = i.op === 'repeg'
                     ? ('move ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + (tch != null ? ' → touch ' + tch + '¢' : '') + (rest != null && tch != null && Math.abs(rest - tch) < 0.01 ? ' (already there)' : '') + ' · keeps its size')
+                    : i.op === 'live'
+                    ? ('move ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + ' → 49.5¢ · no game-start cancel · the box leaves it to you')
                     : i.op === 'rerung'
                     ? ('cancel ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + ' → rest them on ' + i.rerung_label + (i.rerung_c != null ? ' (bid ' + i.rerung_c + '¢ now)' : '') + ' · priced at the touch when it runs')
                     : ('pull the resting order' + (o.leaves != null ? ' · ' + Math.round(o.leaves) + ' unfilled' : ''));
                 if (i.q && i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'queued on the box…') + '</div>';
                 else if (i.q && i.q.ok === false) q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
                 else q = '<div class="q">' + esc(line) + '</div>';
-                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
+                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : i.op === 'live' ? 'LIVE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                      + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
             }
             if (i.q) {
@@ -733,6 +736,7 @@
     }
     function opNote(i, x) {
         if (i.op === 'cancel') return 'Cancelled ' + i.label + (x.deleted ? '' : ' (' + x.held + ' filled stays)');
+        if (i.op === 'live') return x.ok === false ? (i.label + ': ' + (x.note || 'not moved')) : ((x.moved ? 'Moved ' + i.label + ' ' + (x.from_c != null ? x.from_c + '¢ → ' : 'to ') + x.price_c + '¢' : i.label + ' @ ' + x.price_c + '¢') + ' · live, no game-start cancel');
         if (i.op === 'rerung') return x.rerung ? ('Moved ' + i.label + ' → ' + (x.label || i.rerung_label) + ' @ ' + x.price_c + '¢' + (x.held ? ' (' + x.held + ' filled stays on the old line)' : '') + (x.warning ? ' · ' + x.warning : '')) : (i.label + ': ' + (x.note || 'not moved'));
         if (x.moved) return 'Moved ' + i.label + ' ' + (x.from_c != null ? x.from_c + '¢ → ' : 'to ') + x.price_c + '¢';
         return i.label + ': ' + (x.note || 'no move');
@@ -765,11 +769,12 @@
     function quoteSlip() { postSlip(true); }
     function placeSlip() {
         const n = contractsN();
-        const nb = _slip.filter(i => !i.op).length, nr = _slip.filter(i => i.op === 'repeg').length, nc = _slip.filter(i => i.op === 'cancel').length, nx = _slip.filter(i => i.op === 'rerung').length;
+        const nb = _slip.filter(i => !i.op).length, nr = _slip.filter(i => i.op === 'repeg').length, nc = _slip.filter(i => i.op === 'cancel').length, nx = _slip.filter(i => i.op === 'rerung').length, nl = _slip.filter(i => i.op === 'live').length;
         const parts = [];
         if (nb) parts.push('place ' + nb + ' resting bet' + (nb === 1 ? '' : 's') + ' at the touch, ' + n + ' contracts each');
         if (nr) parts.push('re-peg ' + nr + ' order' + (nr === 1 ? '' : 's') + ' to the touch');
         if (nc) parts.push('cancel ' + nc + ' resting order' + (nc === 1 ? '' : 's'));
+        if (nl) parts.push('move ' + nl + ' bet' + (nl === 1 ? '' : 's') + ' to live at 49.5¢ (no game-start cancel — yours to watch)');
         if (nx) parts.push('move ' + nx + ' bet' + (nx === 1 ? '' : 's') + ' to the current line (cancel + new order)');
         if (!confirm(parts.join('; ').replace(/^./, c => c.toUpperCase()) + '?')) return;
         postSlip(false);
@@ -823,6 +828,8 @@
                 return { cls: 'warn', short: 'LINE MOVED', detail: pre + rest + ' · touch ' + touch + '¢ here · current line ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') };
             if (hold && hold.touch_c != null)
                 return { cls: 'warn', short: 'RE-PEG', detail: pre + rest + ' · touch ' + touch + '¢' + (ch.anchor_c != null ? ', ' + Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : ' past the leash') + ' — ' + (b.read ? recShort(b, null) : 'the box stopped chasing') };
+            if (b.live)
+                return { cls: 'rest', short: 'LIVE', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · no game-start cancel · yours to watch' };
             if (b.outbid && b.in_play)
                 return { cls: 'warn', short: 'OUTBID', detail: pre + rest + ' · touch ' + b.touch_c + '¢ · in play — re-peg in the app' };
             let why = '';
@@ -959,13 +966,14 @@
             h += '<div class="note">Sheet line ' + esc(rungLabel(b, _sheetAdd[3])) + ' · yours rests on ' + esc(betLabel(b)) + '.</div>';
         const acts = [];
         if (b.status === 'pending' && o.resting && !b.started) {
-            const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id)), rx = inSlip(opKey('rerung', b.id));
+            const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id)), rx = inSlip(opKey('rerung', b.id)), lv = inSlip(opKey('live', b.id));
             const rr = (b.chase && b.chase.hold && b.chase.hold.rerung && b.chase.hold.rerung.slug) ? b.chase.hold.rerung : null;
             const rd = b.read || null, rec = rd ? rd.rec : (rr ? 'move' : 'repeg');
             if (rd) h += readBlock(b, rd, rr);
             const star = k => (rd && rd.rec === k ? '★ ' : '');
             if (rr) acts.push('<button class="abtn' + (rx ? ' on' : rec === 'move' ? ' pri' : '') + '" onclick="sheetOp(\'rerung\')">' + (rx ? '✓ On the slip: move to ' : star('move') + 'Move to ') + esc(rungLabel(b, rr.line)) + (rr.bid_c != null ? ' @ ' + rr.bid_c + '¢' : '') + '</button>');
             acts.push('<button class="abtn' + (rp ? ' on' : rec === 'repeg' ? ' pri' : '') + '" onclick="sheetOp(\'repeg\')">' + (rp ? '✓ On the slip: re-peg to touch' : star('repeg') + 'Re-peg to touch') + '</button>');
+            if (!b.live) acts.push('<button class="abtn' + (lv ? ' on' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : 'Move to Live · 49.5¢, no game-start cancel') + '</button>');
             acts.push('<button class="abtn dng' + (cn ? ' on' : rec === 'cancel' ? ' pri' : '') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : star('cancel') + 'Cancel order') + '</button>');
         } else if (b.status === 'pending' && o.resting && b.started) {
             h += '<div class="note">The game has started — manage this one in the app.</div>';

@@ -4178,7 +4178,7 @@ def api_bet_sheets_picks():
         out["pending_total"] = f"err: {e}"[:120]
     keep = ("contracts", "price_c", "anchor_c", "order_id", "app_adopted", "manual_web_bet",
             "filled", "filled_qty", "placed_via", "adopted_at", "placed_at", "entry_src",
-            "in_play", "pmm_synthetic", "label", "line_rejoins", "amended",
+            "in_play", "live_snipe", "pmm_synthetic", "label", "line_rejoins", "amended",
             "chase_hold", "thin_hold", "line_hold", "rejoin_hold", "rerung_from")
     if slug:
         try:
@@ -14399,6 +14399,10 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
         out, _st = _bet_sheet_rerung_exec(sb, client, row.get("pick_id"), pl.get("rerung_slug"))
         out["via"] = worker
         return out
+    if op == "live":
+        out, _st = _bet_sheet_live_exec(sb, client, row.get("pick_id"))
+        out["via"] = worker
+        return out
     return {"ok": False, "error": f"unknown op {op}"}
 
 
@@ -14762,8 +14766,8 @@ def _hand_start_tick(sb, client, now) -> dict:
     for r in rows:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         slug, oid = blob.get("pmm_slug"), blob.get("order_id")
-        if blob.get("in_play"):
-            continue                                      # placed live in the app — not ours to cancel
+        if blob.get("in_play") or blob.get("live_snipe"):
+            continue                                      # placed live in the app / moved to live — not ours to cancel
         # SAT OUT THROUGH THE START (Oct 11 2026): a bet the box took off the
         # book (line move / venue reset) and never put back is a box cancel
         # at kickoff — it goes on the missed list and the pick goes, or the
@@ -15121,8 +15125,8 @@ def _hand_move_tick(sb, client, now) -> dict:
             break
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         slug, syn, oid = blob.get("pmm_slug"), bool(blob.get("pmm_synthetic")), blob.get("order_id")
-        if not slug:
-            continue
+        if not slug or blob.get("live_snipe"):
+            continue                                  # moved to live: no sit-out, no drop
         try:
             ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
         except (TypeError, ValueError):
@@ -15739,8 +15743,8 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
         b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if b.get("pmm_slug"):
             pending_slugs.add(b["pmm_slug"])
-        if b.get("app_adopted") and b.get("bet_sheet"):
-            adopted_rows.append((r, b))
+        if (b.get("app_adopted") or b.get("live_snipe")) and b.get("bet_sheet"):
+            adopted_rows.append((r, b))                # a live snipe Rob cancels in the app retires the same way
     # THE BILLS LOOP (Oct 4 2026): a held 1-lot was adopted at 12:11, the game
     # went final at ~13:12, the resolver graded the pick LOST, and the next
     # tick saw a position with no PENDING pick on the slug — and booked it
@@ -16209,7 +16213,8 @@ def _hand_reset_tick(sb, client, now) -> dict:
     for r in rows:
         b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if (b.get("order_id") and b.get("pmm_slug") and not b.get("line_hold")
-                and not b.get("cancelled_at") and not b.get("in_play")):
+                and not b.get("cancelled_at") and not b.get("in_play")
+                and not b.get("live_snipe")):
             watch[r["id"]] = (r, b)
     st["watched"] = len(watch)
     for pid in list(_HAND_RESET_MISS):
@@ -16754,6 +16759,7 @@ def api_bet_sheets_mine():
             "contracts": contracts, "slug": slug, "synthetic": syn,
             "order_id": oid,
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
+            "live": bool(blob.get("live_snipe")),
             "order": (bx.get("order") if bx is not None else
                       ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
                         "price_c": (round((1 - float(o["price_yes"])) * 100, 2) if syn
@@ -17595,6 +17601,91 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
             "before trying again (the order may already be at the touch)"}, 502
 
 
+# MOVE TO LIVE (Oct 17 2026, Rob, on Kansas +3.5: "Move my bet… to 49.5 bid
+# (way off touch I know), and remove the cancel time. I'll click that if I
+# want to try to snipe this live at a good line, and I'm unwilling to pay the
+# new line/spread. I'll take care of cancelling them, or watching… on my
+# own"). One slip op: the resting order is AMENDED in place (same order id,
+# same rung, same size) down to `hand_live_snipe_c` (49.5¢), GTC, and the
+# pick is stamped `live_snipe` — from then on the box keeps its hands off:
+# no chase, no thin-touch drop, no line-move sit-out, no venue-reset re-place,
+# no game-start cancel. It stays on the sheet; Rob cancels it himself. Never
+# a move UP (a bid already at or under the target is only stamped), and never
+# a price that would cross the ask (post-only would reject it).
+_HAND_LIVE_SNIPE_C = 49.5
+
+
+def _bet_sheet_live_exec(sb, client, pick_id):
+    r, blob = _bet_sheet_pick(sb, pick_id)
+    if not r:
+        return {"ok": False, "error": "pick not found"}, 404
+    oid, slug, syn = blob.get("order_id"), blob.get("pmm_slug"), bool(blob.get("pmm_synthetic"))
+    if not oid or not slug:
+        return {"ok": False, "error": "no resting order on this bet"}, 400
+    try:
+        target = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
+    except (TypeError, ValueError):
+        target = _HAND_LIVE_SNIPE_C
+    target = round(_grid_dn(target, _pmm_tick_c(client, slug)), 2)
+    ords = _pmm_open_orders_raw(client, fresh=True)
+    if ords is None:
+        return {"ok": False, "error": "orders unreadable — try again"}, 503
+    cur = next((o for o in ords if o.get("id") == oid), None)
+    if cur is None:
+        return {"ok": False, "error": "order is not on the book (filled or cancelled?) — "
+                "check My bets"}, 409
+    leaves = cur.get("leaves")
+    qty_total = _amend_total(leaves, cur.get("cum"))
+    try:
+        unfilled = int(round(float(leaves or 0)))
+    except (TypeError, ValueError):
+        unfilled = 0
+    if unfilled < 1 or qty_total < 1:
+        return {"ok": False, "error": "nothing left unfilled to move"}, 409
+    cur_c = None
+    if cur.get("price_yes") is not None:
+        py = float(cur["price_yes"]) * 100.0
+        cur_c = round((100.0 - py) if syn else py, 2)
+    from_c = cur_c if cur_c is not None else blob.get("price_c")
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    def _stamp(price_c, moved):
+        nb = {**blob, "live_snipe": {"at": now_iso, "from_c": from_c, "price_c": price_c},
+              "price_c": price_c, "anchor_c": price_c}
+        for k in ("chase_hold", "thin_hold", "rejoin_hold", "line_hold"):
+            nb.pop(k, None)
+        if moved:
+            nb.update({"amended": True, "contracts": qty_total, "repegged_from_c": from_c,
+                       "repeg_at": now_iso})
+        sb.table("bot_picks").update({"signal_blob": nb,
+                                      "entry_price": _cents_to_american_py(price_c)}).eq("id", r["id"]).execute()
+        _probe_log({"hand_live_snipe": True, "pick_id": r["id"], "slug": slug,
+                    "from_c": from_c, "to_c": price_c, "moved": moved, "qty_total": qty_total})
+
+    if from_c is not None and float(from_c) <= target + 1e-9:
+        _stamp(float(from_c), False)
+        return {"ok": True, "moved": False, "price_c": from_c, "live": True,
+                "note": f"already at {from_c}¢ — set to live, the box leaves it alone"}, 200
+    book = _bet_sheet_book(client, slug)
+    if book is None:
+        return {"ok": False, "error": "book unreadable — try again"}, 503
+    _b, s_ask = _manual_side_book(book, syn)
+    if s_ask is not None and s_ask <= target + 1e-9:
+        return {"ok": False, "error": f"the ask is {s_ask}¢ — {target}¢ would cross it"}, 409
+    canon = (100.0 - target) / 100.0 if syn else target / 100.0
+    verdict = _repeg_amend(client, oid, slug, canon, qty_total, None)    # None = GTC, no expiry
+    if verdict == "amended":
+        _stamp(target, True)
+        return {"ok": True, "moved": True, "live": True, "price_c": target, "from_c": from_c,
+                "order_id": oid, "resting": True, "leaves": unfilled}, 200
+    if verdict == "gone":
+        _probe_log({"hand_live_snipe": True, "pick_id": r["id"], "slug": slug, "amend": "gone"})
+        return {"ok": False, "error": "order left the book during the move (filled?) — "
+                "check My bets"}, 502
+    _probe_log({"hand_live_snipe": True, "pick_id": r["id"], "slug": slug, "amend": "unverified"})
+    return {"ok": False, "error": "move sent but the verify read failed — check My bets "
+            "before trying again"}, 502
+
 # ── THE HAND-BET CHASE (Oct 4 2026, Rob: "why would I want to manually
 # watch these, when we have the box that can chase repegs on my bet for
 # me… a guardrail, like 2 cents move on my bet and it would show 'Manual
@@ -17901,6 +17992,8 @@ def _hand_chase_tick(sb, client, now) -> dict:
         live.add(slug)                                  # the start rule reads these frames too
         if ev.astimezone(timezone.utc) <= now:
             continue                                    # chase is pre-game only
+        if blob.get("live_snipe"):
+            continue                                    # moved to live — Rob's to watch, not ours to chase
         st["cands"] += 1
         py = float(o["price_yes"]) * 100.0
         price_c = round((100.0 - py) if syn else py, 2)
@@ -18149,7 +18242,7 @@ def api_bet_sheets_ops():
         key = (it or {}).get("key") or f"op|{(it or {}).get('op')}|{(it or {}).get('pick_id')}"
         op = str((it or {}).get("op") or "").lower()
         res = {"key": key, "op": op, "pick_id": (it or {}).get("pick_id")}
-        if op not in ("cancel", "repeg", "rerung"):
+        if op not in ("cancel", "repeg", "rerung", "live"):
             res.update({"ok": False, "reason": "unknown action"}); results.append(res); continue
         cid = (it or {}).get("cid")
         if cid in seen:                           # a repeat of a ticket already queued
@@ -18179,7 +18272,7 @@ def api_bet_sheets_ops():
         elif not out.get("ok"):
             res.update({"ok": False, "reason": out.get("error") or f"{res['op']} failed"})
         else:
-            res.update({k: out.get(k) for k in ("moved", "from_c", "price_c", "note", "deleted", "held", "via", "order_lost",
+            res.update({k: out.get(k) for k in ("moved", "live", "from_c", "price_c", "note", "deleted", "held", "via", "order_lost",
                                                 "rerung", "label", "to_line", "contracts", "warning")
                         if out.get(k) is not None})
             res["ok"] = True
