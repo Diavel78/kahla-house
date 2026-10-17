@@ -519,12 +519,16 @@ def price(st: State, params: dict, home: str, away: str, d: date,
         "exp_margin": round(exp_margin, 2),          # home − away, final
         "exp_total": round(exp_total, 2),
         "p_ot": round(sum(M[i][i] for i in range(_N)), 4),
-        "over": {}, "home_cover": {}, "away_cover": {},
+        "over": {}, "under": {}, "home_cover": {}, "away_cover": {},
         "goalie_home": round(f["gk_h"], 3), "goalie_away": round(f["gk_a"], 3),
         "b2b_home": bool(f["b2b_h"]), "b2b_away": bool(f["b2b_a"]),
     }
+    # A WHOLE-NUMBER LINE PUSHES (Oct 17 2026): P(t == L) is neither side,
+    # so `under` is P(t < L), never 1 − over — that counted the ~13% push
+    # mass of a 6.0 total as an under win and read every 6.0 under as a lean.
     for L in totals:
         out["over"][str(L)] = round(sum(q for (m, t), q in final.items() if t > L), 4)
+        out["under"][str(L)] = round(sum(q for (m, t), q in final.items() if t < L), 4)
     for L in pucks:
         out["home_cover"][str(-L)] = round(sum(q for (m, t), q in final.items() if m > L), 4)
         out["away_cover"][str(-L)] = round(sum(q for (m, t), q in final.items() if -m > L), 4)
@@ -534,4 +538,12 @@ def price(st: State, params: dict, home: str, away: str, d: date,
 
 
 def over_prob(priced_final: dict, line: float) -> float | None:
-    return (priced_final.get("over") or {}).get(str(line))
+    """P(over | the bet is not refunded) — on a whole-number line the push
+    mass belongs to neither side."""
+    po = (priced_final.get("over") or {}).get(str(line))
+    pu = (priced_final.get("under") or {}).get(str(line))
+    if po is None:
+        return None
+    if pu is None or po + pu <= 0:
+        return po
+    return po / (po + pu)
