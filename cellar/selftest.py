@@ -3953,11 +3953,17 @@ def test_sheet_puck_and_chalk() -> None:
     model = {"home_cover": {"-1.5": 0.30, "1.5": 0.72}, "away_cover": {"1.5": 0.70, "-1.5": 0.28}}
     # home -1.5 +144 (40.98%) vs away +1.5 -170 (62.96%): no-vig home 39.4%, away 60.6%
     pk = P({"puck_home": -1.5, "puck_home_odds": 144, "puck_away_odds": -170}, model)
-    check("model 30% at home -1.5 vs book ~39% -> the dog +1.5 is the pick",
-          pk and pk["side"] == "away" and pk["line"] == 1.5 and pk["price"] == -170)
-    check("its edge is ~9.4pp -> PLAY", pk and abs(pk["edge_pp"] - 9.4) < 0.3 and pk["verdict"] == "play")
+    check("model 30% at home -1.5 vs book ~39%: the dog +1.5 is NEVER the pick (Rob, Oct 17 2026)",
+          pk and pk["side"] == "home" and pk["line"] == -1.5 and pk["price"] == 144)
+    check("the favorite's -1.5 carries its own (negative) edge -> PASS",
+          pk and abs(pk["edge_pp"] + 9.4) < 0.3 and pk["verdict"] == "pass")
+    m2 = {"home_cover": {"-1.5": 0.48}, "away_cover": {"1.5": 0.52}}
+    pk3 = P({"puck_home": -1.5, "puck_home_odds": 144, "puck_away_odds": -170}, m2)
+    check("the favorite's -1.5 with the edge -> PLAY at its price",
+          pk3 and pk3["side"] == "home" and pk3["line"] == -1.5 and pk3["verdict"] == "play")
     pk2 = P({"puck_home": 1.5, "puck_home_odds": -200, "puck_away_odds": 160}, model)
-    check("home +1.5 reads home_cover['1.5']", pk2 and pk2["side"] in ("home", "away") and pk2["model_p"] in (0.72, 0.28))
+    check("home +1.5 -> the away favorite's -1.5, read off home_cover['1.5']",
+          pk2 and pk2["side"] == "away" and pk2["line"] == -1.5 and pk2["model_p"] == 0.28)
     check("missing price -> no pick", P({"puck_home": -1.5, "puck_home_odds": 144}, model) is None)
     check("no cover at the line -> no pick", P({"puck_home": -2.5, "puck_home_odds": 300, "puck_away_odds": -400}, model) is None)
     check("no model -> no pick", P({"puck_home": -1.5, "puck_home_odds": 144, "puck_away_odds": -170}, None) is None)
