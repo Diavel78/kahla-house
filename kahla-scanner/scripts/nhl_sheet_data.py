@@ -25,7 +25,8 @@ Verdict rules (model vs the market's NO-VIG price):
   ML     play ≥ 4.0pp edge · lean ≥ 2.0pp · pass otherwise;
          > 12pp = pass + flagged (the model doesn't know about a scratch
          the market does — goalie news is the usual culprit)
-  TOTAL  play ≥ 5.0pp · lean ≥ 3.0pp (P(over | no push) — a whole line's
+  TOTAL  play ≥ 5.0pp, else pass — no lean tier, the 3-5pp band lost
+         money in the backtest (P(over | no push) — a whole line's
          push is neither side). The edge lives at the OPENING number: walk-
          forward vs DraftKings' open, ≥5pp bets ran +14.9% ROI and beat the
          close (scripts/backtest_crease_totals.py); at the close nobody beats
@@ -60,7 +61,7 @@ log = logging.getLogger("nhl_sheet_data")
 AZ = ZoneInfo("America/Phoenix")
 
 ML_PLAY_PP, ML_LEAN_PP, ML_IMPLAUSIBLE_PP = 4.0, 2.0, 12.0
-TOT_PLAY_PP, TOT_LEAN_PP = 5.0, 3.0
+TOT_PLAY_PP, TOT_LEAN_PP = 5.0, 5.0   # no lean tier: 3-5pp lost ~20u over 577 bets
 
 # ESPN abbreviation → NHL API tricode (the goalie/shot spine's dialect).
 _ESPN_TO_NHL = {"LA": "LAK", "NJ": "NJD", "SJ": "SJS", "TB": "TBL",
