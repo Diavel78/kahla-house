@@ -4023,7 +4023,12 @@ def api_bet_sheets_picks():
                                                                      "edge_pp", "model_p", "market_p")}
                                        for k, v in ((r.get("data_blob") or {}).get("picks") or {}).items()
                                        if isinstance(v, dict)},
-                             "grade": (r.get("data_blob") or {}).get("grade")}
+                             "grade": (r.get("data_blob") or {}).get("grade"),
+                             "built": ((r.get("data_blob") or {}).get("model_meta") or {}).get("computed_at"),
+                             "level": ((r.get("data_blob") or {}).get("model") or {}).get("level"),
+                             "exp_total": ((r.get("data_blob") or {}).get("model") or {}).get("exp_total"),
+                             "mkt_total": ((r.get("data_blob") or {}).get("lines") or {}).get("total"),
+                             "total_open": (r.get("data_blob") or {}).get("total_open")}
                             for r in srows]
             t0 = datetime.fromisoformat(swk).replace(tzinfo=timezone.utc)
             prow = _sb_paged(lambda: sb.table("bot_picks")
