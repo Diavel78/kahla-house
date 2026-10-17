@@ -316,6 +316,11 @@
                 <div class="sb-body" id="bets"></div>
             </div>
 
+            <div class="sec hide" id="srSec">
+                <div class="sh"><h2>Still resting · game started</h2><span class="sub" id="srMeta"></span></div>
+                <div class="sb-body" id="srBody"></div>
+            </div>
+
             <div class="sec hide" id="plSec">
                 <div class="sh" onclick="togglePl()" title="Show / hide"><h2>Live</h2><span class="sub" id="plMeta"></span><span class="chev">▼</span></div>
                 <div class="sb-body" id="plBody"></div>
@@ -828,7 +833,7 @@
                 return { cls: 'warn', short: 'LINE MOVED', detail: pre + rest + ' · touch ' + touch + '¢ here · current line ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') };
             if (hold && hold.touch_c != null)
                 return { cls: 'warn', short: 'RE-PEG', detail: pre + rest + ' · touch ' + touch + '¢' + (ch.anchor_c != null ? ', ' + Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : ' past the leash') + ' — ' + (b.read ? recShort(b, null) : 'the box stopped chasing') };
-            if (b.live)
+            if (b.live_snipe)
                 return { cls: 'rest', short: 'LIVE', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · no game-start cancel · yours to watch' };
             if (b.outbid && b.in_play)
                 return { cls: 'warn', short: 'OUTBID', detail: pre + rest + ' · touch ' + b.touch_c + '¢ · in play — re-peg in the app' };
@@ -973,10 +978,16 @@
             const star = k => (rd && rd.rec === k ? '★ ' : '');
             if (rr) acts.push('<button class="abtn' + (rx ? ' on' : rec === 'move' ? ' pri' : '') + '" onclick="sheetOp(\'rerung\')">' + (rx ? '✓ On the slip: move to ' : star('move') + 'Move to ') + esc(rungLabel(b, rr.line)) + (rr.bid_c != null ? ' @ ' + rr.bid_c + '¢' : '') + '</button>');
             acts.push('<button class="abtn' + (rp ? ' on' : rec === 'repeg' ? ' pri' : '') + '" onclick="sheetOp(\'repeg\')">' + (rp ? '✓ On the slip: re-peg to touch' : star('repeg') + 'Re-peg to touch') + '</button>');
-            if (!b.live) acts.push('<button class="abtn' + (lv ? ' on' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : 'Move to Live · 49.5¢, no game-start cancel') + '</button>');
+            if (!b.live_snipe) acts.push('<button class="abtn' + (lv ? ' on' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : 'Move to Live · 49.5¢, no game-start cancel') + '</button>');
             acts.push('<button class="abtn dng' + (cn ? ' on' : rec === 'cancel' ? ' pri' : '') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : star('cancel') + 'Cancel order') + '</button>');
         } else if (b.status === 'pending' && o.resting && b.started) {
-            h += '<div class="note">The game has started — manage this one in the app.</div>';
+            // STILL RESTING ON A STARTED GAME (Oct 17 2026: a box restart at
+            // 9:00:55 left seven bets resting into their games, and the page
+            // showed them nowhere). Cancel, or keep it as a live snipe.
+            const cn = inSlip(opKey('cancel', b.id)), lv = inSlip(opKey('live', b.id));
+            h += '<div class="note">' + (b.live_snipe ? 'Moved to live — yours to watch.' : 'The game has started and this order is still resting at its pre-game price.') + '</div>';
+            if (!b.live_snipe) acts.push('<button class="abtn' + (lv ? ' on' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : 'Move to Live · 49.5¢') + '</button>');
+            acts.push('<button class="abtn dng' + (cn ? ' on' : ' pri') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : 'Cancel order') + '</button>');
         }
         if (_sheetAdd) {
             const on = inSlip(_sheetAdd[0]);
@@ -1120,8 +1131,33 @@
                  + bar + '<div class="c-n">' + n + '</div></div>';
         }).join('');
     }
+    // STILL RESTING ON A STARTED GAME: every pending order resting on a game
+    // that has started, every sport. Red unless moved to live on purpose.
+    // Tap → the action sheet (Cancel / Move to Live onto the slip).
+    function renderStartedResting(d) {
+        const rows = (d.bets || []).filter(b => b.status === 'pending' && b.started && (b.order || {}).resting)
+            .sort((x, y) => String(x.event_start).localeCompare(String(y.event_start)));
+        document.getElementById('srSec').classList.toggle('hide', !rows.length);
+        if (!rows.length) { document.getElementById('srBody').innerHTML = ''; return; }
+        const bad = rows.filter(b => !b.live_snipe).length;
+        document.getElementById('srMeta').textContent = rows.length + (bad ? ' · ' + bad + ' need you' : '');
+        document.getElementById('srBody').innerHTML = rows.map(b => {
+            const o = b.order || {}, sl = _scoreLine(b), held = Number(b.held || 0);
+            const tag = b.live_snipe ? '<span class="tag amb">LIVE · YOURS</span>' : '<span class="tag red">STILL RESTING</span>';
+            const n = Math.round(o.leaves || 0) + ' @ ' + (o.price_c != null ? o.price_c + '¢' : '?') + ' resting'
+                    + (held > 0 ? ' · ' + fmtQ(held) + ' filled' : '')
+                    + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '')
+                    + (b.cur_c != null ? ' · now ' + b.cur_c + '¢' : '');
+            return '<div class="card' + (b.live_snipe ? ' rest' : ' miss') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(b.id)).replace(/"/g, '&quot;') + ')">'
+                 + '<div class="c-top"><span class="tags">' + tag + (b.app ? '<span class="tag gry">APP</span>' : '') + '<span class="tag gry">' + esc(String(b.sport || '')) + '</span></span></div>'
+                 + '<div class="c-t">' + esc(betLabel(b)) + ' <span class="g">· ' + esc(gameShort(b)) + '</span></div>'
+                 + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + n + '</div>'
+                 + '<div class="c-n">tap to cancel or move to live</div></div>';
+        }).join('');
+    }
     function renderBets(d) {
         try { renderMoney(d); } catch (e) {}
+        try { renderStartedResting(d); } catch (e) {}
         try { renderPnl(d); } catch (e) { document.getElementById('plMeta').textContent = 'render failed'; }
         const bets = d.bets || [];
         _betsById = {}; bets.forEach(b => { _betsById[b.id] = b; });
