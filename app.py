@@ -3797,7 +3797,11 @@ def api_bet_sheets_picks():
                                "order_price_c": b.get("order_price_c"), "entry_src": b.get("entry_src"),
                                "app": b.get("app_adopted"), "in_play": b.get("in_play"),
                                "tile_usd": usd, "slug": sl, "syn": b.get("pmm_synthetic"),
-                               "score": r.get("result_score"), "venue": bys.get(sl)})
+                               "score": r.get("result_score"), "venue": bys.get(sl),
+                               "state": {k: b.get(k) for k in ("order_id", "anchor_c", "line_hold", "chase_hold",
+                                                               "thin_hold", "rejoin_hold", "line_cancels",
+                                                               "cancelled_at", "in_play") if b.get(k) is not None},
+                               "start": r.get("event_start")})
             dk = day0.date()
             out["settled_audit"] = {
                 "day": str(dk), "tile_usd": round(tile, 2), "rows": rows_a,
