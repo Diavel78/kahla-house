@@ -69,28 +69,33 @@ def _odds(side):
     return None
 
 
+def _side_line(blk):
+    tl = (blk or {}).get("total") or {}
+    for k in ("american", "alternateDisplayValue", "displayValue", "value"):
+        v = _num(str(tl.get(k) or "").lstrip("ouOU"))
+        if v and 3.0 <= abs(v) <= 10.0:
+            return abs(v)
+    return None
+
+
 def core_total(eid):
-    """DK's closing total + over/under prices for one event."""
+    """DK's closing total + over/under prices for one event, and the OPEN."""
     b = _get(CORE.format(e=eid))
     for it in (b or {}).get("items") or []:
-        cl = it.get("close") or {}
-        line = _num(it.get("overUnder"))
-        tl = cl.get("total") or {}
-        for k in ("american", "alternateDisplayValue", "displayValue", "value"):
-            v = _num(str(tl.get(k) or "").lstrip("ouOU"))
-            if v and 3.0 <= abs(v) <= 10.0:
-                line = abs(v)
-                break
+        cl, op = it.get("close") or {}, it.get("open") or {}
+        line = _side_line(cl) or _num(it.get("overUnder"))
         ov = _odds(cl.get("over")) or _am(it.get("overOdds"))
         un = _odds(cl.get("under")) or _am(it.get("underOdds"))
         if line and ov and un:
             return {"line": line, "over": ov, "under": un,
+                    "o_line": _side_line(op), "o_over": _odds(op.get("over")),
+                    "o_under": _odds(op.get("under")),
                     "provider": (it.get("provider") or {}).get("name")}
     return None
 
 
 def market_totals(cache, games):
-    path = os.path.join(cache, "nhl_totals.json")
+    path = os.path.join(cache, "nhl_totals_v2.json")
     have = json.load(open(path)) if os.path.exists(path) else {}
     todo = [g["id"] for g in games if g["id"] not in have]
     log.info("market totals: %d cached, %d to fetch", len(have), len(todo))
@@ -190,7 +195,7 @@ def main():
     espn = load_espn(a.cache, [int(x) for x in a.seasons.split(",")])
     mk = market_totals(a.cache, espn)
 
-    rows = []
+    rows, opens = [], []
     for g in espn:
         d = espn_day(g["date"])
         h, w = nhl(g["home"]), nhl(g["away"])
@@ -204,6 +209,14 @@ def main():
             continue
         rec = cp[key]
         t = rec["final_t"]
+        OL = m.get("o_line")
+        if OL in (4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5) and m.get("o_over") and m.get("o_under") and t != OL:
+            oo, ou = imp(m["o_over"]), imp(m["o_under"])
+            opens.append({"season": rec["season"], "line": OL, "close": L, "y": 1.0 if t > OL else 0.0,
+                          "pm": oo / (oo + ou), "over": m["o_over"], "under": m["o_under"],
+                          "c_over": m["over"], "c_under": m["under"],
+                          "p": p_over(rec["pr"], OL),
+                          **{k: p_over(v, OL) for k, v in rec["lv"].items() if v}})
         if t == L:
             continue                              # a push settles nothing
         po_m, pu_m = imp(m["over"]), imp(m["under"])
@@ -274,6 +287,42 @@ def main():
             combo[f"{s}:{v}"] = res
             print("  %s %s %s" % (s, v, json.dumps(res)))
     report["combo"] = combo
+
+    # BETTING THE OPEN: the model's side at the opening number and price,
+    # graded at the result. CLV = did the close move toward the bet (line,
+    # else price)? An edge only exists where the market has not caught up.
+    print("\n=== BETTING THE OPEN (n=%d games with an open total) ===" % len(opens))
+    op_rep = {}
+    for s in seasons + ["ALL"]:
+        rs = [r for r in opens if s in ("ALL", r["season"])]
+        if not rs:
+            continue
+        ys = [r["y"] for r in rs]
+        out = {"n": len(rs), "market_open": br([r["pm"] for r in rs], ys),
+               "model": br([r["p"] for r in rs], ys), "lvl30": br([r["lvl30"] for r in rs], ys)}
+        for v in ("p", "lvl30"):
+            for thr in (3.0, 5.0, 8.0):
+                n = u = clv = 0.0
+                for r in rs:
+                    eo = (r[v] - imp(r["over"])) * 100
+                    eu = ((1 - r[v]) - imp(r["under"])) * 100
+                    if max(eo, eu) < thr:
+                        continue
+                    over = eo >= eu
+                    ml = r["over"] if over else r["under"]
+                    n += 1
+                    u += payout(ml) if (r["y"] == 1.0) == over else -1.0
+                    if r["close"] != r["line"]:
+                        clv += 1.0 if (r["close"] > r["line"]) == over else -1.0
+                    else:
+                        c = imp(r["c_over"] if over else r["c_under"]) - imp(ml)
+                        clv += 1.0 if c > 0.005 else (-1.0 if c < -0.005 else 0.0)
+                out[f"{v}>={thr:g}pp"] = {"n": int(n), "units": round(u, 2),
+                                          "roi": round(u / n, 3) if n else None,
+                                          "clv_net": int(clv)}
+        op_rep[s] = out
+        print("  %s %s" % (s, json.dumps(out)))
+    report["open"] = op_rep
     print("CREASE_TOTALS_REPORT " + json.dumps(report))
     return 0
 
