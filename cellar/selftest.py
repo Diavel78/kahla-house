@@ -3125,6 +3125,31 @@ def test_live_snipe_hands_off() -> None:
     check("live move never moves up", "<= target + 1e-9" in src)
 
 
+def test_touch_tape_seed() -> None:
+    """A RESTART KEEPS THE PRE-START BOOK (Oct 17 2026): the saved tape fills
+    a watched slug's empty tape, never one already recording, and the start
+    rule then has its baseline."""
+    import time as _t
+    import app as _app
+    saved = (dict(_app._TOUCH_SEED), dict(_app.TOUCH_TAPE))
+    try:
+        now = _t.time()
+        _app.TOUCH_TAPE.clear()
+        _app.TOUCH_TAPE["b"] = _app._deque([(now, 50, 1.0, 51, 1.0, 1, 1)], maxlen=10)
+        _app._TOUCH_SEED.update({"loaded": True, "at": now, "slugs": {
+            "a": [[now - 60, 50, 9000.0, 51, 9000.0, 1, 1, [[50, 9000.0]], [[51, 9000.0]]]],
+            "b": [[now - 60, 50, 5.0, 51, 5.0, 1, 1]], "c": [[now - 60, 50, 1.0, 51, 1.0, 1, 1]]}})
+        n = _app._touch_tape_seed_apply({"a", "b"})
+        check("empty watched tape seeded", n == 1 and len(_app.TOUCH_TAPE["a"]) == 1)
+        check("a recording tape is left alone", _app.TOUCH_TAPE["b"][0][2] == 1.0)
+        check("an unwatched slug waits for its turn", "c" in _app._TOUCH_SEED["slugs"] and "c" not in _app.TOUCH_TAPE)
+        v = _app._hand_start_plan(list(_app.TOUCH_TAPE["a"]), now - 30, now, 95.0)
+        check("the start rule has a baseline after a restart", v[0] != "no_baseline")
+    finally:
+        _app._TOUCH_SEED.clear(); _app._TOUCH_SEED.update(saved[0])
+        _app.TOUCH_TAPE.clear(); _app.TOUCH_TAPE.update(saved[1])
+
+
 def test_touch_watch_push() -> None:
     """THE TAPE PUSH (Oct 7 2026): the hand-bet slugs reach the sockets
     through the ONE-argument merge callback, on change or every minute —
@@ -4158,7 +4183,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

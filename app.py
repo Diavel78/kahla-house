@@ -14611,11 +14611,65 @@ def _touch_watch_push(want: set, now_t: float):
     return "ok"
 
 
+_TOUCH_SEED: dict = {"loaded": False, "at": 0.0, "slugs": {}}
+
+
+def _touch_tape_seed_load(sb) -> int:
+    """A RESTART MUST NOT BLIND THE START RULE (Oct 17 2026: Rob kicked the
+    money daemon at 9:00:55 AZ, 55s after nine college games started; the
+    new process had no pre-start frames, `_hand_start_plan` read
+    no_baseline forever, seven unfilled bets rested into their games and
+    three filled in-play). Once per process, BEFORE the first publish
+    overwrites it, keep the last published tape (≤30 min old); a watched
+    slug whose tape is empty is filled from it (`_touch_tape_seed_apply`).
+    Rows carry their own timestamps, so the baseline window reads them
+    exactly as the old process would have."""
+    _TOUCH_SEED["loaded"] = True
+    try:
+        tr = (sb.table("lookup_cache").select("payload")
+              .eq("key", _TOUCH_TAPE_KEY).limit(1).execute().data) or []
+        tp = (tr[0].get("payload") or {}) if tr else {}
+        at = datetime.fromisoformat(str(tp.get("at")).replace("Z", "+00:00"))
+        if (datetime.now(timezone.utc) - at).total_seconds() > 1800:
+            return 0
+        _TOUCH_SEED["at"] = _time.time()
+        _TOUCH_SEED["slugs"] = {k: v for k, v in (tp.get("slugs") or {}).items() if v}
+        return sum(len(v) for v in _TOUCH_SEED["slugs"].values())
+    except Exception:
+        return 0
+
+
+def _touch_tape_seed_apply(want: set) -> int:
+    """Fill each watched slug's EMPTY tape from the saved one (first hour
+    after boot only — past that the seed is history, not a baseline)."""
+    sl = _TOUCH_SEED["slugs"]
+    if not sl:
+        return 0
+    if _time.time() - _TOUCH_SEED["at"] > 3600:
+        sl.clear()
+        return 0
+    n = 0
+    for slug in want:
+        rows = sl.pop(slug, None)
+        if not rows or TOUCH_TAPE.get(slug):
+            continue
+        dq = _deque(maxlen=_TOUCH_TAPE_MAX)
+        for r in rows:
+            if isinstance(r, (list, tuple)) and r and r[0] is not None:
+                dq.append(tuple(r))
+        if dq:
+            TOUCH_TAPE[slug] = dq
+            n += len(dq)
+    return n
+
+
 def _touch_tape_publish(sb) -> dict:
     """Refresh the watch set from machine_flags, push it to the depth socket,
     publish the tape (last 240 samples per slug) to lookup_cache."""
     global TOUCH_WATCH_SLUGS
     out: dict = {}
+    if not _TOUCH_SEED["loaded"]:
+        out["seed_rows"] = _touch_tape_seed_load(sb)
     try:
         cfg = _machine_flag_val("touch_watch", {}) or {}
         want = set(str(x) for x in (cfg.get("slugs") or []) if x)
@@ -14636,6 +14690,9 @@ def _touch_tape_publish(sb) -> dict:
             for s in list(TOUCH_TAPE):
                 if s not in want:
                     TOUCH_TAPE.pop(s, None)
+        seeded = _touch_tape_seed_apply(want)
+        if seeded:
+            out["seeded"] = seeded
         pushed = _touch_watch_push(want, now_t)
         if pushed:
             out["push"] = pushed
@@ -16759,7 +16816,7 @@ def api_bet_sheets_mine():
             "contracts": contracts, "slug": slug, "synthetic": syn,
             "order_id": oid,
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
-            "live": bool(blob.get("live_snipe")),
+            "live_snipe": bool(blob.get("live_snipe")),
             "order": (bx.get("order") if bx is not None else
                       ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
                         "price_c": (round((1 - float(o["price_yes"])) * 100, 2) if syn
