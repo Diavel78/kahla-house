@@ -995,7 +995,10 @@
             // 9:00:55 left seven bets resting into their games, and the page
             // showed them nowhere). Cancel, or keep it as a live snipe.
             const cn = inSlip(opKey('cancel', b.id)), lv = inSlip(opKey('live', b.id));
-            h += '<div class="note">' + (b.live_snipe ? 'Moved to live — yours to watch.' : 'The game has started and this order is still resting at its pre-game price.') + '</div>';
+            h += '<div class="note">' + (b.live_snipe ? 'Moved to live — yours to watch.'
+                : b.start_seen ? 'Game started and the cancel didn\'t take — this order is still resting at its pre-game price.'
+                : b.start_blind ? 'The box has no pre-start book for this game, so it can\'t see game start — cancel or move it yourself.'
+                : 'Past the listed time — the box cancels it at game start (the 95% drop in the bids).') + '</div>';
             if (!b.live_snipe) acts.push('<button class="abtn' + (lv ? ' on' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : 'Move to Live · 49.5¢') + '</button>');
             acts.push('<button class="abtn dng' + (cn ? ' on' : ' pri') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : 'Cancel order') + '</button>');
         }
@@ -1141,24 +1144,35 @@
                  + bar + '<div class="c-n">' + n + '</div></div>';
         }).join('');
     }
-    // STILL RESTING ON A STARTED GAME: every pending order resting on a game
-    // that has started, every sport. Red unless moved to live on purpose.
-    // Tap → the action sheet (Cancel / Move to Live onto the slip).
+    // STILL RESTING · GAME STARTED. GAME START IS THE 95% DROP IN THE BIDS,
+    // NEVER THE LISTED TIME (Rob, Oct 17 2026: "Game doesn't fucking start
+    // until there's 95% drop… You know this" — the first cut of this section
+    // read the listed clock and showed UMass O 42.5 a minute after 10:00
+    // while the box was correctly waiting for the makers to leave). A bet is
+    // here ONLY when the box will not cancel it: moved to live / placed live
+    // in the app (amber, his), the drop fired but the order still rests (the
+    // cancel failed), or the box has no pre-start book to see the drop
+    // (start_blind — a restart at the start). Everything else waits for the
+    // drop, then lands in Missed at game start.
     function renderStartedResting(d) {
-        const rows = (d.bets || []).filter(b => b.status === 'pending' && b.started && (b.order || {}).resting)
+        const rows = (d.bets || []).filter(b => b.status === 'pending' && (b.order || {}).resting
+                && ((b.started && (b.live_snipe || b.in_play)) || b.start_seen || b.start_blind))
             .sort((x, y) => String(x.event_start).localeCompare(String(y.event_start)));
         document.getElementById('srSec').classList.toggle('hide', !rows.length);
         if (!rows.length) { document.getElementById('srBody').innerHTML = ''; return; }
-        const bad = rows.filter(b => !b.live_snipe).length;
+        const bad = rows.filter(b => !((b.live_snipe || b.in_play) && !b.start_seen && !b.start_blind)).length;
         document.getElementById('srMeta').textContent = rows.length + (bad ? ' · ' + bad + ' need you' : '');
         document.getElementById('srBody').innerHTML = rows.map(b => {
             const o = b.order || {}, sl = _scoreLine(b), held = Number(b.held || 0);
-            const tag = b.live_snipe ? '<span class="tag amb">LIVE · YOURS</span>' : '<span class="tag red">STILL RESTING</span>';
+            const mine = (b.live_snipe || b.in_play) && !b.start_seen && !b.start_blind;
+            const tag = mine ? '<span class="tag amb">LIVE · YOURS</span>'
+                      : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
+                      : '<span class="tag red">BOX CAN\'T SEE GAME START</span>';
             const n = Math.round(o.leaves || 0) + ' @ ' + (o.price_c != null ? o.price_c + '¢' : '?') + ' resting'
                     + (held > 0 ? ' · ' + fmtQ(held) + ' filled' : '')
                     + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '')
                     + (b.cur_c != null ? ' · now ' + b.cur_c + '¢' : '');
-            return '<div class="card' + (b.live_snipe ? ' rest' : ' miss') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(b.id)).replace(/"/g, '&quot;') + ')">'
+            return '<div class="card' + (mine ? ' rest' : ' miss') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(b.id)).replace(/"/g, '&quot;') + ')">'
                  + '<div class="c-top"><span class="tags">' + tag + (b.app ? '<span class="tag gry">APP</span>' : '') + '<span class="tag gry">' + esc(String(b.sport || '')) + '</span></span></div>'
                  + '<div class="c-t">' + esc(betLabel(b)) + ' <span class="g">· ' + esc(gameShort(b)) + '</span></div>'
                  + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + n + '</div>'
