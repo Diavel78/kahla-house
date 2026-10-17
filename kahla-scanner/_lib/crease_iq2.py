@@ -29,9 +29,11 @@ scored on each held-out season; the 2025-26 season is fully clean):
     2025-26 alone 0.2456 (54.7%) — a hard season (base 0.2496)
     old Crease IQ P3 xG core: 0.2467 on that same season
     puck line −1.5 calibrated (pred .331 / act .329)
-    TOTALS: no measurable edge over the base rate (Brier .2462 vs .2463
-        at 5.5) — the total is printed as our number, and a total pick
-        is capped at LEAN. Don't promote totals without a new backtest.
+    TOTALS (Oct 17 2026, scripts/backtest_crease_totals.py, vs DK): at the
+        CLOSE nobody beats a coin flip (market .2494, model .2498); at the
+        OPEN the model wins (.2473 vs .2482) and ≥5pp bets at the opening
+        price ran +14.9% ROI with positive CLV in every season. Whole lines
+        push: price P(over | no push) (over_prob), never 1 − over.
 
 Pure Python (no numpy) so it runs on the box, Actions and Vercel alike.
 Research harness: scripts/backtest_crease_iq2.py.
@@ -213,7 +215,14 @@ def build_games(goalie_rows: list[dict], shot_rows: list[dict]) -> list[dict]:
 
 # ------------------------------------------------------------ rolling state
 PARAMS = dict(team_hl=60.0, goalie_hl=365.0, team_prior=10.0,
-              goalie_prior=40.0, min_games=8, w_xg=0.7, ridge=1.0)
+              goalie_prior=40.0, min_games=8, w_xg=0.7, ridge=1.0,
+              level_hl=30.0, level_pw=120.0)
+# THE LEAGUE LEVEL (Oct 17 2026): the fitted intercept is one scoring level
+# for every season in the fit. A 30-day tracker of non-empty-net regulation
+# goals a team-game (shrunk 120 team-games toward the fit's own mean) moves
+# every λ by log(recent / fit mean). Walk-forward vs DraftKings' OPENING
+# total, ≥5pp edges: +22.9u → +55-68u over 3 seasons (scripts/
+# backtest_crease_totals.py).
 
 
 class _Acc:
@@ -245,6 +254,14 @@ class State:
         self.n: dict = defaultdict(int)
         self.last: dict = {}
         self.lg = defaultdict(_Acc)
+        self.lvl = _Acc()                         # league level (λ offset)
+
+    def level(self, d, base: float) -> float:
+        """log(recent league scoring / the fit's mean) — 0 with no history."""
+        if not base or self.lvl.last is None:
+            return 0.0
+        rate = self.lvl.get(d, self.P["level_hl"], base, self.P["level_pw"])
+        return math.log(rate / base) if rate > 0 else 0.0
 
     def league(self, d):
         thl = self.P["team_hl"]
@@ -297,6 +314,7 @@ class State:
             A["st"].add(d, (xf - evf) - (xa - eva), 1, thl)
             self.lg["xg"].add(d, xf, 1, thl)
             self.lg["g"].add(d, gf - enf, 1, thl)
+            self.lvl.add(d, gf - enf, 1, self.P["level_hl"])
             self.n[t] = self.n.get(t, 0) + 1
             self.last[t] = d
             for gid, v in (gls or {}).items():
@@ -472,7 +490,9 @@ def fit(games: list[dict], P: dict | None = None) -> tuple[State, dict]:
             br += (q - yv) ** 2
         if best_b is None or br < best_b:
             best_k, best_b = kk, br
+    base = sum(Y) / len(Y) if Y else 0.0       # the intercept's own scoring level
     params = {"coef": b, "lam3": l3, "delta": delta, "en": en, "ot_home": ot_home,
+              "level_base": base,
               "k": best_k, "n_fit": len(pairs), "w_xg": st.P["w_xg"],
               "tie_rate": at}
     return st, params
@@ -486,13 +506,14 @@ def _win_from(M, ot_home) -> float:
 
 def price(st: State, params: dict, home: str, away: str, d: date,
           g_home: int | None, g_away: int | None,
-          totals=(5.5, 6.5), pucks=(1.5,)) -> dict | None:
+          totals=(5.5, 6.5), pucks=(1.5,), use_level: bool = True) -> dict | None:
     f = st.features(home, away, d, g_home, g_away)
     if f is None:
         return None
     b = params["coef"]
-    lh = math.exp(sum(bi * xi for bi, xi in zip(b, design_row(f, "h", params["w_xg"]))))
-    la = math.exp(sum(bi * xi for bi, xi in zip(b, design_row(f, "a", params["w_xg"]))))
+    lvl = st.level(d, params.get("level_base") or 0.0) if use_level else 0.0
+    lh = math.exp(lvl + sum(bi * xi for bi, xi in zip(b, design_row(f, "h", params["w_xg"]))))
+    la = math.exp(lvl + sum(bi * xi for bi, xi in zip(b, design_row(f, "a", params["w_xg"]))))
     M = score_matrix(lh, la, params["lam3"], params["delta"], params["en"])
     p = min(max(_win_from(M, params["ot_home"]), 1e-6), 1 - 1e-6)
     p = 1 / (1 + math.exp(-params["k"] * math.log(p / (1 - p))))
@@ -518,6 +539,7 @@ def price(st: State, params: dict, home: str, away: str, d: date,
         "win_home": round(p, 4),
         "exp_margin": round(exp_margin, 2),          # home − away, final
         "exp_total": round(exp_total, 2),
+        "level": round(lvl, 4),
         "p_ot": round(sum(M[i][i] for i in range(_N)), 4),
         "over": {}, "under": {}, "home_cover": {}, "away_cover": {},
         "goalie_home": round(f["gk_h"], 3), "goalie_away": round(f["gk_a"], 3),

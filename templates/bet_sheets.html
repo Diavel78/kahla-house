@@ -278,6 +278,9 @@
                  pointer-events: none; max-width: calc(100vw - 32px); }
         .toast.show { opacity: 1; }
         .toast.bad { border-color: var(--r-bd); }
+        .mk-open { font-size: 13px; color: var(--text3); margin-top: 6px; }
+        .clv-b { color: var(--green, #3fb950); font-weight: 600; }
+        .clv-l { color: var(--red, #f85149); font-weight: 600; }
     </style>
 </head>
 <body>
@@ -1248,6 +1251,20 @@
         out.push(totalMarket(g, up, true));
         return out.join('');
     }
+    // THE OPENING TOTAL (Oct 17 2026): the NHL total's edge lives at the
+    // opening number — the first play/lean price, and whether the market has
+    // since moved to it (the last pre-game run is the close).
+    function openTxt(g) {
+        const o = g.total_open;
+        if (!o || !o.side) return '';
+        const now = o.now || {};
+        const moved = now.line != null && Number(now.line) !== Number(o.line) ? ' · now ' + now.line
+                    : (now.price != null && now.price !== o.price ? ' · now ' + am(now.price) : '');
+        const c = o.clv === 'beat' ? ' <span class="clv-b" title="the market moved to our side">✓ market moved our way</span>'
+                : o.clv === 'lost' ? ' <span class="clv-l" title="the market moved against us">✗ market moved away</span>' : '';
+        return '<div class="mk-open">Opened ' + (o.side === 'over' ? 'Over ' : 'Under ') + o.line
+             + (o.price != null ? ' ' + am(o.price) : '') + moved + c + '</div>';
+    }
     function totalMarket(g, up, pts) {
         const L = g.line || {}, M = g.model, p = g.total;
         let mdl = M && M.total != null ? 'model ' + Number(M.total).toFixed(1) : '';
@@ -1255,7 +1272,7 @@
         if (tl != null && !p) mdl = 'line ' + tl + (mdl ? ' · ' + mdl : '');
         if (!p && tl == null && !mdl) return '';
         return mkRow('Total', p, mdl + edgeTxt(p, pts),
-                     mkBody(g, up, 'total', p, tl, p ? (p.side === 'over' ? 'Over ' : 'Under ') + tl : '', 'total'));
+                     mkBody(g, up, 'total', p, tl, p ? (p.side === 'over' ? 'Over ' : 'Under ') + tl : '', 'total') + openTxt(g));
     }
     // THE CHALK RULE (Rob, Oct 11 2026: "-180 and a -262? Yeah, I ain't
     // betting that"): a chalky ML pick (server `ml.chalky`, ≤ −150) keeps its

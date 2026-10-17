@@ -25,9 +25,12 @@ Verdict rules (model vs the market's NO-VIG price):
   ML     play ≥ 4.0pp edge · lean ≥ 2.0pp · pass otherwise;
          > 12pp = pass + flagged (the model doesn't know about a scratch
          the market does — goalie news is the usual culprit)
-  TOTAL  capped at LEAN (≥ 4pp) — the total has NOT beaten the base rate
-         in the walk-forward backtest; it is shown as our number, not sold
-         as an edge.
+  TOTAL  play ≥ 5.0pp · lean ≥ 3.0pp (P(over | no push) — a whole line's
+         push is neither side). The edge lives at the OPENING number: walk-
+         forward vs DraftKings' open, ≥5pp bets ran +14.9% ROI and beat the
+         close (scripts/backtest_crease_totals.py); at the close nobody beats
+         a coin flip. The first play/lean price is kept as `total_open` and
+         every later run stamps whether the market moved to it (CLV).
 
   python -m scripts.nhl_sheet_data [--days 1] [--commit]
 """
@@ -57,7 +60,7 @@ log = logging.getLogger("nhl_sheet_data")
 AZ = ZoneInfo("America/Phoenix")
 
 ML_PLAY_PP, ML_LEAN_PP, ML_IMPLAUSIBLE_PP = 4.0, 2.0, 12.0
-TOT_LEAN_PP = 4.0
+TOT_PLAY_PP, TOT_LEAN_PP = 5.0, 3.0
 
 # ESPN abbreviation → NHL API tricode (the goalie/shot spine's dialect).
 _ESPN_TO_NHL = {"LA": "LAK", "NJ": "NJD", "SJ": "SJS", "TB": "TBL",
@@ -433,8 +436,8 @@ def verdicts(g: dict, pr: dict) -> dict:
                             "fair": _american(p_over if side == "over" else 1 - p_over),
                             "model_p": round(p_over if side == "over" else 1 - p_over, 4),
                             "edge_pp": round(edge, 1),
-                            "verdict": "lean" if edge >= TOT_LEAN_PP else "pass",
-                            "capped": "total model has no backtested edge — lean max"}
+                            "verdict": ("play" if edge >= TOT_PLAY_PP
+                                        else "lean" if edge >= TOT_LEAN_PP else "pass")}
     return out
 
 
@@ -456,6 +459,64 @@ def _ensure_sport_check() -> bool:
     log.error("sport CHECK rejects NHL and no psql here — run "
               "kahla-scanner/scripts/run_sql.sh -f supabase/pick_sheets_sports.sql")
     return False
+
+
+def _imp(ml):
+    try:
+        ml = float(ml)
+    except (TypeError, ValueError):
+        return None
+    return 100 / (ml + 100) if ml > 0 else -ml / (-ml + 100)
+
+
+def total_open(prev: dict | None, pick: dict | None, odds: dict, now_iso: str) -> dict | None:
+    """THE OPENING TOTAL PICK and its closing-line value. The first run that
+    calls the total a play/lean stamps side/line/price; every later pre-game
+    run re-reads the market — the last one before puck drop is the close.
+    CLV: the line moved toward the side (over: up, under: down), else on the
+    same line the side's price got dearer."""
+    op = dict(prev) if isinstance(prev, dict) and prev.get("side") else None
+    if op is None:
+        if not pick or pick.get("verdict") not in ("play", "lean") or pick.get("line") is None:
+            return None
+        op = {"side": pick["side"], "line": pick["line"], "price": pick.get("price"),
+              "edge_pp": pick.get("edge_pp"), "verdict": pick.get("verdict"), "at": now_iso}
+    L = odds.get("total")
+    if L is None:
+        return op
+    price = odds.get("over_odds" if op["side"] == "over" else "under_odds")
+    op["now"] = {"line": L, "price": price, "at": now_iso}
+    sgn = 1 if op["side"] == "over" else -1
+    if float(L) != float(op["line"]):
+        op["clv"] = "beat" if sgn * (float(L) - float(op["line"])) > 0 else "lost"
+    else:
+        a, b = _imp(op.get("price")), _imp(price)
+        op["clv"] = ("flat" if a is None or b is None or abs(b - a) < 0.005
+                     else "beat" if b > a else "lost")
+    return op
+
+
+def _prior_rows(wk: str) -> dict | None:
+    """This week's and last week's NHL rows → {(event_name, event_start):
+    total_open}. None when the read fails — the run must not commit then, or
+    the upsert would wipe every opening pick it could not see."""
+    prev_wk = (date.fromisoformat(wk) - timedelta(days=7)).isoformat()
+    try:
+        rows = sb_select("football_sheets", {
+            "select": "event_name,event_start,data_blob->total_open",
+            "week_key": f"in.({prev_wk},{wk})", "sport": "eq.NHL"})
+    except Exception as e:
+        log.warning("prior rows read failed: %s", e)
+        return None
+    out = {}
+    for r in rows:
+        try:
+            t = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if r.get("total_open"):
+            out[(r.get("event_name"), t.astimezone(timezone.utc).isoformat())] = r["total_open"]
+    return out
 
 
 def run(days: int, commit: bool, pin: bool | None = None) -> dict:
@@ -482,7 +543,10 @@ def run(days: int, commit: bool, pin: bool | None = None) -> dict:
                {g["away"] for g in games if g["date"] == yesterday}
     wk = week_key_default()
     now_iso = datetime.now(timezone.utc).isoformat()
-    rows, summary = [], {"games": 0, "priced": 0, "plays": 0}
+    prior = _prior_rows(wk) if commit else {}
+    if prior is None:
+        return {"games": 0, "error": "prior_rows_unreadable"}
+    rows, summary = [], {"games": 0, "priced": 0, "plays": 0, "total_opens": 0}
     for g in slate:
         h, a = g["home"]["abbr"], g["away"]["abbr"]
         gh = project_goalie(h, "home", g, goalies, dfo, all_goalies, h in played_y)
@@ -499,6 +563,8 @@ def run(days: int, commit: bool, pin: bool | None = None) -> dict:
                 "goalies": {"home": gh, "away": ga},
                 "model_meta": {"engine": "crease_iq2", "n_fit": params["n_fit"],
                                "computed_at": now_iso}}
+        name = f"{g['away']['name']} @ {g['home']['name']}"
+        key = (name, g["start"].astimezone(timezone.utc).isoformat())
         if pr:
             blob["model"] = pr
             blob["picks"] = verdicts(g, pr)
@@ -506,8 +572,12 @@ def run(days: int, commit: bool, pin: bool | None = None) -> dict:
             summary["plays"] += sum(1 for v in blob["picks"].values() if v.get("verdict") == "play")
         else:
             blob["unavailable"] = ["model_unrated_team"]
+        op = total_open(prior.get(key), (blob.get("picks") or {}).get("total"), g["odds"], now_iso)
+        if op:
+            blob["total_open"] = op
+            summary["total_opens"] += 1
         rows.append({"week_key": wk, "sport": "NHL",
-                     "event_name": f"{g['away']['name']} @ {g['home']['name']}",
+                     "event_name": name,
                      "event_start": g["start"].isoformat(), "espn_id": g["espn_id"],
                      "tier": "data", "data_blob": blob, "data_built_at": now_iso})
         log.info("%s @ %s  %s", a, h, json.dumps({

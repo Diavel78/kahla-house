@@ -145,7 +145,7 @@ def walk(cache):
                 continue
             d = date.fromisoformat(g["date"])
             pr = ci2.price(st, params, g["home"], g["away"], d, g["starter_h"], g["starter_a"],
-                           totals=lines)
+                           totals=lines, use_level=False)
             if pr:
                 rec = {"season": start[:4], "date": g["date"], "pr": pr,
                        "final_t": g["final_h"] + g["final_a"], "lv": {}}
@@ -156,12 +156,15 @@ def walk(cache):
                     p2 = dict(params, coef=[params["coef"][0] + math.log(rate / base)]
                               + list(params["coef"][1:]))
                     rec["lv"][k] = ci2.price(st, p2, g["home"], g["away"], d,
-                                             g["starter_h"], g["starter_a"], totals=lines)
+                                             g["starter_h"], g["starter_a"], totals=lines, use_level=False)
                     if k == "lvl30":
                         # NO GOALIE NEWS: the open is often posted before the
                         # starters are known — price with league-average goalies
                         rec["lv"]["nogk30"] = ci2.price(st, p2, g["home"], g["away"], d,
-                                                        None, None, totals=lines)
+                                                        None, None, totals=lines, use_level=False)
+                # PRODUCTION: the engine's own built-in level (must track lvl30)
+                rec["lv"]["prod"] = ci2.price(st, params, g["home"], g["away"], d,
+                                              g["starter_h"], g["starter_a"], totals=lines)
                 out[(g["date"], g["home"], g["away"])] = rec
             st.update(g)
             _lv_add(lv, g)
@@ -305,8 +308,8 @@ def main():
         ys = [r["y"] for r in rs]
         out = {"n": len(rs), "market_open": br([r["pm"] for r in rs], ys),
                "model": br([r["p"] for r in rs], ys), "lvl30": br([r["lvl30"] for r in rs], ys),
-               "nogk30": br([r["nogk30"] for r in rs], ys)}
-        for v in ("p", "lvl30", "nogk30"):
+               "nogk30": br([r["nogk30"] for r in rs], ys), "prod": br([r["prod"] for r in rs], ys)}
+        for v in ("p", "lvl30", "nogk30", "prod"):
             for thr in (3.0, 5.0, 8.0):
                 n = u = clv = 0.0
                 for r in rs:

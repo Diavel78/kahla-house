@@ -3844,7 +3844,11 @@ def test_bet_sheet_reads() -> None:
     check("NBA total: Φ((tu − L)/tsd), lean-capped", 0.57 < o["model_p"] < 0.59 and o["verdict"] == "lean", str(o))
     nhl = {"model": {"over": {"6.5": 0.44}, "home_cover": {"-1.5": 0.35}, "away_cover": {"1.5": 0.65}}}
     o = _app._bs_option_read(None, "NHL", nhl, "total", "under", 6.5, 50.0)
-    check("NHL under 6.5 reads 1 − over, +6¢ = lean", o["model_p"] == 0.56 and o["verdict"] == "lean", str(o))
+    check("NHL under 6.5 reads 1 − over, +6¢ = play (≥5)", o["model_p"] == 0.56 and o["verdict"] == "play", str(o))
+    nhl6 = {"model": {"over": {"6.0": 0.40}, "under": {"6.0": 0.47}}}
+    o = _app._bs_option_read(None, "NHL", nhl6, "total", "under", 6.0, 50.0)
+    check("NHL under 6.0: the push is neither side (0.47/0.87), +4¢ = lean",
+          abs(o["model_p"] - 0.5402) < 1e-3 and o["verdict"] == "lean", str(o))
     check("NHL line the model never priced = None",
           _app._bs_option_read(None, "NHL", nhl, "total", "over", 7.5, 40.0) is None)
     o = _app._bs_option_read(None, "NHL", nhl, "spread", "away", 1.5, 60.0)
