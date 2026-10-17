@@ -332,6 +332,47 @@ def main():
         op_rep[s] = out
         print("  %s %s" % (s, json.dumps(out)))
     report["open"] = op_rep
+
+    # OVER vs UNDER (Oct 17 2026, Rob: "damn near every game is under"): the
+    # production model's opening-line bets split by side, per season — does
+    # the under lean win, or is it a bias? Plus the market's own skew: the
+    # devigged open over price vs how often the over actually came in.
+    print("\n=== OVER vs UNDER at the open (prod) ===")
+    side_rep = {}
+    for s in seasons + ["ALL"]:
+        rs = [r for r in opens if s in ("ALL", r["season"])]
+        if not rs:
+            continue
+        out = {"n": len(rs), "mkt_over": round(float(np.mean([r["pm"] for r in rs])), 3),
+               "actual_over": round(float(np.mean([r["y"] for r in rs])), 3),
+               "model_over": round(float(np.mean([r["prod"] for r in rs])), 3)}
+        for thr in (0.0, 3.0, 5.0):
+            for want in ("over", "under"):
+                n = u = w = 0.0
+                for r in rs:
+                    eo = (r["prod"] - imp(r["over"])) * 100
+                    eu = ((1 - r["prod"]) - imp(r["under"])) * 100
+                    if max(eo, eu) < thr:
+                        continue
+                    over = eo >= eu
+                    if over != (want == "over"):
+                        continue
+                    ml = r["over"] if over else r["under"]
+                    hit = (r["y"] == 1.0) == over
+                    n += 1
+                    w += 1 if hit else 0
+                    u += payout(ml) if hit else -1.0
+                out[f"{want}>={thr:g}pp"] = {"n": int(n), "win": round(w / n, 3) if n else None,
+                                            "units": round(u, 2), "roi": round(u / n, 3) if n else None}
+        for L in (5.5, 6.0, 6.5):
+            lr = [r for r in rs if r["line"] == L]
+            if lr:
+                out[f"line{L}"] = {"n": len(lr), "mkt_over": round(float(np.mean([r["pm"] for r in lr])), 3),
+                                   "actual_over": round(float(np.mean([r["y"] for r in lr])), 3),
+                                   "model_over": round(float(np.mean([r["prod"] for r in lr])), 3)}
+        side_rep[s] = out
+        print("  %s %s" % (s, json.dumps(out)))
+    report["sides"] = side_rep
     print("CREASE_TOTALS_REPORT " + json.dumps(report))
     return 0
 
