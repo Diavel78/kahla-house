@@ -1121,9 +1121,13 @@ def _sheet_chalk_mark(pick: dict | None) -> dict | None:
 def _sheet_puck_pick(line: dict, model: dict | None) -> dict | None:
     """The puck line priced like the ML: the model's cover probability at
     the book's line (Crease v2 `home_cover`/`away_cover`, keyed by the
-    team's own line) against the no-vig book price; the side with the
-    bigger edge is the pick. None when the line, either price or the
-    model's cover at that line is missing."""
+    team's own line) against the no-vig book price. None when the line,
+    either price or the model's cover at that line is missing.
+
+    THE FAVORITE'S −1.5 ONLY (Rob, Oct 17 2026: "for dogs I'll NEVER bet
+    +1.5. Bet the dog, the favorite, the −1.5, and the O/U"): the pick is
+    always the favorite's side of the puck line, graded on its own edge —
+    a model that likes the dog says so on the ML, never on +1.5."""
     ph = (line or {}).get("puck_home")
     oh, oa = (line or {}).get("puck_home_odds"), (line or {}).get("puck_away_odds")
     if ph is None or oh is None or oa is None or not model:
@@ -1147,8 +1151,8 @@ def _sheet_puck_pick(line: dict, model: dict | None) -> dict | None:
         return None
     mh, ma = ih / (ih + ia), ia / (ih + ia)
     e_home, e_away = (p_home - mh) * 100, ((1 - p_home) - ma) * 100
-    side = "home" if e_home >= e_away else "away"
-    edge = max(e_home, e_away)
+    side = "home" if ph < 0 else "away"       # the favorite lays the 1.5
+    edge = e_home if side == "home" else e_away
     p_side = p_home if side == "home" else 1 - p_home
     v = ("play" if edge >= _SHEET_PUCK_PLAY_PP else "lean" if edge >= _SHEET_PUCK_LEAN_PP else "pass")
     implaus = edge > _SHEET_PUCK_IMPLAUSIBLE_PP
