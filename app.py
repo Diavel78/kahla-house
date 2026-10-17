@@ -1385,30 +1385,37 @@ def _sheet_tv_map(sport: str, starts: list) -> dict:
     if not pair or not starts:
         return {}
     et = ZoneInfo("America/New_York")
-    days = sorted({datetime.fromisoformat(str(x).replace("Z", "+00:00")).astimezone(et).date()
-                   for x in starts if x})
+    # only games still worth tuning in to: started in the last 6h or later
+    cut = datetime.now(timezone.utc) - timedelta(hours=6)
+    days = sorted({t.astimezone(et).date() for t in
+                   (datetime.fromisoformat(str(x).replace("Z", "+00:00")) for x in starts if x)
+                   if t >= cut})
     if not days:
         return {}
-    dates = (days[0].strftime("%Y%m%d") if len(days) == 1
-             else days[0].strftime("%Y%m%d") + "-" + days[-1].strftime("%Y%m%d"))
-    key = f"{sport}:{dates}"
+    key = f"{sport}:{days[0]}:{days[-1]}"
     now = _time.time()
     hit = _SHEET_TV_CACHE.get(key)
     if hit and now - hit[0] < _SHEET_TV_TTL_S:
         return hit[1]
-    params = {"dates": dates, "limit": 400}
-    if sport == "NCAAF":
-        params["groups"] = 80
-    out: dict = {}
-    try:
-        r = _http.get(f"https://site.api.espn.com/apis/site/v2/sports/{pair[0]}/{pair[1]}/scoreboard",
-                      params=params, timeout=8)
-        events = (r.json() or {}).get("events", []) if r.status_code == 200 else None
-        _SHEET_TV_DEBUG.update({"status": r.status_code, "url": r.url,
-                                "n_events": len(events) if events is not None else None})
-    except Exception as e:
-        events = None
-        _SHEET_TV_DEBUG.update({"error": repr(e)[:300]})
+    # One request per ET day: ESPN 400s a dates RANGE with limit on NHL
+    # (seen Oct 17 2026). limit/groups only for college football, where
+    # ESPN otherwise returns just the featured slate.
+    params = {"limit": 400, "groups": 80} if sport == "NCAAF" else {}
+    events, fails, out, t0 = [], [], {}, _time.time()
+    for day in days[:8]:
+        if _time.time() - t0 > 7:
+            fails.append(f"{day}:budget")
+            continue
+        try:
+            r = _http.get(f"https://site.api.espn.com/apis/site/v2/sports/{pair[0]}/{pair[1]}/scoreboard",
+                          params={**params, "dates": day.strftime("%Y%m%d")}, timeout=4)
+            if r.status_code == 200:
+                events.extend((r.json() or {}).get("events", []) or [])
+            else:
+                fails.append(f"{day}:{r.status_code}")
+        except Exception as e:
+            fails.append(f"{day}:{type(e).__name__}")
+    _SHEET_TV_DEBUG.update({"days": [str(d) for d in days], "fails": fails, "n_events": len(events)})
     if events:
         c0 = (events[0].get("competitions") or [{}])[0]
         _SHEET_TV_DEBUG["sample"] = {
@@ -1416,7 +1423,7 @@ def _sheet_tv_map(sport: str, starts: list) -> dict:
             "geoBroadcasts": (c0.get("geoBroadcasts") or [])[:3],
             "teams": [((c.get("homeAway"), (c.get("team") or {}).get("displayName")))
                       for c in c0.get("competitors") or []]}
-    if events is None:
+    if not events:
         return hit[1] if hit else {}
     for ev in events:
         comp = (ev.get("competitions") or [{}])[0]
