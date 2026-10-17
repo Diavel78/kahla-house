@@ -1404,9 +1404,10 @@
     // One pick's bet in the shape the card's button uses: market type, side,
     // line and label — the slip item a tap would make. null = not a play/lean
     // (or a chalky ML, or no line to bet it at).
-    function pickSpec(g, k) {
+    function pickSpec(g, k, force) {
         const L = g.line || {}, p = g[k];
-        if (!p || !p.side || (p.verdict !== 'play' && p.verdict !== 'lean') || p.chalky) return null;
+        if (!p || !p.side) return null;
+        if (!force && ((p.verdict !== 'play' && p.verdict !== 'lean') || p.chalky)) return null;
         let mt = k, line = null, label = null, price = p.price;
         if (k === 'ml') {
             line = 0; label = nameOf(g, p.side) + ' ML';
@@ -1428,12 +1429,29 @@
         }
         return { mt, side: p.side, line: Number(line), label, price, verdict: p.verdict };
     }
-    function pickKeys() {
-        return _sport === 'NHL' ? ['ml', 'puck', 'total'] : (_sport === 'NBA' || _sport === 'MLB') ? ['ml', 'spread', 'total'] : ['spread', 'total'];
+    // THE GAME'S BETS (Rob, Oct 17 2026: "Pick the favorite ML up to -150,
+    // then the -1.5 if it's over. Can't put both"): the ML and the puck line /
+    // spread are ONE side bet. A play/lean ML priced better than -150 is the
+    // bet; past -150 the same team's line (the favorite's -1.5) replaces it;
+    // with no ML play the line pick stands on its own. Plus the total.
+    function gamePlays(g) {
+        const out = [], push = x => { if (x) out.push(x); };
+        const lineK = _sport === 'NHL' ? 'puck' : (_sport === 'NBA' || _sport === 'MLB') ? 'spread' : null;
+        if (lineK) {
+            const ml = g.ml, isPick = ml && ml.side && (ml.verdict === 'play' || ml.verdict === 'lean');
+            if (isPick && !ml.chalky) push(pickSpec(g, 'ml'));
+            else if (isPick) {
+                const s = g[lineK];
+                if (s && s.side === ml.side) {
+                    const x = pickSpec(g, lineK, true);
+                    if (x) { x.verdict = ml.verdict; push(x); }
+                }
+            } else push(pickSpec(g, lineK));
+        } else push(pickSpec(g, 'spread'));
+        push(pickSpec(g, 'total'));
+        return out;
     }
-    function pickLine(g, k) {
-        const x = pickSpec(g, k);
-        if (!x) return null;
+    function playText(x) {
         return x.label + (x.price != null && x.price !== '' ? ' ' + am(x.price) : '') + (x.verdict === 'lean' ? ' (lean)' : '');
     }
     // TODAY'S PLAYS (Rob, Oct 17 2026: "adds it to the bet slip, so I don't
@@ -1449,12 +1467,12 @@
                       && new Date(g.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today)
             .forEach(g => {
                 const bets = betsOnGame(g);
-                pickKeys().forEach(k => {
-                    const x = pickSpec(g, k);
-                    if (!x) return;
-                    const bet = bets.some(b => (b.market_type === 'moneyline' ? 'ml' : b.market_type) === x.mt);
+                // the ML and the line are one bet: a bet (or slip item) on either blocks both
+                const grp = mt => (mt === 'total' ? 'total' : 'side');
+                gamePlays(g).forEach(x => {
+                    const bet = bets.some(b => grp(b.market_type === 'moneyline' ? 'ml' : b.market_type) === grp(x.mt));
                     const slipped = _slip.some(i => !i.op && i.sport === _sport && i.away === g.away && i.home === g.home
-                                                && i.event_start === g.event_start && i.market_type === x.mt);
+                                                && i.event_start === g.event_start && grp(i.market_type) === grp(x.mt));
                     if (bet || slipped) { had++; return; }
                     _slip.push({ key: slipKey(g, x.mt, x.side), sport: _sport, away: g.away, home: g.home, event_start: g.event_start,
                                  market_type: x.mt, side: x.side, line: x.line, label: x.label,
@@ -1467,13 +1485,12 @@
         toast('Added ' + added + ' play' + (added === 1 ? '' : 's') + ' to the slip' + (had ? ' · ' + had + ' already bet/on the slip' : ''));
     }
     function picksText(games) {
-        const keys = pickKeys();
         const out = [], day = {};
         games.forEach(g => {
             const d = fmtTime(g.event_start);
             if (!day[d]) { day[d] = 1; out.push((out.length ? '\n' : '') + _sport + ' · ' + d); }
             const L = g.line || {};
-            const lines = keys.map(k => pickLine(g, k)).filter(Boolean);
+            const lines = gamePlays(g).map(playText);
             const priced = Object.keys(L).some(k => L[k] != null);
             out.push(shortTeam(g.away) + ' @ ' + shortTeam(g.home) + ' · ' + clk(g.event_start));
             out.push(lines.length ? lines.map(x => '  ' + x).join('\n') : (priced ? '  Pass' : '  No line yet'));
