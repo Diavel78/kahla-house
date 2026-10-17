@@ -125,11 +125,19 @@
         .bar .p { font-family: var(--mono); font-size: 14px; min-width: 46px; text-align: right; }
 
         /* sheet controls */
-        .seg { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; background: var(--card);
-               border: 1px solid var(--line); border-radius: 12px; padding: 4px; margin-top: 26px; }
-        .tab { height: 42px; border: none; border-radius: 9px; background: transparent; color: var(--text2);
-               font-size: 15px; font-weight: 600; cursor: pointer; }
-        .tab.on { background: var(--text); color: var(--bg); font-weight: 700; }
+        /* sport tabs: one row, the league's logo over its name (Rob, Oct 17 2026:
+           "Blob is ugly… logo's??"). Logos come from /league-logo/<code>.png;
+           a logo that fails to load leaves just the name. */
+        .seg { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-top: 26px; }
+        .tab { height: 66px; padding: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+               gap: 5px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--text3);
+               font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color .15s, background .15s; }
+        .tab .lg { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; }
+        .tab .lg img { max-width: 30px; max-height: 30px; object-fit: contain; opacity: .5; filter: grayscale(.7);
+                       transition: opacity .15s, filter .15s; }
+        .tab .lg.nolg { display: none; }
+        .tab.on { border-color: var(--text2); background: var(--card2); color: var(--text); font-weight: 700; }
+        .tab.on .lg img { opacity: 1; filter: none; }
         .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
         .fchip { height: 38px; padding: 0 14px; border-radius: 19px; border: 1px solid var(--line); background: transparent;
                  color: var(--text); font-size: 14px; font-weight: 600; cursor: pointer; }
@@ -234,11 +242,11 @@
                 <div class="runinfo" id="runInfo"></div>
             </div>
             <div class="seg" style="margin-top:6px">
-                <button class="tab on" data-sport="NHL" onclick="switchSport('NHL')">NHL</button>
-                <button class="tab" data-sport="NBA" onclick="switchSport('NBA')">NBA</button>
-                <button class="tab" data-sport="MLB" onclick="switchSport('MLB')">MLB</button>
-                <button class="tab" data-sport="NCAAF" onclick="switchSport('NCAAF')">College</button>
-                <button class="tab" data-sport="NFL" onclick="switchSport('NFL')">NFL</button>
+                <button class="tab on" data-sport="NHL" onclick="switchSport('NHL')"><span class="lg"><img src="/league-logo/NHL.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NHL</span></button>
+                <button class="tab" data-sport="NBA" onclick="switchSport('NBA')"><span class="lg"><img src="/league-logo/NBA.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NBA</span></button>
+                <button class="tab" data-sport="MLB" onclick="switchSport('MLB')"><span class="lg"><img src="/league-logo/MLB.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">MLB</span></button>
+                <button class="tab" data-sport="NCAAF" onclick="switchSport('NCAAF')"><span class="lg"><img src="/league-logo/NCAAF.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">College</span></button>
+                <button class="tab" data-sport="NFL" onclick="switchSport('NFL')"><span class="lg"><img src="/league-logo/NFL.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NFL</span></button>
             </div>
             <div class="chips" id="fchips"></div>
             <input class="search" id="search" type="search" placeholder="Search a game or team…"

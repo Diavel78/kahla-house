@@ -991,6 +991,65 @@ def apple_touch_icon():
 _WELL_RED_LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "well-red-logo.png")
 
 
+# LEAGUE LOGOS for the sheet tabs (Oct 17 2026, Rob: "Blob is ugly… logo's??").
+# The logo URL comes from ESPN's own scoreboard payload (`leagues[0].logos`,
+# the `dark` variant first — the pages are dark), fetched server-side and
+# cached in memory, so the page never guesses a CDN path and never depends on
+# the phone reaching ESPN. `?meta=1` returns the chosen URL instead (site-curl).
+_LEAGUE_LOGO_SPORT = {"NHL": "nhl", "NBA": "nba", "MLB": "mlb", "NFL": "nfl", "NCAAF": "ncaaf"}
+_LEAGUE_LOGO_CACHE: dict = {}          # code -> (fetched_mono, bytes, mimetype, href)
+_LEAGUE_LOGO_TTL_S = 86400.0
+
+
+def _league_logo_href(code: str) -> str | None:
+    grp, league = _ESPN_PATH[_LEAGUE_LOGO_SPORT[code]]
+    try:
+        r = _http.get(f"https://site.api.espn.com/apis/site/v2/sports/{grp}/{league}/scoreboard",
+                      params={"limit": 1}, timeout=8)
+        logos = ((r.json().get("leagues") or [{}])[0].get("logos")) or []
+    except Exception:
+        logos = []
+    best = None
+    for lg in logos:
+        rel = lg.get("rel") or []
+        if lg.get("href") and "dark" in rel:
+            return lg["href"]
+        if lg.get("href") and best is None:
+            best = lg["href"]
+    return best
+
+
+@app.route("/league-logo/<code>.png")
+def league_logo(code):
+    code = str(code or "").upper()
+    if code not in _LEAGUE_LOGO_SPORT:
+        return ("unknown league", 404)
+    hit = _LEAGUE_LOGO_CACHE.get(code)
+    if not hit or _time.monotonic() - hit[0] > _LEAGUE_LOGO_TTL_S:
+        href = _league_logo_href(code)
+        data, mime = None, "image/png"
+        if href:
+            try:
+                ir = _http.get(href, timeout=8)
+                if ir.ok and ir.content:
+                    data, mime = ir.content, (ir.headers.get("Content-Type") or "image/png").split(";")[0]
+            except Exception:
+                data = None
+        if data:
+            hit = (_time.monotonic(), data, mime, href)
+            _LEAGUE_LOGO_CACHE[code] = hit
+        elif not hit:
+            if request.args.get("meta"):
+                return jsonify({"ok": False, "code": code, "href": href})
+            return ("logo unavailable", 404)
+    if request.args.get("meta"):
+        return jsonify({"ok": True, "code": code, "href": hit[3], "bytes": len(hit[1]), "type": hit[2]})
+    resp = make_response(hit[1])
+    resp.headers["Content-Type"] = hit[2]
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    return resp
+
+
 @app.route("/book-club-logo.png")
 def book_club_logo():
     """Well Red Book Club logo — served from disk (ships with the function,
