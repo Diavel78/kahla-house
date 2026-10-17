@@ -1395,37 +1395,79 @@
     function renderFilters(nMine, nPick) {
         const c = (f, t) => '<button class="fchip' + (_filter === f ? ' on' : '') + '" onclick="setFilter(\'' + f + '\')">' + t + '</button>';
         document.getElementById('fchips').innerHTML = c('all', 'All games') + c('mine', 'My bets ' + nMine) + c('plays', 'Plays & leans ' + nPick)
+            + '<button class="fchip" onclick="addTodaysPlays()">➕ Today\'s plays</button>'
             + '<button class="fchip" onclick="copyPicks()">📋 Copy picks</button>';
     }
     // COPY PICKS (Rob, Oct 17 2026: "copy the picks (not my bets)… game,
     // pick(s), then next game… paste it into an iMessage"): the sheet's own
     // picks for the upcoming games on screen (tab + search + filter), as text.
-    function pickLine(g, k) {
+    // One pick's bet in the shape the card's button uses: market type, side,
+    // line and label — the slip item a tap would make. null = not a play/lean
+    // (or a chalky ML, or no line to bet it at).
+    function pickSpec(g, k) {
         const L = g.line || {}, p = g[k];
         if (!p || !p.side || (p.verdict !== 'play' && p.verdict !== 'lean') || p.chalky) return null;
-        let t = null, price = p.price;
+        let mt = k, line = null, label = null, price = p.price;
         if (k === 'ml') {
-            t = nameOf(g, p.side) + ' ML';
+            line = 0; label = nameOf(g, p.side) + ' ML';
             if (price == null) price = L['ml_' + p.side];
         } else if (k === 'puck') {
             if (p.line == null) return null;
-            t = nameOf(g, p.side) + ' ' + sgn(p.line, 1);
+            mt = 'spread'; line = Number(p.line); label = nameOf(g, p.side) + ' ' + sgn(p.line, 1);
         } else if (k === 'spread') {
             // football reads the line the way its card does (off the market home line)
             const own = (_sport === 'NFL' || _sport === 'NCAAF') ? null : p.line;
-            const ln = own != null ? Number(own)
-                     : (L.spread_home != null ? (p.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home)) : null);
-            if (ln == null) return null;
-            t = nameOf(g, p.side) + ' ' + sgn(ln, 1);
+            line = own != null ? Number(own)
+                 : (L.spread_home != null ? (p.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home)) : null);
+            if (line == null) return null;
+            label = nameOf(g, p.side) + ' ' + sgn(line, 1);
         } else if (k === 'total') {
-            const tl = p.line != null ? p.line : L.total;
-            if (tl == null) return null;
-            t = (p.side === 'over' ? 'Over ' : 'Under ') + tl;
+            line = p.line != null ? p.line : L.total;
+            if (line == null) return null;
+            label = (p.side === 'over' ? 'Over ' : 'Under ') + line;
         }
-        return t + (price != null && price !== '' ? ' ' + am(price) : '') + (p.verdict === 'lean' ? ' (lean)' : '');
+        return { mt, side: p.side, line: Number(line), label, price, verdict: p.verdict };
+    }
+    function pickKeys() {
+        return _sport === 'NHL' ? ['ml', 'puck', 'total'] : (_sport === 'NBA' || _sport === 'MLB') ? ['ml', 'spread', 'total'] : ['spread', 'total'];
+    }
+    function pickLine(g, k) {
+        const x = pickSpec(g, k);
+        if (!x) return null;
+        return x.label + (x.price != null && x.price !== '' ? ' ' + am(x.price) : '') + (x.verdict === 'lean' ? ' (lean)' : '');
+    }
+    // TODAY'S PLAYS (Rob, Oct 17 2026: "adds it to the bet slip, so I don't
+    // have to click all the buttons… then I'll select the contracts, and hit
+    // place"): every play/lean on today's (AZ) upcoming games for this tab,
+    // skipping a market that already holds a bet on EITHER side or is already
+    // on the slip. Adds only — never places.
+    function addTodaysPlays() {
+        if (!_lastBetsPayload) { toast('Your bets are still loading — try again in a second', true); return; }
+        const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
+        let added = 0, had = 0;
+        _games.filter(g => gameStatus(g) === 'up' && g.event_start
+                      && new Date(g.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today)
+            .forEach(g => {
+                const bets = betsOnGame(g);
+                pickKeys().forEach(k => {
+                    const x = pickSpec(g, k);
+                    if (!x) return;
+                    const bet = bets.some(b => (b.market_type === 'moneyline' ? 'ml' : b.market_type) === x.mt);
+                    const slipped = _slip.some(i => !i.op && i.sport === _sport && i.away === g.away && i.home === g.home
+                                                && i.event_start === g.event_start && i.market_type === x.mt);
+                    if (bet || slipped) { had++; return; }
+                    _slip.push({ key: slipKey(g, x.mt, x.side), sport: _sport, away: g.away, home: g.home, event_start: g.event_start,
+                                 market_type: x.mt, side: x.side, line: x.line, label: x.label,
+                                 game: shortTeam(g.away) + ' @ ' + shortTeam(g.home) });
+                    added++;
+                });
+            });
+        if (!added) { toast(had ? 'Nothing new — today\'s ' + had + ' play' + (had === 1 ? ' is' : 's are') + ' already bet or on the slip' : 'No plays left today', !had); return; }
+        saveSlip(); renderSlip(); renderGames(); autoOpenSlip();
+        toast('Added ' + added + ' play' + (added === 1 ? '' : 's') + ' to the slip' + (had ? ' · ' + had + ' already bet/on the slip' : ''));
     }
     function picksText(games) {
-        const keys = _sport === 'NHL' ? ['ml', 'puck', 'total'] : (_sport === 'NBA' || _sport === 'MLB') ? ['ml', 'spread', 'total'] : ['spread', 'total'];
+        const keys = pickKeys();
         const out = [], day = {};
         games.forEach(g => {
             const d = fmtTime(g.event_start);
