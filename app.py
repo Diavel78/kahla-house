@@ -1186,6 +1186,7 @@ def _sheet_game_nhl(r: dict) -> dict:
             "line": line, "model": mdl, "ml": _sheet_chalk_mark(picks.get("ml")),
             "puck": _sheet_puck_pick(line, model),
             "total": picks.get("total"), "unrated": model is None,
+            "total_open": blob.get("total_open"),
             "grade": blob.get("grade"),
             "goalies": {k: {"name": (v or {}).get("name"), "source": (v or {}).get("source")}
                         for k, v in gl.items()}}
@@ -16743,7 +16744,7 @@ def api_bet_sheets_mine():
 _BS_READ_FB_PLAY_PTS, _BS_READ_FB_LEAN_PTS = 1.5, 0.75
 _BS_READ_FB_GAP_PTS = {"spread": 12.0, "total": 7.0}
 _BS_READ_PP = {   # (play, lean, implausible) in pp — None play = lean-capped
-    ("NHL", "spread"): (4.0, 2.0, 12.0), ("NHL", "total"): (None, 4.0, 12.0),
+    ("NHL", "spread"): (4.0, 2.0, 12.0), ("NHL", "total"): (5.0, 3.0, 12.0),
     ("NBA", "spread"): (None, 4.0, 12.0), ("NBA", "total"): (None, 4.0, 12.0),
     ("MLB", "spread"): (None, 4.0, 12.0),
 }
