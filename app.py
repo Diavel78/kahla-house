@@ -16813,7 +16813,10 @@ def _bs_line_prob(sb, sport: str, blob: dict, mt: str, side: str, line):
             po = (m.get("over") or {}).get(str(L))
             if po is None:
                 return None
-            return (float(po) if side == "over" else 1.0 - float(po)), None
+            po, pu = float(po), (m.get("under") or {}).get(str(L))
+            if pu is not None and po + float(pu) > 0:
+                po = po / (po + float(pu))   # a whole line's push is neither side
+            return (po if side == "over" else 1.0 - po), None
         pc = (m.get("home_cover" if side == "home" else "away_cover") or {}).get(str(L))
         return (float(pc), None) if pc is not None else None
     if sport == "NBA":

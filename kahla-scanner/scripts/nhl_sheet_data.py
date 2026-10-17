@@ -422,7 +422,7 @@ def verdicts(g: dict, pr: dict) -> dict:
                      "model_gap_implausible": implaus}
     L = o.get("total")
     if L is not None:
-        p_over = pr["over"].get(str(L))
+        p_over = ci2.over_prob(pr, L)
         if p_over is not None:
             po, pu = _no_vig(o.get("over_odds") or -110, o.get("under_odds") or -110)
             e_over, e_under = (p_over - po) * 100, ((1 - p_over) - pu) * 100
