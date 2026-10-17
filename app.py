@@ -2117,7 +2117,7 @@ def _trade_qty(t) -> float | None:
     return None
 
 
-def _venue_day_map(sb, days: int = 4) -> dict:
+def _venue_day_map(sb, days: int = 4, by_slug: dict | None = None) -> dict:
     """AZ day -> realized BETS P&L, by the one proven Polymarket math.
 
     ⚠ THE RULE THIS EXISTS TO OBEY (Aug 28 2026, after the day card read
@@ -2247,6 +2247,11 @@ def _venue_day_map(sb, days: int = 4) -> dict:
             d = _day(r.get("az_day"))
             if d is not None:
                 acc[d] = acc.get(d, 0.0) + (0.0 if neutral else ((qty - cost) if won else -cost))
+            if by_slug is not None:
+                by_slug.setdefault(slug, []).append({
+                    "k": "res", "day": str(d), "qty": round(qty, 2), "cost": round(cost, 2),
+                    "won": won, "neutral": neutral, "ledger": bool(p and p["qty"] > 0 and abs(p["qty"] - qty) <= 0.5),
+                    "pnl": round(0.0 if neutral else ((qty - cost) if won else -cost), 2)})
             pos[slug] = {"qty": 0.0, "cost": 0.0}    # settled: the lot is gone
             continue
         t = ((r.get("payload") or {}).get("trade") or {})
@@ -2263,6 +2268,9 @@ def _venue_day_map(sb, days: int = 4) -> dict:
         if not (t.get("realizedPnl") is not None or bq > aq):
             p["qty"] += qty                      # a BUY opens/adds
             p["cost"] += price * qty
+            if by_slug is not None:
+                by_slug.setdefault(slug, []).append({"k": "buy", "at": str(ts)[:19], "qty": round(qty, 2),
+                                                     "c": round(price * 100, 2)})
             continue
         if p["qty"] <= 0:
             continue                             # sell with no tracked buys
@@ -2270,6 +2278,10 @@ def _venue_day_map(sb, days: int = 4) -> dict:
         d = _day(t.get("updateTime") or r.get("at"))
         if d is not None:
             acc[d] = acc.get(d, 0.0) + (price - avg) * qty
+        if by_slug is not None:
+            by_slug.setdefault(slug, []).append({"k": "sell", "day": str(d), "qty": round(qty, 2),
+                                                 "c": round(price * 100, 2), "avg_c": round(avg * 100, 2),
+                                                 "pnl": round((price - avg) * qty, 2)})
         sold = min(qty, p["qty"])
         p["cost"] -= avg * sold
         p["qty"] -= sold
@@ -3745,6 +3757,52 @@ def api_bet_sheets_picks():
                               and (not slug or slug in str(x["result"].get("slug") or ""))][:60]
         out["scanned"] = len(st)
     sb = get_supabase()
+    if request.args.get("settled_audit"):
+        # THE SETTLED-TODAY TILE vs THE VENUE (Oct 17 2026, Rob: "settled
+        # today, for sure wrong"): every settled sheet pick on today's AZ
+        # slate with the tile's own dollars beside the venue's legs on its slug.
+        try:
+            az = ZoneInfo("America/Phoenix")
+            day0 = (datetime.now(az) - timedelta(days=int(request.args.get("back") or 0))
+                    ).replace(hour=0, minute=0, second=0, microsecond=0)
+            pr = (sb.table("bot_picks").select("id,event_name,event_start,market_type,side,entry_line,"
+                                               "entry_price,status,pnl_units,settled_at,result_score,signal_blob")
+                  .eq("signal_blob->>bet_sheet", "true")
+                  .gte("event_start", day0.astimezone(timezone.utc).isoformat())
+                  .lt("event_start", (day0 + timedelta(days=1)).astimezone(timezone.utc).isoformat())
+                  .order("event_start").limit(300).execute().data) or []
+            bys: dict = {}
+            dm = _venue_day_map(sb, 3, by_slug=bys)
+            rows_a, tile, seen = [], 0.0, set()
+            for r in pr:
+                b = r.get("signal_blob") or {}
+                st, q, pc = r.get("status"), b.get("filled_qty"), b.get("price_c")
+                usd = None
+                if st == "void" and isinstance(b.get("sold"), dict):
+                    usd = b["sold"].get("pnl_usd")
+                elif st in ("won", "lost", "push") and pc is not None and q is not None:
+                    usd = round(float(q) * (100 - float(pc)) / 100, 2) if st == "won" else (
+                        round(-float(q) * float(pc) / 100, 2) if st == "lost" else 0.0)
+                if usd is not None:
+                    tile += usd
+                sl = b.get("pmm_slug")
+                seen.add(sl)
+                rows_a.append({"id": r["id"], "ev": r.get("event_name"), "mt": r.get("market_type"),
+                               "side": r.get("side"), "line": r.get("entry_line"), "st": st,
+                               "label": b.get("label"), "q": q, "price_c": pc, "contracts": b.get("contracts"),
+                               "order_price_c": b.get("order_price_c"), "entry_src": b.get("entry_src"),
+                               "app": b.get("app_adopted"), "in_play": b.get("in_play"),
+                               "tile_usd": usd, "slug": sl, "syn": b.get("pmm_synthetic"),
+                               "score": r.get("result_score"), "venue": bys.get(sl)})
+            dk = day0.date()
+            out["settled_audit"] = {
+                "day": str(dk), "tile_usd": round(tile, 2), "rows": rows_a,
+                "venue_day_usd": round(dm.get(dk, 0.0), 2),
+                "venue_other_slugs": {k: v for k, v in bys.items() if k not in seen
+                                      and any(e.get("day") == str(dk) for e in v)}}
+        except Exception as e:
+            out["settled_audit_err"] = f"{type(e).__name__}: {e}"[:300]
+        return jsonify(out)
     ids = [x for x in (request.args.get("delete_ids") or "").split(",") if x.strip().isdigit()]
     if ids:                                            # explicit ids, app-adopted rows ONLY
         deleted = []
