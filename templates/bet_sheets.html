@@ -1495,7 +1495,7 @@
             if (line == null) return null;
             label = (p.side === 'over' ? 'Over ' : 'Under ') + line;
         }
-        return { mt, side: p.side, line: Number(line), label, price, verdict: p.verdict };
+        return { k, mt, side: p.side, line: Number(line), label, price, verdict: p.verdict };
     }
     // THE GAME'S BETS (Rob, Oct 17 2026: "Pick the favorite ML up to -150,
     // then the -1.5 if it's over. Can't put both"): the ML and the puck line /
@@ -1552,26 +1552,54 @@
         saveSlip(); renderSlip(); renderGames(); autoOpenSlip();
         toast('Added ' + added + ' play' + (added === 1 ? '' : 's') + ' to the slip' + (had ? ' · ' + had + ' already bet/on the slip' : ''));
     }
+    // A copied pick's result: the box's grade for that market when it is the
+    // sheet's own pick, else (the puck line, a favorite's line standing in for
+    // a chalky ML) worked off the final score. 'win' | 'loss' | 'push' | null.
+    function playGrade(g, x) {
+        const gr = g.grade || {}, f = gr.final;
+        if (x.k !== 'puck' && (gr[x.k] === 'win' || gr[x.k] === 'loss' || gr[x.k] === 'push')) return gr[x.k];
+        if (!f || f.home == null || f.away == null) return null;
+        const h = Number(f.home), a = Number(f.away);
+        let m;
+        if (x.mt === 'ml') m = x.side === 'home' ? h - a : a - h;
+        else if (x.mt === 'total') m = x.side === 'over' ? h + a - x.line : x.line - (h + a);
+        else m = (x.side === 'home' ? h - a : a - h) + x.line;
+        return m > 0 ? 'win' : m < 0 ? 'loss' : 'push';
+    }
+    // COPY PICKS = TODAY'S WHOLE SLATE (Rob, Oct 17 2026: "all games for the
+    // day… ✅ and ❌ next to games over, and the record at the bottom").
     function picksText(games) {
-        const out = [], day = {};
+        const out = [], rec = { win: 0, loss: 0, push: 0 };
+        out.push(_sport + ' · ' + fmtTime(games[0].event_start));
         games.forEach(g => {
-            const d = fmtTime(g.event_start);
-            if (!day[d]) { day[d] = 1; out.push((out.length ? '\n' : '') + _sport + ' · ' + d); }
+            const st = gameStatus(g), f = g.grade && g.grade.final;
             const L = g.line || {};
-            const lines = gamePlays(g).map(playText);
+            const plays = gamePlays(g);
             const priced = Object.keys(L).some(k => L[k] != null);
-            out.push(shortTeam(g.away) + ' @ ' + shortTeam(g.home) + ' · ' + clk(g.event_start));
-            out.push(lines.length ? lines.map(x => '  ' + x).join('\n') : (priced ? '  Pass' : '  No line yet'));
+            let tag = clk(g.event_start);
+            if (st === 'final') tag = f && f.away != null && f.home != null ? 'FINAL ' + f.away + '-' + f.home : 'FINAL';
+            else if (st === 'live') tag = 'LIVE';
+            out.push(shortTeam(g.away) + ' @ ' + shortTeam(g.home) + ' · ' + tag);
+            if (!plays.length) { out.push(priced ? '  Pass' : '  No line yet'); return; }
+            plays.forEach(x => {
+                const r = st === 'up' ? null : playGrade(g, x);
+                if (r) rec[r]++;
+                out.push('  ' + playText(x) + (r ? ' ' + ({ win: '✅', loss: '❌', push: '➖' })[r] : ''));
+            });
         });
+        const n = rec.win + rec.loss;
+        if (n + rec.push) out.push('\nRecord: ' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + (n ? ' (' + Math.round(100 * rec.win / n) + '%)' : ''));
         return out.join('\n');
     }
     async function copyPicks() {
         const q = (document.getElementById('search').value || '').trim().toLowerCase();
         const words = q.split(/\s+/).filter(Boolean);
-        let games = _games.filter(g => gameStatus(g) === 'up' && gameMatches(g, words));
-        if (_filter === 'plays') games = games.filter(g => hasPick(g));
+        const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
+        let games = _games.filter(g => g.event_start && gameMatches(g, words)
+                                    && new Date(g.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today);
+        if (_filter === 'plays') games = games.filter(g => gamePlays(g).length);
         else if (_filter === 'mine') games = games.filter(g => betsOnGame(g).length);
-        if (!games.length) { toast('No upcoming games to copy', true); return; }
+        if (!games.length) { toast('No games today to copy', true); return; }
         const txt = picksText(games);
         let ok = false;
         try { await navigator.clipboard.writeText(txt); ok = true; } catch (e) {}
@@ -1582,7 +1610,7 @@
             try { ok = document.execCommand('copy'); } catch (e) {}
             document.body.removeChild(ta);
         }
-        toast(ok ? 'Copied picks for ' + games.length + ' game' + (games.length === 1 ? '' : 's') : 'Copy failed', !ok);
+        toast(ok ? 'Copied today\'s picks · ' + games.length + ' game' + (games.length === 1 ? '' : 's') : 'Copy failed', !ok);
     }
     let _fold = { started: false };   // default collapsed, every visit
     function toggleFold(k) { _fold[k] = !_fold[k]; renderGames(); }
