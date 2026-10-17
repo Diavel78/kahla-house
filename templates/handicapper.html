@@ -3708,7 +3708,7 @@
         if (!pmm || !pmm.slug) { _toast('No Polymarket market for this side'); return; }
         const g = (_currentGames || []).find(x => x.market_id === d.market_id) || {};
         const es = g.event_start || d.event_start || null;
-        if (!es) { _toast('No kickoff time — cannot set order expiry'); return; }
+        if (!es) { _toast('No game start time — cannot set order expiry'); return; }
         _betCtx = { mt, side, slug: pmm.slug, synthetic: !!pmm.synthetic,
                     line: (pmm.line != null ? pmm.line : null),
                     market_id: d.market_id, event_start: es,
