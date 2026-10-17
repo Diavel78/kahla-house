@@ -1370,6 +1370,8 @@ def _espn_tv_names(comp: dict) -> list:
         for n in b.get("names") or []:
             add(nat if str(mk).lower() == "national" else loc, n)
     for gb in comp.get("geoBroadcasts") or []:
+        if str(((gb.get("type") or {}).get("shortName")) or "").lower() == "radio":
+            continue
         mk = str(((gb.get("market") or {}).get("type")) or "").lower()
         n = (gb.get("media") or {}).get("shortName")
         add(nat if mk == "national" else loc, n)
