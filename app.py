@@ -15788,6 +15788,12 @@ def _hand_start_tick(sb, client, now) -> dict:
                 except (TypeError, ValueError):
                     leaves = 0
                 pc = blob.get("price_c")
+                try:                                    # the resting order's own price beats the blob
+                    if o.get("price_yes") is not None:
+                        py_ = float(o["price_yes"]) * 100.0
+                        pc = round((100.0 - py_) if bool(blob.get("pmm_synthetic")) else py_, 2)
+                except (TypeError, ValueError):
+                    pass
                 if leaves >= 1 and pc is not None:
                     syn_t = bool(blob.get("pmm_synthetic"))
                     book = _pmm_book(client, slug)
@@ -17898,10 +17904,15 @@ def _kalshi_cancel_exec(sb, client, pick_id, skip_cancel: bool = False):
         except Exception as e:
             app.logger.warning("kalshi cancel %s: %s", koid, e)
     if koid:
-        try:
-            vr = _kv.order_resting(koid, ticker)
-        except Exception as e:
-            vr = {"resting": None, "error": str(e)[:120]}
+        vr = {}
+        for _i in range(4):                       # the orders list lags a 200 cancel by a beat (Oct 18 2026)
+            try:
+                vr = _kv.order_resting(koid, ticker)
+            except Exception as e:
+                vr = {"resting": None, "error": str(e)[:120]}
+            if vr.get("resting") is False or vr.get("resting") is None:
+                break
+            _time.sleep(0.6)
         if vr.get("resting") is None:
             return {"ok": False, "error": "Kalshi orders unreadable — check the app"}, 503
         if vr.get("resting"):
@@ -18176,7 +18187,13 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
                     leaves = min(leaves, int(round(float(blob["contracts"]) - cum0)))
             except (TypeError, ValueError):
                 leaves = 0
-            pc = blob.get("price_c")
+            # THE CAP IS OFF THE ORDER'S OWN PRICE, never the blob (Oct 18 2026:
+            # two Kalshi bets the chase had lifted to 49 and 53 still carried
+            # 5 and 52 on the blob after 'unverified' amends — cap 6 and 53
+            # against asks at 50 and 54, both takes skipped 'past the cap').
+            pc = _kv.our_c(o.get("yes_c"), by)
+            if pc is None:
+                pc = blob.get("price_c")
             if leaves >= 1 and pc is not None:
                 kbook, _ = _kalshi_hand_book(ticker, fresh=True)
                 k_ask = _manual_side_book(kbook, not by)[1] if kbook else None
