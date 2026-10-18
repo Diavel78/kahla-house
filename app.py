@@ -4365,7 +4365,9 @@ def api_bet_sheets_picks():
                 pl = json.loads(pl)
             out["strip"] = {"at": pl.get("at"), "n": pl.get("n"), "orders": pl.get("orders"),
                             "positions": pl.get("positions"), "kalshi": pl.get("kalshi"),
-                            "venues": sorted({str(x.get("venue") or "POLYMARKET") for x in (pl.get("rows") or [])})}
+                            "venues": sorted({str(x.get("venue") or "POLYMARKET") for x in
+                                              (list((pl.get("rows") or {}).values()) if isinstance(pl.get("rows"), dict)
+                                               else (pl.get("rows") or [])) if isinstance(x, dict)})}
         except Exception as e:
             out["strip_err"] = str(e)[:160]
     if request.args.get("settled_audit"):
