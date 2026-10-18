@@ -15393,18 +15393,47 @@ def _hand_start_plan(samples, start_ts: float, now_ts: float, drop_pct: float,
 _HAND_START_TAKE_C = 1.0
 
 
-def _hand_take_plan(price_c, ask_c, cap_c, start_ts, now_ts):
-    """Pure. The price to take at, or None (cancel as before). Only after the
-    scheduled start; only an ask within cap_c of the resting price."""
+def _hand_take_plan(price_c, ask_c, cap_c, start_ts, now_ts, tick=1.0):
+    """Pure. The LIMIT to take at, or None (cancel as before). Only after the
+    scheduled start; only when the best ask sits within cap_c of the resting
+    price. The limit is the resting price + cap (on the market's grid), not
+    the best ask: one immediate-or-cancel order then sweeps EVERY level up to
+    the cap (Oct 18 2026, SJSU/UTEP O45.5 — the take priced at the 50¢ best
+    ask filled the 0.11 sitting there and left 9.89 of a 10-lot that sat at
+    50.5-51)."""
     try:
         price_c, ask_c, cap_c = float(price_c), float(ask_c), float(cap_c)
+        tick = float(tick) if tick else 1.0
     except (TypeError, ValueError):
         return None
-    if now_ts < start_ts or cap_c < 0 or not (1.0 <= ask_c <= 99.0):
+    if now_ts < start_ts or cap_c < 0 or tick <= 0 or not (1.0 <= ask_c <= 99.0):
         return None
-    if ask_c - price_c > cap_c + 1e-9:
+    lim = round(math.floor((price_c + cap_c) / tick + 1e-9) * tick, 4)
+    lim = min(lim, 99.0)
+    if ask_c > lim + 1e-9:
         return None
-    return round(ask_c, 2)
+    return lim
+
+
+def _hand_side_asks(book: dict, synthetic: bool) -> list:
+    """Our side's ask ladder, cheapest first, (cents, qty). A synthetic NO
+    side's sellers are the YES bids, inverted."""
+    if synthetic:
+        return sorted(((100.0 - c, q) for c, q in (book.get("bids") or [])), key=lambda x: x[0])
+    return list(book.get("asks") or [])
+
+
+def _hand_take_vwap(asks: list, qty: float, limit_c: float):
+    """Pure. Average price for qty swept up the ladder through limit_c, or None."""
+    left, cost, got = float(qty), 0.0, 0.0
+    for c, q in asks:
+        if c > limit_c + 1e-9 or left <= 0:
+            break
+        n = min(left, float(q))
+        cost += n * c
+        got += n
+        left -= n
+    return round(cost / got, 2) if got > 0 else None
 
 
 def _hand_take_ioc(client, slug: str, synthetic: bool, price_c: float, qty: int):
@@ -15563,12 +15592,16 @@ def _hand_start_tick(sb, client, now) -> dict:
                             cap = float(_machine_flag_val("hand_start_take_c", _HAND_START_TAKE_C))
                         except (TypeError, ValueError):
                             cap = _HAND_START_TAKE_C
-                        tp = _hand_take_plan(pc, s_ask, cap, start_ts, now_ts)
-                        take = {"price_c": pc, "ask_c": s_ask, "cap_c": cap, "qty": leaves}
+                        tick_t = _pmm_tick_c(client, slug)
+                        tp = _hand_take_plan(pc, s_ask, cap, start_ts, now_ts, tick_t)
+                        asks_t = _hand_side_asks(book, syn_t)
+                        take = {"price_c": pc, "ask_c": s_ask, "cap_c": cap, "qty": leaves,
+                                "tick_c": tick_t, "asks": asks_t[:6]}
                         if tp is not None and leaves * tp / 100.0 <= 500.0:
                             oid_t, err_t = _hand_take_ioc(client, slug, syn_t, tp, leaves)
-                            take.update({"take_c": tp, "order_id": oid_t, "error": err_t})
-                            took_px = tp if oid_t else None
+                            vw = _hand_take_vwap(asks_t, leaves, tp)
+                            take.update({"take_c": tp, "vwap_c": vw, "order_id": oid_t, "error": err_t})
+                            took_px = (vw or tp) if oid_t else None
                             if oid_t:
                                 _time.sleep(1.5)        # let the fill reach positions before the cancel's read
                         else:
@@ -15589,7 +15622,7 @@ def _hand_start_tick(sb, client, now) -> dict:
                         newp = round((cum0 * pc0 + took * took_px) / (cum0 + took), 2)
                         b2 = {**b2, "price_c": newp, "start_take": {
                             "at": now.isoformat(), "take_c": took_px, "qty": round(took, 2),
-                            "from_c": pc0}}
+                            "from_c": pc0}}       # took_px = the ladder's average up to the limit
                         upd = {"signal_blob": b2}
                         am_ = _cents_to_american_py(newp)
                         if am_ is not None:
