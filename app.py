@@ -18333,6 +18333,32 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
 _HAND_SWITCH_DEBOUNCE_S = 120.0
 _HAND_SWITCH_MAX_TICK = 2
 _HAND_SWITCH_LAST: dict = {}
+_HAND_SWITCH_PERSIST_S = 30.0     # machine_flags hand_switch_persist_s overrides
+_HAND_SWITCH_SEEN: dict = {}      # pick_id → (destination venue, first seen, monotonic)
+
+
+def _hand_switch_persists(seen: dict, pick_id, dest, now_mono: float, persist_s: float) -> bool:
+    """Pure. A VENUE SWITCH NEEDS A LASTING EDGE, NOT ONE FRAME (Oct 18 2026,
+    ARI/LAR U51.5: Kalshi's 50¢ bid pulled for a few seconds, 49 read as the
+    touch, the compare said Kalshi by 0.6¢, the bet switched, the 50 came
+    back and the chase joined it — now 0.4¢ WORSE than the Polymarket seat
+    it left). The compare must name the same destination continuously for
+    `persist_s` before a switch runs; a 'stay' answer clears the clock."""
+    if dest is None:
+        seen.pop(pick_id, None)
+        return False
+    cur = seen.get(pick_id)
+    if not cur or cur[0] != dest:
+        seen[pick_id] = (dest, now_mono)
+        return False
+    return (now_mono - cur[1]) >= persist_s - 1e-9
+
+
+def _hand_switch_persist_s() -> float:
+    try:
+        return float(_machine_flag_val("hand_switch_persist_s", _HAND_SWITCH_PERSIST_S))
+    except (TypeError, ValueError):
+        return _HAND_SWITCH_PERSIST_S
 
 
 _HAND_TWIN_PER_TICK = 2
@@ -18549,11 +18575,16 @@ def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict
         v, det = _kv.compare_rest(p_seat, k_seat_c, qty, blob.get("kalshi_fee"),
                                   current="KALSHI", min_gain_c=_hand_venue_min_gain_c())
         if v != "POLYMARKET":
+            _HAND_SWITCH_SEEN.pop(r["id"], None)
+            return False
+        if not _hand_switch_persists(_HAND_SWITCH_SEEN, r["id"], "POLYMARKET", _time.monotonic(), _hand_switch_persist_s()):
+            st["switch_pending"] = st.get("switch_pending", 0) + 1
             return False
         if not _hand_switch_gap_ok(k_seat_c, p_seat) or not _hand_switch_leash_ok(blob, p_seat):
             st["switch_refused"] = st.get("switch_refused", 0) + 1
             return False
         _HAND_SWITCH_LAST[r["id"]] = _time.monotonic()
+        _HAND_SWITCH_SEEN.pop(r["id"], None)
         stamp = {"hand_venue_switch": True, "pick_id": r["id"], "from": "KALSHI", "to": "POLYMARKET",
                  "ticker": ticker, "slug": twin, "qty": qty, "from_c": k_touch_c, "to_c": p_seat,
                  "compare": det, "at": now.isoformat(),
@@ -18666,6 +18697,10 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
     v, det = _kv.compare_rest(p_seat, k_seat, qty, blob.get("kalshi_fee"),
                               current="POLYMARKET", min_gain_c=_hand_venue_min_gain_c())
     if v != "KALSHI":
+        _HAND_SWITCH_SEEN.pop(r["id"], None)
+        return False
+    if not _hand_switch_persists(_HAND_SWITCH_SEEN, r["id"], "KALSHI", _time.monotonic(), _hand_switch_persist_s()):
+        st["switch_pending"] = st.get("switch_pending", 0) + 1
         return False
     if not _hand_switch_gap_ok(p_seat, k_seat) or not _hand_switch_leash_ok(blob, k_seat):
         st["switch_refused"] = st.get("switch_refused", 0) + 1
@@ -18675,6 +18710,7 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
             sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
         return False
     _HAND_SWITCH_LAST[r["id"]] = _time.monotonic()
+    _HAND_SWITCH_SEEN.pop(r["id"], None)
     stamp = {"hand_venue_switch": True, "pick_id": r["id"], "from": "POLYMARKET", "to": "KALSHI",
              "ticker": ticker, "slug": slug, "qty": qty, "from_c": p_price_c, "to_c": k_seat,
              "compare": det, "at": now.isoformat(),

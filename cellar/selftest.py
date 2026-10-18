@@ -4236,6 +4236,13 @@ def test_kalshi_hand_lane() -> None:
     assert not _app._hand_switch_gap_ok(54.5, 45.0, 3.0) and not _app._hand_switch_gap_ok(None, 45.0, 3.0)
     assert _app._hand_switch_leash_ok({"anchor_c": 49.5}, 48.0) and _app._hand_switch_leash_ok({"anchor_c": 49.5}, 51.0)
     assert not _app._hand_switch_leash_ok({"anchor_c": 49.5}, 5.0) and not _app._hand_switch_leash_ok({"anchor_c": 49.5}, 53.0)
+    # a switch needs the same answer for persist_s, and a 'stay' resets the clock
+    seen = {}
+    assert not _app._hand_switch_persists(seen, 1, "KALSHI", 100.0, 30.0)
+    assert not _app._hand_switch_persists(seen, 1, "KALSHI", 120.0, 30.0)
+    assert _app._hand_switch_persists(seen, 1, "KALSHI", 130.0, 30.0)
+    assert not _app._hand_switch_persists(seen, 1, "POLYMARKET", 131.0, 30.0)   # destination changed: restart
+    assert not _app._hand_switch_persists(seen, 1, None, 132.0, 30.0) and 1 not in seen
     assert _app._kalshi_pick_order({"kalshi_order_id": "x"}, {"x": {**o, "status": "executed"}}) is None
     assert _app._kalshi_pick_order({"kalshi_order_id": "x"}, {"x": {**o, "remaining": 0.0}}) is None
     # positions: position_fp sign = side; an unreadable read is None, never 0
