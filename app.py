@@ -10389,18 +10389,24 @@ def _kalshi_creds():
 
 
 def _kalshi_sign(pem: str, msg: str) -> str:
-    """base64(RSA-PSS-SHA256(msg)). Vercel env vars often store PEMs with
+    """base64(signature of msg) with the algorithm the KEY TYPE dictates
+    (Kalshi, API-keys doc, Oct 18 2026): RSA → RSA-PSS-SHA256, Ed25519
+    (their recommended type, a PKCS#8 "BEGIN PRIVATE KEY" PEM) → raw
+    Ed25519 over the pre-sign text. Vercel env vars often store PEMs with
     literal \\n — normalized here."""
     import base64
     from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.asymmetric import ed25519, padding
     raw = pem.replace("\\n", "\n").encode()
     key = serialization.load_pem_private_key(raw, password=None)
-    sig = key.sign(
-        msg.encode(),
-        padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
-                    salt_length=padding.PSS.DIGEST_LENGTH),
-        hashes.SHA256())
+    if isinstance(key, ed25519.Ed25519PrivateKey):
+        sig = key.sign(msg.encode())
+    else:
+        sig = key.sign(
+            msg.encode(),
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.DIGEST_LENGTH),
+            hashes.SHA256())
     return base64.b64encode(sig).decode()
 
 

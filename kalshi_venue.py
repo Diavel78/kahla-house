@@ -520,13 +520,18 @@ def _creds():
 
 
 def _sign(pem: str, msg: str) -> str:
+    """RSA → RSA-PSS-SHA256; Ed25519 (Kalshi's recommended key type) → raw
+    Ed25519. The key type picks the algorithm, exactly as app._kalshi_sign."""
     import base64
     from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.asymmetric import ed25519, padding
     key = serialization.load_pem_private_key(pem.replace("\\n", "\n").encode(), password=None)
-    sig = key.sign(msg.encode(),
-                   padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-                   hashes.SHA256())
+    if isinstance(key, ed25519.Ed25519PrivateKey):
+        sig = key.sign(msg.encode())
+    else:
+        sig = key.sign(msg.encode(),
+                       padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+                       hashes.SHA256())
     return base64.b64encode(sig).decode()
 
 
