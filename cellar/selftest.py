@@ -4183,6 +4183,84 @@ def test_sheet_pinnacle_line() -> None:
           set(spenders) == {"_pin_daily_refresh"}, f"got {spenders}")
 
 
+def test_kalshi_venue_math() -> None:
+    """KALSHI AS A SECOND VENUE (Oct 18 2026): the pure fee math and the
+    rest/take compare both venues share, plus the market classifier on the
+    shapes Kalshi is known to use."""
+    import kalshi_venue as kv
+    # fees per contract at 50¢: Poly take 1.25 / rest 0.3125; Kalshi take
+    # 1.75 / rest 0.4375 on a maker-fee series, 0 on a fee-free one
+    assert abs(kv.fee_per_contract_c("POLYMARKET", "take", 50) - 1.25) < 1e-9
+    assert abs(kv.fee_per_contract_c("POLYMARKET", "rest", 50) - 0.3125) < 1e-9
+    assert abs(kv.fee_per_contract_c("KALSHI", "take", 50) - 1.75) < 1e-9
+    assert abs(kv.fee_per_contract_c("KALSHI", "rest", 50, {"maker": True, "mult": 1}) - 0.4375) < 1e-9
+    assert kv.fee_per_contract_c("KALSHI", "rest", 50, {"maker": False, "mult": 1}) == 0.0
+    assert abs(kv.fee_per_contract_c("KALSHI", "take", 50, {"maker": True, "mult": 0.5}) - 0.875) < 1e-9
+    # Kalshi rounds the ORDER's fee up to the cent: 5 contracts × 0.4375 = 2.19 → 3¢
+    assert kv.order_fee_c("KALSHI", "rest", 50, 5, {"maker": True}) == 3.0
+    assert kv.order_fee_c("POLYMARKET", "rest", 50, 5) == 1.56
+    # rest: same touch on both → Kalshi's fee-free series wins, maker-fee series loses
+    v, d = kv.compare_rest(50.0, 50.0, 10, {"maker": False})
+    assert v == "KALSHI", d
+    v, d = kv.compare_rest(50.0, 50.0, 10, {"maker": True})
+    assert v == "POLYMARKET", d
+    # a cheaper Kalshi touch beats Poly even paying the maker fee (49 + 0.5 < 50.3)
+    v, d = kv.compare_rest(50.0, 49.0, 10, {"maker": True})
+    assert v == "KALSHI", d
+    # no churn: the gain must clear the threshold to leave the current venue
+    v, d = kv.compare_rest(50.0, 49.9, 10, {"maker": False}, current="POLYMARKET", min_gain_c=0.5)
+    assert v == "POLYMARKET" and d["why"] == "gain_under_threshold", d
+    v, d = kv.compare_rest(50.0, 49.0, 10, {"maker": False}, current="POLYMARKET", min_gain_c=0.5)
+    assert v == "KALSHI" and d["why"] == "switch", d
+    assert kv.compare_rest(None, None, 10, None)[0] is None
+    # take at the drop: cheaper all-in ask wins; the cap is on the RAW ask
+    v, d = kv.compare_take(51.0, 50.0, 10, {"maker": True})
+    assert v == "KALSHI", d                       # 50 + 1.75 < 51 + 1.25
+    v, d = kv.compare_take(50.0, 50.0, 10, {"maker": True})
+    assert v == "POLYMARKET", d                   # same ask → the cheaper fee
+    v, d = kv.compare_take(51.5, 50.0, 10, None, resting_c=49.5, cap_c=1.0)
+    assert v == "KALSHI", d                       # Poly's 51.5 is past the cap, Kalshi's 50 is in
+    v, d = kv.compare_take(51.5, 51.0, 10, None, resting_c=49.5, cap_c=1.0)
+    assert v is None and d["why"] == "every_ask_past_cap", d
+    # the classifier on Kalshi's known shapes
+    away, home = "Nebraska Cornhuskers", "Oregon Ducks"
+    ml = {"title": "Nebraska at Oregon: Winner?", "yes_sub_title": "Nebraska", "ticker": "KXNCAAFGAME-X-NEB"}
+    assert kv.classify(ml, away, home) == {"mt": "ml", "team_side": "away", "line": None, "yes_is": "team",
+                                           "text": kv._market_text(ml)[:140]}
+    tot = {"title": "Nebraska at Oregon: Total points", "yes_sub_title": "Over 52.5", "floor_strike": 52.5}
+    c = kv.classify(tot, away, home)
+    assert c["mt"] == "total" and c["line"] == 52.5 and c["yes_is"] == "over", c
+    spr = {"title": "Nebraska at Oregon: Spread", "yes_sub_title": "Oregon wins by over 7.5"}
+    c = kv.classify(spr, away, home)
+    assert c["mt"] == "spread" and c["team_side"] == "home" and c["line"] == -7.5, c
+    spr2 = {"title": "Oregon wins by over 7 points?", "yes_sub_title": "Oregon"}
+    c = kv.classify(spr2, away, home)
+    assert c["mt"] == "spread" and c["line"] == -7.5, c       # suffix convention: 7 → −7.5
+    # rung_for: Nebraska +7.5 = NO on 'Oregon wins by over 7.5'; +6.5 asked with
+    # only +7.5 and +8.5 listed → the MORE favorable +8.5, never +6.5's worse neighbour
+    evm = [dict(spr, ticker="A", yes_bid_dollars="0.60", yes_ask_dollars="0.62"),
+           {"title": "Spread", "yes_sub_title": "Oregon wins by over 8.5", "ticker": "B",
+            "yes_bid_dollars": "0.55", "yes_ask_dollars": "0.57"}]
+    r = kv.rung_for({"market_type": "spread", "side": "away", "line": 7.5}, evm, away, home)
+    assert r["ok"] and r["ticker"] == "A" and r["buy_yes"] is False and r["why"] == "exact", r
+    assert kv.our_side_quote(evm[0], False) == {"bid": 38.0, "ask": 40.0}
+    r = kv.rung_for({"market_type": "spread", "side": "away", "line": 6.5}, evm, away, home)
+    assert r["ok"] and r["line"] == 7.5 and r["why"] == "favorable", r
+    r = kv.rung_for({"market_type": "spread", "side": "away", "line": 9.5}, evm, away, home)
+    assert not r["ok"], r
+    r = kv.rung_for({"market_type": "spread", "side": "home", "line": -7.5}, evm, away, home)
+    assert r["ok"] and r["buy_yes"] is True and r["ticker"] == "A", r
+    # pick_event: both teams must be named; a same-series twin resolves by close time
+    rows = [dict(ml, event_ticker="E1", expected_expiration_time="2026-10-19T06:00:00Z"),
+            {"title": "Nebraska at Oregon: Winner?", "yes_sub_title": "Oregon", "event_ticker": "E1"},
+            {"title": "Utah at Oregon: Winner?", "yes_sub_title": "Utah", "event_ticker": "E2"}]
+    ev = kv.pick_event(rows, away, home, "2026-10-19T02:30:00Z")
+    assert ev and ev[0] == "E1", ev
+    assert kv.pick_event(rows, "Utah Utes", home, None)[0] == "E2"
+    assert kv.pick_event(rows, "Ohio State Buckeyes", home, None) is None
+    check("kalshi venue: fees, rest/take compare, classifier, rung rule", True)
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
@@ -4199,7 +4277,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

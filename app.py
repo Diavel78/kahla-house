@@ -1494,6 +1494,176 @@ def api_sheet_tv():
                                "tv": g.get("tv")} for g in games]})
 
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# KALSHI AS A SECOND HAND-BET VENUE — PHASE 0, the coverage probe (Oct 18
+# 2026; Rob: "I want Nebraska plus 7.5 tonight… you figure out which one's
+# the best rest at the current lines. Quote them both. Calculate the fees").
+# Read-only. For every pick on today's sheet (or one game), resolve the
+# same slip item on BOTH venues, quote our-side touch + ask with sizes,
+# read Kalshi's per-series fee terms, and print the all-in rest and take
+# on each. The venue layer is kalshi_venue.py; the math is pure and
+# selftested. Spec: docs/dual-venue-hand-bets-spec.md.
+# ═══════════════════════════════════════════════════════════════════════
+def _sheet_games_today(sb, sport: str) -> list:
+    """Today's (AZ) upcoming sheet games for a sport, in the page's shape."""
+    wk = (sb.table("football_sheet_weeks").select("week_key").eq("sport", sport)
+          .order("week_key", desc=True).limit(1).execute().data or [{}])[0]
+    if not wk.get("week_key"):
+        return []
+    az = ZoneInfo("America/Phoenix")
+    day0 = datetime.now(az).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = (sb.table("football_sheets").select("market_id,event_name,event_start,tier,data_blob,friday_md,data_built_at")
+            .eq("week_key", wk["week_key"]).eq("sport", sport)
+            .gte("event_start", day0.astimezone(timezone.utc).isoformat())
+            .lte("event_start", (day0 + timedelta(days=1)).astimezone(timezone.utc).isoformat())
+            .order("event_start").limit(200).execute().data or [])
+    shape = {"NHL": _sheet_game_nhl, "NBA": _sheet_game_nba, "MLB": _sheet_game_mlb}.get(sport, _sheet_game_football)
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows:
+        g = shape(r)
+        try:
+            if datetime.fromisoformat(str(g.get("event_start")).replace("Z", "+00:00")) <= now:
+                continue
+        except (TypeError, ValueError):
+            continue
+        out.append(g)
+    return out
+
+
+def _sheet_items(g: dict, sport: str) -> list:
+    """The slip items a game's buttons would make (mirrors the page's
+    gamePlays: the ML to −150 else the favorite's line, plus the total).
+    Pass verdicts are included too (flag `verdict`) — the probe wants
+    coverage on every priced market, not only the plays."""
+    items = []
+    L = g.get("line") or {}
+    base = {"sport": sport, "away": g.get("away"), "home": g.get("home"),
+            "event_start": g.get("event_start"), "market_id": g.get("market_id")}
+    ml = g.get("ml")
+    if ml and ml.get("side"):
+        items.append({**base, "market_type": "ml", "side": ml["side"], "line": 0,
+                      "label": f"{ml['side']} ML", "verdict": ml.get("verdict"),
+                      "chalky": bool(ml.get("chalky"))})
+    sp = g.get("puck") if sport == "NHL" else g.get("spread")
+    if sp and sp.get("side"):
+        ln = sp.get("line")
+        if sport in ("NFL", "NCAAF") and L.get("spread_home") is not None:
+            ln = float(L["spread_home"]) if sp["side"] == "home" else -float(L["spread_home"])
+        if ln is not None:
+            items.append({**base, "market_type": "spread", "side": sp["side"], "line": float(ln),
+                          "label": f"{sp['side']} {float(ln):+g}", "verdict": sp.get("verdict")})
+    tt = g.get("total")
+    if tt and tt.get("side"):
+        ln = tt.get("line") if tt.get("line") is not None else L.get("total")
+        if ln is not None:
+            items.append({**base, "market_type": "total", "side": tt["side"], "line": float(ln),
+                          "label": f"{'O' if tt['side'] == 'over' else 'U'} {float(ln):g}",
+                          "verdict": tt.get("verdict")})
+    return items
+
+
+@app.route("/api/kalshi/coverage")
+def api_kalshi_coverage():
+    """READ-ONLY, shared-secret (site-curl). ?sport=NCAAF [&game=nebraska]
+    [&n=6] [&creds=1] [&contracts=10]. Per pick: Polymarket rung + touch
+    + ask (the slip's own resolver), Kalshi rung + touch + ask + fee terms,
+    all-in rest/take on each venue, and the compare."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    import kalshi_venue as kv
+    sport = (request.args.get("sport") or "NCAAF").upper()
+    gq = (request.args.get("game") or "").strip().lower()
+    try:
+        n_max = max(1, min(12, int(request.args.get("n") or 6)))
+        qty = max(1, min(250, int(request.args.get("contracts") or 10)))
+    except ValueError:
+        return jsonify({"ok": False, "error": "bad n/contracts"}), 400
+    out: dict = {"ok": True, "sport": sport, "contracts": qty,
+                 "at": datetime.now(ZoneInfo("America/Phoenix")).strftime("%Y-%m-%d %H:%M:%S")}
+    if request.args.get("creds"):
+        kid, pem, kid_env, pem_env = _kalshi_creds()
+        out["creds"] = {"configured": bool(kid and pem), "key_id_env": kid_env, "private_key_env": pem_env}
+        if kid and pem:
+            bal = _kalshi_authed_get("/portfolio/balance")
+            out["creds"]["balance"] = {"ok": bal.get("ok"), "status": bal.get("status"),
+                                       "error": bal.get("error"), "data": bal.get("data")}
+    sb = get_supabase()
+    try:
+        games = _sheet_games_today(sb, sport)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"sheet read: {e}"[:200]}), 500
+    if gq:
+        games = [x for x in games if gq in f"{x.get('away')} {x.get('home')}".lower()]
+    out["games_today"] = len(games)
+    games = games[:n_max]
+    try:
+        client = get_client()
+    except Exception as e:
+        client = None
+        out["poly_error"] = str(e)[:120]
+    out["series"] = {mt: kv.discover_series(sport, mt) for mt in ("ml", "spread", "total")}
+    t0 = _time.monotonic()
+    rows = []
+    for gm in games:
+        for it in _sheet_items(gm, sport):
+            if _time.monotonic() - t0 > 48.0:
+                out["truncated"] = "function budget"
+                break
+            row = {"game": f"{gm.get('away')} @ {gm.get('home')}", "start": gm.get("event_start"),
+                   "pick": it["label"], "verdict": it.get("verdict"), "chalky": it.get("chalky")}
+            # Polymarket — the slip's own resolver (venue read, paced)
+            poly = None
+            if client is not None:
+                try:
+                    _time.sleep(0.5)
+                    rs = _bet_sheet_resolve(client, it)
+                    bk = rs.pop("_book", None) or {}
+                    poly = {k: rs.get(k) for k in ("ok", "reason", "slug", "synthetic", "rung_line", "rung_why",
+                                                   "price_c", "touch_c", "ask_c")}
+                    if bk:
+                        bids, asks = bk.get("bids") or [], bk.get("asks") or []
+                        if rs.get("synthetic"):
+                            bids, asks = ([(100 - p, q) for p, q in asks], [(100 - p, q) for p, q in bids])
+                        poly["touch_q"] = round(bids[0][1], 1) if bids else None
+                        poly["ask_q"] = round(asks[0][1], 1) if asks else None
+                except Exception as e:
+                    poly = {"ok": False, "reason": f"{type(e).__name__}: {e}"[:120]}
+            row["polymarket"] = poly
+            # Kalshi
+            try:
+                kr = kv.resolve(sport, it["away"], it["home"], it["event_start"], it)
+            except Exception as e:
+                kr = {"ok": False, "why": f"{type(e).__name__}: {e}"[:140]}
+            row["kalshi"] = kr
+            # the compare
+            kq, kfee = (kr.get("quote") or {}), kr.get("fee")
+            pt = (poly or {}).get("touch_c") if (poly or {}).get("ok") else None
+            pa = (poly or {}).get("ask_c") if (poly or {}).get("ok") else None
+            rest_v, rest_d = kv.compare_rest(pt, kq.get("bid"), qty, kfee)
+            take_v, take_d = kv.compare_take(pa, kq.get("ask"), qty, kfee)
+            row["rest"] = {"venue": rest_v, **rest_d}
+            row["take"] = {"venue": take_v, **take_d}
+            lines_ok = (poly or {}).get("rung_line"), kr.get("line")
+            row["same_line"] = (lines_ok[0] is not None and lines_ok[1] is not None
+                                and abs(float(lines_ok[0]) - float(lines_ok[1])) < 0.01) if it["market_type"] != "ml" else True
+            rows.append(row)
+    out["rows"] = rows
+    out["summary"] = {
+        "picks": len(rows),
+        "poly_ok": sum(1 for r in rows if (r.get("polymarket") or {}).get("ok")),
+        "kalshi_ok": sum(1 for r in rows if (r.get("kalshi") or {}).get("ok")),
+        "same_line": sum(1 for r in rows if r.get("same_line") and (r.get("kalshi") or {}).get("ok")),
+        "rest_kalshi": sum(1 for r in rows if r["rest"].get("venue") == "KALSHI"),
+        "rest_poly": sum(1 for r in rows if r["rest"].get("venue") == "POLYMARKET"),
+        "take_kalshi": sum(1 for r in rows if r["take"].get("venue") == "KALSHI"),
+        "take_poly": sum(1 for r in rows if r["take"].get("venue") == "POLYMARKET"),
+        "elapsed_s": round(_time.monotonic() - t0, 1)}
+    return jsonify(out)
+
+
 @app.route("/api/pick-sheets")
 @app.route("/api/football-picks")
 @bot_required
