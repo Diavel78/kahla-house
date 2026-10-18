@@ -3944,6 +3944,181 @@ def _sheet_week_review(srows: list, prow: list, acts: dict | None = None) -> dic
             "clv_timing": timing}
 
 
+def _audit_result(mt, side, line, hs, as_):
+    """win/loss/push for a bet on (market_type, side, own line) off a final."""
+    try:
+        hs, as_ = float(hs), float(as_)
+        ln = float(line) if line is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    mt = (mt or "").lower()
+    if mt in ("moneyline", "ml"):
+        m = (hs - as_) if side == "home" else (as_ - hs)
+    elif mt == "spread":
+        m = ((hs - as_) if side == "home" else (as_ - hs)) + ln
+    elif mt == "total":
+        m = (hs + as_ - ln) if side == "over" else (ln - (hs + as_))
+    else:
+        return None
+    return "win" if m > 0 else "loss" if m < 0 else "push"
+
+
+def _audit_usd(res, qty, price_c):
+    if res not in ("win", "loss", "push") or not qty or price_c is None:
+        return None
+    p = float(price_c) / 100.0
+    return round(qty * (1.0 - p), 2) if res == "win" else round(-qty * p, 2) if res == "loss" else 0.0
+
+
+@app.route("/api/bet-sheets/fill-audit")
+def api_bet_sheets_fill_audit():
+    """READ-ONLY (shared-secret, site-curl). Rob, Oct 18 2026: "your model
+    says it's profitable, I'm losing money, the ones that don't fill are the
+    ones that win… we might need to take instead of cancel at the 95% drop".
+    Over the last `days` (default 21): every SETTLED sheet/app pick that held
+    a lot (record + dollars at its own price), against every bet the box
+    CANCELLED at game start with nothing filled (graded off ESPN finals in
+    game_results, priced at the wanted price and at +1/+2/+3/+5¢ — what
+    taking would have cost; the ask at the drop was never recorded)."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    now = datetime.now(timezone.utc)
+    try:
+        days = max(1, min(60, int(request.args.get("days") or 21)))
+    except ValueError:
+        days = 21
+    since = now - timedelta(days=days)
+    out: dict = {"ok": True, "days": days}
+
+    def _bucket():
+        return {"n": 0, "win": 0, "loss": 0, "push": 0, "usd": 0.0}
+
+    def _add(b, res, usd):
+        b["n"] += 1
+        if res in ("win", "loss", "push"):
+            b[res] += 1
+        if usd is not None:
+            b["usd"] = round(b["usd"] + usd, 2)
+
+    # ---- filled: settled sheet/app picks
+    filled = (_sb_paged(lambda: sb.table("bot_picks").select(
+        "id,sport,event_name,event_start,market_type,side,entry_line,status,signal_blob,poly_pnl,picked_at")
+        .eq("signal_blob->>bet_sheet", "true").in_("status", ["won", "lost", "push", "void"])
+        .gte("event_start", since.isoformat()), max_pages=10) or [])
+    fsum = {"all": _bucket(), "by_sport": {}, "by_origin": {}, "by_fill_lead": {}, "venue_usd": 0.0}
+    frows = []
+    for r in filled:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        qty = b.get("filled_qty") or b.get("contracts") or 0
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            qty = 0.0
+        pc = b.get("price_c")
+        st = r.get("status")
+        if st == "void":
+            if not isinstance(b.get("sold"), dict):
+                continue
+            res, usd = "sold", (b.get("sold") or {}).get("pnl_usd")
+        else:
+            res = {"won": "win", "lost": "loss", "push": "push"}[st]
+            usd = _audit_usd(res, qty, pc)
+        vp = (r.get("poly_pnl") or {}) if isinstance(r.get("poly_pnl"), dict) else {}
+        if vp.get("final") and vp.get("realized_usd") is not None:
+            try:
+                fsum["venue_usd"] = round(fsum["venue_usd"] + float(vp["realized_usd"]), 2)
+            except (TypeError, ValueError):
+                pass
+        origin = ("in_play" if b.get("in_play") else "app" if b.get("app_adopted") else "sheet")
+        lead = None
+        try:
+            fs = b.get("fill_seen")
+            fs = fs.get("at") if isinstance(fs, dict) else fs
+            if fs:
+                ev = datetime.fromisoformat(str(r["event_start"]).replace("Z", "+00:00"))
+                lead = (ev - datetime.fromisoformat(str(fs).replace("Z", "+00:00"))).total_seconds() / 60.0
+        except (TypeError, ValueError, KeyError):
+            lead = None
+        lb = ("unknown" if lead is None else "after_start" if lead < 0 else "0-10m" if lead < 10
+              else "10-60m" if lead < 60 else "1-6h" if lead < 360 else "6h+")
+        sp = str(r.get("sport") or "").upper()
+        for bk in (fsum["all"], fsum["by_sport"].setdefault(sp, _bucket()),
+                   fsum["by_origin"].setdefault(origin, _bucket()),
+                   fsum["by_fill_lead"].setdefault(lb, _bucket())):
+            _add(bk, res, usd if isinstance(usd, (int, float)) else None)
+        frows.append({"id": r["id"], "sport": sp, "game": r.get("event_name"), "label": b.get("label"),
+                      "price_c": pc, "qty": qty, "res": res, "usd": usd, "origin": origin,
+                      "fill_lead_min": None if lead is None else round(lead, 1)})
+    out["filled"] = fsum
+
+    # ---- missed: unfilled box cancels at game start
+    stamps = (_sb_paged(lambda: sb.table("exec_probe_runs").select("at,result")
+              .eq("result->>hand_start_cancel", "true").gte("at", since.isoformat()), max_pages=10) or [])
+    gr = (_sb_paged(lambda: sb.table("game_results").select("sport,event_start,home,away,home_score,away_score")
+          .gte("event_start", (since - timedelta(days=1)).isoformat()), max_pages=20) or [])
+    finals: dict = {}
+    for g in gr:
+        finals.setdefault((str(g.get("sport") or "").upper(), _pair_team_key(g.get("away")),
+                           _pair_team_key(g.get("home"))), []).append(g)
+    ADD = (0, 1, 2, 3, 5)
+    msum = {"all": _bucket(), "ungraded": 0, "by_sport": {},
+            "usd_if_taken": {f"+{a}c": 0.0 for a in ADD}}
+    mrows, seen = [], set()
+    for row in stamps:
+        res0 = row.get("result") if isinstance(row.get("result"), dict) else {}
+        outr = res0.get("result") if isinstance(res0.get("result"), dict) else {}
+        if not (outr.get("deleted") or (outr.get("ok") and not (outr.get("held") or 0) > 0)):
+            continue
+        bet = res0.get("bet") if isinstance(res0.get("bet"), dict) else None
+        pid = res0.get("pick_id")
+        if not bet or pid in seen:
+            continue
+        seen.add(pid)
+        sp = str(bet.get("sport") or "").upper()
+        away, _, home = str(bet.get("event_name") or "").split(" · ")[0].partition(" @ ")
+        cand = finals.get((sp, _pair_team_key(away), _pair_team_key(home))) or []
+        g = None
+        try:
+            ev = datetime.fromisoformat(str(bet.get("event_start")).replace("Z", "+00:00"))
+            for c in cand:
+                cs = datetime.fromisoformat(str(c["event_start"]).replace("Z", "+00:00"))
+                if abs((cs - ev).total_seconds()) < 8 * 3600:
+                    g = c
+                    break
+        except (TypeError, ValueError, KeyError):
+            g = None
+        qty = bet.get("contracts") or 0
+        try:
+            qty = float(qty)
+        except (TypeError, ValueError):
+            qty = 0.0
+        pc = bet.get("price_c")
+        res = (_audit_result(bet.get("market_type"), bet.get("side"), bet.get("line"),
+                             g.get("home_score"), g.get("away_score")) if g else None)
+        if res is None:
+            msum["ungraded"] += 1
+        else:
+            for a in ADD:
+                u = _audit_usd(res, qty, (float(pc) + a) if pc is not None else None)
+                if u is not None:
+                    msum["usd_if_taken"][f"+{a}c"] = round(msum["usd_if_taken"][f"+{a}c"] + u, 2)
+            usd = _audit_usd(res, qty, pc)
+            _add(msum["all"], res, usd)
+            _add(msum["by_sport"].setdefault(sp, _bucket()), res, usd)
+        mrows.append({"pick": pid, "sport": sp, "game": bet.get("event_name"), "label": bet.get("label"),
+                      "price_c": pc, "qty": qty, "res": res,
+                      "final": f"{g.get('away_score')}-{g.get('home_score')}" if g else None,
+                      "drop_pct": res0.get("drop_pct"), "after_start_s": res0.get("after_start_s"),
+                      "sat_out": bool(res0.get("sat_out"))})
+    out["missed"] = msum
+    if request.args.get("rows"):
+        out["filled_rows"] = frows
+        out["missed_rows"] = mrows
+    return jsonify(out)
+
+
 @app.route("/api/bet-sheets/picks")
 def api_bet_sheets_picks():
     """READ-ONLY (shared-secret, site-curl): every bot_picks row on a slug
