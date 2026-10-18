@@ -3990,7 +3990,10 @@ def api_bet_sheets_fill_audit():
     except ValueError:
         days = 21
     since = now - timedelta(days=days)
-    out: dict = {"ok": True, "days": days}
+    if request.args.get("today"):
+        az = ZoneInfo("America/Phoenix")
+        since = datetime.now(az).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    out: dict = {"ok": True, "days": days, "since": since.isoformat()}
 
     def _bucket():
         return {"n": 0, "win": 0, "loss": 0, "push": 0, "usd": 0.0}
@@ -4062,6 +4065,20 @@ def api_bet_sheets_fill_audit():
     for g in gr:
         finals.setdefault((str(g.get("sport") or "").upper(), _pair_team_key(g.get("away")),
                            _pair_team_key(g.get("home"))), []).append(g)
+    # today's finals land in game_results only at the 04:00 ingest; the
+    # sheet's own 5-min grader has them within minutes — use it too
+    try:
+        for r in (_sb_paged(lambda: sb.table("football_sheets").select("sport,event_name,event_start,data_blob")
+                            .gte("event_start", (since - timedelta(days=1)).isoformat())
+                            .lte("event_start", now.isoformat()), max_pages=10) or []):
+            f = ((r.get("data_blob") or {}).get("grade") or {}).get("final") or {}
+            if f.get("home") is None or f.get("away") is None:
+                continue
+            aw, _, hm = str(r.get("event_name") or "").split(" · ")[0].partition(" @ ")
+            finals.setdefault((str(r.get("sport") or "").upper(), _pair_team_key(aw), _pair_team_key(hm)), []).append(
+                {"event_start": r.get("event_start"), "home_score": f["home"], "away_score": f["away"]})
+    except Exception as e:
+        out["sheet_finals_err"] = str(e)[:160]
     ADD = (0, 1, 2, 3, 5)
     msum = {"all": _bucket(), "ungraded": 0, "by_sport": {},
             "usd_if_taken": {f"+{a}c": 0.0 for a in ADD}}
@@ -4111,7 +4128,7 @@ def api_bet_sheets_fill_audit():
                       "price_c": pc, "qty": qty, "res": res,
                       "final": f"{g.get('away_score')}-{g.get('home_score')}" if g else None,
                       "drop_pct": res0.get("drop_pct"), "after_start_s": res0.get("after_start_s"),
-                      "sat_out": bool(res0.get("sat_out"))})
+                      "sat_out": bool(res0.get("sat_out")), "book_pre": res0.get("book_pre")})
     out["missed"] = msum
     # ---- the sheet's own record over the window (graded picks, plays+leans)
     try:
@@ -15285,6 +15302,21 @@ def _hand_start_tick(sb, client, now) -> dict:
                  "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1)}
         if sat_out:
             stamp["sat_out"] = blob.get("line_hold")
+        # OUR SIDE'S BOOK GOING INTO THE START (Rob, Oct 18 2026: "I could be
+        # at 49.5 with 50 million other people and there's only 8000 sellers…
+        # the sellers don't sell, they hold the contracts. Those things are
+        # winning"): bids vs sellers at the touch over the last 90s before the
+        # listed start, so the unfilled-and-sellers-holding case can be graded.
+        try:
+            srows = _hand_side_rows(TOUCH_TAPE.get(slug) or [], bool(blob.get("pmm_synthetic")))
+            pre = [x for x in srows if start_ts - 90.0 <= x[0] <= start_ts]
+            if pre:
+                stamp["book_pre"] = {
+                    "bid_c": pre[-1][1], "ask_c": pre[-1][3],
+                    "bid_q": round(sum(x[2] for x in pre) / len(pre), 1),
+                    "ask_q": round(sum(x[4] for x in pre) / len(pre), 1), "n": len(pre)}
+        except Exception:
+            pass
         try:
             # remember the verdict on the pick first — a partial fill keeps the row
             # (and a sat-out pick drops its hold, so a kept row is never re-run)
