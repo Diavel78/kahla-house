@@ -118,6 +118,16 @@
   `read_only_ok` · `write_ok` · `write_scope_ok_no_funds` (an empty
   account still proves trade scope — the venue says insufficient balance,
   not 401/403) · `write_denied` · `create_rejected` (read `create.data`).
+  **THIRD LIVE PROBE (Oct 18 2026, 19:08 AZ): `403 insufficient_scope:
+  write::trade required` on the V2 path with a fully accepted body —
+  KALSHI API KEYS ARE SCOPED, and the key in the box's `kalshi_state` row
+  is read-only (it has answered balance/orders/fills reads since July;
+  it has never placed anything).** The fix is a key with the trade scope
+  from the Kalshi app's API-key settings, written into `kalshi_state`
+  (`key_id`, `private_key`, row id=1) with psql on the box — never through
+  the site — then the probe again. Every other link in the chain is
+  proven: creds load, RSA-PSS signing, the elections host, the V2 path,
+  the body shape, market selection, the orders read for verification.
   Runs on the box two ways: `python3 kahla-scanner/scripts/kalshi_probe.py
   [--place]`, or `machine_flags kalshi_probe = {"place": true}` (via
   `/api/cellar/flag`) which the next handbets tick runs ONCE
