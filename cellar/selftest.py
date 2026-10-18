@@ -4204,6 +4204,28 @@ def test_kalshi_hand_lane() -> None:
     assert bk["best_bid"] == 62.0 and bk["best_ask"] == 63.0, bk
     assert bk["asks"] == [(63.0, 500.0), (64.0, 90.0)], bk
     assert kv.poly_book({"ok": False, "yes": [], "no": []}) is None
+    # EVERY HAND-LANE BOOK READ IS SOCKET-FIRST (Oct 18 2026, Rob: "if it is
+    # possible to do it on the WebSocket, write the code so it's on the
+    # WebSocket"): no forced REST read of a Kalshi book outside the dark-
+    # socket sampler in the start window; every Polymarket decision book
+    # goes through `_hand_poly_book` (depth table first).
+    import inspect as _ins
+    for fn in (_app._hand_switch_to_kalshi, _app._hand_switch_to_poly, _app._hand_start_kalshi,
+               _app._hand_move_kalshi, _app._hand_chase_kalshi, _app._bet_sheet_resolve_kalshi,
+               _app._kalshi_repeg_exec, _app._kalshi_live_exec):
+        ls = _ins.getsource(fn).splitlines()
+        forced = [ln for i, ln in enumerate(ls) if "_kalshi_hand_book(" in ln and "fresh=True" in ln
+                  and "not _kalshi_ws_fresh" not in (ls[i - 1] + ln)]   # the dark-socket sampler is gated on the line above
+        assert not forced, (fn.__name__, forced)
+    for fn in (_app._hand_switch_to_poly, _app._hand_start_kalshi, _app._bet_sheet_resolve,
+               _app._bet_sheet_rerung_exec, _app._bet_sheet_repeg_exec, _app._bet_sheet_live_exec,
+               _app._hand_chase_tick, _app._hand_move_tick):
+        src = _ins.getsource(fn)
+        assert "_bet_sheet_book(client" not in src and "_pmm_book(client, twin)" not in src, fn.__name__
+    hp = _ins.getsource(_app._hand_poly_book)
+    assert hp.find("_ws_depth(") < hp.find("_bet_sheet_book("), "depth table before REST"
+    sk = _ins.getsource(_app._hand_switch_to_kalshi)
+    assert "not _kalshi_ws_fresh(ticker)" in sk and 'kctx["kbooks"]' in sk, "REST cap only while the socket is dark"
     # a NO bet reads the inverted book exactly like a synthetic Polymarket NO
     assert _app._manual_side_book(bk, True) == (37.0, 38.0)
     assert _app._manual_side_book(bk, False) == (62.0, 63.0)

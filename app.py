@@ -14547,6 +14547,30 @@ def _bet_sheet_book(client, slug: str, tries: int = 3):
     return None
 
 
+# EVERY HAND-LANE BOOK READ IS SOCKET-FIRST (Oct 18 2026, Rob: "Everything
+# possible should be on the WebSocket… if it is possible to do it on the
+# WebSocket, write the code so it's on the WebSocket"). Polymarket: the depth
+# table (`_ws_depth`, the markets socket's full book for every slug on the
+# hand watch set — resting bets, held lots AND the Kalshi bets' Polymarket
+# twins). Kalshi: `KALSHI_BOOKS` (cellar/kalshifeed.py's `orderbook_delta`
+# book). REST is the fallback for a market the socket is not vouching for
+# (a rung just resolved and not yet subscribed, a dark feed). The counters
+# ride the strip (`books`) so "is the lane on the socket" is one read.
+_HAND_BOOK_SRC: dict = {"poly_ws": 0, "poly_rest": 0, "kalshi_ws": 0, "kalshi_rest": 0}
+
+
+def _hand_poly_book(client, slug: str, tries: int = 3):
+    """The Polymarket book for a hand-lane decision: the depth socket's
+    fresh book when it has one, else ONE REST read (`_bet_sheet_book`).
+    Same `_pmm_book` shape either way."""
+    bk = _ws_depth(slug)
+    if bk is not None:
+        _HAND_BOOK_SRC["poly_ws"] = _HAND_BOOK_SRC.get("poly_ws", 0) + 1
+        return bk
+    _HAND_BOOK_SRC["poly_rest"] = _HAND_BOOK_SRC.get("poly_rest", 0) + 1
+    return _bet_sheet_book(client, slug, tries=tries)
+
+
 def _bet_sheet_item_check(item: dict):
     """Pure. The slip item's shape — the part of a resolve that needs no
     venue read. None when fine, else the reason the item stays on the slip."""
@@ -14687,7 +14711,7 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
             _TICK_CACHE_AT[slug] = _time.monotonic()
     except (TypeError, ValueError):
         pass
-    book = _bet_sheet_book(client, slug)
+    book = _hand_poly_book(client, slug)
     if book is None:
         return {"ok": False, "reason": ("Polymarket is rate-limiting us — wait 20s and submit again"
                                         if _venue_rl_active() else "book unreadable — try again"),
@@ -15190,7 +15214,7 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                     pl["resolve"]["kalshi_fee"] = k_rs.get("fee")
             row = dict(row, slug=slug, synthetic=syn, payload=pl)
         if book is None:
-            book = _bet_sheet_book(client, slug)
+            book = _hand_poly_book(client, slug)
         if book is None:
             return {"ok": False, "error": "book unreadable — try again"}
         seat_det = None
@@ -15353,6 +15377,7 @@ def _hand_status_publish(sb, client) -> dict:
             "key": _HAND_STATUS_KEY, "sport": "ANY", "fetched_at": now_iso,
             "payload": {"at": now_iso, "rows": out, "n": len(out), "quoted": quoted,
                         "orders": len(orders), "positions": len(positions),
+                        "books": dict(_HAND_BOOK_SRC),
                         "kalshi": ({"orders": (len(k_orders) if k_orders is not None else None),
                                     "positions": (len(k_pos) if k_pos is not None else None),
                                     "book_reads": k_reads.get("n", 0), "watch": len(k_watch),
@@ -16280,7 +16305,7 @@ def _hand_move_tick(sb, client, now) -> dict:
                 touch = ((100 - ya) if ya is not None else None) if syn else yb
             if touch is None and st["rest"] < 2:
                 st["rest"] += 1
-                bk = _bet_sheet_book(client, slug, tries=1)
+                bk = _hand_poly_book(client, slug, tries=1)
                 if bk:
                     touch, _a = _manual_side_book(bk, syn)
             if touch is None:
@@ -17485,11 +17510,13 @@ def _kalshi_hand_book(ticker: str, fresh: bool = False, record: bool = True):
         # target, the "REST cross-check" — came back here for the same copy.
         hit = _KALSHI_BOOK_CACHE.get(ticker)
         if hit:
+            _HAND_BOOK_SRC["kalshi_ws"] = _HAND_BOOK_SRC.get("kalshi_ws", 0) + 1
             return hit[1], hit[2]
     hit = _KALSHI_BOOK_CACHE.get(ticker)
     if hit and not fresh and _time.monotonic() - hit[0] < _KALSHI_BOOK_TTL_S:
         return hit[1], hit[2]
     import kalshi_venue as _kv
+    _HAND_BOOK_SRC["kalshi_rest"] = _HAND_BOOK_SRC.get("kalshi_rest", 0) + 1
     try:
         ob = _kv.orderbook(ticker)
     except Exception as e:
@@ -17565,7 +17592,7 @@ def _bet_sheet_resolve_kalshi(item: dict) -> dict:
         return {"ok": False, "reason": f"Kalshi: {rs.get('why') or 'no market'}"[:160],
                 "tried": rs.get("tried")}
     ticker, buy_yes = rs["ticker"], bool(rs["buy_yes"])
-    book, _ob = _kalshi_hand_book(ticker, fresh=True)
+    book, _ob = _kalshi_hand_book(ticker)              # socket when it vouches, else REST
     if book is None:
         return {"ok": False, "reason": "Kalshi book unreadable — try again", "ticker": ticker}
     syn = not buy_yes
@@ -17649,7 +17676,7 @@ def _kalshi_order_place(ticker: str, buy_yes: bool, price_c, contracts, event_st
     if cost > 500.0:
         return {"ok": False, "error": f"cost ${cost:.2f} over the $500 fat-finger cap"}, 400
     if book is None:
-        book, _ = _kalshi_hand_book(ticker, fresh=True)
+        book, _ = _kalshi_hand_book(ticker)
     if book is None:
         return {"ok": False, "error": "Kalshi book unreadable — try again"}, 503
     s_bid, s_ask = _manual_side_book(book, not buy_yes)
@@ -18144,7 +18171,7 @@ def _kalshi_repeg_exec(sb, pick_id):
         nb = {**blob, "repeg_gone_at": datetime.now(timezone.utc).isoformat()}
         sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
         return {"ok": False, "error": "order is not on the Kalshi book (filled or cancelled?) — check My bets"}, 409
-    book, _ = _kalshi_hand_book(ticker, fresh=True)
+    book, _ = _kalshi_hand_book(ticker)
     if book is None:
         return {"ok": False, "error": "Kalshi book unreadable — try again"}, 503
     syn = not by
@@ -18238,7 +18265,7 @@ def _kalshi_live_exec(sb, pick_id):
         _stamp(float(from_c), False)
         return {"ok": True, "moved": False, "price_c": from_c, "live": True, "venue": "KALSHI",
                 "note": f"already at {from_c}¢ — set to live, the box leaves it alone"}, 200
-    book, _ = _kalshi_hand_book(ticker, fresh=True)
+    book, _ = _kalshi_hand_book(ticker)
     if book is None:
         return {"ok": False, "error": "Kalshi book unreadable — try again"}, 503
     _b, s_ask = _manual_side_book(book, not by)
@@ -18378,11 +18405,13 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
             if pc is None:
                 pc = blob.get("price_c")
             if leaves >= 1 and pc is not None:
-                kbook, _ = _kalshi_hand_book(ticker, fresh=True)
+                # both asks off the sockets (the frame is the freshest read there is);
+                # REST only for a market neither feed vouches for
+                kbook, _ = _kalshi_hand_book(ticker)
                 k_ask = _manual_side_book(kbook, not by)[1] if kbook else None
                 p_ask, pbook, twin_syn = None, None, bool(blob.get("pmm_twin_synthetic"))
                 if twin and client is not None:
-                    pbook = _pmm_book(client, twin)
+                    pbook = _hand_poly_book(client, twin, tries=1)
                     if pbook:
                         p_ask = _manual_side_book(pbook, twin_syn)[1]
                 try:
@@ -18708,7 +18737,7 @@ def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict
                                    current="KALSHI", min_gain_c=_hand_venue_min_gain_c())
         if v0 != "POLYMARKET":
             return False
-    pbook = _bet_sheet_book(client, twin, tries=1)
+    pbook = _hand_poly_book(client, twin, tries=1)    # the depth socket's book (the twin rides the watch set), REST if dark
     if pbook is None:
         return False
     p_bid, _pa = _manual_side_book(pbook, tsyn)
@@ -18818,9 +18847,10 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
     ticker, by = blob.get("kalshi_twin_ticker"), bool(blob.get("kalshi_twin_buy_yes"))
     if not ticker or not _hand_switch_ok(blob, r, now, st, o.get("cum")):
         return False
-    if kctx.get("kbooks", 0) >= 4:
-        return False                                  # ≤4 Kalshi book reads a tick for the Polymarket side
-    kctx["kbooks"] = kctx.get("kbooks", 0) + 1
+    if not _kalshi_ws_fresh(ticker):
+        if kctx.get("kbooks", 0) >= 4:
+            return False                              # ≤4 Kalshi REST book reads a tick while the socket is dark
+        kctx["kbooks"] = kctx.get("kbooks", 0) + 1
     slug, syn, oid = blob.get("pmm_slug"), bool(blob.get("pmm_synthetic")), blob.get("order_id")
     try:
         qty = int(round(float(o.get("leaves") or 0)))
@@ -18828,10 +18858,14 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
         return False
     if qty < 1:
         return False
-    # A MONEY DECISION READS THE VENUE, NOT THE SOCKET (Oct 18 2026): the
-    # socket book serves the chase; a switch takes one REST read and checks
-    # the socket's copy against it — a disagreement is stamped, never traded.
-    kbook, _ = _kalshi_hand_book(ticker, fresh=True)   # the venue, never the socket copy (the reader stamps a disagreement)
+    # THE SOCKET BOOK, like every other hand-lane read (Oct 18 2026 — the
+    # morning's "a money decision reads the venue over REST" was a reaction
+    # to the socket book being WRONG, and that was the snapshot parser
+    # (`kalshi_venue.ws_snapshot`), fixed the same day; Rob: "if it is
+    # possible to do it on the WebSocket, write the code so it's on the
+    # WebSocket"). REST only while the feed is dark for this ticker — and a
+    # REST read still stamps `kalshi_book_mismatch` when the socket disagrees.
+    kbook, _ = _kalshi_hand_book(ticker)
     if kbook is None:
         return False
     k_bid, _ka = _manual_side_book(kbook, not by)
@@ -18990,7 +19024,7 @@ def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg
             return
         if _time.monotonic() - last_at < 30.0:
             return
-        book, _ = _kalshi_hand_book(ticker, fresh=True)
+        book, _ = _kalshi_hand_book(ticker)
         if book is None:
             return
         touch, _a = _manual_side_book(book, syn)
@@ -20338,7 +20372,7 @@ def _bet_sheet_rerung_exec(sb, client, pick_id, want_slug=None):
         return {"ok": False, "error": "bad event_start on the pick"}, 400
     if ev.astimezone(timezone.utc) <= datetime.now(timezone.utc):
         return {"ok": False, "error": "game already started — pre-game only"}, 400
-    book = _bet_sheet_book(client, new_slug)
+    book = _hand_poly_book(client, new_slug)
     if book is None:
         return {"ok": False, "error": "new rung's book unreadable — try again"}, 503
     s_bid, _s_ask = _manual_side_book(book, new_syn)
@@ -20433,7 +20467,7 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
     oid, slug, syn = blob.get("order_id"), blob.get("pmm_slug"), bool(blob.get("pmm_synthetic"))
     if not oid or not slug:
         return {"ok": False, "error": "no resting order on this bet"}, 400
-    book = _bet_sheet_book(client, slug)
+    book = _hand_poly_book(client, slug)
     if book is None:
         return {"ok": False, "error": "book unreadable — try again"}, 503
     s_bid, s_ask = _manual_side_book(book, syn)
@@ -20577,7 +20611,7 @@ def _bet_sheet_live_exec(sb, client, pick_id):
         _stamp(float(from_c), False)
         return {"ok": True, "moved": False, "price_c": from_c, "live": True,
                 "note": f"already at {from_c}¢ — set to live, the box leaves it alone"}, 200
-    book = _bet_sheet_book(client, slug)
+    book = _hand_poly_book(client, slug)
     if book is None:
         return {"ok": False, "error": "book unreadable — try again"}, 503
     _b, s_ask = _manual_side_book(book, syn)
@@ -20927,7 +20961,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
             touch_c = ((100 - ya) if ya is not None else None) if syn else yb
         elif st["rest"] < _HAND_CHASE_REST_READS:
             st["rest"] += 1
-            bk = _bet_sheet_book(client, slug, tries=1)
+            bk = _hand_poly_book(client, slug, tries=1)
             if bk:
                 touch_c, _a = _manual_side_book(bk, syn)
         anchor_c = blob.get("anchor_c", blob.get("price_c"))
@@ -20964,7 +20998,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
             if lad is None:
                 if bk is None and st["rest"] < _HAND_CHASE_REST_READS:
                     st["rest"] += 1
-                    bk = _bet_sheet_book(client, slug, tries=1)
+                    bk = _hand_poly_book(client, slug, tries=1)
                 lad = _hand_ladder_from_book(bk, syn)
             return lad
         if verdict == "stay" and note == "at_touch" and guard_on:
