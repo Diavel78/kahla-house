@@ -4267,21 +4267,23 @@ def test_kalshi_venue_math() -> None:
     assert kv.pick_event(rows, "Utah Utes", home, None)[0] == "E2"
     assert kv.pick_event(rows, "Ohio State Buckeyes", home, None) is None
     check("kalshi venue: fees, rest/take compare, classifier, rung rule", True)
-    # THE WRITE PATH (Oct 18 2026): every create body shape we know, newest
-    # first; our-side price lands on the side's own field; IOC carries no
-    # expiration; the shape probe stops on a non-schema answer.
-    bodies = kv.order_bodies("KXNHLGAME-X-UTA", True, 37, 1, expiration_time="2026-10-19T02:00:00Z")
-    assert [n for n, _ in bodies] == ["v2_dollars_fp", "v2_dollars_count", "legacy_cents"]
-    v2 = bodies[0][1]
-    assert v2["side"] == "yes" and v2["action"] == "buy" and v2["post_only"] is True
-    assert v2["yes_price_dollars"] == "0.3700" and v2["count_fp"] == "1.00"
-    assert v2["time_in_force"] == "good_till_canceled" and v2["expiration_time"] == "2026-10-19T02:00:00Z"
-    assert bodies[2][1]["yes_price"] == 37 and bodies[2][1]["count"] == 1 and "expiration_ts" in bodies[2][1]
-    no_ioc = kv.order_bodies("T", False, 37.4, 2, tif="immediate_or_cancel", post_only=False)[0][1]
-    assert no_ioc["side"] == "no" and no_ioc["no_price_dollars"] == "0.3700" and "yes_price_dollars" not in no_ioc
+    # THE WRITE PATH (Oct 18 2026, the V2 events-orders schema the venue
+    # answered with after the legacy path returned 410): the side is the
+    # YES leg's book side — bid buys YES, buying NO is an ASK at 1 − p —
+    # count/price are fixed-point strings, self-trade prevention is
+    # required, expiration rides only with GTC, IOC carries none.
+    b = kv.order_body("KXNHLGAME-X-UTA", True, 37, 1, expiration_time="2026-10-19T02:00:00Z")
+    assert b["side"] == "bid" and b["price"] == "0.3700" and b["count"] == "1.00"
+    assert b["time_in_force"] == "good_till_canceled" and b["post_only"] is True
+    assert b["self_trade_prevention_type"] == "taker_at_cross"
+    assert b["expiration_time"] == 1792375200 and b["client_order_id"].startswith("kh-")
+    no_ioc = kv.order_body("T", False, 28, 2, tif="immediate_or_cancel", post_only=False)
+    assert no_ioc["side"] == "ask" and no_ioc["price"] == "0.7200" and no_ioc["count"] == "2.00"
     assert no_ioc["post_only"] is False and "expiration_time" not in no_ioc
-    assert kv.order_bodies("T", True, 0, 1)[0][1]["yes_price_dollars"] == "0.0100"   # floor 1¢
-    assert kv._SCHEMA_REJECT.search("unknown field count_fp") and not kv._SCHEMA_REJECT.search("insufficient balance")
+    assert kv.order_body("T", True, 0, 1)["price"] == "0.0100"          # floor 1¢
+    assert kv.yes_price_c(False, 99) == 1 and kv.yes_price_c(True, 61) == 61
+    assert kv.order_bodies("T", True, 50, 1)[0][0] == kv.CREATE_SCHEMA == "v2_events"
+    assert kv.ORDERS_PATH == "/portfolio/events/orders"
 
 
 def main() -> int:

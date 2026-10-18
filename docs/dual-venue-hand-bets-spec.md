@@ -87,14 +87,32 @@
   if you can prove this thing works").** `kalshi_venue.signed_request`
   (ts + METHOD + full path, RSA-PSS — the reader's scheme), `balance`,
   `my_orders/positions/fills`, `create_order` (post-only GTC by default;
-  IOC for the take), `cancel_order`, `order_resting` (the orders LIST is
-  the truthful read, never the create's echo). ⚠ The create body shape is
-  unsettled across sources, so `order_bodies` builds every known shape
-  (dollar strings + `count_fp` + `time_in_force` → dollar strings +
-  `count` → legacy integer cents + `expiration_ts`) and `create_order`
-  sends them in turn, stopping at the first answer that is not a 400
-  naming a field; the accepted shape is pinned in `CREATE_SCHEMA` and
-  recorded on the probe stamp. `kalshi_venue.probe` = creds → balance →
+  IOC for the take), `cancel_order`, `amend_order`, `order_resting` (the
+  orders LIST is the truthful read, never the create's echo). **THE V2
+  ORDER API, read off the venue's own docs after the first live probe got
+  `410 deprecated_v1_order_endpoint` on `/portfolio/orders` (Oct 18
+  2026):** create = `POST /portfolio/events/orders`; the side is the YES
+  leg's BOOK side — `bid` buys YES, `ask` sells YES, so BUYING NO at p is an
+  `ask` at 1 − p (`yes_price_c`); `count` = fixed-point contracts
+  ("1.00"), `price` = fixed-point dollars ("0.6100"); `time_in_force` ∈
+  fill_or_kill | good_till_canceled | immediate_or_cancel, GTC +
+  `expiration_time` (unix SECONDS) = an expiring order, IOC carries none;
+  `self_trade_prevention_type` REQUIRED (`taker_at_cross` — the new order
+  dies rather than hit our own resting one); 201 → {order_id,
+  client_order_id, fill_count, remaining_count, average_fill_price?,
+  average_fee_paid?, ts_ms} with NO status field. Cancel = `DELETE
+  /portfolio/events/orders/{id}?market_ticker=` (the ticker routes the
+  cancel to its shard — "an order_id alone cannot identify the exchange
+  shard") → {order_id, reduced_by}. Amend = `POST …/{id}/amend` with
+  `count` = filled + desired remaining (the TOTAL — Polymarket's modify
+  semantics) — Phase 3's in-place chase on Kalshi. Reads
+  (`/portfolio/balance`, `/portfolio/orders`) still answer on the old
+  paths. Rate limit: a create costs 10 tokens, a cancel 2. The legacy
+  hosts (`external-api`, `trading-api`) answer every signed call with a
+  401 "API has been moved" — `signed_request` treats ANY HTTP reply from a
+  host as final and only tries the next host on a connection failure
+  (the first probe lost the venue's real answer to that fallback).
+  `kalshi_venue.probe` = creds → balance →
   orders read → a liquid market → [place] ONE post-only 1-lot 10¢ under
   the bid → verify resting → cancel → verify gone, with a `verdict`:
   `read_only_ok` · `write_ok` · `write_scope_ok_no_funds` (an empty

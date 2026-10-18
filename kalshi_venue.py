@@ -620,87 +620,110 @@ def get_order(order_id: str) -> dict:
     return signed_request("GET", f"/portfolio/orders/{order_id}")
 
 
-def cancel_order(order_id: str) -> dict:
-    return signed_request("DELETE", f"/portfolio/orders/{order_id}")
+# THE V2 ORDER API (read off docs.kalshi.com/api-reference/orders/create-order-v2
+# on Oct 18 2026, after the live probe got `410 deprecated_v1_order_endpoint`
+# on the old /portfolio/orders path): POST /portfolio/events/orders. The
+# side is the BOOK side of the YES leg — `bid` = buy YES, `ask` = sell YES
+# — and everything is quoted from the YES side, so BUYING NO at p is an
+# `ask` at 1 − p (the venue's own words: "Selling YES is economically
+# equivalent to buying NO at 1 - price"). count = fixed-point contracts
+# ("1.00"), price = fixed-point dollars ("0.6100"), `time_in_force` ∈
+# fill_or_kill | good_till_canceled | immediate_or_cancel (GTC +
+# `expiration_time` unix SECONDS = an expiring order; IOC may not carry
+# one), `self_trade_prevention_type` is REQUIRED (taker_at_cross = the NEW
+# order dies if it would hit our own resting order — the safe default for
+# a hand bet; `maker` kills the resting one instead). 201 → {order_id,
+# client_order_id, fill_count, remaining_count, average_fill_price?,
+# average_fee_paid?, ts_ms} — NO status field; the orders LIST says
+# whether it rests. Cancel = DELETE /portfolio/events/orders/{id} →
+# {order_id, client_order_id, reduced_by}. Amend (Phase 3's chase) =
+# POST /portfolio/events/orders/{id}/amend, count = filled + desired
+# remaining (the TOTAL, the same semantics as Polymarket's modify).
+ORDERS_PATH = "/portfolio/events/orders"
+CREATE_SCHEMA = "v2_events"
 
 
-# THE CREATE SCHEMA IS UNSETTLED ACROSS SOURCES (Oct 18 2026): the current
-# docs show dollar-string prices + `time_in_force`; the legacy body carries
-# integer cents + `expiration_ts`; community reports say the integer body
-# 400s now. `order_bodies` builds every shape we know, newest first;
-# `create_order` sends them in turn and stops at the first answer that is
-# not a schema rejection (a 400 naming a field). The probe records WHICH
-# shape the venue took — that result is the schema from then on
-# (`CREATE_SCHEMA` pins it once known).
-CREATE_SCHEMA: str | None = None
+def yes_price_c(buy_yes: bool, price_c) -> int:
+    """Our-side cents → the YES-canonical cents the V2 body wants."""
+    pc = max(1, min(99, int(round(float(price_c)))))
+    return pc if buy_yes else 100 - pc
+
+
+def order_body(ticker: str, buy_yes: bool, price_c, count: int, tif: str = "good_till_canceled",
+               post_only: bool = True, client_order_id: str | None = None,
+               expiration_time=None, stp: str = "taker_at_cross") -> dict:
+    """The ONE create body (V2). `expiration_time` = unix seconds or an ISO
+    string; only sent with good_till_canceled."""
+    import uuid
+    body = {"ticker": ticker,
+            "client_order_id": client_order_id or f"kh-{uuid.uuid4().hex[:20]}",
+            "side": "bid" if buy_yes else "ask",
+            "count": f"{int(count)}.00",
+            "price": f"{yes_price_c(buy_yes, price_c) / 100.0:.4f}",
+            "time_in_force": tif,
+            "self_trade_prevention_type": stp,
+            "post_only": bool(post_only)}
+    if expiration_time and tif == "good_till_canceled":
+        if isinstance(expiration_time, str):
+            try:
+                expiration_time = int(datetime.fromisoformat(expiration_time.replace("Z", "+00:00")).timestamp())
+            except Exception:  # noqa: BLE001
+                expiration_time = None
+        if expiration_time:
+            body["expiration_time"] = int(expiration_time)
+    return body
 
 
 def order_bodies(ticker: str, buy_yes: bool, price_c, count: int, tif: str = "good_till_canceled",
                  post_only: bool = True, client_order_id: str | None = None,
-                 expiration_time: str | None = None, action: str = "buy") -> list[tuple[str, dict]]:
-    import uuid
-    cid = client_order_id or f"kh-{uuid.uuid4().hex[:20]}"
-    side = "yes" if buy_yes else "no"
-    pc = int(round(float(price_c)))
-    pc = max(1, min(99, pc))
-    dollars = f"{pc / 100.0:.4f}"
-    v2 = {"ticker": ticker, "client_order_id": cid, "action": action, "side": side, "type": "limit",
-          "count_fp": f"{int(count)}.00", "time_in_force": tif, "post_only": bool(post_only),
-          ("yes_price_dollars" if buy_yes else "no_price_dollars"): dollars}
-    if expiration_time and tif == "good_till_canceled":
-        v2["expiration_time"] = expiration_time
-    v2b = dict(v2)
-    v2b.pop("count_fp")
-    v2b["count"] = int(count)
-    legacy = {"ticker": ticker, "client_order_id": cid, "action": action, "side": side, "type": "limit",
-              "count": int(count), "post_only": bool(post_only),
-              ("yes_price" if buy_yes else "no_price"): pc}
-    if tif == "immediate_or_cancel":
-        legacy["time_in_force"] = tif
-    elif expiration_time:
-        try:
-            legacy["expiration_ts"] = int(datetime.fromisoformat(expiration_time.replace("Z", "+00:00")).timestamp())
-        except Exception:  # noqa: BLE001
-            pass
-    return [("v2_dollars_fp", v2), ("v2_dollars_count", v2b), ("legacy_cents", legacy)]
-
-
-_SCHEMA_REJECT = re.compile(r"unknown|unrecogni|invalid (?:field|param|request|body)|required|missing|"
-                            r"deprecated|count_fp|price_dollars|yes_price|expiration|time_in_force|schema|parse",
-                            re.I)
+                 expiration_time=None, action: str = "buy") -> list[tuple[str, dict]]:
+    """Kept for the selftest + callers: one shape now that the venue has
+    answered which it takes."""
+    return [(CREATE_SCHEMA, order_body(ticker, buy_yes, price_c, count, tif, post_only, client_order_id,
+                                       expiration_time))]
 
 
 def create_order(ticker: str, buy_yes: bool, price_c, count: int, tif: str = "good_till_canceled",
                  post_only: bool = True, client_order_id: str | None = None,
-                 expiration_time: str | None = None, action: str = "buy") -> dict:
-    """Place ONE order. post-only GTC by default (a resting hand bet);
-    tif='immediate_or_cancel' + post_only=False is the take. Returns the
-    venue's answer plus `schema` (which body shape it accepted) and
-    `order` (the order object when created) / `order_id`."""
-    global CREATE_SCHEMA
-    bodies = order_bodies(ticker, buy_yes, price_c, count, tif, post_only, client_order_id, expiration_time, action)
-    if CREATE_SCHEMA:
-        bodies.sort(key=lambda b: 0 if b[0] == CREATE_SCHEMA else 1)
-    attempts = []
-    for name, body in bodies:
-        res = signed_request("POST", "/portfolio/orders", body=body)
-        res["schema"] = name
-        attempts.append({"schema": name, "status": res.get("status"), "error": res.get("error"),
-                         "base": res.get("base"), "tries": res.get("tries"), "body": body})
-        d = res.get("data") or {}
-        if res.get("ok"):
-            o = d.get("order") or d
-            res["order"] = o
-            res["order_id"] = o.get("order_id") or o.get("id")
-            res["order_status"] = o.get("status")
-            CREATE_SCHEMA = name
-            break
-        msg = str(d)[:400]
-        if res.get("status") == 400 and _SCHEMA_REJECT.search(msg):
-            continue                         # the venue rejected the SHAPE — try the next one
-        break                                # a real answer (insufficient funds, 401, 403, 404…)
-    res["attempts"] = attempts
+                 expiration_time=None, action: str = "buy") -> dict:
+    """Place ONE order on the V2 path. post-only GTC by default (a resting
+    hand bet); tif='immediate_or_cancel' + post_only=False is the take.
+    Returns the venue's answer plus `order_id`, `fill_count`,
+    `remaining_count` and an inferred `order_status`
+    (resting / filled / partial / none)."""
+    body = order_body(ticker, buy_yes, price_c, count, tif, post_only, client_order_id, expiration_time)
+    res = signed_request("POST", ORDERS_PATH, body=body)
+    res["schema"] = CREATE_SCHEMA
+    res["attempts"] = [{"schema": CREATE_SCHEMA, "status": res.get("status"), "error": res.get("error"),
+                        "base": res.get("base"), "tries": res.get("tries"), "body": body}]
+    d = res.get("data") or {}
+    if res.get("ok"):
+        o = d.get("order") if isinstance(d.get("order"), dict) else d
+        res["order"] = o
+        res["order_id"] = o.get("order_id") or o.get("id")
+        res["fill_count"] = _num(o.get("fill_count"))
+        res["remaining_count"] = _num(o.get("remaining_count"))
+        fc, rc = res["fill_count"] or 0.0, res["remaining_count"]
+        res["order_status"] = ("resting" if (rc or 0) > 0 and fc == 0 else
+                               "partial" if (rc or 0) > 0 and fc > 0 else
+                               "filled" if fc > 0 else "none")
     return res
+
+
+def cancel_order(order_id: str, ticker: str | None = None) -> dict:
+    """DELETE on the V2 path → {order_id, client_order_id, reduced_by}.
+    The venue auto-routes the cancel to its exchange shard ONLY when
+    `market_ticker` rides along ("an order_id alone cannot identify the
+    exchange shard") — always pass the ticker when you have it."""
+    params = {"market_ticker": ticker} if ticker else None
+    return signed_request("DELETE", f"{ORDERS_PATH}/{order_id}", params=params)
+
+
+def amend_order(order_id: str, buy_yes: bool, price_c, total_count: int) -> dict:
+    """POST .../{id}/amend — `count` is the TOTAL (filled + desired
+    remaining), price YES-canonical. Phase 3's in-place chase."""
+    body = {"price": f"{yes_price_c(buy_yes, price_c) / 100.0:.4f}", "count": f"{int(total_count)}.00"}
+    return signed_request("POST", f"{ORDERS_PATH}/{order_id}/amend", body=body)
 
 
 def order_resting(order_id: str, ticker: str | None = None) -> dict:
@@ -792,6 +815,7 @@ def probe(place: bool = False, ticker: str | None = None, contracts: int = 1, of
     cr = create_order(m.get("ticker"), True, px, int(contracts))
     out["create"] = {"ok": cr.get("ok"), "status": cr.get("status"), "schema": cr.get("schema"),
                      "base": cr.get("base"), "order_id": cr.get("order_id"), "order_status": cr.get("order_status"),
+                     "fill_count": cr.get("fill_count"), "remaining_count": cr.get("remaining_count"),
                      "error": cr.get("error"), "attempts": cr.get("attempts"), "tries": cr.get("tries"),
                      "data": (cr.get("data") if not cr.get("ok") else None), "body_sent": cr.get("body_sent")}
     step("create", **{k: v for k, v in out["create"].items() if k not in ("data", "body_sent")})
@@ -815,7 +839,7 @@ def probe(place: bool = False, ticker: str | None = None, contracts: int = 1, of
     if not cancel:
         out["verdict"] = "placed_left_resting"
         return out
-    cx = cancel_order(oid) if oid else {"ok": False, "error": "no order id"}
+    cx = cancel_order(oid, m.get("ticker")) if oid else {"ok": False, "error": "no order id"}
     out["cancel"] = {"ok": cx.get("ok"), "status": cx.get("status"), "error": cx.get("error"),
                      "data": cx.get("data") if cx.get("ok") else (cx.get("data") or cx.get("error"))}
     step("cancel", ok=cx.get("ok"), status=cx.get("status"), error=cx.get("error"))
