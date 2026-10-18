@@ -532,16 +532,21 @@ def _sign(pem: str, msg: str) -> str:
 
 def signed_request(method: str, path: str, body: dict | None = None, params: dict | None = None,
                    timeout: float = 12.0) -> dict:
-    """One signed call. Returns {ok, status, data|error, base, body_sent}.
-    401/403 short-circuit (the key is the problem, not the host); a 4xx
-    with a JSON error body is returned as data too so the caller can read
-    Kalshi's own reason (insufficient_balance, invalid field…)."""
+    """One signed call. Returns {ok, status, data|error, base, body_sent, tries}.
+    ⚠ THE FALLBACK HOSTS ARE LEGACY (Oct 18 2026, the first live probe): the
+    elections host answered the balance read 200, the create got an
+    unlisted status there, the client fell through to external-api, and
+    external-api's 401 "API has been moved" was returned as the verdict —
+    the real answer was lost. Now: ANY HTTP reply from a host is final
+    (the next host only on a connection failure), every host's reply is
+    kept in `tries`, and a 4xx with a JSON error body is returned as data
+    so the caller can read Kalshi's own reason."""
     from urllib.parse import urlparse
     kid, pem, src = _creds()
     if not (kid and pem):
         return {"ok": False, "configured": False, "error": f"no creds ({src})"}
     method = method.upper()
-    last = None
+    tries: list = []
     for base in BASES:
         ts = str(int(time.time() * 1000))
         try:
@@ -552,23 +557,24 @@ def signed_request(method: str, path: str, body: dict | None = None, params: dic
                    "KALSHI-ACCESS-TIMESTAMP": ts, "KALSHI-ACCESS-SIGNATURE": sig}
         try:
             r = _http.request(method, base + path, params=params or {}, json=body if body is not None else None,
-                              headers=headers, timeout=timeout)
-            try:
-                data = r.json() if (r.text or "").strip() else {}
-            except ValueError:
-                data = {"raw": (r.text or "")[:300]}
-            out = {"ok": 200 <= r.status_code < 300, "configured": True, "status": r.status_code,
-                   "data": data, "base": base, "creds": src}
-            if body is not None:
-                out["body_sent"] = body
-            if out["ok"] or r.status_code in (400, 401, 403, 404, 409, 422):
-                if not out["ok"]:
-                    out["error"] = f"HTTP {r.status_code}: {str(data)[:300]}"
-                return out
-            last = f"HTTP {r.status_code} @ {base}: {(r.text or '')[:160]}"
+                              headers=headers, timeout=timeout, allow_redirects=False)
         except Exception as e:  # noqa: BLE001
-            last = f"{type(e).__name__} @ {base}: {str(e)[:120]}"
-    return {"ok": False, "configured": True, "error": last}
+            tries.append({"base": base, "exc": f"{type(e).__name__}: {str(e)[:120]}"})
+            continue                                   # connection failure → next host
+        try:
+            data = r.json() if (r.text or "").strip() else {}
+        except ValueError:
+            data = {"raw": (r.text or "")[:300]}
+        tries.append({"base": base, "status": r.status_code, "body": str(data)[:300],
+                      "location": r.headers.get("Location")})
+        out = {"ok": 200 <= r.status_code < 300, "configured": True, "status": r.status_code,
+               "data": data, "base": base, "creds": src, "tries": tries}
+        if body is not None:
+            out["body_sent"] = body
+        if not out["ok"]:
+            out["error"] = f"HTTP {r.status_code} @ {base}: {str(data)[:300]}"
+        return out                                     # an HTTP answer is THE answer
+    return {"ok": False, "configured": True, "error": "no host answered", "tries": tries}
 
 
 def balance() -> dict:
@@ -679,7 +685,8 @@ def create_order(ticker: str, buy_yes: bool, price_c, count: int, tif: str = "go
     for name, body in bodies:
         res = signed_request("POST", "/portfolio/orders", body=body)
         res["schema"] = name
-        attempts.append({"schema": name, "status": res.get("status"), "error": res.get("error")})
+        attempts.append({"schema": name, "status": res.get("status"), "error": res.get("error"),
+                         "base": res.get("base"), "tries": res.get("tries"), "body": body})
         d = res.get("data") or {}
         if res.get("ok"):
             o = d.get("order") or d
@@ -784,15 +791,17 @@ def probe(place: bool = False, ticker: str | None = None, contracts: int = 1, of
                          "post_only": True, "tif": "good_till_canceled", "touch_bid_c": bid}
     cr = create_order(m.get("ticker"), True, px, int(contracts))
     out["create"] = {"ok": cr.get("ok"), "status": cr.get("status"), "schema": cr.get("schema"),
-                     "order_id": cr.get("order_id"), "order_status": cr.get("order_status"),
-                     "error": cr.get("error"), "attempts": cr.get("attempts"),
+                     "base": cr.get("base"), "order_id": cr.get("order_id"), "order_status": cr.get("order_status"),
+                     "error": cr.get("error"), "attempts": cr.get("attempts"), "tries": cr.get("tries"),
                      "data": (cr.get("data") if not cr.get("ok") else None), "body_sent": cr.get("body_sent")}
     step("create", **{k: v for k, v in out["create"].items() if k not in ("data", "body_sent")})
     if not cr.get("ok"):
         st = cr.get("status")
         msg = str(cr.get("data") or cr.get("error") or "").lower()
-        if st in (401, 403):
-            out["verdict"] = "write_denied"           # the key cannot trade
+        if st in (401, 403) and (cr.get("base") or "").startswith(BASES[0]):
+            out["verdict"] = "write_denied"           # the PRIMARY host refused the key
+        elif st in (401, 403):
+            out["verdict"] = "legacy_host_answered"   # never a verdict about the key
         elif "balance" in msg or "insufficient" in msg or "funds" in msg:
             out["verdict"] = "write_scope_ok_no_funds"  # it tried to place: trade scope proven, account empty
         else:
