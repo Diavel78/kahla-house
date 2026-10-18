@@ -17407,10 +17407,14 @@ def _kalshi_hand_book(ticker: str, fresh: bool = False, record: bool = True):
     """The Kalshi book shaped like `_pmm_book` (YES-canonical), cached 3s.
     Every fresh read appends a KALSHI_TAPE row — the Kalshi bet's own touch
     tape, what the start rule reads. Returns (book or None, raw)."""
-    if _kalshi_ws_fresh(ticker):
+    if not fresh and _kalshi_ws_fresh(ticker):
         # THE SOCKET IS THE TAPE (Oct 18 2026): while the Kalshi feed speaks
         # for this market its book is current to the frame and already on
-        # KALSHI_TAPE — no REST read, no duplicate row.
+        # KALSHI_TAPE — no REST read, no duplicate row. ⚠ `fresh=True` MEANS
+        # THE VENUE (same day, the ARI +13.5 bid parked a tick under a 901k
+        # touch): the socket copy had 51×4,500 / 50×100 on a market carrying
+        # 900k a level, and every money read — the switch compare, the chase
+        # target, the "REST cross-check" — came back here for the same copy.
         hit = _KALSHI_BOOK_CACHE.get(ticker)
         if hit:
             return hit[1], hit[2]
@@ -17426,6 +17430,25 @@ def _kalshi_hand_book(ticker: str, fresh: bool = False, record: bool = True):
     book = _kv.poly_book(ob)
     if book is None:
         return None, ob
+    # the socket's copy vs the venue: a disagreement at the touch is stamped
+    # (rate-limited per ticker) — the read that finds the feed's bug
+    try:
+        sock = KALSHI_BOOKS.get(ticker)
+        if sock and isinstance(sock, tuple) and isinstance(sock[1], dict):
+            sb_, sa_ = sock[1].get("best_bid"), sock[1].get("best_ask")
+            rb_, ra_ = book.get("best_bid"), book.get("best_ask")
+            if ((sb_ is None) != (rb_ is None) or (sb_ is not None and abs(float(sb_) - float(rb_)) > 0.01)
+                    or (sa_ is None) != (ra_ is None) or (sa_ is not None and abs(float(sa_) - float(ra_)) > 0.01)):
+                last = _KALSHI_MISMATCH_AT.get(ticker, 0.0)
+                if _time.monotonic() - last > 60.0:
+                    _KALSHI_MISMATCH_AT[ticker] = _time.monotonic()
+                    _probe_log({"kalshi_book_mismatch": True, "ticker": ticker,
+                                "rest": {"bid": rb_, "ask": ra_, "bids": (book.get("bids") or [])[:3], "asks": (book.get("asks") or [])[:3]},
+                                "socket": {"bid": sb_, "ask": sa_, "bids": (sock[1].get("bids") or [])[:3], "asks": (sock[1].get("asks") or [])[:3],
+                                           "age_s": round(_time.time() - float(sock[0] or 0), 1)},
+                                "at": datetime.now(timezone.utc).isoformat()})
+    except Exception:
+        pass
     _KALSHI_BOOK_CACHE[ticker] = (_time.monotonic(), book, ob)
     if record:
         row = _kv.tape_row(book, _time.time())
@@ -17798,7 +17821,14 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
     price_c = _kv.our_c(o.get("yes_c"), by)
     if price_c is None:
         return
-    book, _ = _kalshi_hand_book(ticker)
+    # THE CHASE PRICES OFF THE VENUE (Oct 18 2026): one REST read per Kalshi
+    # bet a tick (≤6), the socket copy only when the budget is spent.
+    book = None
+    if kctx.get("kbooks_chase", 0) < 6:
+        kctx["kbooks_chase"] = kctx.get("kbooks_chase", 0) + 1
+        book, _ = _kalshi_hand_book(ticker, fresh=True)
+    if book is None:
+        book, _ = _kalshi_hand_book(ticker)
     if book is None:
         st["no_quote"] += 1
         return
@@ -18159,8 +18189,8 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
     except (TypeError, ValueError):
         _d = _HAND_START_DROP_PCT_SPORT.get(_sp, drop)
     _d = max(drop, _d)
-    if now_ts >= start_ts - 1200.0 and not _kalshi_ws_fresh(ticker):
-        _kalshi_hand_book(ticker, fresh=True)           # REST sample through the start window when the socket is dark
+    if now_ts >= start_ts - 1200.0:
+        _kalshi_hand_book(ticker, fresh=True)           # REST sample through the start window: the drop reads sizes, the socket copy has been wrong
     tape_src = "kalshi"
     verdict, base, cur, seen = _hand_start_plan(list(KALSHI_TAPE.get(ticker) or []), start_ts, now_ts, _d)
     twin = blob.get("pmm_twin_slug")
@@ -18668,21 +18698,12 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
     # A MONEY DECISION READS THE VENUE, NOT THE SOCKET (Oct 18 2026): the
     # socket book serves the chase; a switch takes one REST read and checks
     # the socket's copy against it — a disagreement is stamped, never traded.
-    sock = KALSHI_BOOKS.get(ticker)
-    kbook, _ = _kalshi_hand_book(ticker, fresh=True)
+    kbook, _ = _kalshi_hand_book(ticker, fresh=True)   # the venue, never the socket copy (the reader stamps a disagreement)
     if kbook is None:
         return False
     k_bid, _ka = _manual_side_book(kbook, not by)
     if k_bid is None:
         return False
-    if sock and isinstance(sock, tuple) and len(sock) == 2 and isinstance(sock[1], dict):
-        s_bid, _sa = _manual_side_book(sock[1], not by)
-        if s_bid is None or abs(float(s_bid) - float(k_bid)) > 1.01:
-            _probe_log({"kalshi_book_mismatch": True, "pick_id": r["id"], "ticker": ticker,
-                        "rest_bid_c": k_bid, "socket_bid_c": s_bid, "socket_age_s": round(_time.time() - float(sock[0] or 0), 1),
-                        "rest_top": _hand_ladder_from_book(kbook, not by)[:3] if _hand_ladder_from_book(kbook, not by) else None,
-                        "socket_top": _hand_ladder_from_book(sock[1], not by)[:3] if _hand_ladder_from_book(sock[1], not by) else None,
-                        "at": now.isoformat()})
     mp, oh = _hand_thin_cfg()
     k_seat, _sd = _hand_seat_price(kbook, not by, r.get("event_start"), now, mp, oh)
     if k_seat is None:
@@ -18762,6 +18783,7 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
 # While the socket speaks for a market the REST sampler stands down.
 KALSHI_WATCH_TICKERS: set = set()
 KALSHI_WS: dict = {"up": False, "rx": 0.0, "tickers": set(), "msgs": 0}
+_KALSHI_MISMATCH_AT: dict = {}        # ticker → last socket-vs-REST disagreement stamp (monotonic)
 KALSHI_BOOKS: dict = {}                # ticker → (time.time(), book) — the socket's latest book
 _KALSHI_WS_FRESH_S = 20.0
 
