@@ -90,7 +90,7 @@ class KalshiFeed:
         try:
             self.sb.table("exec_probe_runs").insert({
                 "params": {"kind": "kalshi_ws"},
-                "result": {"state": state, "err": (err or "")[:300], "msgs": self.msgs,
+                "result": {"kalshi_ws": state, "state": state, "err": (err or "")[:300], "msgs": self.msgs,
                            "reconnects": self.reconnects, "tickers": sorted(self.subscribed)[:40]},
             }).execute()
         except Exception:

@@ -4337,17 +4337,35 @@ def api_bet_sheets_picks():
     kinds = [k.strip() for k in (request.args.get("stamps") or "").split(",") if k.strip()]
     if kinds:                                          # e.g. stamps=hand_move_cancel,hand_move_rejoin
         try:
-            st = (get_supabase().table("exec_probe_runs").select("at,result")
+            st = (get_supabase().table("exec_probe_runs").select("at,params,result")
                   .order("at", desc=True).limit(int(request.args.get("n") or 600)).execute().data) or []
         except Exception as e:
             st = []
             out["stamps_err"] = str(e)[:160]
+        # A stamp names its kind EITHER as a result key (the hand_* stamps)
+        # or as params.kind (the probe/feed stamps) — match both (Oct 18 2026:
+        # the Kalshi socket's stamps were invisible to this read).
+        def _kind_hit(x):
+            r = x.get("result") if isinstance(x.get("result"), dict) else {}
+            pk = (x.get("params") or {}).get("kind") if isinstance(x.get("params"), dict) else None
+            return any(r.get(k) for k in kinds) or (pk in kinds)
         out["kind_stamps"] = [{"at": x.get("at"), "r": x.get("result")} for x in st
-                              if isinstance(x.get("result"), dict)
-                              and any(x["result"].get(k) for k in kinds)
-                              and (not slug or slug in str(x["result"].get("slug") or ""))][:60]
+                              if _kind_hit(x)
+                              and (not slug or slug in str((x.get("result") or {}).get("slug") or ""))][:60]
         out["scanned"] = len(st)
     sb = get_supabase()
+    if request.args.get("ws"):
+        # The strip publisher's last blob: Kalshi socket presence + the
+        # venue read counts, without a Firebase token (site-curl).
+        try:
+            r = (sb.table("lookup_cache").select("fetched_at,payload")
+                 .eq("key", _HAND_STATUS_KEY).limit(1).execute())
+            pl = ((r.data or [None])[0] or {}).get("payload") or {}
+            out["strip"] = {"at": pl.get("at"), "n": pl.get("n"), "orders": pl.get("orders"),
+                            "positions": pl.get("positions"), "kalshi": pl.get("kalshi"),
+                            "venues": sorted({str(x.get("venue") or "POLYMARKET") for x in (pl.get("rows") or [])})}
+        except Exception as e:
+            out["strip_err"] = str(e)[:160]
     if request.args.get("settled_audit"):
         # THE SETTLED-TODAY TILE vs THE VENUE (Oct 17 2026, Rob: "settled
         # today, for sure wrong"): every settled sheet pick on today's AZ
