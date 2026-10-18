@@ -4802,6 +4802,34 @@ def api_bet_sheets_picks():
         except Exception as e:
             ar["err"] = f"{type(e).__name__}: {e}"[:200]
         out["archive_stale"] = ar
+    cs_id = (request.args.get("complete_switch") or "").strip()
+    if cs_id:
+        # A Kalshi pick whose order is GONE (fresh orders read) and nothing
+        # held: mark `kalshi_cancel_sent` so the box's chase places its
+        # Polymarket leg next tick (the Oct 18 2026 late-cancel orphans).
+        try:
+            import kalshi_venue as _kv
+            pr = (sb.table("bot_picks").select("id,signal_blob,status").eq("id", int(cs_id)).limit(1).execute().data or [None])[0]
+            b = (pr or {}).get("signal_blob") if isinstance((pr or {}).get("signal_blob"), dict) else None
+            if not pr or pr.get("status") != "pending" or not b or not _kalshi_pick(b):
+                out["complete_switch"] = {"ok": False, "why": "not a pending Kalshi pick"}
+            else:
+                ro = _kv.resting_orders()
+                po = _kv.positions()
+                if not ro.get("ok") or po is None:
+                    out["complete_switch"] = {"ok": False, "why": "venue unreadable", "err": ro.get("error")}
+                elif b.get("kalshi_order_id") in (ro.get("by_id") or {}):
+                    out["complete_switch"] = {"ok": False, "why": "order still resting"}
+                elif (_kv.held_for(po, b.get("kalshi_ticker"), bool(b.get("kalshi_buy_yes"))) or 0) > 0:
+                    out["complete_switch"] = {"ok": False, "why": "a lot is held — not an orphan"}
+                else:
+                    nb = {**b, "kalshi_cancel_sent": {"at": datetime.now(timezone.utc).isoformat(), "to": "POLYMARKET",
+                                                      "qty": b.get("contracts"), "order_id": b.get("kalshi_order_id"),
+                                                      "via": "complete_switch"}}
+                    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", int(cs_id)).execute()
+                    out["complete_switch"] = {"ok": True, "pick_id": int(cs_id), "qty": b.get("contracts")}
+        except Exception as e:
+            out["complete_switch"] = {"ok": False, "err": str(e)[:160]}
     re_slug = (request.args.get("readopt") or "").strip()
     if re_slug:                                        # THE MISSOURI RE-ATTACH (Oct 6 2026): book one
         out["readopt"] = _hand_readopt(sb, re_slug)     # held lot as a hand bet, from Vercel, now
@@ -17717,6 +17745,28 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
         kctx["tried"] = True
     o = _kalshi_pick_order(blob, kctx.get("orders"))
     if o is None:
+        cs = blob.get("kalshi_cancel_sent") if isinstance(blob.get("kalshi_cancel_sent"), dict) else None
+        if cs and kctx.get("orders") is not None and kctx.get("client") is not None:
+            # our cancel landed after its verify: complete the switch (fresh reads first)
+            orders2, pos2 = _kalshi_acct(fresh=True)
+            if orders2 is None or pos2 is None or _kalshi_pick_order(blob, orders2) is not None:
+                return
+            held = _kv.held_for(pos2, ticker, by)
+            if held and held > 0:
+                nb = {**blob, "filled_qty": held}
+                nb.pop("kalshi_cancel_sent", None)
+                sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                _probe_log({"hand_venue_switch": True, "pick_id": r["id"], "ticker": ticker, "result": "cancel_raced_fill",
+                            "held": held, "at": now.isoformat()})
+                return
+            try:
+                qty = int(round(float(cs.get("qty") or blob.get("contracts") or 0)))
+            except (TypeError, ValueError):
+                qty = 0
+            if qty >= 1:
+                st["completed"] = st.get("completed", 0) + 1
+                _hand_switch_to_poly(sb, kctx["client"], r, blob, now, st, {"remaining": qty, "filled": 0},
+                                     blob.get("price_c"), None, skip_cancel=True)
         return
     st["cands"] += 1
     price_c = _kv.our_c(o.get("yes_c"), by)
@@ -18368,18 +18418,26 @@ def _hand_switch_leash_ok(blob: dict, dest_c: float) -> bool:
         return True
 
 
-def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict, k_touch_c, k_seat_c) -> bool:
+def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict, k_touch_c, k_seat_c,
+                         skip_cancel: bool = False) -> bool:
     """A Kalshi-resting unfilled bet → Polymarket when its seat is cheaper
-    all-in. Returns True when the pick changed venue (caller stops)."""
+    all-in. Returns True when the pick changed venue (caller stops).
+    `skip_cancel=True` = COMPLETE a switch whose Kalshi cancel verified late
+    (`kalshi_cancel_sent` on the blob — Oct 18 2026: two cancels landed a beat
+    after the 3 reads, the Polymarket leg never placed, two bets sat off the
+    book): no compare, no flag gate, the order is already gone — place the
+    Polymarket leg at its seat capped at anchor + leash."""
     import kalshi_venue as _kv
     twin, tsyn = blob.get("pmm_twin_slug"), bool(blob.get("pmm_twin_synthetic"))
-    if not twin or not _hand_switch_ok(blob, r, now, st, o.get("filled")):
+    if not twin:
+        return False
+    if not skip_cancel and not _hand_switch_ok(blob, r, now, st, o.get("filled")):
         return False
     ticker, by = blob.get("kalshi_ticker"), bool(blob.get("kalshi_buy_yes"))
     qty = int(round(float(o.get("remaining") or 0)))
-    if qty < 1 or k_seat_c is None:
+    if qty < 1 or (k_seat_c is None and not skip_cancel):
         return False
-    q = _ws_quote(twin)                               # the twin rides the socket watch set: no REST until it matters
+    q = _ws_quote(twin) if not skip_cancel else None   # the twin rides the socket watch set: no REST until it matters
     if q:
         yb, ya = q
         p_touch = ((100 - ya) if ya is not None else None) if tsyn else yb
@@ -18399,38 +18457,61 @@ def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict
     p_seat, _sd = _hand_seat_price(pbook, tsyn, r.get("event_start"), now, mp, oh)
     if p_seat is None:
         p_seat = p_bid
-    v, det = _kv.compare_rest(p_seat, k_seat_c, qty, blob.get("kalshi_fee"),
-                              current="KALSHI", min_gain_c=_hand_venue_min_gain_c())
-    if v != "POLYMARKET":
-        return False
-    if not _hand_switch_gap_ok(k_seat_c, p_seat) or not _hand_switch_leash_ok(blob, p_seat):
-        st["switch_refused"] = st.get("switch_refused", 0) + 1
-        return False
-    _HAND_SWITCH_LAST[r["id"]] = _time.monotonic()
-    stamp = {"hand_venue_switch": True, "pick_id": r["id"], "from": "KALSHI", "to": "POLYMARKET",
-             "ticker": ticker, "slug": twin, "qty": qty, "from_c": k_touch_c, "to_c": p_seat,
-             "compare": det, "at": now.isoformat(),
-             "poly_top": (_hand_ladder_from_book(pbook, tsyn) or [])[:3]}
     koid = blob.get("kalshi_order_id")
-    cr = _kv.cancel_order(koid, ticker)
-    stamp["cancel"] = {"ok": cr.get("ok"), "status": cr.get("status"), "error": (cr.get("error") or "")[:160] or None}
-    vr = {}
-    for _i in range(3):                               # the orders list lags the cancel by a beat
-        vr = _kv.order_resting(koid, ticker)
-        if vr.get("resting") is False:
-            break
-        _time.sleep(0.7)
-    if vr.get("resting") is not False:
-        stamp["result"] = "cancel_unverified"
-        stamp["verify_error"] = vr.get("error")
-        _probe_log(stamp)
-        return False
+    if skip_cancel:
+        # the completion: the seat, never past Rob's leash (the chase would park there anyway)
+        anchor = blob.get("anchor_c", blob.get("price_c"))
+        try:
+            leash = float(_machine_flag_val("hand_chase_leash_c", _HAND_CHASE_LEASH_C))
+            if anchor is not None:
+                p_seat = min(float(p_seat), float(anchor) + leash)
+        except (TypeError, ValueError):
+            pass
+        p_seat = round(_grid_dn(float(p_seat), _pmm_tick_c(twin)), 2)
+        det = {"why": "complete_switch", "cancel_sent": blob.get("kalshi_cancel_sent")}
+        stamp = {"hand_venue_switch": True, "pick_id": r["id"], "from": "KALSHI", "to": "POLYMARKET",
+                 "ticker": ticker, "slug": twin, "qty": qty, "from_c": k_touch_c, "to_c": p_seat,
+                 "compare": det, "at": now.isoformat(), "completion": True,
+                 "poly_top": (_hand_ladder_from_book(pbook, tsyn) or [])[:3]}
+    else:
+        v, det = _kv.compare_rest(p_seat, k_seat_c, qty, blob.get("kalshi_fee"),
+                                  current="KALSHI", min_gain_c=_hand_venue_min_gain_c())
+        if v != "POLYMARKET":
+            return False
+        if not _hand_switch_gap_ok(k_seat_c, p_seat) or not _hand_switch_leash_ok(blob, p_seat):
+            st["switch_refused"] = st.get("switch_refused", 0) + 1
+            return False
+        _HAND_SWITCH_LAST[r["id"]] = _time.monotonic()
+        stamp = {"hand_venue_switch": True, "pick_id": r["id"], "from": "KALSHI", "to": "POLYMARKET",
+                 "ticker": ticker, "slug": twin, "qty": qty, "from_c": k_touch_c, "to_c": p_seat,
+                 "compare": det, "at": now.isoformat(),
+                 "poly_top": (_hand_ladder_from_book(pbook, tsyn) or [])[:3]}
+        cr = _kv.cancel_order(koid, ticker)
+        stamp["cancel"] = {"ok": cr.get("ok"), "status": cr.get("status"), "error": (cr.get("error") or "")[:160] or None}
+        vr = {}
+        for _i in range(3):                               # the orders list lags the cancel by a beat
+            vr = _kv.order_resting(koid, ticker)
+            if vr.get("resting") is False:
+                break
+            _time.sleep(0.7)
+        if vr.get("resting") is not False:
+            stamp["result"] = "cancel_unverified"
+            stamp["verify_error"] = vr.get("error")
+            if cr.get("ok"):
+                # the venue took the cancel; the list has not caught up. The
+                # chase completes the switch once the order reads gone.
+                nb0 = {**blob, "kalshi_cancel_sent": {"at": now.isoformat(), "to": "POLYMARKET", "qty": qty,
+                                                      "p_seat_c": p_seat, "order_id": koid}}
+                sb.table("bot_picks").update({"signal_blob": nb0}).eq("id", r["id"]).execute()
+                stamp["cancel_sent"] = True
+            _probe_log(stamp)
+            return False
     out, _http = _manual_order_place(client, twin, tsyn, p_seat, qty, r.get("event_start"),
                                      book=pbook, verify="fresh")
     nb = {**blob, "kalshi_order_id": None, "kalshi_twin_ticker": ticker, "kalshi_twin_buy_yes": by,
           "venue_switches": (blob.get("venue_switches") or []) + [
               {"at": now.isoformat(), "from": "KALSHI", "to": "POLYMARKET", "from_c": k_touch_c, "to_c": p_seat}][-10:]}
-    for k in ("chase_hold", "thin_hold"):
+    for k in ("chase_hold", "thin_hold", "kalshi_cancel_sent", "chase_err"):
         nb.pop(k, None)
     if out.get("ok") and out.get("order_id"):
         nb.update({"venue": "POLYMARKET", "pmm_slug": twin, "pmm_synthetic": tsyn,
@@ -18444,11 +18525,14 @@ def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict
         app.logger.info("hand venue switch KALSHI→POLY pick %s %s %s¢ → %s %s¢", r["id"], ticker, k_touch_c, twin, p_seat)
         _probe_log(stamp)
         return True
-    # the new book refused: back onto Kalshi at its seat
+    # the new book refused: back onto Kalshi at its seat (a completion has no
+    # fresh Kalshi seat — the price the order rested at)
     stamp["poly_error"] = out.get("error")
-    back, _h2 = _kalshi_order_place(ticker, by, k_seat_c, qty, r.get("event_start"))
+    k_back = k_seat_c if k_seat_c is not None else k_touch_c
+    back, _h2 = (_kalshi_order_place(ticker, by, k_back, qty, r.get("event_start"))
+                 if k_back is not None else ({"ok": False, "error": "no kalshi seat"}, None))
     if back.get("ok") and back.get("order_id"):
-        nb.update({"kalshi_order_id": back["order_id"], "price_c": k_seat_c, "contracts": qty})
+        nb.update({"kalshi_order_id": back["order_id"], "price_c": k_back, "contracts": qty})
         stamp["result"] = "poly_failed_back_on_kalshi"
     else:
         nb["switch_err"] = {"at": now.isoformat(), "poly": out.get("error"), "kalshi": back.get("error")}
