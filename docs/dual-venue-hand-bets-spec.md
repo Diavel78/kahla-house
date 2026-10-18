@@ -11,6 +11,19 @@
 
 ## 0. Rules Rob set (verbatim intent, do not re-litigate)
 
+0. **EVERYTHING RUNS ON THE BOX. Vercel is the dashboard, nothing else**
+   (Rob, Oct 18 2026: "Everything for Polymarket runs on the box. Nothing
+   runs on Vercel except for the dashboard"). Every Kalshi read the machine
+   acts on, every Kalshi write, the venue decision at placement / chase /
+   take, and the Kalshi socket tape live in the box's `handbets` lane and
+   `cellar/`. Vercel's only Kalshi job is to display what the box published
+   (`lookup_cache`, the strip blob) and to enqueue what Rob tapped
+   (`hand_orders`). `/api/kalshi/coverage` is a read-only DIAGNOSTIC for a
+   sandbox that cannot reach Kalshi — not a production path. The slip Quote,
+   which today reads Polymarket from Vercel, moves onto the box as a `quote`
+   op in `hand_orders` when the dual-venue quote lands (the page polls the
+   answer like a placed bet).
+
 1. **Kalshi has coverage.** RULE 0.001 applies to Kalshi exactly as to
    Polymarket. A pick the Kalshi reader cannot place is a READER bug, never
    "Kalshi doesn't list it". It may be *listed differently* (title, suffix,
@@ -78,8 +91,9 @@
   Kalshi needs its own tape — `cellar/kalshifeed.py`, the wsfeed shape.
   Build after the coverage probe prints green.
 
-**Phase 1 — quote both, write nothing new on Kalshi.** The slip Quote shows
-both venues' all-in rest and the box's pick. Place still goes to Polymarket.
+**Phase 1 — quote both, write nothing new on Kalshi.** The slip Quote becomes
+a `hand_orders` op the BOX answers: both venues' all-in rest and the box's
+pick. Place still goes to Polymarket.
 
 **Phase 2 — Kalshi placement path.** `_hand_order_execute` grows a venue:
 post-only `good_till_canceled` create (dollar-string schema), cancel, the
