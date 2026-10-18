@@ -18079,13 +18079,48 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
         kctx["orders"], kctx["pos"] = _kalshi_acct()
         kctx["tried"] = True
     o = _kalshi_pick_order(blob, kctx.get("orders"))
-    if o is None:
-        return
     try:
         ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return
     start_ts = ev.astimezone(timezone.utc).timestamp()
+    if o is None:
+        # NO ORDER AT THE START (Oct 18 2026): a Kalshi pick whose order is
+        # gone and nothing held once the game has started is a box cancel
+        # that never got put back (the late-verified switch cancel) — it goes
+        # on the missed list and the pick goes, or the resolver grades a bet
+        # that never rested.
+        if now_ts < start_ts or kctx.get("orders") is None:
+            return
+        if _time.monotonic() - _HAND_START_DONE.get(r["id"], 0.0) < 20.0:
+            return
+        _HAND_START_DONE[r["id"]] = _time.monotonic()
+        held = _kv.held_for(kctx.get("pos"), ticker, by)
+        if held is None or held > 0:
+            return                                        # unreadable, or a lot → the resolver's
+        bet = {"sport": r.get("sport"), "event_name": r.get("event_name"),
+               "event_start": r.get("event_start"), "market_id": r.get("market_id"),
+               "market_type": r.get("market_type"), "side": r.get("side"),
+               "line": r.get("entry_line"), "entry_price": r.get("entry_price"),
+               "label": blob.get("label"), "price_c": blob.get("price_c"),
+               "anchor_c": blob.get("anchor_c"), "contracts": blob.get("contracts"),
+               "synthetic": not by, "app": False, "venue": "KALSHI"}
+        stamp = {"kind": "hand_start_cancel", "bet": bet, "hand_start_cancel": True, "venue": "KALSHI",
+                 "pick_id": r["id"], "slug": blob.get("pmm_twin_slug"), "ticker": ticker, "order_id": koid,
+                 "baseline_q": 0.0, "touch_q": 0.0, "drop_pct": None, "orphan": True,
+                 "sat_out": blob.get("kalshi_cancel_sent") or {"why": "order gone before the start"},
+                 "start": ev.astimezone(timezone.utc).isoformat(),
+                 "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1)}
+        try:
+            out, code = _kalshi_cancel_exec(sb, client, r["id"], skip_cancel=True)
+            stamp["result"], stamp["http"] = out, code
+            st["sat_out"] = st.get("sat_out", 0) + 1
+        except Exception as e:
+            stamp["error"] = str(e)[:160]
+            st["errors"] += 1
+        _probe_log(stamp)
+        app.logger.warning("hand start KALSHI orphan pick %s %s → %s", r["id"], ticker, stamp.get("result"))
+        return
     st["cands"] += 1
     _sp = str(r.get("sport") or "").upper()
     try:
@@ -18467,7 +18502,7 @@ def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict
                 p_seat = min(float(p_seat), float(anchor) + leash)
         except (TypeError, ValueError):
             pass
-        p_seat = round(_grid_dn(float(p_seat), _pmm_tick_c(twin)), 2)
+        p_seat = round(_grid_dn(float(p_seat), _pmm_tick_c(client, twin)), 2)
         det = {"why": "complete_switch", "cancel_sent": blob.get("kalshi_cancel_sent")}
         stamp = {"hand_venue_switch": True, "pick_id": r["id"], "from": "KALSHI", "to": "POLYMARKET",
                  "ticker": ticker, "slug": twin, "qty": qty, "from_c": k_touch_c, "to_c": p_seat,
