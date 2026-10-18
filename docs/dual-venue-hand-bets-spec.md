@@ -1,6 +1,7 @@
 # Dual-venue hand bets — Polymarket + Kalshi (spec, Oct 18 2026)
 
-> Status: **PHASE 0 (feasibility) in flight.** Nothing writes to Kalshi.
+> Status: **PHASE 0 (feasibility) in flight.** The only Kalshi write is the
+> one-shot proof probe (below); no bet path writes to Kalshi.
 > Rob, Oct 18 2026: "change my betting machine to automatically calculate
 > the fees and figure out where to keep these bets while they're resting,
 > move them back and forth… when we have to take a bet, with the new
@@ -82,8 +83,30 @@
   terms, all-in rest + take, which venue wins each. `creds=1` reports
   whether the Kalshi key is configured and whether a signed balance read is
   accepted (no values echoed).
-- Still manual: **does the key TRADE?** The only proof is a 1-contract
-  post-only order 10¢ off the touch, then cancel — run from the box.
+- **The write client + THE PROOF (same day, Rob: "I'll put money in Kalshi
+  if you can prove this thing works").** `kalshi_venue.signed_request`
+  (ts + METHOD + full path, RSA-PSS — the reader's scheme), `balance`,
+  `my_orders/positions/fills`, `create_order` (post-only GTC by default;
+  IOC for the take), `cancel_order`, `order_resting` (the orders LIST is
+  the truthful read, never the create's echo). ⚠ The create body shape is
+  unsettled across sources, so `order_bodies` builds every known shape
+  (dollar strings + `count_fp` + `time_in_force` → dollar strings +
+  `count` → legacy integer cents + `expiration_ts`) and `create_order`
+  sends them in turn, stopping at the first answer that is not a 400
+  naming a field; the accepted shape is pinned in `CREATE_SCHEMA` and
+  recorded on the probe stamp. `kalshi_venue.probe` = creds → balance →
+  orders read → a liquid market → [place] ONE post-only 1-lot 10¢ under
+  the bid → verify resting → cancel → verify gone, with a `verdict`:
+  `read_only_ok` · `write_ok` · `write_scope_ok_no_funds` (an empty
+  account still proves trade scope — the venue says insufficient balance,
+  not 401/403) · `write_denied` · `create_rejected` (read `create.data`).
+  Runs on the box two ways: `python3 kahla-scanner/scripts/kalshi_probe.py
+  [--place]`, or `machine_flags kalshi_probe = {"place": true}` (via
+  `/api/cellar/flag`) which the next handbets tick runs ONCE
+  (`app._kalshi_probe_tick` clears the flag BEFORE placing) and stamps
+  `exec_probe_runs kind=kalshi_probe` (read:
+  `/api/bet-sheets/picks?stamps=kalshi_probe`). This is the ONLY Kalshi
+  write surface until `hand_kalshi_enabled` exists.
 - **Kalshi WebSocket**: `wss://external-api-ws.kalshi.com/trade-api/ws/v2`,
   same RSA headers; channels `orderbook_delta` (snapshot + deltas, sizes),
   `ticker`, `trade` (public), `fill`, `market_positions` (private). The 95%

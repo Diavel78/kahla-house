@@ -17104,6 +17104,42 @@ def _hand_reset_tick(sb, client, now) -> dict:
     return st
 
 
+def _kalshi_probe_tick(sb) -> dict | None:
+    """THE KALSHI PROOF, FIRED FROM A FLAG (Oct 18 2026, Rob: "I'll put money
+    in Kalshi if you can prove this thing works"). The sandbox cannot reach
+    Kalshi and Vercel must not trade, so the box runs it: set
+    `machine_flags kalshi_probe` to `{"place": true}` (optionally `ticker`,
+    `contracts`, `off_c`, `cancel`) via /api/cellar/flag; the next handbets
+    tick runs `kalshi_venue.probe` ONCE — balance, orders read, one
+    post-only 1-lot 10¢ under the bid, verify, cancel, verify gone — stamps
+    `exec_probe_runs kind=kalshi_probe` and clears the flag BEFORE placing
+    anything, so a crash mid-run can never fire it twice. Read it back with
+    /api/bet-sheets/picks?stamps=kalshi_probe. `place:false` = reads only.
+    This is the ONLY Kalshi write surface until `hand_kalshi_enabled` exists."""
+    cfg = _machine_flag_val("kalshi_probe", None)
+    if not cfg:
+        return None
+    if not isinstance(cfg, dict):
+        cfg = {"place": bool(cfg)}
+    # clear FIRST (one shot), then run
+    try:
+        sb.table("machine_flags").upsert(
+            {"key": "kalshi_probe", "value": False,
+             "updated_at": datetime.now(timezone.utc).isoformat()}, on_conflict="key").execute()
+        _MFLAGS_CACHE["map"]["kalshi_probe"] = False
+    except Exception as e:
+        return {"gate": f"flag clear failed, not running: {e}"[:120]}
+    import kalshi_venue as _kv
+    out = _kv.probe(place=bool(cfg.get("place")), ticker=cfg.get("ticker") or None,
+                    contracts=int(cfg.get("contracts") or 1), off_c=int(cfg.get("off_c") or 10),
+                    cancel=cfg.get("cancel", True) is not False, log_fn=app.logger.info)
+    out["kind"] = "kalshi_probe"
+    out["cfg"] = cfg
+    _probe_log(out)
+    app.logger.info("kalshi_probe verdict=%s create=%s", out.get("verdict"), out.get("create"))
+    return {"verdict": out.get("verdict"), "schema": (out.get("create") or {}).get("schema")}
+
+
 def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
     """THE BOX LANE: claim every pending row in ONE update (oldest-first,
     ≤max_n) and run them serially, BEFORE the strip/chase maintenance —
@@ -17114,6 +17150,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
     if not _hand_orders_ensure(sb):
         stats["gate"] = "no_table"
         return stats
+    try:
+        stats["kalshi_probe"] = _kalshi_probe_tick(sb)      # one-shot, flag-driven, box IP
+    except Exception as e:
+        stats["kalshi_probe"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     try:
         rows = (sb.table("hand_orders").select("*").eq("state", "pending")
                 .order("created_at").limit(max_n).execute().data or [])

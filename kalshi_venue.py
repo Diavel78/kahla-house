@@ -500,3 +500,324 @@ def resolve(sport: str, away: str, home: str, start_iso: str | None, item: dict)
                                 "expected_expiration_time", "status") if k in m}
     found["tried"] = tried
     return found
+
+
+# ───────────────────────── authed (I/O, the write path) ─────────────────────────
+# The trading API signs ts + METHOD + path (the path INCLUDING /trade-api/v2,
+# never the query string) with RSA-PSS-SHA256 — the same scheme
+# app._kalshi_sign/_kalshi_authed_get have used for the portfolio reads
+# since July 2026. Creds come from app._kalshi_creds (env, else the box's
+# kalshi_state row). EVERY write is behind the caller's flag — this module
+# never decides to place anything; it places what it is told.
+
+def _creds():
+    try:
+        import app as _app  # noqa: WPS433 — the site module owns the creds
+        kid, pem, kid_src, pem_src = _app._kalshi_creds()
+        return kid, pem, f"{kid_src}/{pem_src}"
+    except Exception as e:  # noqa: BLE001
+        return None, None, f"creds unavailable: {type(e).__name__}"
+
+
+def _sign(pem: str, msg: str) -> str:
+    import base64
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    key = serialization.load_pem_private_key(pem.replace("\\n", "\n").encode(), password=None)
+    sig = key.sign(msg.encode(),
+                   padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+                   hashes.SHA256())
+    return base64.b64encode(sig).decode()
+
+
+def signed_request(method: str, path: str, body: dict | None = None, params: dict | None = None,
+                   timeout: float = 12.0) -> dict:
+    """One signed call. Returns {ok, status, data|error, base, body_sent}.
+    401/403 short-circuit (the key is the problem, not the host); a 4xx
+    with a JSON error body is returned as data too so the caller can read
+    Kalshi's own reason (insufficient_balance, invalid field…)."""
+    from urllib.parse import urlparse
+    kid, pem, src = _creds()
+    if not (kid and pem):
+        return {"ok": False, "configured": False, "error": f"no creds ({src})"}
+    method = method.upper()
+    last = None
+    for base in BASES:
+        ts = str(int(time.time() * 1000))
+        try:
+            sig = _sign(pem, ts + method + urlparse(base).path + path)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "configured": True, "error": f"key load/sign: {type(e).__name__}: {str(e)[:120]}"}
+        headers = {**_HDRS, "Content-Type": "application/json", "KALSHI-ACCESS-KEY": kid,
+                   "KALSHI-ACCESS-TIMESTAMP": ts, "KALSHI-ACCESS-SIGNATURE": sig}
+        try:
+            r = _http.request(method, base + path, params=params or {}, json=body if body is not None else None,
+                              headers=headers, timeout=timeout)
+            try:
+                data = r.json() if (r.text or "").strip() else {}
+            except ValueError:
+                data = {"raw": (r.text or "")[:300]}
+            out = {"ok": 200 <= r.status_code < 300, "configured": True, "status": r.status_code,
+                   "data": data, "base": base, "creds": src}
+            if body is not None:
+                out["body_sent"] = body
+            if out["ok"] or r.status_code in (400, 401, 403, 404, 409, 422):
+                if not out["ok"]:
+                    out["error"] = f"HTTP {r.status_code}: {str(data)[:300]}"
+                return out
+            last = f"HTTP {r.status_code} @ {base}: {(r.text or '')[:160]}"
+        except Exception as e:  # noqa: BLE001
+            last = f"{type(e).__name__} @ {base}: {str(e)[:120]}"
+    return {"ok": False, "configured": True, "error": last}
+
+
+def balance() -> dict:
+    return signed_request("GET", "/portfolio/balance")
+
+
+def balance_c(res: dict | None = None):
+    """Cents, off either field shape the venue has used (`balance` int cents,
+    `balance_dollars` string)."""
+    res = res or balance()
+    d = (res or {}).get("data") or {}
+    if d.get("balance_dollars") is not None:
+        try:
+            return round(float(d["balance_dollars"]) * 100.0, 2)
+        except (TypeError, ValueError):
+            return None
+    if d.get("balance") is not None:
+        try:
+            return float(d["balance"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def my_orders(ticker: str | None = None, status: str | None = "resting") -> dict:
+    p = {}
+    if ticker:
+        p["ticker"] = ticker
+    if status:
+        p["status"] = status
+    return signed_request("GET", "/portfolio/orders", params=p)
+
+
+def my_positions(ticker: str | None = None) -> dict:
+    return signed_request("GET", "/portfolio/positions", params={"ticker": ticker} if ticker else {})
+
+
+def my_fills(ticker: str | None = None) -> dict:
+    return signed_request("GET", "/portfolio/fills", params={"ticker": ticker} if ticker else {})
+
+
+def get_order(order_id: str) -> dict:
+    return signed_request("GET", f"/portfolio/orders/{order_id}")
+
+
+def cancel_order(order_id: str) -> dict:
+    return signed_request("DELETE", f"/portfolio/orders/{order_id}")
+
+
+# THE CREATE SCHEMA IS UNSETTLED ACROSS SOURCES (Oct 18 2026): the current
+# docs show dollar-string prices + `time_in_force`; the legacy body carries
+# integer cents + `expiration_ts`; community reports say the integer body
+# 400s now. `order_bodies` builds every shape we know, newest first;
+# `create_order` sends them in turn and stops at the first answer that is
+# not a schema rejection (a 400 naming a field). The probe records WHICH
+# shape the venue took — that result is the schema from then on
+# (`CREATE_SCHEMA` pins it once known).
+CREATE_SCHEMA: str | None = None
+
+
+def order_bodies(ticker: str, buy_yes: bool, price_c, count: int, tif: str = "good_till_canceled",
+                 post_only: bool = True, client_order_id: str | None = None,
+                 expiration_time: str | None = None, action: str = "buy") -> list[tuple[str, dict]]:
+    import uuid
+    cid = client_order_id or f"kh-{uuid.uuid4().hex[:20]}"
+    side = "yes" if buy_yes else "no"
+    pc = int(round(float(price_c)))
+    pc = max(1, min(99, pc))
+    dollars = f"{pc / 100.0:.4f}"
+    v2 = {"ticker": ticker, "client_order_id": cid, "action": action, "side": side, "type": "limit",
+          "count_fp": f"{int(count)}.00", "time_in_force": tif, "post_only": bool(post_only),
+          ("yes_price_dollars" if buy_yes else "no_price_dollars"): dollars}
+    if expiration_time and tif == "good_till_canceled":
+        v2["expiration_time"] = expiration_time
+    v2b = dict(v2)
+    v2b.pop("count_fp")
+    v2b["count"] = int(count)
+    legacy = {"ticker": ticker, "client_order_id": cid, "action": action, "side": side, "type": "limit",
+              "count": int(count), "post_only": bool(post_only),
+              ("yes_price" if buy_yes else "no_price"): pc}
+    if tif == "immediate_or_cancel":
+        legacy["time_in_force"] = tif
+    elif expiration_time:
+        try:
+            legacy["expiration_ts"] = int(datetime.fromisoformat(expiration_time.replace("Z", "+00:00")).timestamp())
+        except Exception:  # noqa: BLE001
+            pass
+    return [("v2_dollars_fp", v2), ("v2_dollars_count", v2b), ("legacy_cents", legacy)]
+
+
+_SCHEMA_REJECT = re.compile(r"unknown|unrecogni|invalid (?:field|param|request|body)|required|missing|"
+                            r"deprecated|count_fp|price_dollars|yes_price|expiration|time_in_force|schema|parse",
+                            re.I)
+
+
+def create_order(ticker: str, buy_yes: bool, price_c, count: int, tif: str = "good_till_canceled",
+                 post_only: bool = True, client_order_id: str | None = None,
+                 expiration_time: str | None = None, action: str = "buy") -> dict:
+    """Place ONE order. post-only GTC by default (a resting hand bet);
+    tif='immediate_or_cancel' + post_only=False is the take. Returns the
+    venue's answer plus `schema` (which body shape it accepted) and
+    `order` (the order object when created) / `order_id`."""
+    global CREATE_SCHEMA
+    bodies = order_bodies(ticker, buy_yes, price_c, count, tif, post_only, client_order_id, expiration_time, action)
+    if CREATE_SCHEMA:
+        bodies.sort(key=lambda b: 0 if b[0] == CREATE_SCHEMA else 1)
+    attempts = []
+    for name, body in bodies:
+        res = signed_request("POST", "/portfolio/orders", body=body)
+        res["schema"] = name
+        attempts.append({"schema": name, "status": res.get("status"), "error": res.get("error")})
+        d = res.get("data") or {}
+        if res.get("ok"):
+            o = d.get("order") or d
+            res["order"] = o
+            res["order_id"] = o.get("order_id") or o.get("id")
+            res["order_status"] = o.get("status")
+            CREATE_SCHEMA = name
+            break
+        msg = str(d)[:400]
+        if res.get("status") == 400 and _SCHEMA_REJECT.search(msg):
+            continue                         # the venue rejected the SHAPE — try the next one
+        break                                # a real answer (insufficient funds, 401, 403, 404…)
+    res["attempts"] = attempts
+    return res
+
+
+def order_resting(order_id: str, ticker: str | None = None) -> dict:
+    """Is this order on the book right now? Reads the orders list (the
+    truthful read, never the create's echo). {ok, resting, order, error}."""
+    res = my_orders(ticker=ticker, status="resting")
+    if not res.get("ok"):
+        return {"ok": False, "resting": None, "error": res.get("error")}
+    for o in ((res.get("data") or {}).get("orders") or []):
+        if (o.get("order_id") or o.get("id")) == order_id:
+            return {"ok": True, "resting": True, "order": o}
+    return {"ok": True, "resting": False}
+
+
+def _best_bid_c(m: dict, buy_yes: bool):
+    b = book_c(m)
+    v = b.get("yes_bid") if buy_yes else b.get("no_bid")
+    return v
+
+
+def probe(place: bool = False, ticker: str | None = None, contracts: int = 1, off_c: int = 10,
+          cancel: bool = True, log_fn=None) -> dict:
+    """THE PROOF (Rob, Oct 18 2026: "I'll put money in Kalshi if you can
+    prove this thing works"). Steps, each recorded: creds → balance →
+    resting orders read → pick a liquid market (or `ticker`) → book →
+    [place=True] ONE post-only buy for `contracts` at (our-side best bid −
+    off_c¢, floored at 1¢ — never near the touch, never a fill) → verify on
+    the orders list → cancel → verify gone. An EMPTY account proves scope
+    too: a key without trade permission answers 401/403 at the create; a
+    funded-enough key rests the order; a broke key answers 400
+    insufficient balance — all three are recorded as `verdict`."""
+    out: dict = {"kalshi_probe": True, "at": datetime.now(timezone.utc).isoformat(), "place": bool(place),
+                 "steps": []}
+
+    def step(name, **kw):
+        kw["step"] = name
+        out["steps"].append(kw)
+        if log_fn:
+            try:
+                log_fn(f"kalshi_probe {name}: {kw}")
+            except Exception:  # noqa: BLE001
+                pass
+
+    kid, pem, src = _creds()
+    out["creds"] = {"configured": bool(kid and pem), "src": src}
+    if not (kid and pem):
+        out["verdict"] = "no_creds"
+        return out
+    bal = balance()
+    out["balance"] = {"ok": bal.get("ok"), "status": bal.get("status"), "cents": balance_c(bal),
+                      "error": bal.get("error"), "base": bal.get("base")}
+    step("balance", **out["balance"])
+    if not bal.get("ok"):
+        out["verdict"] = "read_denied" if bal.get("status") in (401, 403) else "read_failed"
+        return out
+    mo = my_orders(status="resting")
+    out["resting_before"] = (len((mo.get("data") or {}).get("orders") or []) if mo.get("ok") else None)
+    step("orders_read", ok=mo.get("ok"), status=mo.get("status"), n=out["resting_before"], error=mo.get("error"))
+    # the market
+    m = None
+    if ticker:
+        res, err = _get(f"/markets/{ticker}")
+        m = (res or {}).get("market") if res else None
+        step("market", ticker=ticker, found=bool(m), error=err)
+    else:
+        for series in ("KXNHLGAME", "KXNBAGAME", "KXNCAAFGAME", "KXNFLGAME", "KXMLBGAME"):
+            res = markets(series)
+            cands = [x for x in (res.get("markets") or []) if book_c(x).get("yes_bid") and book_c(x).get("yes_ask")
+                     and 10 <= (book_c(x).get("yes_bid") or 0) <= 90]
+            cands.sort(key=lambda x: -(float(x.get("volume_fp") or x.get("volume") or 0)))
+            if cands:
+                m = cands[0]
+                step("market", series=series, ticker=m.get("ticker"), title=m.get("title"), book=book_c(m))
+                break
+        if m is None:
+            step("market", found=False)
+    if m is None:
+        out["verdict"] = "no_market"
+        return out
+    out["market"] = {"ticker": m.get("ticker"), "title": m.get("title"), "book": book_c(m),
+                     "close_time": m.get("close_time"), "status": m.get("status")}
+    if not place:
+        out["verdict"] = "read_only_ok"
+        return out
+    bid = _best_bid_c(m, True)
+    px = max(1, int(round((bid or 20) - off_c)))
+    out["order_plan"] = {"ticker": m.get("ticker"), "buy_yes": True, "price_c": px, "contracts": int(contracts),
+                         "post_only": True, "tif": "good_till_canceled", "touch_bid_c": bid}
+    cr = create_order(m.get("ticker"), True, px, int(contracts))
+    out["create"] = {"ok": cr.get("ok"), "status": cr.get("status"), "schema": cr.get("schema"),
+                     "order_id": cr.get("order_id"), "order_status": cr.get("order_status"),
+                     "error": cr.get("error"), "attempts": cr.get("attempts"),
+                     "data": (cr.get("data") if not cr.get("ok") else None), "body_sent": cr.get("body_sent")}
+    step("create", **{k: v for k, v in out["create"].items() if k not in ("data", "body_sent")})
+    if not cr.get("ok"):
+        st = cr.get("status")
+        msg = str(cr.get("data") or cr.get("error") or "").lower()
+        if st in (401, 403):
+            out["verdict"] = "write_denied"           # the key cannot trade
+        elif "balance" in msg or "insufficient" in msg or "funds" in msg:
+            out["verdict"] = "write_scope_ok_no_funds"  # it tried to place: trade scope proven, account empty
+        else:
+            out["verdict"] = "create_rejected"
+        return out
+    oid = cr.get("order_id")
+    time.sleep(1.0)
+    v = order_resting(oid, m.get("ticker")) if oid else {"ok": False, "resting": None, "error": "no order id"}
+    out["verify"] = v
+    step("verify", ok=v.get("ok"), resting=v.get("resting"), error=v.get("error"))
+    if not cancel:
+        out["verdict"] = "placed_left_resting"
+        return out
+    cx = cancel_order(oid) if oid else {"ok": False, "error": "no order id"}
+    out["cancel"] = {"ok": cx.get("ok"), "status": cx.get("status"), "error": cx.get("error"),
+                     "data": cx.get("data") if cx.get("ok") else (cx.get("data") or cx.get("error"))}
+    step("cancel", ok=cx.get("ok"), status=cx.get("status"), error=cx.get("error"))
+    time.sleep(1.0)
+    v2 = order_resting(oid, m.get("ticker")) if oid else {"ok": False, "resting": None}
+    out["verify_after_cancel"] = v2
+    step("verify_after_cancel", ok=v2.get("ok"), resting=v2.get("resting"), error=v2.get("error"))
+    if cr.get("ok") and v.get("resting") and cx.get("ok") and v2.get("resting") is False:
+        out["verdict"] = "write_ok"                   # rested, verified, cancelled, verified gone
+    elif cr.get("ok") and cx.get("ok"):
+        out["verdict"] = "write_ok_unverified"        # placed + cancelled, but a list read failed
+    else:
+        out["verdict"] = "cancel_failed" if not cx.get("ok") else "unverified"
+    return out

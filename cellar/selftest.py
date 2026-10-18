@@ -4267,6 +4267,21 @@ def test_kalshi_venue_math() -> None:
     assert kv.pick_event(rows, "Utah Utes", home, None)[0] == "E2"
     assert kv.pick_event(rows, "Ohio State Buckeyes", home, None) is None
     check("kalshi venue: fees, rest/take compare, classifier, rung rule", True)
+    # THE WRITE PATH (Oct 18 2026): every create body shape we know, newest
+    # first; our-side price lands on the side's own field; IOC carries no
+    # expiration; the shape probe stops on a non-schema answer.
+    bodies = kv.order_bodies("KXNHLGAME-X-UTA", True, 37, 1, expiration_time="2026-10-19T02:00:00Z")
+    assert [n for n, _ in bodies] == ["v2_dollars_fp", "v2_dollars_count", "legacy_cents"]
+    v2 = bodies[0][1]
+    assert v2["side"] == "yes" and v2["action"] == "buy" and v2["post_only"] is True
+    assert v2["yes_price_dollars"] == "0.3700" and v2["count_fp"] == "1.00"
+    assert v2["time_in_force"] == "good_till_canceled" and v2["expiration_time"] == "2026-10-19T02:00:00Z"
+    assert bodies[2][1]["yes_price"] == 37 and bodies[2][1]["count"] == 1 and "expiration_ts" in bodies[2][1]
+    no_ioc = kv.order_bodies("T", False, 37.4, 2, tif="immediate_or_cancel", post_only=False)[0][1]
+    assert no_ioc["side"] == "no" and no_ioc["no_price_dollars"] == "0.3700" and "yes_price_dollars" not in no_ioc
+    assert no_ioc["post_only"] is False and "expiration_time" not in no_ioc
+    assert kv.order_bodies("T", True, 0, 1)[0][1]["yes_price_dollars"] == "0.0100"   # floor 1¢
+    assert kv._SCHEMA_REJECT.search("unknown field count_fp") and not kv._SCHEMA_REJECT.search("insufficient balance")
 
 
 def main() -> int:
