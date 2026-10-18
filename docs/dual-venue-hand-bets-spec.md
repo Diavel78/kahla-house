@@ -223,9 +223,20 @@ grading off Kalshi settlement.
   side / entry_line as always). Dollars on the page = filled_qty × price,
   fees not netted (same as Polymarket).
 
-**Not built (say so, don't assume):** a venue switch while resting (the
-chase stays on the bet's venue — Rule 4's "re-peg may switch books" is
-open); the line-move sit-out / vanish drop on Kalshi (no Kalshi depth
+- **The venue switch** (`_hand_switch_to_poly` / `_hand_switch_to_kalshi`,
+  same morning — Rob: "If it repegs, the machine determines if we are
+  switching books… I shouldn't even know what you're doing"): every chase
+  tick an UNFILLED bet re-runs `compare_rest` against the other venue's
+  seat (the Polymarket twin rides the socket watch set; ≤4 Kalshi book
+  reads a tick for Polymarket bets); the destination must sit inside Rob's
+  leash; verified cancel on the old book, then the create on the new one;
+  a failed create re-places on the venue it left, and a second failure
+  reads OFF THE BOOK (red). A bet with any fill never switches (its lot
+  would split across venues). Stamp `exec_probe_runs hand_venue_switch`.
+  There is NO venue knob on the page — the chip says which book the bet is
+  on (POLY / KALSHI) and nothing else.
+
+**Not built (say so, don't assume):** the line-move sit-out / vanish drop on Kalshi (no Kalshi depth
 socket — `cellar/kalshifeed.py` is the next piece); adopting bets placed in
 the Kalshi app; sold-in-the-Kalshi-app detection; venue-truth grading off
 Kalshi settlement; re-rung on Kalshi; dashboard P&L from Kalshi fills.

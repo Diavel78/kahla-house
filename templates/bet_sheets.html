@@ -368,8 +368,6 @@
                 <div id="slipItems"></div>
                 <div class="slip-f">
                     <label>Contracts <input id="contracts" type="number" min="1" max="250" step="1" value="10" oninput="saveSlip();renderSlip()"></label>
-                    <label>Venue <select id="venueSel" onchange="saveSlip();renderSlip()" title="Where the bet rests: the box compares both venues' touch + fees and picks the cheaper seat, or you force one">
-                        <option value="auto">best venue</option><option value="poly">Polymarket</option><option value="kalshi">Kalshi</option></select></label>
                     <button class="btn" id="btnQuote" onclick="quoteSlip()">Quote</button>
                     <button class="btn go" id="btnPlace" onclick="placeSlip()">Place bets</button>
                     <button class="btn sm" onclick="clearSlip()">Clear</button>
@@ -581,15 +579,16 @@
     // (placed, cleared, removed) re-arms the pop-open.
     let _slipUserHid = false;
     function autoOpenSlip() { if (!_slipUserHid) toggleSlip(true); }
-    try { const s = JSON.parse(localStorage.getItem(SLIP_KEY) || '{}'); _slip = s.items || []; if (s.contracts) document.getElementById('contracts').value = s.contracts; if (s.venue) document.getElementById('venueSel').value = s.venue; } catch (e) {}
+    try { const s = JSON.parse(localStorage.getItem(SLIP_KEY) || '{}'); _slip = s.items || []; if (s.contracts) document.getElementById('contracts').value = s.contracts; } catch (e) {}
     function saveSlip() {
         try { localStorage.setItem(SLIP_KEY, JSON.stringify({ items: _slip.map(i => ({ ...i, q: (i.q && i.q.queued) ? i.q : undefined })), contracts: document.getElementById('contracts').value, venue: venueSel() })); } catch (e) {}
     }
     // THE VENUE (Oct 18 2026): auto = the box quotes both venues, adds each
     // one's maker fee and rests on the cheaper seat (Polymarket is home;
     // Kalshi has to win by half a cent); poly / kalshi force it.
-    function venueSel() { const v = (document.getElementById('venueSel') || {}).value; return (v === 'poly' || v === 'kalshi') ? v : 'auto'; }
-    function venueTag(b) { return (b && b.venue === 'KALSHI') ? '<span class="tag kal">KALSHI</span>' : ''; }
+    function venueSel() { return 'auto'; }           // no knob — the machine picks the venue (Rob, Oct 18 2026)
+    function venueName(b) { return (b && b.venue === 'KALSHI') ? 'Kalshi' : 'Poly'; }
+    function venueTag(b) { return (b && b.venue === 'KALSHI') ? '<span class="tag kal">KALSHI</span>' : '<span class="tag gry">POLY</span>'; }
     function toggleSlip(force) {
         _slipOpen = (force === undefined) ? !_slipOpen : !!force;
         if (force === undefined) _slipUserHid = !_slipOpen;   // a tap on the header is the user's choice
@@ -898,7 +897,7 @@
         if (b.line != null && line != null && Math.abs(Number(b.line) - Number(line)) > 0.01)
             s += ' · on ' + (b.market_type === 'total' ? Number(b.line) : sgn(Number(b.line), 1));
         if (b.app) s += ' · app';
-        if (b.venue === 'KALSHI') s += ' · Kalshi';
+        s += ' · ' + venueName(b);                   // the chip says WHICH BOOK the bet is on, always
         return s;
     }
     // ONE BUTTON PER MARKET, THE MODEL'S SIDE (Rob, Oct 11 2026: "just
@@ -948,7 +947,7 @@
         const cls = loud && st.cls === 'rest' ? 'warn' : st.cls;
         const fd = flip ? (loud ? ' · model now on ' + flip.label + ' — keep it or cancel' : ' · against the model (' + flip.label + ')') : '';
         return '<div class="xb st-' + cls + '" onclick="openSheet(\'' + String(b.id).replace(/[^\w-]/g, '') + '\')">'
-             + '<div class="xt"><span class="xl">' + esc(betLabel(b)) + '<span class="xs">' + esc(st.short) + (b.app ? ' · APP' : '') + (b.venue === 'KALSHI' ? ' · KALSHI' : '') + '</span>'
+             + '<div class="xt"><span class="xl">' + esc(betLabel(b)) + '<span class="xs">' + esc(st.short) + (b.app ? ' · APP' : '') + ' · ' + venueName(b).toUpperCase() + '</span>'
              + (loud ? '<span class="xf">MODEL FLIPPED</span>' : '') + '</span>'
              + '<span class="xd">' + esc(st.detail + fd) + (withGame ? ' · ' + esc(gameShort(b)) + ' · ' + fmtTime(b.event_start) + ' ' + clk(b.event_start) : '') + '</span></div>'
              + '<span class="go">›</span></div>';
