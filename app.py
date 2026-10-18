@@ -17377,7 +17377,7 @@ def _hand_reset_tick(sb, client, now) -> dict:
 # sold-in-the-Kalshi-app detection, re-rung on Kalshi.
 # ═══════════════════════════════════════════════════════════════════════
 HAND_KALSHI_ENABLED = False           # code default; machine_flags hand_kalshi_enabled flips it
-_HAND_VENUE_MIN_GAIN_C = 0.5           # Kalshi must beat Polymarket's all-in by this to win the seat
+_HAND_VENUE_MIN_GAIN_C = 0.0           # THE CHEAPER VENUE WINS, FULL STOP (Rob, Oct 18 2026: "I said I wanted the cheaper one" — the 0.5¢ floor was never his; a tie stays put, the 30s persistence rule handles the noise)
 KALSHI_TAPE: dict = {}                 # ticker → deque of tape rows (REST-sampled each handbets tick)
 _KALSHI_TAPE_MAX = 900
 _KALSHI_BOOK_CACHE: dict = {}          # ticker → (mono_ts, book, raw)
