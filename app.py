@@ -4384,6 +4384,15 @@ def api_bet_sheets_picks():
                                     "side": r.get("side"), "line": r.get("entry_line"),
                                     **{k: (r.get("signal_blob") or {}).get(k) for k in keys
                                        if (r.get("signal_blob") or {}).get(k) is not None}} for r in rows]
+            try:
+                import kalshi_venue as _kv
+                ro = _kv.resting_orders()
+                out["kalshi_orders_live"] = ([{"id": k, "ticker": o.get("ticker"), "yes_c": o.get("yes_c"),
+                                               "remaining": o.get("remaining"), "filled": o.get("filled"),
+                                               "status": o.get("status")} for k, o in (ro.get("by_id") or {}).items()]
+                                             if ro.get("ok") else {"error": ro.get("error")})
+            except Exception as e:
+                out["kalshi_orders_live"] = {"error": str(e)[:160]}
         except Exception as e:
             out["kalshi_err"] = str(e)[:160]
     if request.args.get("settled_audit"):
@@ -17659,17 +17668,27 @@ def _kalshi_amend_pick(blob: dict, target_c: float, o: dict | None = None):
     if not am.get("ok"):
         return "error", koid, {"error": am.get("error"), "status": am.get("status")}
     try:
-        vr = _kv.order_resting(new_id, ticker)
-        if vr.get("resting") is None:
-            return "unverified", new_id, {"error": vr.get("error")}
-        if not vr.get("resting"):
-            if new_id != koid:
-                vr2 = _kv.order_resting(koid, ticker)
-                if vr2.get("resting"):
-                    return "amended", koid, {"note": "same id"}
-            return "gone", new_id, {}
-        po = _kv.parse_order(vr.get("order") or {})
-        got = _kv.our_c(po.get("yes_c"), by)
+        # THE ORDERS LIST LAGS THE AMEND BY A BEAT (Oct 18 2026, first live
+        # chase: 200 on the amend, the list still showing the old price a
+        # moment later → 'unverified' on five of seven moves). Re-read up to
+        # 4× over ~2s; the verdict is the LAST read, never the first.
+        got = None
+        vr = {}
+        for _i in range(4):
+            vr = _kv.order_resting(new_id, ticker)
+            if vr.get("resting") is None:
+                return "unverified", new_id, {"error": vr.get("error")}
+            if not vr.get("resting"):
+                if new_id != koid:
+                    vr2 = _kv.order_resting(koid, ticker)
+                    if vr2.get("resting"):
+                        return "amended", koid, {"note": "same id"}
+                return "gone", new_id, {}
+            po = _kv.parse_order(vr.get("order") or {})
+            got = _kv.our_c(po.get("yes_c"), by)
+            if got is None or abs(float(got) - float(target_c)) <= 0.01:
+                break
+            _time.sleep(0.5)
         if got is not None and abs(float(got) - float(target_c)) > 0.01:
             return "unverified", new_id, {"resting_at": got, "wanted": target_c}
         return "amended", new_id, {"total": total}
@@ -17791,6 +17810,7 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
         nb.pop("thin_hold", None)
     if v == "amended":
         st["moved"] += 1
+        nb.pop("chase_err", None)
         nb.update({"price_c": target, "chase_from_c": price_c, "chase_at": now.isoformat(),
                    "chase_moves": int(blob.get("chase_moves") or 0) + 1, "amended": True,
                    "contracts": det.get("total") or blob.get("contracts"),
