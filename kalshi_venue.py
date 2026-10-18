@@ -1139,23 +1139,62 @@ def _ws_price_c(msg: dict, dollars_key: str, cents_key: str):
     return None if v is None else round(float(v), 2)
 
 
+_WS_SNAP_KEYS = (("{s}_dollars_fp", True), ("{s}_dollars", True), ("{s}_fp", False), ("{s}", False))
+
+
 def ws_snapshot(msg: dict) -> dict:
-    """An `orderbook_snapshot` body → {"yes": {price_c: qty}, "no": {…}}."""
-    state = {"yes": {}, "no": {}}
+    """An `orderbook_snapshot` body → {"yes": {price_c: qty}, "no": {…},
+    "keys": [...]}. THE WIRE IS `yes_dollars_fp` / `no_dollars_fp` (Oct 18
+    2026, read off docs.kalshi.com/websockets/orderbook-updates.md: arrays
+    of ["0.5300", "901189.00"], the key ABSENT when a side has no offers;
+    `price_dollars` + `delta_fp` on the deltas). Until this fix the parser
+    looked for `yes_dollars` / `yes`, found neither, built every book from
+    an EMPTY base and let the deltas since subscribe pose as the ladder —
+    the ARI +13.5 socket book read 51×4,500 / 50×100 against a venue
+    showing 53×901k / 52×731k. `keys` names the body's level keys so a
+    renamed wire shows up as an empty book WITH unknown keys, never a quiet
+    zero again."""
+    state = {"yes": {}, "no": {}, "keys": sorted(k for k in msg.keys()
+                                                  if k not in ("market_ticker", "market_id"))}
     for side in ("yes", "no"):
-        rows = msg.get(f"{side}_dollars")
-        dollars = rows is not None
-        if rows is None:
-            rows = msg.get(side) or []
+        rows, dollars = None, False
+        for pat, dol in _WS_SNAP_KEYS:
+            k = pat.format(s=side)
+            if msg.get(k) is not None:
+                rows, dollars = msg.get(k), dol
+                break
         for r in rows or []:
             try:
-                c = round(float(r[0]) * (100.0 if dollars else 1.0), 2)
-                q = float(r[1])
-            except (TypeError, ValueError, IndexError):
+                if isinstance(r, dict):
+                    pv = r.get("price_dollars", r.get("price"))
+                    qv = r.get("count_fp", r.get("quantity_fp", r.get("count", r.get("quantity"))))
+                    dol = "price_dollars" in r or dollars
+                else:
+                    pv, qv, dol = r[0], r[1], dollars
+                pf = float(pv)
+                if not dol and pf <= 1.0 and isinstance(pv, str) and "." in pv:
+                    dol = True                       # a "0.53" where cents were expected
+                c = round(pf * (100.0 if dol else 1.0), 2)
+                q = float(qv)
+            except (TypeError, ValueError, IndexError, KeyError):
                 continue
             if 0 < c < 100 and q > 0:
                 state[side][c] = q
     return state
+
+
+def ws_snapshot_suspect(msg: dict, state: dict) -> bool:
+    """Pure. A snapshot that parsed to NOTHING while its body carried level
+    data under keys we did not read — the renamed-wire tripwire."""
+    if (state.get("yes") or state.get("no")):
+        return False
+    known = {pat.format(s=s) for pat, _ in _WS_SNAP_KEYS for s in ("yes", "no")}
+    for k, v in (msg or {}).items():
+        if k in ("market_ticker", "market_id") or k in known:
+            continue
+        if isinstance(v, (list, dict)) and v:
+            return True
+    return False
 
 
 def ws_delta(state: dict, msg: dict) -> dict:
@@ -1164,6 +1203,8 @@ def ws_delta(state: dict, msg: dict) -> dict:
     if side not in ("yes", "no"):
         return state
     c = _ws_price_c(msg, "price_dollars", "price")
+    if c is None:
+        c = _ws_price_c(msg, "price_dollars_fp", "price_fp")
     d = _num(msg.get("delta_fp")) if msg.get("delta_fp") is not None else _num(msg.get("delta"))
     if c is None or d is None:
         return state
@@ -1181,6 +1222,18 @@ def ws_to_ob(state: dict) -> dict:
     yes = sorted(((c, q) for c, q in (state.get("yes") or {}).items() if q > 0), key=lambda x: -x[0])
     no = sorted(((c, q) for c, q in (state.get("no") or {}).items() if q > 0), key=lambda x: -x[0])
     return {"ok": True, "yes": yes, "no": no, "error": None}
+
+
+def ws_seq_ok(last: dict, sid, seq) -> bool:
+    """Pure. Track `seq` per `sid`; False on a gap (the venue says: check it
+    to guarantee you received every message — a gap means resync)."""
+    try:
+        sid_i, seq_i = int(sid), int(seq)
+    except (TypeError, ValueError):
+        return True
+    prev = last.get(sid_i)
+    last[sid_i] = seq_i
+    return prev is None or seq_i == prev + 1
 
 
 def ws_auth_headers() -> list | None:

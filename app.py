@@ -17821,14 +17821,12 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
     price_c = _kv.our_c(o.get("yes_c"), by)
     if price_c is None:
         return
-    # THE CHASE PRICES OFF THE VENUE (Oct 18 2026): one REST read per Kalshi
-    # bet a tick (≤6), the socket copy only when the budget is spent.
-    book = None
-    if kctx.get("kbooks_chase", 0) < 6:
-        kctx["kbooks_chase"] = kctx.get("kbooks_chase", 0) + 1
-        book, _ = _kalshi_hand_book(ticker, fresh=True)
-    if book is None:
-        book, _ = _kalshi_hand_book(ticker)
+    # THE CHASE READS THE SOCKET BOOK, like the Polymarket chase reads the
+    # quote table (Rob, Oct 18 2026: "you can't do shit over REST"). The
+    # REST sample is the fallback for a dark socket only. The book was
+    # wrong because the snapshot parser read the old wire keys — fixed in
+    # `kalshi_venue.ws_snapshot`, not by polling around it.
+    book, _ = _kalshi_hand_book(ticker)
     if book is None:
         st["no_quote"] += 1
         return
@@ -18189,8 +18187,8 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
     except (TypeError, ValueError):
         _d = _HAND_START_DROP_PCT_SPORT.get(_sp, drop)
     _d = max(drop, _d)
-    if now_ts >= start_ts - 1200.0:
-        _kalshi_hand_book(ticker, fresh=True)           # REST sample through the start window: the drop reads sizes, the socket copy has been wrong
+    if now_ts >= start_ts - 1200.0 and not _kalshi_ws_fresh(ticker):
+        _kalshi_hand_book(ticker, fresh=True)           # REST sample through the start window only while the socket is dark
     tape_src = "kalshi"
     verdict, base, cur, seen = _hand_start_plan(list(KALSHI_TAPE.get(ticker) or []), start_ts, now_ts, _d)
     twin = blob.get("pmm_twin_slug")

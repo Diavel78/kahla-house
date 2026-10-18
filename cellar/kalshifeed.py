@@ -51,6 +51,10 @@ class KalshiFeed:
         self.books: dict = {}            # ticker → {"yes": {c: q}, "no": {c: q}}
         self.subscribed: set = set()
         self._url_i = 0
+        self._seq: dict = {}             # sid → last seq seen (reset per connection)
+        self.seq_gaps = 0
+        self.suspect = 0                 # snapshots whose shape we could not read
+        self.snapshots = 0
 
     def start(self) -> bool:
         try:
@@ -91,7 +95,9 @@ class KalshiFeed:
             self.sb.table("exec_probe_runs").insert({
                 "params": {"kind": "kalshi_ws"},
                 "result": {"kalshi_ws": state, "state": state, "err": (err or "")[:300], "msgs": self.msgs,
-                           "reconnects": self.reconnects, "tickers": sorted(self.subscribed)[:40]},
+                           "reconnects": self.reconnects, "snapshots": self.snapshots,
+                           "seq_gaps": self.seq_gaps, "shape_unknown": self.suspect,
+                           "tickers": sorted(self.subscribed)[:40]},
             }).execute()
         except Exception:
             pass
@@ -105,6 +111,9 @@ class KalshiFeed:
                 p["rx"] = time.time()
             p["tickers"] = set(self.subscribed)
             p["msgs"] = self.msgs
+            p["snapshots"] = self.snapshots
+            p["seq_gaps"] = self.seq_gaps
+            p["shape_unknown"] = self.suspect
         except Exception:
             pass
 
@@ -142,10 +151,28 @@ class KalshiFeed:
         import kalshi_venue as kv
         t = msg.get("type")
         body = msg.get("msg") if isinstance(msg.get("msg"), dict) else {}
+        if t in ("orderbook_snapshot", "orderbook_delta"):
+            # THE SEQUENCE IS THE CONTRACT: a gap means a frame was lost and
+            # the local book is no longer the venue's — resync (reconnect =
+            # fresh snapshots). The venue's own doc says to check it.
+            if not kv.ws_seq_ok(self._seq, msg.get("sid"), msg.get("seq")):
+                self.seq_gaps += 1
+                raise ConnectionError(f"seq gap sid={msg.get('sid')} seq={msg.get('seq')}")
         if t == "orderbook_snapshot":
             tk = body.get("market_ticker")
             if tk:
-                self.books[tk] = kv.ws_snapshot(body)
+                st = kv.ws_snapshot(body)
+                self.books[tk] = st
+                if kv.ws_snapshot_suspect(body, st):
+                    # a renamed wire: the body carries levels we did not read.
+                    # Never a quiet empty book again (Oct 18 2026 — `yes_dollars_fp`).
+                    self.suspect += 1
+                    if self.suspect <= 3:
+                        log.error("kalshi ws SNAPSHOT SHAPE UNKNOWN %s keys=%s", tk, st.get("keys"))
+                        self._stamp("snapshot_shape_unknown", f"{tk} keys={st.get('keys')}")
+                    self.books.pop(tk, None)         # no book is better than a wrong one
+                    return
+                self.snapshots += 1
                 self._record(tk)
         elif t == "orderbook_delta":
             tk = body.get("market_ticker")
@@ -182,6 +209,7 @@ class KalshiFeed:
                 ws = self._connect(want)
                 self.subscribed = set(want)
                 self.books = {}
+                self._seq = {}
                 self.reconnects += 1
                 backoff_i = 0
                 if not self._was_connected:

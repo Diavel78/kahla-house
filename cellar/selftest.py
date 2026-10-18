@@ -4301,6 +4301,21 @@ def test_kalshi_ws_book() -> None:
     kv.ws_delta(st2, {"side": "maybe", "price": 1, "delta": 1})
     kv.ws_delta(st2, {"side": "yes", "delta": 1})
     assert kv.ws_to_ob(st2)["yes"] == [(62.0, 200.0)]
+    # THE LIVE WIRE (docs.kalshi.com/websockets/orderbook-updates.md, Oct 18
+    # 2026): `yes_dollars_fp` / `no_dollars_fp`, keys absent when a side is
+    # empty. The old parser read neither → an empty book + deltas posing as
+    # the ladder (the ARI +13.5 bid parked under a 901k touch).
+    st3 = kv.ws_snapshot({"market_ticker": "KXNFLSPREAD-26OCT18ARILAR-LAR14", "market_id": "",
+                          "yes_dollars_fp": [["0.4600", "1000.00"], ["0.4500", "20.00"]],
+                          "no_dollars_fp": [["0.5300", "901189.00"], ["0.5200", "731664.00"]]})
+    bk3 = kv.poly_book(kv.ws_to_ob(st3))
+    assert bk3["best_bid"] == 46.0 and bk3["best_ask"] == 47.0 and bk3["asks"][0] == (47.0, 901189.0), bk3
+    assert not kv.ws_snapshot_suspect({"market_ticker": "T", "market_id": ""}, kv.ws_snapshot({"market_ticker": "T", "market_id": ""}))
+    assert kv.ws_snapshot_suspect({"market_ticker": "T", "yes_levels": [[1, 2]]}, kv.ws_snapshot({"market_ticker": "T", "yes_levels": [[1, 2]]}))
+    one_side = kv.ws_snapshot({"market_ticker": "T", "no_dollars_fp": [["0.5300", "5.00"]]})
+    assert one_side["yes"] == {} and one_side["no"] == {53.0: 5.0}
+    seqs = {}
+    assert kv.ws_seq_ok(seqs, 2, 1) and kv.ws_seq_ok(seqs, 2, 2) and kv.ws_seq_ok(seqs, 3, 1) and not kv.ws_seq_ok(seqs, 2, 4)
     check("kalshi ws book: snapshot + deltas → order book", True)
 
 
