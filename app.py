@@ -4113,6 +4113,21 @@ def api_bet_sheets_fill_audit():
                       "drop_pct": res0.get("drop_pct"), "after_start_s": res0.get("after_start_s"),
                       "sat_out": bool(res0.get("sat_out"))})
     out["missed"] = msum
+    # ---- the sheet's own record over the window (graded picks, plays+leans)
+    try:
+        srows = _sb_paged(lambda: sb.table("football_sheets").select("sport,event_start,data_blob")
+                          .gte("event_start", since.isoformat()).lte("event_start", now.isoformat()),
+                          max_pages=10) or []
+        srec: dict = {}
+        for r in srows:
+            gd = (r.get("data_blob") or {}).get("grade") or {}
+            b0 = srec.setdefault(str(r.get("sport") or "").upper(), {"win": 0, "loss": 0, "push": 0})
+            for k in ("ml", "spread", "total"):
+                if gd.get(k) in b0:
+                    b0[gd[k]] += 1
+        out["sheet_record"] = srec
+    except Exception as e:
+        out["sheet_record_err"] = str(e)[:160]
     if request.args.get("rows"):
         out["filled_rows"] = frows
         out["missed_rows"] = mrows
