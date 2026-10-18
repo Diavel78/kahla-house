@@ -4240,6 +4240,13 @@ def test_kalshi_hand_lane() -> None:
     assert _app._hand_venue_pick("kalshi", poly, {"ok": False}, 10, 0.5)[0] is None
     assert _app._hand_venue_pick("kalshi", poly, kal, 10, 0.5)[0] == "KALSHI"
     assert _app._hand_venue_pick("auto", None, None, 10, 0.5)[0] is None
+    # different rungs are never compared by price: the sheet's exact line wins, else Polymarket
+    v, d = _app._hand_venue_pick("auto", {"ok": True, "price_c": 52.5, "rung_line": 38.5, "rung_why": "favorable"},
+                                 {**kal, "price_c": 59.0, "rung_line": 36.5, "rung_why": "favorable"}, 10, 0.5)
+    assert v == "POLYMARKET" and d["why"] == "line_differs", d
+    v, d = _app._hand_venue_pick("auto", {"ok": True, "price_c": 52.5, "rung_line": 38.5, "rung_why": "favorable"},
+                                 {**kal, "price_c": 59.0, "rung_line": 39.5, "rung_why": "exact"}, 10, 0.5)
+    assert v == "KALSHI" and d["why"] == "line_differs_kalshi_exact", d
     # a Kalshi pick is invisible to every Polymarket path: no slug, no order id
     assert _app._kalshi_pick({"venue": "KALSHI"}) and not _app._kalshi_pick({"venue": "POLYMARKET"}) and not _app._kalshi_pick({})
     check("kalshi hand lane: book shape, orders/positions, venue pick", True)

@@ -17355,6 +17355,27 @@ def _hand_venue_pick(want, poly_rs, k_rs, qty, min_gain_c=None):
         return ("KALSHI" if k_ok else None), {"why": "forced_kalshi", "poly_ok": p_ok, "kalshi_ok": k_ok}
     if min_gain_c is None:
         min_gain_c = _HAND_VENUE_MIN_GAIN_C
+    if p_ok and k_ok:
+        # DIFFERENT RUNGS ARE NOT COMPARABLE BY PRICE (Oct 18 2026, CAR@PHI
+        # O 39: Kalshi's nearest favorable rung was 36.5 at 59¢, Polymarket's
+        # 38.5 at 52.5¢ — a better line costs more, the all-in compare would
+        # have read it as "Polymarket cheaper"). When the venues landed on
+        # different lines the one on the SHEET's exact line wins; neither
+        # exact → Polymarket, the home venue.
+        pl, kl = poly_rs.get("rung_line"), k_rs.get("rung_line")
+        try:
+            differ = pl is not None and kl is not None and abs(float(pl) - float(kl)) > 0.01
+        except (TypeError, ValueError):
+            differ = False
+        if differ:
+            if poly_rs.get("rung_why") == "exact":
+                return "POLYMARKET", {"why": "line_differs_poly_exact", "poly_line": pl, "kalshi_line": kl,
+                                      "poly_ok": True, "kalshi_ok": True}
+            if k_rs.get("rung_why") == "exact":
+                return "KALSHI", {"why": "line_differs_kalshi_exact", "poly_line": pl, "kalshi_line": kl,
+                                  "poly_ok": True, "kalshi_ok": True}
+            return "POLYMARKET", {"why": "line_differs", "poly_line": pl, "kalshi_line": kl,
+                                  "poly_ok": True, "kalshi_ok": True}
     v, det = _kv.compare_rest(poly_rs.get("price_c") if p_ok else None,
                               k_rs.get("price_c") if k_ok else None,
                               int(qty or 1), (k_rs or {}).get("fee") if k_ok else None,
