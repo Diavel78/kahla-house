@@ -4379,7 +4379,7 @@ def api_bet_sheets_picks():
                     .eq("signal_blob->>venue", "KALSHI").limit(100).execute().data or [])
             keys = ("kalshi_ticker", "kalshi_buy_yes", "kalshi_order_id", "price_c", "anchor_c", "contracts",
                     "chase_err", "switch_err", "venue_switches", "chase_hold", "thin_hold", "line_hold",
-                    "kalshi_fee", "pmm_twin_slug", "switched_at", "filled_qty", "chase_moves")
+                    "kalshi_fee", "pmm_twin_slug", "switched_at", "filled_qty", "chase_moves", "kalshi_cancel_sent", "switch_refused")
             out["kalshi_picks"] = [{"id": r["id"], "game": r.get("event_name"), "mt": r.get("market_type"),
                                     "side": r.get("side"), "line": r.get("entry_line"),
                                     **{k: (r.get("signal_blob") or {}).get(k) for k in keys
