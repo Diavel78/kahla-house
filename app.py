@@ -4370,6 +4370,22 @@ def api_bet_sheets_picks():
                                                else (pl.get("rows") or [])) if isinstance(x, dict)})}
         except Exception as e:
             out["strip_err"] = str(e)[:160]
+    if request.args.get("kalshi"):
+        # Every pending Kalshi-resting sheet pick with the fields that say
+        # where it sits and what the last chase/switch did to it.
+        try:
+            rows = (sb.table("bot_picks").select("id,event_name,market_type,side,entry_line,event_start,signal_blob")
+                    .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                    .eq("signal_blob->>venue", "KALSHI").limit(100).execute().data or [])
+            keys = ("kalshi_ticker", "kalshi_buy_yes", "kalshi_order_id", "price_c", "anchor_c", "contracts",
+                    "chase_err", "switch_err", "venue_switches", "chase_hold", "thin_hold", "line_hold",
+                    "kalshi_fee", "pmm_twin_slug", "switched_at", "filled_qty", "chase_moves")
+            out["kalshi_picks"] = [{"id": r["id"], "game": r.get("event_name"), "mt": r.get("market_type"),
+                                    "side": r.get("side"), "line": r.get("entry_line"),
+                                    **{k: (r.get("signal_blob") or {}).get(k) for k in keys
+                                       if (r.get("signal_blob") or {}).get(k) is not None}} for r in rows]
+        except Exception as e:
+            out["kalshi_err"] = str(e)[:160]
     if request.args.get("settled_audit"):
         # THE SETTLED-TODAY TILE vs THE VENUE (Oct 17 2026, Rob: "settled
         # today, for sure wrong"): every settled sheet pick on today's AZ
