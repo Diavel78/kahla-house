@@ -4354,6 +4354,62 @@ def api_bet_sheets_picks():
                               and (not slug or slug in str((x.get("result") or {}).get("slug") or ""))][:60]
         out["scanned"] = len(st)
     sb = get_supabase()
+    rs_id = (request.args.get("reseat") or "").strip()
+    if rs_id:
+        # RE-SEAT A BET THROUGH THE BOX (Oct 18 2026, the ARI +13.5 Rob wanted
+        # back after it left Kalshi): copy the game + owner off a sibling
+        # pick (`reseat=<pick_id>`, usually another bet on the same game) and
+        # enqueue a `create` row exactly as a slip Place does — the executor
+        # resolves the rung, prices both venues and rests it; nothing is
+        # placed from Vercel. mt/side/line/contracts name the bet.
+        try:
+            src = (sb.table("bot_picks").select("id,sport,event_name,event_start,asked_by,signal_blob")
+                   .eq("id", int(rs_id)).limit(1).execute().data or [])
+        except Exception as e:
+            src = []
+            out["reseat"] = {"ok": False, "why": f"source pick unreadable: {e}"[:160]}
+        if src:
+            r0 = src[0]
+            ev = str(r0.get("event_name") or "")
+            away, _, home = ev.partition(" @ ")
+            mt = (request.args.get("mt") or "").strip()
+            side = (request.args.get("side") or "").strip()
+            line = request.args.get("line")
+            try:
+                contracts = int(request.args.get("contracts") or (r0.get("signal_blob") or {}).get("contracts") or 5)
+            except (TypeError, ValueError):
+                contracts = 5
+            item = {"key": f"reseat-{rs_id}-{mt}-{side}-{line}", "sport": r0.get("sport"), "away": away.strip(),
+                    "home": home.strip(), "event_start": r0.get("event_start"), "market_type": mt, "side": side,
+                    "line": (float(line) if line not in (None, "") else None), "label": ev, "venue": "auto"}
+            bad = _bet_sheet_item_check(item)
+            cid = f"reseat-{rs_id}-{mt}-{side}-{str(line).replace('.', 'p')}"
+            if bad:
+                out["reseat"] = {"ok": False, "why": bad, "item": item}
+            else:
+                seen = _hand_orders_by_cid(sb, [cid]) or {}
+                if cid in seen:
+                    out["reseat"] = {"ok": True, "repeat": True, "queue_id": seen[cid][0], "state": seen[cid][1]}
+                else:
+                    row = {"op": "create", "slug": None, "synthetic": False, "price_c": None,
+                           "contracts": contracts, "event_start": r0.get("event_start"),
+                           "payload": {"item": item, "asked_by": r0.get("asked_by"), "contracts": contracts,
+                                       "cid": cid, "reseat_from": int(rs_id)}}
+                    try:
+                        qid = _hand_order_enqueue(sb, row)
+                        out["reseat"] = {"ok": True, "queue_id": qid, "item": item, "contracts": contracts,
+                                         "asked_by_src": int(rs_id)}
+                    except Exception as e:
+                        out["reseat"] = {"ok": False, "why": f"queue write failed: {e}"[:160]}
+        elif "reseat" not in out:
+            out["reseat"] = {"ok": False, "why": "source pick not found"}
+    qid = (request.args.get("qid") or "").strip()
+    if qid:
+        try:
+            out["queue_row"] = (sb.table("hand_orders").select("id,state,slug,price_c,contracts,pick_id,order_id,result,error,worker,created_at,claimed_at,done_at")
+                                .eq("id", int(qid)).limit(1).execute().data or [None])[0]
+        except Exception as e:
+            out["queue_row"] = {"error": str(e)[:160]}
     if request.args.get("ws"):
         # The strip publisher's last blob: Kalshi socket presence + the
         # venue read counts, without a Firebase token (site-curl).
@@ -15308,7 +15364,9 @@ def _hand_status_publish(sb, client) -> dict:
                                     "book_reads": k_reads.get("n", 0), "watch": len(k_watch),
                                     "ws_up": bool(KALSHI_WS.get("up")),
                                     "ws_rx_s": (round(_time.time() - float(KALSHI_WS.get("rx") or 0)) if KALSHI_WS.get("rx") else None),
-                                    "ws_msgs": KALSHI_WS.get("msgs")} if (k_tried or k_watch) else None)}}).execute()
+                                    "ws_msgs": KALSHI_WS.get("msgs"),
+                                    "ws_snapshots": KALSHI_WS.get("snapshots"), "ws_seq_gaps": KALSHI_WS.get("seq_gaps"),
+                                    "ws_shape_unknown": KALSHI_WS.get("shape_unknown")} if (k_tried or k_watch) else None)}}).execute()
     except Exception as e:
         return {"err": f"publish: {e}"[:120]}
     return {"n": len(out), "quoted": quoted}
