@@ -4370,6 +4370,26 @@ def api_bet_sheets_picks():
                                                else (pl.get("rows") or [])) if isinstance(x, dict)})}
         except Exception as e:
             out["strip_err"] = str(e)[:160]
+    if request.args.get("queue"):
+        # The last N slip rows: what each submit asked for and what the box did with it.
+        try:
+            qn = int(request.args.get("queue") or 20)
+            qrows = (sb.table("hand_orders").select("id,state,op,created_at,claimed_at,done_at,error,payload,result")
+                     .order("id", desc=True).limit(min(qn, 60)).execute().data or [])
+            def _q(x):
+                pl = x.get("payload") if isinstance(x.get("payload"), dict) else {}
+                it = pl.get("item") if isinstance(pl.get("item"), dict) else pl
+                rs = x.get("result") if isinstance(x.get("result"), dict) else {}
+                return {"id": x.get("id"), "state": x.get("state"), "op": x.get("op"), "at": x.get("created_at"),
+                        "done_at": x.get("done_at"), "error": x.get("error"),
+                        "label": it.get("label"), "game": it.get("event_name") or (f"{it.get('away')} @ {it.get('home')}" if it.get("away") else None),
+                        "mt": it.get("market_type"), "side": it.get("side"), "line": it.get("line"),
+                        "contracts": it.get("contracts"), "venue": rs.get("venue"), "price_c": rs.get("price_c"),
+                        "order_id": rs.get("order_id"), "pick_id": rs.get("pick_id"),
+                        "venue_pick": (pl.get("resolve") or {}).get("venue_pick") if isinstance(pl.get("resolve"), dict) else None}
+            out["queue"] = [_q(x) for x in qrows]
+        except Exception as e:
+            out["queue_err"] = str(e)[:160]
     if request.args.get("kalshi"):
         # Every pending Kalshi-resting sheet pick with the fields that say
         # where it sits and what the last chase/switch did to it.
