@@ -4329,11 +4329,11 @@ def test_kalshi_venue_math() -> None:
     MK = {"fee_type": "quadratic_with_maker_fees", "maker": True, "maker_ratio": 0.25, "mult": 1.0}
     NOMK = {"fee_type": "quadratic", "maker": False, "maker_ratio": 0.0, "mult": 1.0}
     # fees per contract at 50¢, off the venues' own schedules (Oct 18 2026):
-    # Poly take 0.0695 → 1.7375; Poly rest = a REBATE −0.3125 until Oct 19
-    # 1 PM ET, then 0 (Tier 1 gets none); Kalshi take 1.75, rest 0.4375 on a
-    # maker-fee series / 0 on plain quadratic / 0.875 on combo-maker-fee
+    # Poly take 0.0695 → 1.7375; Poly rest = 0 ALWAYS (Rob: ignore the dying
+    # rebate); Kalshi take 1.75, rest 0.4375 on a maker-fee series / 0 on
+    # plain quadratic / 0.875 on combo-maker-fee
     assert abs(kv.fee_per_contract_c("POLYMARKET", "take", 50) - 1.7375) < 1e-9
-    assert abs(kv.fee_per_contract_c("POLYMARKET", "rest", 50, at=BEFORE) + 0.3125) < 1e-9
+    assert kv.fee_per_contract_c("POLYMARKET", "rest", 50, at=BEFORE) == 0.0
     assert kv.fee_per_contract_c("POLYMARKET", "rest", 50, at=AFTER) == 0.0
     assert abs(kv.fee_per_contract_c("KALSHI", "take", 50) - 1.75) < 1e-9
     assert abs(kv.fee_per_contract_c("KALSHI", "rest", 50, MK) - 0.4375) < 1e-9
@@ -4342,18 +4342,17 @@ def test_kalshi_venue_math() -> None:
     assert abs(kv.fee_per_contract_c("KALSHI", "take", 50, {**MK, "mult": 0.5}) - 0.875) < 1e-9
     assert abs(kv.fee_per_contract_c("KALSHI", "rest", 50, None) - 0.4375) < 1e-9   # unreadable → charged
     assert abs(kv.fee_per_contract_c("KALSHI", "rest", 50, {"maker": False}) - 0.0) < 1e-9   # legacy dict shape
-    # Kalshi rounds the ORDER's fee up to the cent: 5 contracts × 0.4375 = 2.19 → 3¢; Poly's rebate rounds to the cent
+    # Kalshi rounds the ORDER's fee up to the cent: 5 contracts × 0.4375 = 2.19 → 3¢; Poly rests free
     assert kv.order_fee_c("KALSHI", "rest", 50, 5, MK) == 3.0
-    assert kv.order_fee_c("POLYMARKET", "rest", 50, 5, at=BEFORE) == -1.56
+    assert kv.order_fee_c("POLYMARKET", "rest", 50, 5, at=BEFORE) == 0.0
     assert kv.order_fee_c("POLYMARKET", "rest", 50, 5, at=AFTER) == 0.0
-    # rest: same touch both books → after the cutoff a fee-free Kalshi series ties (Poly keeps home),
-    # a maker-fee series loses; before the cutoff Poly's rebate wins both
+    # rest: same touch both books → a fee-free Kalshi series ties (Poly keeps home), a maker-fee series loses
     v, d = kv.compare_rest(50.0, 50.0, 10, NOMK, at=AFTER)
     assert v == "POLYMARKET", d
     v, d = kv.compare_rest(50.0, 50.0, 10, MK, at=AFTER)
     assert v == "POLYMARKET", d
     v, d = kv.compare_rest(50.0, 50.0, 10, NOMK, at=BEFORE)
-    assert v == "POLYMARKET" and d["all_in"]["POLYMARKET"] < 50.0, d
+    assert v == "POLYMARKET" and d["all_in"]["POLYMARKET"] == 50.0, d
     # a cent cheaper on Kalshi beats Poly even paying the maker fee (49 + 0.5 < 50)
     v, d = kv.compare_rest(50.0, 49.0, 10, MK, at=AFTER)
     assert v == "KALSHI", d

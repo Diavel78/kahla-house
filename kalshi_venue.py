@@ -62,11 +62,9 @@ _SPORT_TAGS = {"MLB": ("MLB",), "NBA": ("NBA",), "NHL": ("NHL",),
 # all the fees… since it's what determines the venue") ──────────────────
 # POLYMARKET US (docs.polymarket.us/fees, effective exchange-wide Oct 7 2026):
 #   taker  = 0.0695 × C × p(1−p)       (the code carried 0.05 — a stale number)
-#   maker  = a REBATE, −0.0125 × C × p(1−p), credited at the fill — makers
-#            are PAID, not charged. ⚠ From 1:00 PM ET Mon Oct 19 2026 the
-#            rebate goes to volume tiers: Tier 1 (< $10M prior-month maker
-#            volume — us) gets NO rebate. So the Polymarket maker side is a
-#            small credit until the cutoff and exactly $0 after it.
+#   maker  = $0 for us. (The −0.0125 × C × p(1−p) rebate ends for Tier 1 at
+#            1:00 PM ET Mon Oct 19 2026; Rob: ignore it — the compare prices
+#            the Polymarket maker side at exactly zero, always.)
 #   rounding: banker's to the cent per fill, cumulative across an order.
 # KALSHI (kalshi.com/docs/kalshi-fee-schedule.pdf via the series `fee_type`):
 #   taker  = 0.07 × C × p(1−p) × fee_multiplier
@@ -90,10 +88,13 @@ POLY_MAKER_C = 0.0                           # legacy name: Polymarket charges m
 
 
 def poly_maker_c(at=None) -> float:
-    """Polymarket's maker coefficient in cents (negative = a rebate paid to
-    us) at time `at` (UTC, default now)."""
-    at = at or datetime.now(timezone.utc)
-    return -POLY_MAKER_REBATE_C if at < POLY_MAKER_TIER1_FROM else 0.0
+    """Polymarket's maker coefficient in cents: ZERO (Rob, Oct 18 2026:
+    "ignore the rebate on Polymarket, that shit's gone — assume Polymarket
+    maker is zero and Kalshi is whatever it is"). Tier 1 gets no rebate
+    from the Oct 19 cutoff and the pennies before it bought nothing but a
+    compare that leaned on a dying number. `at` is accepted for the callers
+    and ignored."""
+    return 0.0
 
 
 def kalshi_maker_ratio(fee: dict | None) -> float:

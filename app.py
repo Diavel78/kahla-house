@@ -9924,16 +9924,10 @@ _PMM_MAKER_TIER1_FROM = datetime(2026, 10, 19, 17, 0, tzinfo=timezone.utc)
 
 
 def _pmm_maker_fee_cents(price_cents, at=None) -> float:
-    """Polymarket US MAKER fee per share in cents — NEGATIVE = the rebate
-    we are paid (−1.25c · p·(1−p) until the Oct 19 2026 tier cutoff), 0
-    after it. Never positive."""
-    if price_cents is None:
-        return 0.0
-    at = at or datetime.now(timezone.utc)
-    if at >= _PMM_MAKER_TIER1_FROM:
-        return 0.0
-    p = max(0.0, min(1.0, price_cents / 100.0))
-    return round(-1.25 * p * (1.0 - p), 2)
+    """Polymarket US MAKER fee per share in cents: 0. Never positive."""
+    # ZERO, always (Rob, Oct 18 2026: "ignore the rebate on Polymarket, that
+    # shit's gone") — the Tier-1 rebate ends Oct 19 and never moved a venue.
+    return 0.0
 
 
 def _cents_to_american_py(cents) -> int | None:
