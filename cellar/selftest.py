@@ -4226,6 +4226,16 @@ def test_kalshi_hand_lane() -> None:
                                "event_start": "x"}, {})
     assert it["market_type"] == "ml" and it["line"] == 0, it
     assert _app._hand_twin_item({"event_name": "no-at", "market_type": "spread"}, {}) is None
+    # the V2 amend body carries ticker + side (a price+count body is a 400)
+    ab = kv.amend_body("KXNFLTOTAL-26OCT18BALCLE-40", True, 49, 5)
+    assert ab == {"ticker": "KXNFLTOTAL-26OCT18BALCLE-40", "side": "bid", "price": "0.4900", "count": "5.00"}, ab
+    assert kv.amend_body("T", False, 45, 5)["side"] == "ask" and kv.amend_body("T", False, 45, 5)["price"] == "0.5500"
+    # the switch guards: a destination seat within the gap of the one we leave,
+    # and within the leash of the anchor in EITHER direction
+    assert _app._hand_switch_gap_ok(49.5, 48.0, 3.0) and not _app._hand_switch_gap_ok(49.5, 5.0, 3.0)
+    assert not _app._hand_switch_gap_ok(54.5, 45.0, 3.0) and not _app._hand_switch_gap_ok(None, 45.0, 3.0)
+    assert _app._hand_switch_leash_ok({"anchor_c": 49.5}, 48.0) and _app._hand_switch_leash_ok({"anchor_c": 49.5}, 51.0)
+    assert not _app._hand_switch_leash_ok({"anchor_c": 49.5}, 5.0) and not _app._hand_switch_leash_ok({"anchor_c": 49.5}, 53.0)
     assert _app._kalshi_pick_order({"kalshi_order_id": "x"}, {"x": {**o, "status": "executed"}}) is None
     assert _app._kalshi_pick_order({"kalshi_order_id": "x"}, {"x": {**o, "remaining": 0.0}}) is None
     # positions: position_fp sign = side; an unreadable read is None, never 0

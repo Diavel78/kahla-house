@@ -806,11 +806,22 @@ def cancel_order(order_id: str, ticker: str | None = None) -> dict:
     return signed_request("DELETE", f"{ORDERS_PATH}/{order_id}", params=params)
 
 
-def amend_order(order_id: str, buy_yes: bool, price_c, total_count: int) -> dict:
-    """POST .../{id}/amend — `count` is the TOTAL (filled + desired
-    remaining), price YES-canonical. Phase 3's in-place chase."""
-    body = {"price": f"{yes_price_c(buy_yes, price_c) / 100.0:.4f}", "count": f"{int(total_count)}.00"}
-    return signed_request("POST", f"{ORDERS_PATH}/{order_id}/amend", body=body)
+def amend_body(ticker: str, buy_yes: bool, price_c, total_count: int) -> dict:
+    """The V2 amend body. ⚠ `ticker` and `side` are REQUIRED (AmendOrderV2Request,
+    Oct 18 2026: a price+count body answered 400 on every chase move the
+    first live hour) — `side` is the YES leg's book side exactly as the
+    create: bid = buy YES, ask = buy NO at 1 − p; price YES-canonical;
+    `count` is the TOTAL (filled + desired remaining)."""
+    return {"ticker": ticker,
+            "side": "bid" if buy_yes else "ask",
+            "price": f"{yes_price_c(buy_yes, price_c) / 100.0:.4f}",
+            "count": f"{int(total_count)}.00"}
+
+
+def amend_order(order_id: str, ticker: str, buy_yes: bool, price_c, total_count: int) -> dict:
+    """POST .../{id}/amend — Phase 3's in-place chase. See `amend_body`."""
+    return signed_request("POST", f"{ORDERS_PATH}/{order_id}/amend",
+                          body=amend_body(ticker, buy_yes, price_c, total_count))
 
 
 def order_resting(order_id: str, ticker: str | None = None) -> dict:

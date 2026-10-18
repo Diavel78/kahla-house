@@ -17652,7 +17652,7 @@ def _kalshi_amend_pick(blob: dict, target_c: float, o: dict | None = None):
     total = int(round(float(o.get("filled") or 0) + float(o.get("remaining") or 0)))
     if total < 1 or float(o.get("remaining") or 0) < 1:
         return "nothing_unfilled", koid, {"filled": o.get("filled"), "remaining": o.get("remaining")}
-    am = _kv.amend_order(koid, by, int(round(target_c)), total)
+    am = _kv.amend_order(koid, ticker, by, int(round(target_c)), total)
     d = am.get("data") or {}
     newo = d.get("order") if isinstance(d.get("order"), dict) else d
     new_id = (newo.get("order_id") if isinstance(newo, dict) else None) or koid
@@ -18293,8 +18293,32 @@ def _hand_twin_backfill(sb, now) -> dict:
     return st
 
 
+_HAND_SWITCH_MAX_GAP_C = 3.0      # machine_flags hand_switch_max_gap_c overrides
+
+
+def _hand_switch_gap_ok(from_seat_c, to_seat_c, max_gap_c=None) -> bool:
+    """Pure. THE SAME BET ON TWO VENUES CANNOT BE 40¢ APART (Oct 18 2026:
+    the first live switches moved BAL/CLE O39.5 from a 49.5¢ Polymarket seat
+    to a 5¢ Kalshi seat, NYJ +7.5 from 47 to 9, BAL −3.5 from 52.5 to 14 —
+    a Kalshi book read seconds after the socket subscribed, half loaded; the
+    compare called a book that wasn't there 'cheaper'). A destination seat
+    more than `max_gap_c` under the seat we are leaving is a book-quality
+    problem, never a bargain: no switch."""
+    if max_gap_c is None:
+        try:
+            max_gap_c = float(_machine_flag_val("hand_switch_max_gap_c", _HAND_SWITCH_MAX_GAP_C))
+        except (TypeError, ValueError):
+            max_gap_c = _HAND_SWITCH_MAX_GAP_C
+    try:
+        return abs(float(from_seat_c) - float(to_seat_c)) <= float(max_gap_c) + 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
 def _hand_switch_ok(blob: dict, r: dict, now, st: dict, filled) -> bool:
-    if not _hand_kalshi_on() or blob.get("live_snipe") or blob.get("line_hold") or blob.get("in_play"):
+    if not _hand_kalshi_on() or not _machine_flag("hand_venue_switch", True):
+        return False                                  # machine_flags hand_venue_switch=false = Kalshi placement on, no switching
+    if blob.get("live_snipe") or blob.get("line_hold") or blob.get("in_play"):
         return False
     try:
         if float(filled or 0) > 0 or float(blob.get("filled_qty") or 0) > 0:
@@ -18309,13 +18333,17 @@ def _hand_switch_ok(blob: dict, r: dict, now, st: dict, filled) -> bool:
 
 
 def _hand_switch_leash_ok(blob: dict, dest_c: float) -> bool:
+    """TWO-SIDED for a switch (Oct 18 2026): the chase leash only caps a
+    HIGHER price (a lower bid is never a chase move), so a 5¢ destination
+    passed against a 49.5¢ anchor. A switch lands the bet where Rob set it,
+    give or take the leash, in either direction."""
     anchor = blob.get("anchor_c", blob.get("price_c"))
     try:
         leash = float(_machine_flag_val("hand_chase_leash_c", _HAND_CHASE_LEASH_C))
     except (TypeError, ValueError):
         leash = _HAND_CHASE_LEASH_C
     try:
-        return anchor is None or float(dest_c) <= float(anchor) + leash + 1e-9
+        return anchor is None or abs(float(dest_c) - float(anchor)) <= leash + 1e-9
     except (TypeError, ValueError):
         return True
 
@@ -18353,17 +18381,28 @@ def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict
         p_seat = p_bid
     v, det = _kv.compare_rest(p_seat, k_seat_c, qty, blob.get("kalshi_fee"),
                               current="KALSHI", min_gain_c=_hand_venue_min_gain_c())
-    if v != "POLYMARKET" or not _hand_switch_leash_ok(blob, p_seat):
+    if v != "POLYMARKET":
+        return False
+    if not _hand_switch_gap_ok(k_seat_c, p_seat) or not _hand_switch_leash_ok(blob, p_seat):
+        st["switch_refused"] = st.get("switch_refused", 0) + 1
         return False
     _HAND_SWITCH_LAST[r["id"]] = _time.monotonic()
     stamp = {"hand_venue_switch": True, "pick_id": r["id"], "from": "KALSHI", "to": "POLYMARKET",
              "ticker": ticker, "slug": twin, "qty": qty, "from_c": k_touch_c, "to_c": p_seat,
-             "compare": det, "at": now.isoformat()}
+             "compare": det, "at": now.isoformat(),
+             "poly_top": (_hand_ladder_from_book(pbook, tsyn) or [])[:3]}
     koid = blob.get("kalshi_order_id")
-    _kv.cancel_order(koid, ticker)
-    vr = _kv.order_resting(koid, ticker)
+    cr = _kv.cancel_order(koid, ticker)
+    stamp["cancel"] = {"ok": cr.get("ok"), "status": cr.get("status"), "error": (cr.get("error") or "")[:160] or None}
+    vr = {}
+    for _i in range(3):                               # the orders list lags the cancel by a beat
+        vr = _kv.order_resting(koid, ticker)
+        if vr.get("resting") is False:
+            break
+        _time.sleep(0.7)
     if vr.get("resting") is not False:
         stamp["result"] = "cancel_unverified"
+        stamp["verify_error"] = vr.get("error")
         _probe_log(stamp)
         return False
     out, _http = _manual_order_place(client, twin, tsyn, p_seat, qty, r.get("event_start"),
@@ -18419,12 +18458,24 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
         return False
     if qty < 1:
         return False
-    kbook, _ = _kalshi_hand_book(ticker)
+    # A MONEY DECISION READS THE VENUE, NOT THE SOCKET (Oct 18 2026): the
+    # socket book serves the chase; a switch takes one REST read and checks
+    # the socket's copy against it — a disagreement is stamped, never traded.
+    sock = KALSHI_BOOKS.get(ticker)
+    kbook, _ = _kalshi_hand_book(ticker, fresh=True)
     if kbook is None:
         return False
     k_bid, _ka = _manual_side_book(kbook, not by)
     if k_bid is None:
         return False
+    if sock and isinstance(sock, tuple) and len(sock) == 2 and isinstance(sock[1], dict):
+        s_bid, _sa = _manual_side_book(sock[1], not by)
+        if s_bid is None or abs(float(s_bid) - float(k_bid)) > 1.01:
+            _probe_log({"kalshi_book_mismatch": True, "pick_id": r["id"], "ticker": ticker,
+                        "rest_bid_c": k_bid, "socket_bid_c": s_bid, "socket_age_s": round(_time.time() - float(sock[0] or 0), 1),
+                        "rest_top": _hand_ladder_from_book(kbook, not by)[:3] if _hand_ladder_from_book(kbook, not by) else None,
+                        "socket_top": _hand_ladder_from_book(sock[1], not by)[:3] if _hand_ladder_from_book(sock[1], not by) else None,
+                        "at": now.isoformat()})
     mp, oh = _hand_thin_cfg()
     k_seat, _sd = _hand_seat_price(kbook, not by, r.get("event_start"), now, mp, oh)
     if k_seat is None:
@@ -18438,12 +18489,21 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
             p_seat = ps
     v, det = _kv.compare_rest(p_seat, k_seat, qty, blob.get("kalshi_fee"),
                               current="POLYMARKET", min_gain_c=_hand_venue_min_gain_c())
-    if v != "KALSHI" or not _hand_switch_leash_ok(blob, k_seat):
+    if v != "KALSHI":
+        return False
+    if not _hand_switch_gap_ok(p_seat, k_seat) or not _hand_switch_leash_ok(blob, k_seat):
+        st["switch_refused"] = st.get("switch_refused", 0) + 1
+        if not isinstance(blob.get("switch_refused"), dict) or abs(float(blob["switch_refused"].get("to_c") or -1) - k_seat) >= 0.99:
+            nb = {**blob, "switch_refused": {"to": "KALSHI", "from_c": p_seat, "to_c": k_seat,
+                                             "anchor_c": blob.get("anchor_c", blob.get("price_c")), "at": now.isoformat()}}
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
         return False
     _HAND_SWITCH_LAST[r["id"]] = _time.monotonic()
     stamp = {"hand_venue_switch": True, "pick_id": r["id"], "from": "POLYMARKET", "to": "KALSHI",
              "ticker": ticker, "slug": slug, "qty": qty, "from_c": p_price_c, "to_c": k_seat,
-             "compare": det, "at": now.isoformat()}
+             "compare": det, "at": now.isoformat(),
+             "kalshi_top": (_hand_ladder_from_book(kbook, not by) or [])[:3],
+             "poly_top": (_hand_ladder_from_book(bk, syn) or [])[:3] if bk is not None else None}
     gone, _ords = _bet_sheet_cancel(client, oid, slug)
     if not gone:
         stamp["result"] = "cancel_unverified"
