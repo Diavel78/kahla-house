@@ -15110,9 +15110,14 @@ def _hand_status_publish(sb, client) -> dict:
     k_orders = k_pos = None
     k_tried = False
     k_reads: dict = {"n": 0}
+    k_watch: set = set()
     for r in rows:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if blob.get("kalshi_twin_ticker") and not _kalshi_pick(blob):
+            k_watch.add(blob["kalshi_twin_ticker"])    # the switch compare reads this book off the socket
         if _kalshi_pick(blob):
+            if blob.get("kalshi_ticker"):
+                k_watch.add(blob["kalshi_ticker"])
             # A KALSHI BET (Oct 18 2026): one orders read + one positions read
             # a tick, shared; the row shape is the Polymarket row's.
             if not k_tried:
@@ -15178,8 +15183,9 @@ def _hand_status_publish(sb, client) -> dict:
     # A FILLED hand bet has no resting order, so nothing subscribed its
     # market and the live strip read 'no live quote' (Oct 8 2026). Held lots
     # join the socket watch set (the touch tape publishes it each tick).
-    global HAND_HELD_SLUGS
+    global HAND_HELD_SLUGS, KALSHI_WATCH_TICKERS
     HAND_HELD_SLUGS = held_slugs
+    KALSHI_WATCH_TICKERS = k_watch                  # cellar/kalshifeed.py subscribes this set
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
         sb.table("lookup_cache").upsert({
@@ -15188,7 +15194,10 @@ def _hand_status_publish(sb, client) -> dict:
                         "orders": len(orders), "positions": len(positions),
                         "kalshi": ({"orders": (len(k_orders) if k_orders is not None else None),
                                     "positions": (len(k_pos) if k_pos is not None else None),
-                                    "book_reads": k_reads.get("n", 0)} if k_tried else None)}}).execute()
+                                    "book_reads": k_reads.get("n", 0), "watch": len(k_watch),
+                                    "ws_up": bool(KALSHI_WS.get("up")),
+                                    "ws_rx_s": (round(_time.time() - float(KALSHI_WS.get("rx") or 0)) if KALSHI_WS.get("rx") else None),
+                                    "ws_msgs": KALSHI_WS.get("msgs")} if (k_tried or k_watch) else None)}}).execute()
     except Exception as e:
         return {"err": f"publish: {e}"[:120]}
     return {"n": len(out), "quoted": quoted}
@@ -16046,14 +16055,30 @@ def _hand_move_tick(sb, client, now) -> dict:
     now_ts = _time.time()
     acts = 0
     fresh_open = None                 # one fresh orders read a tick, only when a venue-reset rejoin needs it
+    kcfg = {"pct": pct, "calm_s": calm_s, "max_wait": max_wait, "lead_min": lead_min, "leash": leash,
+            "hold_s": _fl("hand_move_rejoin_hold_s", _HAND_MOVE_REJOIN_HOLD_S),
+            "relocate_pct": _fl("hand_move_relocate_pct", _HAND_MOVE_RELOCATE_PCT),
+            "need_ask": bool(_machine_flag("hand_move_need_ask", False)),
+            "drop": bool(_machine_flag("hand_move_drop", True)),
+            "drop_min_pct": _fl("hand_join_min_pct", _HAND_JOIN_MIN_PCT)}
+    kctx: dict = {}
     for r in rows:
-        if _time.monotonic() - t0 > 25.0 or acts >= _HAND_MOVE_MAX_ACTS:
+        if _time.monotonic() - t0 > 25.0 or acts + st.get("acts", 0) >= _HAND_MOVE_MAX_ACTS:
             st["gate"] = "budget"
             break
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if _kalshi_pick(blob):
+            # THE SAME RULE ON THE KALSHI BOOK (Oct 18 2026): the bet's own
+            # tape (the Kalshi socket, else the per-tick REST sample)
+            try:
+                _hand_move_kalshi(sb, r, blob, now, now_ts, st, kcfg, kctx)
+            except Exception as e:
+                st["errors"] += 1
+                app.logger.warning("hand move KALSHI pick %s: %s", r["id"], str(e)[:120])
+            continue
         slug, syn, oid = blob.get("pmm_slug"), bool(blob.get("pmm_synthetic")), blob.get("order_id")
-        if not slug or blob.get("live_snipe") or _kalshi_pick(blob):
-            continue                                  # moved to live: no sit-out, no drop; a Kalshi bet has no Polymarket tape
+        if not slug or blob.get("live_snipe"):
+            continue                                  # moved to live: no sit-out, no drop
         try:
             ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
         except (TypeError, ValueError):
@@ -17281,6 +17306,13 @@ def _kalshi_hand_book(ticker: str, fresh: bool = False, record: bool = True):
     """The Kalshi book shaped like `_pmm_book` (YES-canonical), cached 3s.
     Every fresh read appends a KALSHI_TAPE row — the Kalshi bet's own touch
     tape, what the start rule reads. Returns (book or None, raw)."""
+    if _kalshi_ws_fresh(ticker):
+        # THE SOCKET IS THE TAPE (Oct 18 2026): while the Kalshi feed speaks
+        # for this market its book is current to the frame and already on
+        # KALSHI_TAPE — no REST read, no duplicate row.
+        hit = _KALSHI_BOOK_CACHE.get(ticker)
+        if hit:
+            return hit[1], hit[2]
     hit = _KALSHI_BOOK_CACHE.get(ticker)
     if hit and not fresh and _time.monotonic() - hit[0] < _KALSHI_BOOK_TTL_S:
         return hit[1], hit[2]
@@ -17953,8 +17985,8 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
     except (TypeError, ValueError):
         _d = _HAND_START_DROP_PCT_SPORT.get(_sp, drop)
     _d = max(drop, _d)
-    if now_ts >= start_ts - 1200.0:
-        _kalshi_hand_book(ticker, fresh=True)           # sample the tape through the start window
+    if now_ts >= start_ts - 1200.0 and not _kalshi_ws_fresh(ticker):
+        _kalshi_hand_book(ticker, fresh=True)           # REST sample through the start window when the socket is dark
     tape_src = "kalshi"
     verdict, base, cur, seen = _hand_start_plan(list(KALSHI_TAPE.get(ticker) or []), start_ts, now_ts, _d)
     twin = blob.get("pmm_twin_slug")
@@ -18310,6 +18342,238 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
     sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
     _probe_log(stamp)
     return True
+
+
+# ── THE KALSHI TAPE FROM THE SOCKET (Oct 18 2026, Rob: "Nothing functions on
+# line moves if you can't get the websockets and volume working") ──
+# cellar/kalshifeed.py keeps a live book per watched Kalshi market and calls
+# `_kalshi_tape_record` on every change; `KALSHI_WATCH_TICKERS` (refreshed
+# by the strip publisher) is what it subscribes; `KALSHI_WS` is its presence.
+# While the socket speaks for a market the REST sampler stands down.
+KALSHI_WATCH_TICKERS: set = set()
+KALSHI_WS: dict = {"up": False, "rx": 0.0, "tickers": set(), "msgs": 0}
+KALSHI_BOOKS: dict = {}                # ticker → (time.time(), book) — the socket's latest book
+_KALSHI_WS_FRESH_S = 20.0
+
+
+def _kalshi_tape_record(ticker: str, ob: dict) -> None:
+    """One socket frame → the latest book + one tape row. Never raises."""
+    try:
+        import kalshi_venue as _kv
+        book = _kv.poly_book(ob)
+        if book is None:
+            return
+        now_t = _time.time()
+        KALSHI_BOOKS[ticker] = (now_t, book)
+        _KALSHI_BOOK_CACHE[ticker] = (_time.monotonic(), book, ob)
+        row = _kv.tape_row(book, now_t)
+        if row:
+            dq = KALSHI_TAPE.get(ticker)
+            if dq is None:
+                dq = KALSHI_TAPE[ticker] = _deque(maxlen=_KALSHI_TAPE_MAX)
+            dq.append(row)
+    except Exception:
+        pass
+
+
+def _kalshi_ws_fresh(ticker: str) -> bool:
+    """Is the socket vouching for this market's book right now?"""
+    try:
+        p = KALSHI_WS
+        if not p.get("up") or _time.time() - float(p.get("rx") or 0) > _KALSHI_WS_FRESH_S:
+            return False
+        hit = KALSHI_BOOKS.get(ticker)
+        return bool(hit and ticker in (p.get("tickers") or set()))
+    except Exception:
+        return False
+
+
+def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg: dict, kctx: dict) -> None:
+    """THE LINE-MOVE RULE ON A KALSHI BET — the same rule as the Polymarket
+    one (`_hand_move_plan`: collapse + relocation = cancel, sit out, rejoin
+    the rung that gained; collapse alone = vanish → drop to the fat rung),
+    read off the Kalshi bet's OWN tape (the socket, else the per-tick REST
+    sample). Cancel = verified on the orders list; drop = in-place amend;
+    rejoin = a fresh post-only order at the touch, the rejoin the new anchor
+    with the chase held off the rung for `hand_move_rejoin_hold_s`."""
+    import kalshi_venue as _kv
+    ticker, by = blob.get("kalshi_ticker"), bool(blob.get("kalshi_buy_yes"))
+    if not ticker or blob.get("live_snipe") or blob.get("in_play"):
+        return
+    try:
+        ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return
+    lead_s = (ev.astimezone(timezone.utc) - now).total_seconds()
+    syn = not by
+    side_rows = _hand_side_rows(KALSHI_TAPE.get(ticker), syn)
+    hold = blob.get("line_hold") if isinstance(blob.get("line_hold"), dict) else None
+    last_at = _HAND_MOVE_LAST.get(r["id"], 0.0)
+    pct, calm_s, max_wait, lead_min, leash = (cfg["pct"], cfg["calm_s"], cfg["max_wait"],
+                                               cfg["lead_min"], cfg["leash"])
+    KALSHI_WATCH_TICKERS.add(ticker)
+    if hold:
+        st["sitting"] += 1
+        try:
+            since = now_ts - datetime.fromisoformat(str(hold.get("at"))).timestamp()
+        except (TypeError, ValueError):
+            since = max_wait
+        forced = lead_s <= lead_min * 60.0 or since >= max_wait
+        if since < calm_s and not forced:
+            return
+        if not forced and not _hand_calm(side_rows, now_ts):
+            return
+        if _time.monotonic() - last_at < 30.0:
+            return
+        book, _ = _kalshi_hand_book(ticker, fresh=True)
+        if book is None:
+            return
+        touch, _a = _manual_side_book(book, syn)
+        if touch is None:
+            return
+        dest = hold.get("rejoin_c")
+        if dest is not None:
+            try:
+                touch = min(touch, float(dest))
+            except (TypeError, ValueError):
+                pass
+        touch = round(_grid_dn(float(touch), _KALSHI_TICK_C), 2)
+        anchor = blob.get("anchor_c", blob.get("price_c"))
+        if anchor is not None and touch > float(anchor) + leash + 1e-9:
+            if not blob.get("chase_hold"):
+                sb.table("bot_picks").update({"signal_blob": {**blob, "chase_hold": {
+                    "touch_c": touch, "price_c": blob.get("price_c"), "leash_c": leash,
+                    "at": now.isoformat(), "sitting_out": True}}}).eq("id", r["id"]).execute()
+            return
+        _HAND_MOVE_LAST[r["id"]] = _time.monotonic()
+        contracts = int(hold.get("qty") or blob.get("contracts") or 1)
+        try:
+            out, code = _kalshi_order_place(ticker, by, touch, contracts, r.get("event_start"), book=book)
+        except Exception as e:
+            out, code = {"ok": False, "error": str(e)[:160]}, 500
+        st["acts"] = st.get("acts", 0) + 1
+        stamp = {"hand_move_rejoin": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
+                 "slug": blob.get("pmm_twin_slug"), "touch_c": touch, "dest_c": dest,
+                 "contracts": contracts, "sat_out_s": round(since, 1), "forced": forced,
+                 "result": out, "http": code, "at": now.isoformat()}
+        if out.get("ok") and out.get("order_id") and out.get("resting", True):
+            nb = {k: v for k, v in blob.items() if k not in ("line_hold", "chase_hold")}
+            hold_s = cfg["hold_s"]
+            nb.update({"kalshi_order_id": out["order_id"], "price_c": touch, "anchor_c": touch,
+                       "amended": False, "line_rejoins": int(blob.get("line_rejoins") or 0) + 1,
+                       "rejoined_at": now.isoformat(),
+                       "rejoin_hold": {"cap_c": touch, "at": now.isoformat(),
+                                       "until": _rejoin_hold_until(now, ev, hold_s, lead_min).isoformat()}})
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            st["rejoined"] += 1
+        else:
+            st["errors"] += 1
+            sb.table("bot_picks").update({"signal_blob": {**blob, "line_hold": {
+                **hold, "err": str(out.get("error") or out.get("state") or "create failed")[:120],
+                "err_at": now.isoformat()}}}).eq("id", r["id"]).execute()
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        app.logger.warning("hand move-rejoin KALSHI %s pick %s at %.1f¢ after %.0fs → %s",
+                           ticker, r["id"], touch, since, out.get("ok"))
+        return
+
+    # ── resting: did the line move against us? ──
+    if not kctx.get("tried"):
+        kctx["orders"], kctx["pos"] = _kalshi_acct()
+        kctx["tried"] = True
+    o = _kalshi_pick_order(blob, kctx.get("orders"))
+    if o is None:
+        return
+    if lead_s <= lead_min * 60.0:
+        return
+    st["cands"] += 1
+    price_c = _kv.our_c(o.get("yes_c"), by)
+    if price_c is None:
+        return
+    leaves = float(o.get("remaining") or 0.0)
+    verdict, det = _hand_move_plan(side_rows, price_c, leaves, now_ts, pct,
+                                   relocate_pct=cfg["relocate_pct"], need_ask=cfg["need_ask"],
+                                   drop=cfg["drop"], drop_min_pct=cfg["drop_min_pct"])
+    if verdict == "drop":
+        if _time.monotonic() - last_at < 30.0:
+            return
+        tgt = det.get("drop_c")
+        if tgt is None or float(tgt) >= price_c - 1e-9:
+            return
+        tgt = round(_grid_dn(float(tgt), _KALSHI_TICK_C), 2)
+        _HAND_MOVE_LAST[r["id"]] = _time.monotonic()
+        st["acts"] = st.get("acts", 0) + 1
+        v, new_id, adet = _kalshi_amend_pick(blob, tgt, o=o)
+        stamp = {"hand_move_drop": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
+                 "slug": blob.get("pmm_twin_slug"), "order_id": blob.get("kalshi_order_id"),
+                 "from_c": price_c, "to_c": tgt, "leaves": leaves, "verdict": v,
+                 "lead_s": round(lead_s), "at": now.isoformat(), **det}
+        if v == "amended":
+            nb = {**blob, "price_c": tgt, "amended": True,
+                  "kalshi_order_id": new_id or blob.get("kalshi_order_id"),
+                  "line_drops": int(blob.get("line_drops") or 0) + 1, "dropped_at": now.isoformat(),
+                  "rejoin_hold": {"cap_c": tgt, "at": now.isoformat(), "why": "vanish_drop",
+                                  "until": _rejoin_hold_until(now, ev, cfg["hold_s"], lead_min).isoformat()}}
+            nb.pop("chase_hold", None)
+            nb.pop("thin_hold", None)
+            sb.table("bot_picks").update({"signal_blob": nb,
+                                          "entry_price": _cents_to_american_py(tgt)}).eq("id", r["id"]).execute()
+            st["dropped"] = st.get("dropped", 0) + 1
+        else:
+            st["errors"] += 1
+            if new_id and v in ("gone", "unverified"):
+                sb.table("bot_picks").update({"signal_blob": {**blob, "kalshi_order_id": new_id}}).eq("id", r["id"]).execute()
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        app.logger.warning("hand move-drop KALSHI %s pick %s %.1f→%.1f¢ (vanish %s%%) → %s",
+                           ticker, r["id"], price_c, tgt, det.get("drop_pct"), v)
+        return
+    if verdict != "cancel":
+        return
+    if _time.monotonic() - last_at < 30.0:
+        return
+    _HAND_MOVE_LAST[r["id"]] = _time.monotonic()
+    st["acts"] = st.get("acts", 0) + 1
+    koid = blob.get("kalshi_order_id")
+    # still ours to cancel? a fresh orders read first (the Chicago ML lesson)
+    orders, _p = _kalshi_acct(fresh=True)
+    if orders is None or _kalshi_pick_order(blob, orders) is None:
+        st["gone_first"] = st.get("gone_first", 0) + 1
+        try:
+            _probe_log({"hand_move_cancel_skip": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
+                        "order_id": koid, "why": "not_open_before_cancel", "at": now.isoformat()})
+        except Exception:
+            pass
+        return
+    _kv.cancel_order(koid, ticker)
+    vr = _kv.order_resting(koid, ticker)
+    gone = vr.get("resting") is False
+    stamp = {"hand_move_cancel": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
+             "slug": blob.get("pmm_twin_slug"), "order_id": koid,
+             "price_c": price_c, "leaves": leaves, "gone": gone, "lead_s": round(lead_s),
+             "rule_pct": pct, "at": now.isoformat(), **det}
+    if gone:
+        resume = datetime.fromtimestamp(now_ts + calm_s, tz=timezone.utc)
+        nb = {**blob, "kalshi_order_id": None,
+              "line_hold": {"at": now.isoformat(), "resume_at": resume.isoformat(),
+                            "from_c": price_c, "rejoin_c": det.get("rejoin_c"), "detail": det,
+                            "qty": int(round(leaves)) or None},
+              "line_cancels": int(blob.get("line_cancels") or 0) + 1}
+        nb.pop("chase_hold", None)
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+        st["cancelled"] += 1
+    else:
+        st["errors"] += 1
+    try:
+        _probe_log(stamp)
+    except Exception:
+        pass
+    app.logger.warning("hand move-cancel KALSHI %s pick %s @%.1f¢: bid %s→%s (-%s%%) → gone=%s",
+                       ticker, r["id"], price_c, det.get("hi_q"), det.get("cur_q"), det.get("drop_pct"), gone)
 
 
 def _kalshi_probe_tick(sb) -> dict | None:

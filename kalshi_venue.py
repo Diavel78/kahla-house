@@ -1110,3 +1110,75 @@ def held_for(pos: dict | None, ticker: str, buy_yes: bool) -> float | None:
     if buy_yes:
         return net if net > 0 else 0.0
     return -net if net < 0 else 0.0
+
+
+# ───────────── the socket book (pure; cellar/kalshifeed.py feeds it) ─────────────
+# Kalshi's `orderbook_delta` channel: one `orderbook_snapshot` per market on
+# subscribe ({market_ticker, yes: [[price, qty]…], no: [[…]]} — cents ints
+# on the legacy shape, `yes_dollars`/`no_dollars` fixed-point strings on the
+# new one), then `orderbook_delta` frames ({market_ticker, price, delta,
+# side} / `price_dollars` + `delta_fp`): the signed change in resting size
+# at one price on one side. Both sides are BIDS (a no bid at X = a yes ask
+# at 100 − X), exactly like the REST order book.
+def _ws_price_c(msg: dict, dollars_key: str, cents_key: str):
+    if msg.get(dollars_key) is not None:
+        v = _num(msg.get(dollars_key))
+        return None if v is None else round(v * 100.0, 2)
+    v = _num(msg.get(cents_key))
+    return None if v is None else round(float(v), 2)
+
+
+def ws_snapshot(msg: dict) -> dict:
+    """An `orderbook_snapshot` body → {"yes": {price_c: qty}, "no": {…}}."""
+    state = {"yes": {}, "no": {}}
+    for side in ("yes", "no"):
+        rows = msg.get(f"{side}_dollars")
+        dollars = rows is not None
+        if rows is None:
+            rows = msg.get(side) or []
+        for r in rows or []:
+            try:
+                c = round(float(r[0]) * (100.0 if dollars else 1.0), 2)
+                q = float(r[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if 0 < c < 100 and q > 0:
+                state[side][c] = q
+    return state
+
+
+def ws_delta(state: dict, msg: dict) -> dict:
+    """Apply one `orderbook_delta` body in place; returns the state."""
+    side = str(msg.get("side") or "").lower()
+    if side not in ("yes", "no"):
+        return state
+    c = _ws_price_c(msg, "price_dollars", "price")
+    d = _num(msg.get("delta_fp")) if msg.get("delta_fp") is not None else _num(msg.get("delta"))
+    if c is None or d is None:
+        return state
+    book = state.setdefault(side, {})
+    q = book.get(c, 0.0) + float(d)
+    if q <= 1e-9:
+        book.pop(c, None)
+    else:
+        book[c] = q
+    return state
+
+
+def ws_to_ob(state: dict) -> dict:
+    """The socket state → the same {ok, yes, no} shape `orderbook()` returns."""
+    yes = sorted(((c, q) for c, q in (state.get("yes") or {}).items() if q > 0), key=lambda x: -x[0])
+    no = sorted(((c, q) for c, q in (state.get("no") or {}).items() if q > 0), key=lambda x: -x[0])
+    return {"ok": True, "yes": yes, "no": no, "error": None}
+
+
+def ws_auth_headers() -> list | None:
+    """The signed handshake headers for wss://…/trade-api/ws/v2 (the REST
+    scheme: ts + GET + the ws path), as websocket-client header lines."""
+    kid, pem, _src = _creds()
+    if not (kid and pem):
+        return None
+    ts = str(int(time.time() * 1000))
+    sig = _sign(pem, ts + "GET" + "/trade-api/ws/v2")
+    return [f"KALSHI-ACCESS-KEY: {kid}", f"KALSHI-ACCESS-SIGNATURE: {sig}",
+            f"KALSHI-ACCESS-TIMESTAMP: {ts}"]

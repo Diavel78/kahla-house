@@ -240,8 +240,19 @@ grading off Kalshi settlement.
   There is NO venue knob on the page — the chip says which book the bet is
   on (POLY / KALSHI) and nothing else.
 
-**Not built (say so, don't assume):** the line-move sit-out / vanish drop on Kalshi (no Kalshi depth
-socket — `cellar/kalshifeed.py` is the next piece); adopting bets placed in
+- **The Kalshi socket + the line-move rule on Kalshi** (same day — Rob:
+  "Nothing functions on line moves if you can't get the websockets and
+  volume working"): `cellar/kalshifeed.py` subscribes `orderbook_delta` on
+  `KALSHI_WATCH_TICKERS` (signed handshake, `GET /trade-api/ws/v2`; the set
+  changes → reconnect for fresh snapshots; ping/pong via `recv_data`), keeps
+  a book per market and writes a tape row per change; the REST sampler
+  stands down while the socket vouches. `_hand_move_kalshi` runs the
+  Polymarket line-move rule unchanged on that tape: cancel (verified) → sit
+  out → rejoin at the touch with the rejoin hold; a vanish drops to the fat
+  rung by amend. Stamps `hand_move_cancel` / `hand_move_drop` /
+  `hand_move_rejoin` carry `venue: KALSHI`; feed health `kind=kalshi_ws`.
+
+**Not built (say so, don't assume):** adopting bets placed in
 the Kalshi app; sold-in-the-Kalshi-app detection; venue-truth grading off
 Kalshi settlement; re-rung on Kalshi; dashboard P&L from Kalshi fills.
 

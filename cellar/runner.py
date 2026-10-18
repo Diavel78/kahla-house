@@ -518,6 +518,16 @@ class Runner:
         if "handbets" in enabled:
             threading.Thread(target=self._hand_queue_watch, name="cellar-handq",
                              daemon=True).start()
+            # THE KALSHI BOOK SOCKET (Oct 18 2026): the Kalshi half of the
+            # hand lane's tape. Its own thread, its own failure modes; a
+            # dead socket degrades to the per-tick REST sample.
+            if getattr(config, "KALSHI_WS", True):
+                try:
+                    from .kalshifeed import KalshiFeed
+                    self._kfeed = KalshiFeed(sb=self.sb)
+                    self._kfeed.start()
+                except Exception as e:
+                    log.error("kalshi ws feed failed to start (%s) — REST sample stands in", e)
 
         log.info("%s", config.summary())
         while not self.stop.is_set():
@@ -527,6 +537,8 @@ class Runner:
         log.info("shutting down — releasing lanes so the standby can resume")
         if self._wsfeed is not None:
             self._wsfeed.shutdown()
+        if getattr(self, "_kfeed", None) is not None:
+            self._kfeed.shutdown()
         for t in self._threads.values():
             if t.is_alive():
                 t.join(timeout=15)

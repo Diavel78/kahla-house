@@ -4252,6 +4252,32 @@ def test_kalshi_hand_lane() -> None:
     check("kalshi hand lane: book shape, orders/positions, venue pick", True)
 
 
+def test_kalshi_ws_book() -> None:
+    """THE KALSHI SOCKET BOOK (Oct 18 2026): snapshot + deltas → the same
+    order-book shape the REST read returns, on either wire shape (legacy
+    cents, fixed-point dollars)."""
+    import kalshi_venue as kv
+    st = kv.ws_snapshot({"market_ticker": "T", "yes": [[62, 300], [61, 1200]], "no": [[37, 500]]})
+    assert st["yes"] == {62.0: 300.0, 61.0: 1200.0} and st["no"] == {37.0: 500.0}, st
+    kv.ws_delta(st, {"market_ticker": "T", "price": 62, "delta": -250, "side": "yes"})
+    kv.ws_delta(st, {"market_ticker": "T", "price": 60, "delta": 900, "side": "yes"})
+    kv.ws_delta(st, {"market_ticker": "T", "price": 37, "delta": -500, "side": "no"})   # the level empties
+    kv.ws_delta(st, {"market_ticker": "T", "price": 36, "delta": 80, "side": "no"})
+    ob = kv.ws_to_ob(st)
+    assert ob["yes"] == [(62.0, 50.0), (61.0, 1200.0), (60.0, 900.0)] and ob["no"] == [(36.0, 80.0)], ob
+    bk = kv.poly_book(ob)
+    assert bk["best_bid"] == 62.0 and bk["best_ask"] == 64.0, bk            # no bid 36 = yes ask 64
+    # fixed-point dollar wire shape
+    st2 = kv.ws_snapshot({"yes_dollars": [["0.6200", "300.00"]], "no_dollars": [["0.3700", "500.00"]]})
+    kv.ws_delta(st2, {"price_dollars": "0.6200", "delta_fp": "-100.00", "side": "yes"})
+    assert kv.ws_to_ob(st2)["yes"] == [(62.0, 200.0)], st2
+    # a delta on an unknown side or without a price is ignored, never raises
+    kv.ws_delta(st2, {"side": "maybe", "price": 1, "delta": 1})
+    kv.ws_delta(st2, {"side": "yes", "delta": 1})
+    assert kv.ws_to_ob(st2)["yes"] == [(62.0, 200.0)]
+    check("kalshi ws book: snapshot + deltas → order book", True)
+
+
 def test_kalshi_venue_math() -> None:
     """KALSHI AS A SECOND VENUE (Oct 18 2026): the pure fee math and the
     rest/take compare both venues share, plus the market classifier on the
@@ -4381,7 +4407,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

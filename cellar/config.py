@@ -73,6 +73,11 @@ WS_FEED = _flag("CELLAR_WS", True)
 # (CELLAR_WS_MKTS=0), never a revert. Requires WS_FEED (it rides the
 # private feed's watch list).
 WS_MKTS = _flag("CELLAR_WS_MKTS", True)
+# KALSHI ORDER-BOOK SOCKET (Oct 18 2026): the Kalshi tape for hand bets
+# resting there — the line-move rule, the start drop and the thin-touch
+# guard read sizes off it. Same hint/tape doctrine; disables itself loudly
+# without websocket-client or Kalshi creds. Off = CELLAR_KALSHI_WS=0.
+KALSHI_WS = _flag("CELLAR_KALSHI_WS", True)
 # Markets-socket CONNECTIONS (Sep 6 2026): the venue's ~12-request budget
 # is per connection; one held 7 packs ≈ 2,450 rungs against 4,848 live
 # football rungs. Two connections double the pack budget.
