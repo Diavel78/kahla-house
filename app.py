@@ -4413,6 +4413,22 @@ def api_bet_sheets_picks():
                                              if ro.get("ok") else {"error": ro.get("error")})
             except Exception as e:
                 out["kalshi_orders_live"] = {"error": str(e)[:160]}
+            kt = (request.args.get("korders") or "").strip()
+            if kt:
+                # THE ORDER'S FATE (Oct 18 2026, the ARI +13.5 that rested nowhere):
+                # every order on the ticker, ANY status — a resting read cannot say
+                # whether a vanished order filled, expired or was cancelled in the app.
+                try:
+                    import kalshi_venue as _kv2
+                    hist = _kv2.my_orders(ticker=kt, status=None)
+                    out["kalshi_order_history"] = ([{**_kv2.parse_order(o),
+                                                     **{k: o.get(k) for k in ("created_time", "last_update_time", "expiration_time",
+                                                                              "type", "taker_fill_count_fp", "maker_fill_count_fp",
+                                                                              "time_in_force", "post_only") if o.get(k) is not None}}
+                                                    for o in ((hist.get("data") or {}).get("orders") or [])]
+                                                   if hist.get("ok") else {"error": hist.get("error"), "status": hist.get("status")})
+                except Exception as e:
+                    out["kalshi_order_history"] = {"error": str(e)[:160]}
         except Exception as e:
             out["kalshi_err"] = str(e)[:160]
     if request.args.get("settled_audit"):
@@ -17773,6 +17789,60 @@ def _kalshi_amend_pick(blob: dict, target_c: float, o: dict | None = None):
         return "unverified", new_id, {"error": str(e)[:120]}
 
 
+def _hand_kalshi_gone(sb, r: dict, blob: dict, now, st: dict, ticker: str, by: bool) -> None:
+    """A Kalshi pick whose order left the book without our cancel: adopt a
+    re-id'd order, keep a filled lot, else retire the pick. Stamps
+    `exec_probe_runs hand_kalshi_gone` with the bet either way."""
+    import kalshi_venue as _kv
+    orders2, pos2 = _kalshi_acct(fresh=True)
+    if orders2 is None or pos2 is None or _kalshi_pick_order(blob, orders2) is not None:
+        return                                   # unreadable, or it is back — never act on a failed read
+    want_side = "yes" if by else "no"
+    stray = None
+    for oo in (orders2 or {}).values():
+        if (oo.get("ticker") == ticker and oo.get("status") in _kv.RESTING and float(oo.get("remaining") or 0) > 0
+                and str(oo.get("side") or "").lower() == want_side and str(oo.get("action") or "buy").lower() == "buy"):
+            try:
+                claimed = (sb.table("bot_picks").select("id").eq("status", "pending")
+                           .eq("signal_blob->>kalshi_order_id", oo["order_id"]).limit(1).execute().data) or []
+            except Exception:
+                return                           # can't tell whose it is — wait a tick
+            if not claimed:
+                stray = oo
+                break
+    bet = {"label": r.get("event_name"), "mt": r.get("market_type"), "side": r.get("side"),
+           "line": r.get("entry_line"), "price_c": blob.get("price_c"), "contracts": blob.get("contracts"),
+           "old_order_id": blob.get("kalshi_order_id")}
+    if stray is not None:
+        nb = {**blob, "kalshi_order_id": stray["order_id"], "price_c": _kv.our_c(stray.get("yes_c"), by) or blob.get("price_c"),
+              "kalshi_readopt": {"at": now.isoformat(), "from": blob.get("kalshi_order_id"), "to": stray["order_id"]}}
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+        st["readopted"] = st.get("readopted", 0) + 1
+        _probe_log({"hand_kalshi_gone": True, "result": "readopted", "pick_id": r["id"], "ticker": ticker,
+                    "slug": blob.get("pmm_twin_slug"), "new_order_id": stray["order_id"], "bet": bet, "at": now.isoformat()})
+        return
+    held = _kv.held_for(pos2, ticker, by)
+    if held is not None and held >= 1.0:
+        if not blob.get("filled"):
+            nb = {**blob, "filled": True, "filled_qty": round(float(held), 2), "kalshi_order_id": None,
+                  "kalshi_gone": {"at": now.isoformat(), "result": "filled", "held": round(float(held), 2)}}
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            _probe_log({"hand_kalshi_gone": True, "result": "filled", "pick_id": r["id"], "ticker": ticker,
+                        "slug": blob.get("pmm_twin_slug"), "held": round(float(held), 2), "bet": bet, "at": now.isoformat()})
+        return
+    try:
+        ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        ev = None
+    if ev is not None and ev <= now:
+        return                                   # started: the resolver / start tick own it
+    _probe_log({"hand_kalshi_gone": True, "result": "retired", "pick_id": r["id"], "ticker": ticker,
+                "slug": blob.get("pmm_twin_slug"), "held": held, "bet": bet, "at": now.isoformat(),
+                "why": "order gone, nothing held, no box cancel — a hand cancel"})
+    sb.table("bot_picks").delete().eq("id", r["id"]).execute()
+    st["gone"] = st.get("gone", 0) + 1
+
+
 def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
                        thin_pct: float, thin_off_h: float, kctx: dict) -> None:
     """The chase for a Kalshi-resting bet: join the touch (never lead it),
@@ -17816,6 +17886,19 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
                 st["completed"] = st.get("completed", 0) + 1
                 _hand_switch_to_poly(sb, kctx["client"], r, blob, now, st, {"remaining": qty, "filled": 0},
                                      blob.get("price_c"), None, skip_cancel=True)
+            return
+        if cs is None and kctx.get("orders") is not None:
+            # THE ORDER IS GONE AND WE DID NOT CANCEL IT (Oct 18 2026, the ARI
+            # +13.5: the venue listed no order and no lot while the pick kept its
+            # id, and this branch returned in silence every tick — a bet resting
+            # NOWHERE that the strip read as resting). Fresh reads first. An
+            # unclaimed resting order on the same ticker + side is OURS under a
+            # new id (an amend may re-id) — adopt it. A held lot is a fill (the
+            # strip's hand_fill stamp books it). Nothing anywhere = cancelled in
+            # the Kalshi app or by the venue: the pick is retired exactly as a
+            # Polymarket app-cancel is (deleted, the bet stamped so it can be
+            # read back) — one order vanishing is Rob's call, never re-placed.
+            _hand_kalshi_gone(sb, r, blob, now, st, ticker, by)
         return
     st["cands"] += 1
     price_c = _kv.our_c(o.get("yes_c"), by)
