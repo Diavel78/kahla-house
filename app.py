@@ -4361,6 +4361,8 @@ def api_bet_sheets_picks():
             r = (sb.table("lookup_cache").select("fetched_at,payload")
                  .eq("key", _HAND_STATUS_KEY).limit(1).execute())
             pl = ((r.data or [None])[0] or {}).get("payload") or {}
+            if isinstance(pl, str):
+                pl = json.loads(pl)
             out["strip"] = {"at": pl.get("at"), "n": pl.get("n"), "orders": pl.get("orders"),
                             "positions": pl.get("positions"), "kalshi": pl.get("kalshi"),
                             "venues": sorted({str(x.get("venue") or "POLYMARKET") for x in (pl.get("rows") or [])})}
@@ -18173,6 +18175,106 @@ _HAND_SWITCH_MAX_TICK = 2
 _HAND_SWITCH_LAST: dict = {}
 
 
+_HAND_TWIN_PER_TICK = 2
+_HAND_TWIN_RETRY_S = 3600
+
+
+def _hand_twin_item(r: dict, blob: dict) -> dict | None:
+    """Pure. A pending Polymarket sheet pick → the slip-shaped item the
+    Kalshi resolver takes {sport, away, home, event_start, market_type
+    ml|spread|total, side, line}. None when the row can't name its game."""
+    parts = str(r.get("event_name") or "").split(" @ ")
+    if len(parts) != 2:
+        return None
+    mt = str(r.get("market_type") or "")
+    mt = "ml" if mt in ("moneyline", "ml") else mt
+    if mt not in ("ml", "spread", "total"):
+        return None
+    line = blob.get("rung_line")
+    if line is None:
+        line = r.get("entry_line")
+    return {"sport": str(r.get("sport") or blob.get("sport") or "").upper(),
+            "away": parts[0], "home": parts[1], "event_start": r.get("event_start"),
+            "market_type": mt, "side": r.get("side"), "line": (0 if mt == "ml" else line)}
+
+
+def _hand_twin_backfill(sb, now) -> dict:
+    """THE TWIN BACKFILL (Oct 18 2026): the venue switch and the Kalshi
+    socket both key on `kalshi_twin_ticker`, which only PLACEMENT stamped —
+    so every bet resting before the lane shipped had no twin, nothing for
+    the socket to watch, and no way to switch. Each tick resolves the
+    Kalshi twin for ≤2 pending Polymarket sheet picks that lack one (same
+    line only — a twin on another line is not the same bet; a miss retries
+    hourly via `kalshi_twin_miss`). No book read here: the strip publisher
+    reads the book once the ticker is in the watch set."""
+    st = {"cands": 0, "stamped": 0, "miss": 0, "skip": 0}
+    if not _hand_kalshi_on():
+        st["gate"] = "off"
+        return st
+    try:
+        rows = (sb.table("bot_picks").select("id,event_start,event_name,sport,market_type,side,entry_line,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .limit(300).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    import kalshi_venue as _kv
+    done = 0
+    for r in rows:
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if _kalshi_pick(blob) or blob.get("kalshi_twin_ticker") or not blob.get("pmm_slug"):
+            continue
+        try:
+            if _parse_iso(r.get("event_start")) <= now:
+                continue                                    # started: nothing switches
+        except Exception:
+            continue
+        miss = blob.get("kalshi_twin_miss") if isinstance(blob.get("kalshi_twin_miss"), dict) else None
+        if miss:
+            try:
+                if (now - _parse_iso(miss.get("at"))).total_seconds() < _HAND_TWIN_RETRY_S:
+                    st["skip"] += 1
+                    continue
+            except Exception:
+                pass
+        st["cands"] += 1
+        if done >= _HAND_TWIN_PER_TICK:
+            continue
+        item = _hand_twin_item(r, blob)
+        if item is None:
+            continue
+        done += 1
+        try:
+            rs = _kv.resolve(item["sport"], item["away"], item["home"], item["event_start"], item)
+        except Exception as e:
+            rs = {"ok": False, "why": f"{type(e).__name__}: {e}"[:120]}
+        nb = dict(blob)
+        same_line = True
+        if rs.get("ok") and item["market_type"] != "ml":
+            try:
+                same_line = (rs.get("line") is None or item.get("line") is None
+                             or abs(float(rs["line"]) - float(item["line"])) < 0.01)
+            except (TypeError, ValueError):
+                same_line = False
+        if rs.get("ok") and same_line:
+            nb.pop("kalshi_twin_miss", None)
+            nb.update({"venue": blob.get("venue") or "POLYMARKET",
+                       "kalshi_twin_ticker": rs["ticker"], "kalshi_twin_buy_yes": bool(rs.get("buy_yes")),
+                       "kalshi_twin_line": rs.get("line"), "kalshi_fee": rs.get("fee"),
+                       "kalshi_twin_src": "backfill"})
+            st["stamped"] += 1
+        else:
+            nb["kalshi_twin_miss"] = {"at": now.isoformat(),
+                                      "why": ("line differs: kalshi %s vs %s" % (rs.get("line"), item.get("line")))
+                                      if rs.get("ok") else str(rs.get("why") or "no market")[:120]}
+            st["miss"] += 1
+        try:
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+        except Exception as e:
+            st["err"] = str(e)[:80]
+    return st
+
+
 def _hand_switch_ok(blob: dict, r: dict, now, st: dict, filled) -> bool:
     if not _hand_kalshi_on() or blob.get("live_snipe") or blob.get("line_hold") or blob.get("in_play"):
         return False
@@ -18713,6 +18815,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
             stats["sold"] = _hand_sold_tick(sb, client, now)         # sold in the app → pick closed
         except Exception as e:
             stats["sold"] = {"err": str(e)[:80]}
+        try:
+            stats["twins"] = _hand_twin_backfill(sb, now)        # Kalshi twins for pre-lane bets → watch set + switch
+        except Exception as e:
+            stats["twins"] = {"err": str(e)[:80]}
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
         try:
             stats["tape"] = _touch_tape_publish(sb)

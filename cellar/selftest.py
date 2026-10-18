@@ -4217,6 +4217,15 @@ def test_kalshi_hand_lane() -> None:
     assert o["yes_c"] == 38.0 and o["remaining"] == 7.0 and o["filled"] == 3.0 and o["status"] == "resting", o
     assert kv.our_c(38.0, True) == 38.0 and kv.our_c(38.0, False) == 62.0
     assert _app._kalshi_pick_order({"kalshi_order_id": "x"}, {"x": o}) is o
+    # the twin backfill's item: a pending pick row → the resolver's slip shape
+    it = _app._hand_twin_item({"event_name": "Arizona Cardinals @ Green Bay Packers", "sport": "NFL",
+                               "market_type": "spread", "side": "away", "entry_line": 13.5,
+                               "event_start": "2026-10-19T17:00:00+00:00"}, {"rung_line": 13.5})
+    assert it["market_type"] == "spread" and it["away"] == "Arizona Cardinals" and it["line"] == 13.5, it
+    it = _app._hand_twin_item({"event_name": "A @ B", "sport": "NHL", "market_type": "moneyline", "side": "home",
+                               "event_start": "x"}, {})
+    assert it["market_type"] == "ml" and it["line"] == 0, it
+    assert _app._hand_twin_item({"event_name": "no-at", "market_type": "spread"}, {}) is None
     assert _app._kalshi_pick_order({"kalshi_order_id": "x"}, {"x": {**o, "status": "executed"}}) is None
     assert _app._kalshi_pick_order({"kalshi_order_id": "x"}, {"x": {**o, "remaining": 0.0}}) is None
     # positions: position_fp sign = side; an unreadable read is None, never 0
