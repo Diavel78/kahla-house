@@ -58,8 +58,54 @@ _SPORT_TAGS = {"MLB": ("MLB",), "NBA": ("NBA",), "NHL": ("NHL",),
 # cent; maker 1.75¢·p(1−p) ONLY on series whose fee type carries maker
 # fees, else $0. The multiplier M is per series (default 1). Read it off
 # the series object (`series_fee`), never from a table.
-POLY_TAKER_C, POLY_MAKER_C = 5.0, 1.25
-KALSHI_TAKER_C, KALSHI_MAKER_C = 7.0, 1.75
+# ── THE FEES, READ OFF BOTH VENUES' OWN SCHEDULES Oct 18 2026 (Rob: "read
+# all the fees… since it's what determines the venue") ──────────────────
+# POLYMARKET US (docs.polymarket.us/fees, effective exchange-wide Oct 7 2026):
+#   taker  = 0.0695 × C × p(1−p)       (the code carried 0.05 — a stale number)
+#   maker  = a REBATE, −0.0125 × C × p(1−p), credited at the fill — makers
+#            are PAID, not charged. ⚠ From 1:00 PM ET Mon Oct 19 2026 the
+#            rebate goes to volume tiers: Tier 1 (< $10M prior-month maker
+#            volume — us) gets NO rebate. So the Polymarket maker side is a
+#            small credit until the cutoff and exactly $0 after it.
+#   rounding: banker's to the cent per fill, cumulative across an order.
+# KALSHI (kalshi.com/docs/kalshi-fee-schedule.pdf via the series `fee_type`):
+#   taker  = 0.07 × C × p(1−p) × fee_multiplier
+#   maker  = taker × 0.25 on `quadratic_with_maker_fees` series (0.0175 —
+#            the July 12 2026 fill receipt: 3 × 0.3808¢ at 32¢), × 0.5 on
+#            `quadratic_with_combo_maker_fees`, $0 on plain `quadratic`;
+#            `flat` is the Specific Trading Fees table (read conservatively).
+#   ⚠ an EVENT may carry `fee_type_override` / `fee_multiplier_override`
+#   that beat the series (GET /events/{ticker}) — `event_fee` reads it.
+#   rounding: the trade fee rounds UP to $0.000001 per fill, then a rounding
+#   fee aligns the balance to the member's cent — ≈ the order's fee ceil'd
+#   to the cent, which is what `order_fee_c` does.
+POLY_TAKER_C = 6.95
+POLY_MAKER_REBATE_C = 1.25                     # credited, until the tier cutoff
+POLY_MAKER_TIER1_FROM = datetime(2026, 10, 19, 17, 0, tzinfo=timezone.utc)   # 1 PM ET Oct 19 2026
+KALSHI_TAKER_C = 7.0
+KALSHI_MAKER_RATIO = {"quadratic": 0.0, "quadratic_with_maker_fees": 0.25,
+                      "quadratic_with_combo_maker_fees": 0.5, "flat": 0.25}
+KALSHI_MAKER_C = KALSHI_TAKER_C * 0.25       # 1.75 — the common maker-fee series
+POLY_MAKER_C = 0.0                           # legacy name: Polymarket charges makers nothing
+
+
+def poly_maker_c(at=None) -> float:
+    """Polymarket's maker coefficient in cents (negative = a rebate paid to
+    us) at time `at` (UTC, default now)."""
+    at = at or datetime.now(timezone.utc)
+    return -POLY_MAKER_REBATE_C if at < POLY_MAKER_TIER1_FROM else 0.0
+
+
+def kalshi_maker_ratio(fee: dict | None) -> float:
+    """Maker fee as a share of the taker fee for a Kalshi fee-terms dict."""
+    if not fee:
+        return 0.25                              # unreadable → the common charged case
+    if fee.get("maker_ratio") is not None:
+        return float(fee["maker_ratio"])
+    ft = str(fee.get("fee_type") or "").lower()
+    if ft in KALSHI_MAKER_RATIO:
+        return KALSHI_MAKER_RATIO[ft]
+    return 0.25 if fee.get("maker", True) else 0.0
 
 
 def _pq(price_c) -> float:
@@ -67,53 +113,54 @@ def _pq(price_c) -> float:
     return p * (1.0 - p)
 
 
-def fee_per_contract_c(venue: str, role: str, price_c, fee: dict | None = None) -> float:
-    """Fee in cents per contract for buying at `price_c`. role = 'take' |
-    'rest'. `fee` = the Kalshi series fee dict from `series_fee` ({maker:
-    bool, mult: float}); None = defaults (maker charged, mult 1 — the
-    CONSERVATIVE read when the series could not be read)."""
+def fee_per_contract_c(venue: str, role: str, price_c, fee: dict | None = None, at=None) -> float:
+    """Fee in cents per contract for buying at `price_c`; NEGATIVE = a
+    rebate paid to us. role = 'take' | 'rest'. `fee` = the Kalshi fee-terms
+    dict (`series_fee` / `event_fee`: fee_type, mult, maker_ratio); None =
+    the conservative read (maker charged at 0.25, mult 1). `at` = the time
+    the fee applies (Polymarket's maker rebate ends Oct 19 2026 1 PM ET)."""
     if price_c is None:
         return 0.0
     v = (venue or "").upper()
     if v.startswith("POLY"):
-        return round((POLY_TAKER_C if role == "take" else POLY_MAKER_C) * _pq(price_c), 4)
+        coef = POLY_TAKER_C if role == "take" else poly_maker_c(at)
+        return round(coef * _pq(price_c), 4)
     mult = float((fee or {}).get("mult", 1.0) or 1.0)
     if role == "take":
         return round(KALSHI_TAKER_C * mult * _pq(price_c), 4)
-    maker = (fee or {}).get("maker", True)
-    return round(KALSHI_MAKER_C * mult * _pq(price_c), 4) if maker else 0.0
+    return round(KALSHI_TAKER_C * mult * kalshi_maker_ratio(fee) * _pq(price_c), 4)
 
 
-def order_fee_c(venue: str, role: str, price_c, qty: int, fee: dict | None = None) -> float:
-    """The whole order's fee in cents. Kalshi rounds the ORDER's fee up to
-    the next cent (a 5-lot pays a whole cent on a 0.4¢ fee); Polymarket
-    charges per share to the hundredth of a cent."""
-    per = fee_per_contract_c(venue, role, price_c, fee)
+def order_fee_c(venue: str, role: str, price_c, qty: int, fee: dict | None = None, at=None) -> float:
+    """The whole order's fee in cents (negative = rebate). Kalshi's fee
+    rounds UP to the next cent on the order; Polymarket's rounds to the
+    nearest cent (banker's) per fill."""
+    per = fee_per_contract_c(venue, role, price_c, fee, at)
     tot = per * max(0, int(qty or 0))
     if (venue or "").upper().startswith("KALSHI"):
-        return float(math.ceil(tot - 1e-9))
+        return float(math.ceil(tot - 1e-9)) if tot > 0 else 0.0
     return round(tot, 2)
 
 
-def all_in_c(venue: str, role: str, price_c, qty: int, fee: dict | None = None):
-    """Per-contract all-in cost in cents: price + the order's fee spread
-    over its contracts. None when there is no price."""
+def all_in_c(venue: str, role: str, price_c, qty: int, fee: dict | None = None, at=None):
+    """Per-contract all-in cost in cents: price + the order's fee (or minus
+    its rebate) spread over its contracts. None when there is no price."""
     if price_c is None or not qty:
         return None
-    return round(float(price_c) + order_fee_c(venue, role, price_c, qty, fee) / int(qty), 3)
+    return round(float(price_c) + order_fee_c(venue, role, price_c, qty, fee, at) / int(qty), 3)
 
 
 def compare_rest(poly_touch_c, kalshi_touch_c, qty: int, kalshi_fee: dict | None,
-                 current: str | None = None, min_gain_c: float = 0.0):
+                 current: str | None = None, min_gain_c: float = 0.0, at=None):
     """Pure. WHERE A RESTING BET SITS. Each venue's seat = our-side touch
     (the price we would join) + its maker fee. Lower all-in wins; a tie, or
     a gain under `min_gain_c`, keeps the bet where it is (`current`) so the
     box never churns a venue switch on noise. Returns (venue, detail)."""
     opts = {}
-    a = all_in_c("POLYMARKET", "rest", poly_touch_c, qty)
+    a = all_in_c("POLYMARKET", "rest", poly_touch_c, qty, None, at)
     if a is not None:
         opts["POLYMARKET"] = a
-    b = all_in_c("KALSHI", "rest", kalshi_touch_c, qty, kalshi_fee)
+    b = all_in_c("KALSHI", "rest", kalshi_touch_c, qty, kalshi_fee, at)
     if b is not None:
         opts["KALSHI"] = b
     if not opts:
@@ -131,17 +178,17 @@ def compare_rest(poly_touch_c, kalshi_touch_c, qty: int, kalshi_fee: dict | None
 
 
 def compare_take(poly_ask_c, kalshi_ask_c, qty: int, kalshi_fee: dict | None,
-                 resting_c=None, cap_c=None):
+                 resting_c=None, cap_c=None, at=None):
     """Pure. THE TAKE AT THE DROP across venues: each ask + its taker fee;
     the cheaper all-in wins. With `resting_c` and `cap_c` the winner must
     sit within cap_c of the resting price on its RAW ask (Rob's 1¢ rule
     is on the line, the fee is the cost of crossing). Returns (venue or
     None, detail)."""
     opts, raw = {}, {}
-    a = all_in_c("POLYMARKET", "take", poly_ask_c, qty)
+    a = all_in_c("POLYMARKET", "take", poly_ask_c, qty, None, at)
     if a is not None:
         opts["POLYMARKET"], raw["POLYMARKET"] = a, float(poly_ask_c)
-    b = all_in_c("KALSHI", "take", kalshi_ask_c, qty, kalshi_fee)
+    b = all_in_c("KALSHI", "take", kalshi_ask_c, qty, kalshi_fee, at)
     if b is not None:
         opts["KALSHI"], raw["KALSHI"] = b, float(kalshi_ask_c)
     if not opts:
@@ -220,15 +267,50 @@ def series_fee(series: str, ttl_s: float = 6 * 3600) -> dict:
     sr = (data or {}).get("series") if isinstance(data, dict) else None
     if not isinstance(sr, dict):
         sr = data if isinstance(data, dict) and data.get("ticker") else None
-    out = {"ok": False, "maker": True, "mult": 1.0, "fee_type": None, "raw": {}, "error": err}
+    out = {"ok": False, "maker": True, "maker_ratio": 0.25, "mult": 1.0, "fee_type": None, "raw": {}, "error": err}
     if sr:
         feeish = {k: v for k, v in sr.items() if re.search(r"fee|maker|taker|mult", str(k), re.I)}
-        ft = str(sr.get("fee_type") or "")
-        out.update(ok=True, fee_type=ft or None, raw=feeish,
-                   maker=("maker" in ft.lower()) if ft else bool(feeish.get("maker_fee") or feeish.get("maker_fee_multiplier")),
+        ft = str(sr.get("fee_type") or "").lower()
+        ratio = KALSHI_MAKER_RATIO.get(ft, 0.25 if "maker" in ft else (0.0 if ft == "quadratic" else 0.25))
+        out.update(ok=True, fee_type=ft or None, raw=feeish, maker=ratio > 0, maker_ratio=ratio,
                    mult=float(sr.get("fee_multiplier") or feeish.get("taker_fee_multiplier") or 1.0) or 1.0)
         _CACHE[key] = (time.time(), out)
     return out
+
+
+def event_fee(event_ticker: str | None, series_terms: dict | None, ttl_s: float = 6 * 3600) -> dict:
+    """The fee terms that ACTUALLY apply to an event's markets: the parent
+    series' terms, beaten by the event's own `fee_type_override` /
+    `fee_multiplier_override` when set (GET /events/{ticker}, docs: "When
+    present, takes precedence over the series-level fee"). Cached 6h; an
+    unreadable event keeps the series terms."""
+    base = dict(series_terms or {"ok": False, "maker": True, "maker_ratio": 0.25, "mult": 1.0, "fee_type": None})
+    if not event_ticker:
+        return base
+    key = f"ef:{event_ticker}"
+    hit = _CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl_s:
+        return {**base, **hit[1]}
+    data, err = _get(f"/events/{event_ticker}", {"exclude_markets": "true"})
+    ev = (data or {}).get("event") if isinstance(data, dict) else None
+    ov: dict = {}
+    if isinstance(ev, dict):
+        ft = ev.get("fee_type_override")
+        fm = ev.get("fee_multiplier_override")
+        if ft:
+            ft = str(ft).lower()
+            ratio = KALSHI_MAKER_RATIO.get(ft, 0.25 if "maker" in ft else 0.25)
+            ov.update(fee_type=ft, maker=ratio > 0, maker_ratio=ratio, event_override=True)
+        if fm is not None:
+            try:
+                ov["mult"] = float(fm) or 1.0
+                ov["event_override"] = True
+            except (TypeError, ValueError):
+                pass
+        _CACHE[key] = (time.time(), ov)
+    elif err:
+        ov["event_fee_error"] = err
+    return {**base, **ov}
 
 
 def catalog(ttl_s: float = 6 * 3600) -> list:
@@ -493,7 +575,7 @@ def resolve(sport: str, away: str, home: str, start_iso: str | None, item: dict)
         m = found.pop("market")
         found["quote"] = our_side_quote(m, found["buy_yes"])
         found["book"] = book_c(m)
-        found["fee"] = series_fee(found["series"])
+        found["fee"] = event_fee(found.get("event_ticker"), series_fee(found["series"]))
         found["raw_sample"] = {k: m.get(k) for k in
                                ("ticker", "title", "subtitle", "yes_sub_title", "no_sub_title",
                                 "floor_strike", "cap_strike", "strike_type", "close_time",

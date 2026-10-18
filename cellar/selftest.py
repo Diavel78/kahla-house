@@ -4227,7 +4227,7 @@ def test_kalshi_hand_lane() -> None:
     assert kv.parse_positions({"ok": False}) is None and kv.held_for(None, "T", True) is None
     # the venue pick: Polymarket is home, Kalshi must win by min_gain
     poly = {"ok": True, "price_c": 52.0}
-    kal = {"ok": True, "price_c": 51.0, "fee": {"maker": False, "mult": 1.0}}
+    kal = {"ok": True, "price_c": 51.0, "fee": {"fee_type": "quadratic", "maker": False, "maker_ratio": 0.0, "mult": 1.0}}
     v, d = _app._hand_venue_pick("auto", poly, kal, 10, 0.5)
     assert v == "KALSHI" and d["why"] == "switch", d
     v, d = _app._hand_venue_pick("auto", poly, {**kal, "price_c": 52.0}, 10, 0.5)
@@ -4257,40 +4257,58 @@ def test_kalshi_venue_math() -> None:
     rest/take compare both venues share, plus the market classifier on the
     shapes Kalshi is known to use."""
     import kalshi_venue as kv
-    # fees per contract at 50¢: Poly take 1.25 / rest 0.3125; Kalshi take
-    # 1.75 / rest 0.4375 on a maker-fee series, 0 on a fee-free one
-    assert abs(kv.fee_per_contract_c("POLYMARKET", "take", 50) - 1.25) < 1e-9
-    assert abs(kv.fee_per_contract_c("POLYMARKET", "rest", 50) - 0.3125) < 1e-9
+    from datetime import datetime as _dt, timezone as _tz
+    BEFORE, AFTER = _dt(2026, 10, 18, 12, tzinfo=_tz.utc), _dt(2026, 10, 20, 12, tzinfo=_tz.utc)
+    MK = {"fee_type": "quadratic_with_maker_fees", "maker": True, "maker_ratio": 0.25, "mult": 1.0}
+    NOMK = {"fee_type": "quadratic", "maker": False, "maker_ratio": 0.0, "mult": 1.0}
+    # fees per contract at 50¢, off the venues' own schedules (Oct 18 2026):
+    # Poly take 0.0695 → 1.7375; Poly rest = a REBATE −0.3125 until Oct 19
+    # 1 PM ET, then 0 (Tier 1 gets none); Kalshi take 1.75, rest 0.4375 on a
+    # maker-fee series / 0 on plain quadratic / 0.875 on combo-maker-fee
+    assert abs(kv.fee_per_contract_c("POLYMARKET", "take", 50) - 1.7375) < 1e-9
+    assert abs(kv.fee_per_contract_c("POLYMARKET", "rest", 50, at=BEFORE) + 0.3125) < 1e-9
+    assert kv.fee_per_contract_c("POLYMARKET", "rest", 50, at=AFTER) == 0.0
     assert abs(kv.fee_per_contract_c("KALSHI", "take", 50) - 1.75) < 1e-9
-    assert abs(kv.fee_per_contract_c("KALSHI", "rest", 50, {"maker": True, "mult": 1}) - 0.4375) < 1e-9
-    assert kv.fee_per_contract_c("KALSHI", "rest", 50, {"maker": False, "mult": 1}) == 0.0
-    assert abs(kv.fee_per_contract_c("KALSHI", "take", 50, {"maker": True, "mult": 0.5}) - 0.875) < 1e-9
-    # Kalshi rounds the ORDER's fee up to the cent: 5 contracts × 0.4375 = 2.19 → 3¢
-    assert kv.order_fee_c("KALSHI", "rest", 50, 5, {"maker": True}) == 3.0
-    assert kv.order_fee_c("POLYMARKET", "rest", 50, 5) == 1.56
-    # rest: same touch on both → Kalshi's fee-free series wins, maker-fee series loses
-    v, d = kv.compare_rest(50.0, 50.0, 10, {"maker": False})
-    assert v == "KALSHI", d
-    v, d = kv.compare_rest(50.0, 50.0, 10, {"maker": True})
+    assert abs(kv.fee_per_contract_c("KALSHI", "rest", 50, MK) - 0.4375) < 1e-9
+    assert kv.fee_per_contract_c("KALSHI", "rest", 50, NOMK) == 0.0
+    assert abs(kv.fee_per_contract_c("KALSHI", "rest", 50, {"fee_type": "quadratic_with_combo_maker_fees", "mult": 1.0}) - 0.875) < 1e-9
+    assert abs(kv.fee_per_contract_c("KALSHI", "take", 50, {**MK, "mult": 0.5}) - 0.875) < 1e-9
+    assert abs(kv.fee_per_contract_c("KALSHI", "rest", 50, None) - 0.4375) < 1e-9   # unreadable → charged
+    assert abs(kv.fee_per_contract_c("KALSHI", "rest", 50, {"maker": False}) - 0.0) < 1e-9   # legacy dict shape
+    # Kalshi rounds the ORDER's fee up to the cent: 5 contracts × 0.4375 = 2.19 → 3¢; Poly's rebate rounds to the cent
+    assert kv.order_fee_c("KALSHI", "rest", 50, 5, MK) == 3.0
+    assert kv.order_fee_c("POLYMARKET", "rest", 50, 5, at=BEFORE) == -1.56
+    assert kv.order_fee_c("POLYMARKET", "rest", 50, 5, at=AFTER) == 0.0
+    # rest: same touch both books → after the cutoff a fee-free Kalshi series ties (Poly keeps home),
+    # a maker-fee series loses; before the cutoff Poly's rebate wins both
+    v, d = kv.compare_rest(50.0, 50.0, 10, NOMK, at=AFTER)
     assert v == "POLYMARKET", d
-    # a cheaper Kalshi touch beats Poly even paying the maker fee (49 + 0.5 < 50.3)
-    v, d = kv.compare_rest(50.0, 49.0, 10, {"maker": True})
+    v, d = kv.compare_rest(50.0, 50.0, 10, MK, at=AFTER)
+    assert v == "POLYMARKET", d
+    v, d = kv.compare_rest(50.0, 50.0, 10, NOMK, at=BEFORE)
+    assert v == "POLYMARKET" and d["all_in"]["POLYMARKET"] < 50.0, d
+    # a cent cheaper on Kalshi beats Poly even paying the maker fee (49 + 0.5 < 50)
+    v, d = kv.compare_rest(50.0, 49.0, 10, MK, at=AFTER)
     assert v == "KALSHI", d
     # no churn: the gain must clear the threshold to leave the current venue
-    v, d = kv.compare_rest(50.0, 49.9, 10, {"maker": False}, current="POLYMARKET", min_gain_c=0.5)
+    v, d = kv.compare_rest(50.0, 49.9, 10, NOMK, current="POLYMARKET", min_gain_c=0.5, at=AFTER)
     assert v == "POLYMARKET" and d["why"] == "gain_under_threshold", d
-    v, d = kv.compare_rest(50.0, 49.0, 10, {"maker": False}, current="POLYMARKET", min_gain_c=0.5)
+    v, d = kv.compare_rest(50.0, 49.0, 10, NOMK, current="POLYMARKET", min_gain_c=0.5, at=AFTER)
     assert v == "KALSHI" and d["why"] == "switch", d
     assert kv.compare_rest(None, None, 10, None)[0] is None
     # take at the drop: cheaper all-in ask wins; the cap is on the RAW ask
-    v, d = kv.compare_take(51.0, 50.0, 10, {"maker": True})
-    assert v == "KALSHI", d                       # 50 + 1.75 < 51 + 1.25
-    v, d = kv.compare_take(50.0, 50.0, 10, {"maker": True})
-    assert v == "POLYMARKET", d                   # same ask → the cheaper fee
+    v, d = kv.compare_take(51.0, 50.0, 10, MK)
+    assert v == "KALSHI", d                       # 50 + 1.75 < 51 + 1.74
+    v, d = kv.compare_take(50.0, 50.0, 10, MK)
+    assert v == "POLYMARKET", d                   # same ask → the cheaper fee (1.7375 < 1.75→2¢ on the order)
     v, d = kv.compare_take(51.5, 50.0, 10, None, resting_c=49.5, cap_c=1.0)
     assert v == "KALSHI", d                       # Poly's 51.5 is past the cap, Kalshi's 50 is in
     v, d = kv.compare_take(51.5, 51.0, 10, None, resting_c=49.5, cap_c=1.0)
     assert v is None and d["why"] == "every_ask_past_cap", d
+    # the event override beats the series (pure merge)
+    assert kv.kalshi_maker_ratio({"fee_type": "quadratic"}) == 0.0
+    assert kv.kalshi_maker_ratio({"fee_type": "quadratic_with_combo_maker_fees"}) == 0.5
+    assert kv.kalshi_maker_ratio(None) == 0.25
     # the classifier on Kalshi's known shapes
     away, home = "Nebraska Cornhuskers", "Oregon Ducks"
     ml = {"title": "Nebraska at Oregon: Winner?", "yes_sub_title": "Nebraska", "ticker": "KXNCAAFGAME-X-NEB"}

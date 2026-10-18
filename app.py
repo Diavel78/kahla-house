@@ -9737,30 +9737,36 @@ def _pmm_side_book(client, sport: str, away: str, home: str, side: str,
 
 
 def _pmm_taker_fee_cents(price_cents) -> float:
-    """Polymarket US TAKER fee per share, in cents: 5c · p·(1-p) (p = price
-    in dollars) — peaks at 1.25c/share at 50c, tapers to the wings. Confirmed
-    on live tickets (54c -> $1.24/100sh, 47c -> $1.25/100sh) AND against the
-    published schedule (0.05·C·p·(1-p), effective Apr 2026). The fee PEAKS at
-    coin-flips, exactly where sharp action lives, so taking a 50/50 is the
-    most expensive case."""
+    """Polymarket US TAKER fee per share, in cents: 6.95c · p·(1-p) (p =
+    price in dollars) — the published schedule effective exchange-wide Oct 7
+    2026 (docs.polymarket.us/fees, read Oct 18 2026; the 5c coefficient this
+    carried was the Apr-2026 schedule). Peaks at 1.74c/share at 50c."""
     if price_cents is None:
         return 0.0
     p = max(0.0, min(1.0, price_cents / 100.0))
-    return round(5.0 * p * (1.0 - p), 2)
+    return round(6.95 * p * (1.0 - p), 2)
 
 
-def _pmm_maker_fee_cents(price_cents) -> float:
-    """Polymarket US MAKER fee per share, in cents: 1.25c · p·(1-p),
-    CHARGED at fill (max 0.31c at 50c). This was a maker REBATE when
-    verified June 2026 — Polymarket flipped it to a fee by Aug 1 2026,
-    PROVEN on the user's own settled NRFI ticket (9.70 contracts @ ~49c,
-    resting maker order, fee −$0.03 = exactly 1.25·p·(1−p)/share; a
-    taker would have paid $0.12). Same silent rebate→fee flip Kalshi
-    pulled July 7 2026, same 25%-of-taker ratio. Trust fills, not docs."""
+# Polymarket's maker REBATE (−0.0125 × C × p(1−p), credited at the fill)
+# ends for us at 1 PM ET Mon Oct 19 2026: the rebate goes to prior-month
+# maker-volume tiers and Tier 1 (< $10M) gets none. Makers are never
+# CHARGED on this venue (Rob, Oct 18 2026: "Poly charges no maker fee's";
+# the fee page agrees). The Aug 1 2026 "maker fee" read off an NRFI ticket
+# was most likely the venue's cent-rounding, not a fee.
+_PMM_MAKER_TIER1_FROM = datetime(2026, 10, 19, 17, 0, tzinfo=timezone.utc)
+
+
+def _pmm_maker_fee_cents(price_cents, at=None) -> float:
+    """Polymarket US MAKER fee per share in cents — NEGATIVE = the rebate
+    we are paid (−1.25c · p·(1−p) until the Oct 19 2026 tier cutoff), 0
+    after it. Never positive."""
     if price_cents is None:
         return 0.0
+    at = at or datetime.now(timezone.utc)
+    if at >= _PMM_MAKER_TIER1_FROM:
+        return 0.0
     p = max(0.0, min(1.0, price_cents / 100.0))
-    return round(1.25 * p * (1.0 - p), 2)
+    return round(-1.25 * p * (1.0 - p), 2)
 
 
 def _cents_to_american_py(cents) -> int | None:
@@ -9789,11 +9795,10 @@ def _book_signal(book: dict | None, edge_units: float = 1,
     bb, ba = book["best_bid"], book["best_ask"]
     spread = ba - bb
     fee = _pmm_taker_fee_cents(ba)
-    maker_fee = _pmm_maker_fee_cents(bb)   # makers PAY now (Aug 2026 flip)
+    maker_fee = _pmm_maker_fee_cents(bb)   # ≤ 0: a rebate until Oct 19 2026, then nothing
     take_eff = round(ba + fee, 2)          # TRUE cost of taking (ask + fee)
-    # take vs make all-in gap: spread + taker fee − the maker fee you'd
-    # pay anyway by resting (~1.9c at 50/50 on a 1c book — the flip
-    # narrowed the gap from ~2.6c, but MAKE still wins on price).
+    # take vs make all-in gap: spread + taker fee + the maker rebate you
+    # forgo by not resting (maker_fee is negative or zero).
     take_cost = round(spread + fee - maker_fee, 2)
     # THE TOP ROW is the truth — best bid size vs best ask size. NOT a
     # 2-level sum: a deep bid wall ONE tick below the touch fooled the old

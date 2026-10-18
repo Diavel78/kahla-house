@@ -49,22 +49,26 @@
    (strip, P&L, grading, sold/adopt) sees Kalshi bets — but that work comes
    AFTER Phase 0 proves the venue can be used at all.
 
-## 1. Fees (the math is `kalshi_venue.fee_per_contract_c`, selftested)
+## 1. Fees — READ OFF BOTH VENUES' OWN SCHEDULES, Oct 18 2026 (the math is `kalshi_venue.fee_per_contract_c`, selftested)
 
-| | Polymarket US | Kalshi |
+| | Polymarket US (docs.polymarket.us/fees, effective Oct 7 2026) | Kalshi (series `fee_type` → kalshi-fee-schedule.pdf) |
 |---|---|---|
-| take, per contract | 5¢·p(1−p) | 7¢·p(1−p) × M; the ORDER's fee rounded UP to the cent |
-| rest (maker), per contract | 1.25¢·p(1−p), charged at fill | 1.75¢·p(1−p) × M on series whose fee type carries maker fees, else $0 |
+| take, per contract | 0.0695 × p(1−p) (6.95¢·p(1−p); 1.74¢ at 50¢) | 0.07 × p(1−p) × fee_multiplier; the order's fee rounded up to the cent |
+| rest (maker), per contract | a REBATE: −0.0125 × p(1−p) credited at the fill — **until 1 PM ET Oct 19 2026**, when the rebate moves to prior-month maker-volume tiers and Tier 1 (< $10M, us) gets NONE. Makers are never charged. | taker × 0.25 on `quadratic_with_maker_fees` (1.75¢·p(1−p)), × 0.5 on `quadratic_with_combo_maker_fees`, $0 on plain `quadratic`; `flat` read conservatively |
 | tick | 0.25 / 0.5 / 1¢ by market | 1¢ |
 
-- Polymarket numbers are calibrated on Rob's own tickets (`app._pmm_*_fee_cents`).
-- Kalshi's maker fee is PER SERIES and the list moves (third-party readers
-  counted 107 of 3,883 sports series with a maker fee on Oct 10 2026, incl.
-  NFL/NBA/NHL/CFB games). `kalshi_venue.series_fee` reads it off
-  `GET /series/{ticker}` live, 6h cache. **Never write the list down.**
-- Unreadable fee terms default to CONSERVATIVE (maker charged, M=1).
-- The fee gap at 50¢ is ~0.5¢ on the take and ~0.13¢ on the rest. The
-  PRICE gap between venues decides the route far more often than the fee.
+- Rob, Oct 18 2026: "Poly charges no maker fees" — correct; the code had carried
+  a 1.25¢ maker FEE (from an Aug 1 NRFI ticket that was almost certainly the
+  venue's cent-rounding) and a 5¢ taker coefficient (the Apr-2026 schedule).
+  Both fixed the same morning; `poly_maker_c(at)` carries the Oct 19 cutoff.
+- Kalshi's fee terms are read live per SERIES (`series_fee`) AND the event's
+  own `fee_type_override` / `fee_multiplier_override` beat the series
+  (`event_fee`, GET /events/{ticker}) — never a table. Unreadable → the
+  conservative read (maker charged at 0.25, multiplier 1).
+- Today's NFL spread/total series all read `quadratic_with_maker_fees`,
+  multiplier 1: a Kalshi resting bet pays ~0.44¢/contract at 50¢ (5¢ on a
+  10-lot, ceil'd), a Polymarket one pays nothing (and earns 0.31¢ until the
+  cutoff). So Kalshi needs a full cent of price to win the seat.
 
 ## 2. The compare (pure, `kalshi_venue.compare_rest` / `compare_take`)
 
