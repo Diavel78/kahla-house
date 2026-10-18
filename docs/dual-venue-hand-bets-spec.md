@@ -1,7 +1,13 @@
 # Dual-venue hand bets — Polymarket + Kalshi (spec, Oct 18 2026)
 
-> Status: **PHASE 0 (feasibility) in flight.** The only Kalshi write is the
-> one-shot proof probe (below); no bet path writes to Kalshi.
+> Status: **PHASE 2 LIVE BEHIND `machine_flags hand_kalshi_enabled` (Oct 18
+> 2026).** Phase 0 proved the write path end to end (fourth probe, 08:09 AZ:
+> `write_scope_ok_no_funds` on the trade-scoped key — the venue accepted
+> the order and refused only for balance). Phases 1-2 shipped the same
+> morning (Rob: "Start on the rest, I want to use this for the 1 pm NFL
+> games"): the quote prices both venues, the executor rests on the cheaper
+> all-in seat, the strip / chase / start-cancel / take / cancel / re-peg /
+> live carry a Kalshi bet. See §5 for what is and is not built.
 > Rob, Oct 18 2026: "change my betting machine to automatically calculate
 > the fees and figure out where to keep these bets while they're resting,
 > move them back and forth… when we have to take a bet, with the new
@@ -178,3 +184,55 @@ grading off Kalshi settlement.
 - The hand-fill verdict (`_hand_fill_verdict`) reads Polymarket's trade
   tape; a Kalshi fill needs the fills endpoint (`/portfolio/fills`) or the
   `fill` channel.
+
+
+## 5. What shipped Oct 18 2026 (Phase 1 + 2), and what did not
+
+**Built (app.py, the `KALSHI AS A SECOND HAND-BET VENUE` block before
+`_kalshi_probe_tick`; `kalshi_venue.py` reads at the end of the module):**
+
+- **Quote** (`/api/bet-sheets/place preview=true`): when the flag is on and
+  the item's `venue` is not `poly`, `_bet_sheet_resolve_kalshi` prices the
+  Kalshi seat (same seat rule as Polymarket — `_hand_seat_price` on the
+  Kalshi book), `_hand_venue_pick` → `compare_rest` picks; the slip shows
+  `all-in Poly X¢ vs Kalshi Y¢` and the venue. Quote still runs on Vercel
+  (public reads only); moving it onto the box as a `quote` op is open.
+- **Place** (`_hand_order_execute` create): both venues resolved, venue
+  picked (`auto` / `poly` / `kalshi` from the slip's Venue selector), Kalshi
+  → `_kalshi_order_place` (post-only GTC, whole cents, 1-99¢, 1-250, ≤$500,
+  never crossing the ask, pre-game, verified on the orders LIST) →
+  `_bet_sheet_log_pick` with the Kalshi identity + the Polymarket twin.
+- **Strip** (`_hand_status_publish` → `_hand_status_kalshi`): one orders
+  read + one positions read a tick, the book per Kalshi pick (≤12 reads a
+  tick, which also samples `KALSHI_TAPE`), fill stamp, OUTBID. Vercel's
+  `/api/bet-sheets/mine` falls back to the same reads when the box is not
+  publishing; every row carries `venue`.
+- **Chase** (`_hand_chase_kalshi`): join the touch, Rob's leash from the
+  anchor, the thin-touch guard, moves by `amend_order` (the venue may hand
+  back a NEW order id — the verified id is kept).
+- **Game start** (`_hand_start_kalshi`): `_hand_start_plan` on the Kalshi
+  tape (REST-sampled, so ~10s frames; the 90s stale rule holds), the twin's
+  Polymarket tape as the fallback baseline; the take compares both venues'
+  asks + taker fees under Rob's 1¢ cap, cancels the resting Kalshi order
+  (verified) BEFORE the IOC, and a Polymarket take stamps `pmm_slug` so the
+  lot is tracked there. Unfilled → pick deleted (the missed list reads the
+  stamp, `venue: KALSHI`).
+- **Slip ops**: cancel / re-peg / move-to-live have Kalshi branches
+  (`_kalshi_cancel_exec`, `_kalshi_repeg_exec`, `_kalshi_live_exec`).
+- **Grading**: the resolver's ESPN pass (entry_book KALSHI, market_id /
+  side / entry_line as always). Dollars on the page = filled_qty × price,
+  fees not netted (same as Polymarket).
+
+**Not built (say so, don't assume):** a venue switch while resting (the
+chase stays on the bet's venue — Rule 4's "re-peg may switch books" is
+open); the line-move sit-out / vanish drop on Kalshi (no Kalshi depth
+socket — `cellar/kalshifeed.py` is the next piece); adopting bets placed in
+the Kalshi app; sold-in-the-Kalshi-app detection; venue-truth grading off
+Kalshi settlement; re-rung on Kalshi; dashboard P&L from Kalshi fills.
+
+**Operating it:** flip `machine_flags hand_kalshi_enabled=true` via
+`/api/cellar/flag` (site-curl); the box must be on this commit (pull +
+kick the money daemon); fund the Kalshi account. The slip's Venue
+selector defaults to best venue. Watch `exec_probe_runs` kinds
+`kalshi_order`, `hand_chase` (venue KALSHI), `hand_start_cancel` (venue
+KALSHI) — `/api/bet-sheets/picks?stamps=kalshi_order`.

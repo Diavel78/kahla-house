@@ -4191,6 +4191,60 @@ def test_sheet_pinnacle_line() -> None:
           set(spenders) == {"_pin_daily_refresh"}, f"got {spenders}")
 
 
+def test_kalshi_hand_lane() -> None:
+    """THE KALSHI HAND LANE (Oct 18 2026): a Kalshi order book reads into the
+    Polymarket book shape so every hand-bet rule runs unchanged; orders and
+    positions parse to one shape; the venue pick is the all-in compare with
+    Polymarket as home."""
+    import app as _app
+    import kalshi_venue as kv
+    # the venue returns BIDS ONLY per side: a no bid at 37 is a yes ask at 63
+    ob = {"ok": True, "yes": [(62.0, 300.0), (61.0, 1200.0)], "no": [(37.0, 500.0), (36.0, 90.0)]}
+    bk = kv.poly_book(ob)
+    assert bk["best_bid"] == 62.0 and bk["best_ask"] == 63.0, bk
+    assert bk["asks"] == [(63.0, 500.0), (64.0, 90.0)], bk
+    assert kv.poly_book({"ok": False, "yes": [], "no": []}) is None
+    # a NO bet reads the inverted book exactly like a synthetic Polymarket NO
+    assert _app._manual_side_book(bk, True) == (37.0, 38.0)
+    assert _app._manual_side_book(bk, False) == (62.0, 63.0)
+    assert _app._hand_ladder_from_book(bk, True) == [(37.0, 500.0), (36.0, 90.0)]
+    # the tape row shape the start rule reads: both-side touch sizes
+    row = kv.tape_row(bk, 1000.0)
+    assert row[1:5] == (62.0, 300.0, 63.0, 500.0) and row[5] == 1500.0 and row[6] == 590.0, row
+    # orders: dollar strings, fp counts, YES-canonical price → our side
+    o = kv.parse_order({"order_id": "x", "ticker": "T", "status": "resting", "yes_price_dollars": "0.3800",
+                        "remaining_count_fp": "7.00", "fill_count_fp": "3.00", "initial_count_fp": "10.00"})
+    assert o["yes_c"] == 38.0 and o["remaining"] == 7.0 and o["filled"] == 3.0 and o["status"] == "resting", o
+    assert kv.our_c(38.0, True) == 38.0 and kv.our_c(38.0, False) == 62.0
+    assert _app._kalshi_pick_order({"kalshi_order_id": "x"}, {"x": o}) is o
+    assert _app._kalshi_pick_order({"kalshi_order_id": "x"}, {"x": {**o, "status": "executed"}}) is None
+    assert _app._kalshi_pick_order({"kalshi_order_id": "x"}, {"x": {**o, "remaining": 0.0}}) is None
+    # positions: position_fp sign = side; an unreadable read is None, never 0
+    pos = kv.parse_positions({"ok": True, "data": {"market_positions": [
+        {"ticker": "T", "position_fp": "-5.00"}, {"ticker": "U", "position_fp": "2.00"}]}})
+    assert kv.held_for(pos, "T", False) == 5.0 and kv.held_for(pos, "T", True) == 0.0
+    assert kv.held_for(pos, "U", True) == 2.0 and kv.held_for(pos, "V", True) == 0.0
+    assert kv.parse_positions({"ok": False}) is None and kv.held_for(None, "T", True) is None
+    # the venue pick: Polymarket is home, Kalshi must win by min_gain
+    poly = {"ok": True, "price_c": 52.0}
+    kal = {"ok": True, "price_c": 51.0, "fee": {"maker": False, "mult": 1.0}}
+    v, d = _app._hand_venue_pick("auto", poly, kal, 10, 0.5)
+    assert v == "KALSHI" and d["why"] == "switch", d
+    v, d = _app._hand_venue_pick("auto", poly, {**kal, "price_c": 52.0}, 10, 0.5)
+    assert v == "POLYMARKET", d                       # same price, no maker fee on Kalshi: 0 gain < 0.5
+    v, d = _app._hand_venue_pick("auto", poly, {"ok": False, "reason": "no market"}, 10, 0.5)
+    assert v == "POLYMARKET" and d["kalshi_ok"] is False, d
+    v, d = _app._hand_venue_pick("auto", {"ok": False, "reason": "not listed"}, kal, 10, 0.5)
+    assert v == "KALSHI", d                           # Polymarket missing: Kalshi carries the bet
+    assert _app._hand_venue_pick("poly", {"ok": False}, kal, 10, 0.5)[0] is None
+    assert _app._hand_venue_pick("kalshi", poly, {"ok": False}, 10, 0.5)[0] is None
+    assert _app._hand_venue_pick("kalshi", poly, kal, 10, 0.5)[0] == "KALSHI"
+    assert _app._hand_venue_pick("auto", None, None, 10, 0.5)[0] is None
+    # a Kalshi pick is invisible to every Polymarket path: no slug, no order id
+    assert _app._kalshi_pick({"venue": "KALSHI"}) and not _app._kalshi_pick({"venue": "POLYMARKET"}) and not _app._kalshi_pick({})
+    check("kalshi hand lane: book shape, orders/positions, venue pick", True)
+
+
 def test_kalshi_venue_math() -> None:
     """KALSHI AS A SECOND VENUE (Oct 18 2026): the pure fee math and the
     rest/take compare both venues share, plus the market classifier on the
@@ -4302,7 +4356,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

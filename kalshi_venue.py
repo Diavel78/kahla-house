@@ -859,3 +859,172 @@ def probe(place: bool = False, ticker: str | None = None, contracts: int = 1, of
     else:
         out["verdict"] = "cancel_failed" if not cx.get("ok") else "unverified"
     return out
+
+
+# ───────────────── the hand lane's reads (Phase 2, Oct 18 2026) ─────────────────
+# Everything the box's handbets lane needs from Kalshi to carry a resting
+# hand bet: the order book shaped like a Polymarket `_pmm_book` dict (so
+# every pure hand-bet rule — seat, thin touch, chase, start drop, take —
+# runs unchanged on either venue), the resting orders and positions
+# parsed to one shape, and a small pace so the box never bursts the
+# venue's 20 reads / 10 writes a second.
+_PACE = {"at": 0.0}
+_PACE_MIN_S = 0.06
+
+
+def _pace():
+    now = time.monotonic()
+    wait = _PACE["at"] + _PACE_MIN_S - now
+    if wait > 0:
+        time.sleep(wait)
+    _PACE["at"] = time.monotonic()
+
+
+def orderbook(ticker: str, depth: int = 12) -> dict:
+    """GET /markets/{ticker}/orderbook → {ok, yes:[(c, q)…], no:[(c, q)…],
+    error}. The venue returns BIDS ONLY on each side (`orderbook_fp`:
+    yes_dollars / no_dollars as [["0.1500","100.00"], …], best first) — a
+    yes bid at X is the no ask at 100 − X with the same size, and vice
+    versa. Cents + float sizes; never cached (this IS the tape)."""
+    _pace()
+    data, err = _get(f"/markets/{ticker}/orderbook", {"depth": int(depth)} if depth else None)
+    if data is None:
+        return {"ok": False, "yes": [], "no": [], "error": err}
+    ob = data.get("orderbook_fp") or data.get("orderbook") or {}
+
+    def lv(rows, dollars: bool):
+        out = []
+        for r in (rows or []):
+            try:
+                p, q = r[0], r[1]
+                c = round(float(p) * (100.0 if dollars else 1.0), 2)
+                q = float(q)
+                if 0 < c < 100 and q > 0:
+                    out.append((c, q))
+            except (TypeError, ValueError, IndexError):
+                continue
+        return sorted(out, key=lambda x: -x[0])
+    if "yes_dollars" in ob or "no_dollars" in ob:
+        yes, no = lv(ob.get("yes_dollars"), True), lv(ob.get("no_dollars"), True)
+    else:
+        yes, no = lv(ob.get("yes"), False), lv(ob.get("no"), False)
+    return {"ok": True, "yes": yes, "no": no, "error": None}
+
+
+def poly_book(ob: dict) -> dict | None:
+    """Pure. A Kalshi order book → the YES-canonical `_pmm_book` shape
+    {bids, asks, best_bid, best_ask}: bids = the yes bids, asks = the no
+    bids inverted (a no bid at X sells YES at 100 − X). A NO hand bet then
+    reads it as a synthetic side exactly like a Polymarket NO."""
+    if not ob or not ob.get("ok"):
+        return None
+    bids = sorted(((c, q) for c, q in ob.get("yes") or []), key=lambda x: -x[0])
+    asks = sorted(((round(100.0 - c, 2), q) for c, q in ob.get("no") or []), key=lambda x: x[0])
+    return {"bids": bids, "asks": asks,
+            "best_bid": bids[0][0] if bids else None,
+            "best_ask": asks[0][0] if asks else None}
+
+
+def tape_row(book: dict, ts: float, levels: int = 6) -> tuple | None:
+    """Pure. One touch-tape sample from a YES book, in the box's tape row
+    shape: (ts, yes_bid_c, yes_bid_q, yes_ask_c, yes_ask_q, bid3, ask3,
+    bid ladder, ask ladder) — what `_hand_start_plan`, `_hand_side_rows`
+    and the move rule read."""
+    if not book:
+        return None
+    bids, asks = book.get("bids") or [], book.get("asks") or []
+    bb = bids[0] if bids else (None, 0.0)
+    ba = asks[0] if asks else (None, 0.0)
+    return (round(float(ts), 2), bb[0], round(bb[1], 1), ba[0], round(ba[1], 1),
+            round(sum(q for _, q in bids[:3]), 1), round(sum(q for _, q in asks[:3]), 1),
+            [(p, round(q, 1)) for p, q in bids[:levels]],
+            [(p, round(q, 1)) for p, q in asks[:levels]])
+
+
+def parse_order(o: dict) -> dict:
+    """Pure. One venue order → {order_id, ticker, status, yes_c, remaining,
+    filled, initial, side, action}. Prices arrive as dollar strings
+    (`yes_price_dollars`) or legacy integer cents (`yes_price`); counts as
+    `*_count_fp` strings or legacy integers."""
+    def n(*keys):
+        for k in keys:
+            v = o.get(k)
+            if v is not None:
+                x = _num(v)
+                if x is not None:
+                    return x
+        return None
+    yes_c = n("yes_price_dollars")
+    if yes_c is not None:
+        yes_c = round(yes_c * 100.0, 2)
+    else:
+        yes_c = n("yes_price")
+        if yes_c is None:
+            nc = n("no_price_dollars")
+            if nc is not None:
+                yes_c = round(100.0 - nc * 100.0, 2)
+    return {"order_id": o.get("order_id") or o.get("id"), "ticker": o.get("ticker"),
+            "status": str(o.get("status") or "").lower(),
+            "yes_c": yes_c,
+            "remaining": n("remaining_count_fp", "remaining_count") or 0.0,
+            "filled": n("fill_count_fp", "fill_count") or 0.0,
+            "initial": n("initial_count_fp", "initial_count"),
+            "side": o.get("side"), "action": o.get("action"),
+            "client_order_id": o.get("client_order_id")}
+
+
+def our_c(yes_c, buy_yes: bool):
+    if yes_c is None:
+        return None
+    return round(float(yes_c) if buy_yes else 100.0 - float(yes_c), 2)
+
+
+RESTING = ("resting", "pending", "partially_filled", "partial")
+
+
+def resting_orders() -> dict:
+    """{ok, by_id: {order_id: parsed}, error} — every resting order on the
+    account in one read."""
+    _pace()
+    res = my_orders(ticker=None, status="resting")
+    if not res.get("ok"):
+        return {"ok": False, "by_id": {}, "error": res.get("error")}
+    by_id = {}
+    for o in ((res.get("data") or {}).get("orders") or []):
+        p = parse_order(o)
+        if p["order_id"]:
+            by_id[p["order_id"]] = p
+    return {"ok": True, "by_id": by_id, "error": None}
+
+
+def parse_positions(res: dict) -> dict | None:
+    """{ticker: net contracts} off a positions read (+ = YES held, − = NO
+    held; `position_fp` string, legacy `position` int). None when the read
+    failed — a failed read must never look like 'nothing held'."""
+    if not res or not res.get("ok"):
+        return None
+    out = {}
+    for mp in ((res.get("data") or {}).get("market_positions") or []):
+        t = mp.get("ticker")
+        v = _num(mp.get("position_fp"))
+        if v is None:
+            v = _num(mp.get("position"))
+        if t and v is not None:
+            out[t] = float(v)
+    return out
+
+
+def positions() -> dict | None:
+    _pace()
+    return parse_positions(my_positions())
+
+
+def held_for(pos: dict | None, ticker: str, buy_yes: bool) -> float | None:
+    """Contracts held on OUR side of a ticker; None when positions are
+    unreadable."""
+    if pos is None:
+        return None
+    net = float(pos.get(ticker) or 0.0)
+    if buy_yes:
+        return net if net > 0 else 0.0
+    return -net if net < 0 else 0.0
