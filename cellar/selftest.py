@@ -2788,18 +2788,26 @@ def test_hand_lot_price() -> None:
 
 def test_hand_take_plan() -> None:
     """TAKE AT THE GAME-START DROP (Oct 18 2026): only after the scheduled
-    start, only an ask within the cap of the resting price."""
+    start, only a best ask within the cap; the LIMIT is resting + cap on the
+    grid so one order sweeps every level up to it (the SJSU 0.11-of-10)."""
     import app as _app
     f = _app._hand_take_plan
     S = 1000.0
-    assert f(49.5, 50.0, 1.0, S, S + 5) == 50.0          # half-cent spread → take
-    assert f(49.5, 50.5, 1.0, S, S + 5) == 50.5          # exactly the cap → take
-    assert f(49.5, 51.0, 1.0, S, S + 5) is None          # past the cap → cancel as before
-    assert f(49.5, 50.0, 1.0, S, S - 1) is None          # before the scheduled start → never
-    assert f(49.5, 50.0, 0.5, S, S + 5) == 50.0
-    assert f(49.5, None, 1.0, S, S + 5) is None          # no ask → cancel
-    assert f(None, 50.0, 1.0, S, S + 5) is None
-    assert f(49.5, 100.0, 1.0, S, S + 5) is None
+    assert f(49.0, 50.0, 1.0, S, S + 5, 0.5) == 50.0       # limit = 49 + 1
+    assert f(49.5, 50.0, 1.0, S, S + 5, 0.5) == 50.5       # sweeps up to 50.5, not just the 50 ask
+    assert f(49.5, 50.0, 1.0, S, S + 5, 1.0) == 50.0       # whole-cent grid snaps the limit down
+    assert f(49.5, 51.0, 1.0, S, S + 5, 0.5) is None       # best ask past the cap → cancel as before
+    assert f(49.5, 50.0, 1.0, S, S - 1, 0.5) is None       # before the scheduled start → never
+    assert f(49.5, 50.0, 0.5, S, S + 5, 0.5) == 50.0
+    assert f(49.5, None, 1.0, S, S + 5, 0.5) is None
+    assert f(None, 50.0, 1.0, S, S + 5, 0.5) is None
+    assert f(98.5, 99.0, 1.0, S, S + 5, 0.5) == 99.0
+    v = _app._hand_take_vwap
+    assert v([(50.0, 0.11), (50.5, 4.0), (51.0, 100.0)], 10, 51.0) == round((0.11*50 + 4*50.5 + 5.89*51) / 10, 2)
+    assert v([(50.0, 0.11), (51.5, 100.0)], 10, 51.0) == 50.0
+    assert v([], 10, 51.0) is None
+    asks = _app._hand_side_asks({"bids": [(52.0, 5.0), (51.0, 9.0)], "asks": [(53.0, 1.0)]}, True)
+    assert asks == [(48.0, 5.0), (49.0, 9.0)], asks
 
 
 def test_hand_start_plan() -> None:
