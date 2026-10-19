@@ -4461,7 +4461,7 @@ def api_bet_sheets_picks():
                     .eq("signal_blob->>venue", "KALSHI").limit(100).execute().data or [])
             keys = ("kalshi_ticker", "kalshi_buy_yes", "kalshi_order_id", "price_c", "anchor_c", "contracts",
                     "chase_err", "switch_err", "venue_switches", "chase_hold", "thin_hold", "line_hold",
-                    "kalshi_fee", "pmm_twin_slug", "switched_at", "filled_qty", "chase_moves", "kalshi_cancel_sent", "switch_refused", "venue_pick", "kalshi_twin_src", "kalshi_twin_ticker", "quoted_c", "placed_at")
+                    "kalshi_fee", "pmm_twin_slug", "switched_at", "filled_qty", "chase_moves", "kalshi_cancel_sent", "kalshi_move_cancel_sent", "line_cancels", "line_rejoins", "switch_refused", "venue_pick", "kalshi_twin_src", "kalshi_twin_ticker", "quoted_c", "placed_at")
             out["kalshi_picks"] = [{"id": r["id"], "game": r.get("event_name"), "mt": r.get("market_type"),
                                     "side": r.get("side"), "line": r.get("entry_line"),
                                     **{k: (r.get("signal_blob") or {}).get(k) for k in keys
@@ -18280,6 +18280,13 @@ def _hand_kalshi_gone(sb, r: dict, blob: dict, now, st: dict, ticker: str, by: b
     re-id'd order, keep a filled lot, else retire the pick. Stamps
     `exec_probe_runs hand_kalshi_gone` with the bet either way."""
     import kalshi_venue as _kv
+    if _hand_kalshi_box_cancel(blob):
+        # THE BOX TOOK IT OFF THE BOOK (Oct 19 2026): a line-move cancel, a
+        # switch cancel or a sit-out is never "a hand cancel" — four picks
+        # were deleted this way the first Kalshi day. Those paths finish
+        # their own bet; this sweep only judges orders with NO box record.
+        st["box_cancel_kept"] = st.get("box_cancel_kept", 0) + 1
+        return
     orders2, pos2 = _kalshi_acct(fresh=True)
     if orders2 is None or pos2 is None or _kalshi_pick_order(blob, orders2) is not None:
         return                                   # unreadable, or it is back — never act on a failed read
@@ -18350,6 +18357,10 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
         kctx["tried"] = True
     o = _kalshi_pick_order(blob, kctx.get("orders"))
     if o is None:
+        if isinstance(blob.get("kalshi_move_cancel_sent"), dict):
+            if kctx.get("orders") is not None:
+                _hand_kalshi_move_complete(sb, r, blob, now, st, ticker, by)
+            return
         cs = blob.get("kalshi_cancel_sent") if isinstance(blob.get("kalshi_cancel_sent"), dict) else None
         if cs and kctx.get("orders") is not None and kctx.get("client") is not None:
             # our cancel landed after its verify: complete the switch (fresh reads first)
@@ -18708,8 +18719,10 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
     import kalshi_venue as _kv
     ticker, by = blob.get("kalshi_ticker"), bool(blob.get("kalshi_buy_yes"))
     koid = blob.get("kalshi_order_id")
-    if blob.get("in_play") or blob.get("live_snipe") or not (ticker and koid):
+    if blob.get("in_play") or blob.get("live_snipe") or not ticker:
         return
+    if not koid and not isinstance(blob.get("line_hold"), dict):
+        return                                        # no order and not sitting out: nothing to judge
     if not kctx.get("tried"):
         kctx["orders"], kctx["pos"] = _kalshi_acct()
         kctx["tried"] = True
@@ -18747,7 +18760,7 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
         stamp = {"kind": "hand_start_cancel", "bet": bet, "hand_start_cancel": True, "venue": "KALSHI",
                  "pick_id": r["id"], "slug": blob.get("pmm_twin_slug"), "ticker": ticker, "order_id": koid,
                  "baseline_q": 0.0, "touch_q": 0.0, "drop_pct": None, "orphan": True,
-                 "sat_out": blob.get("kalshi_cancel_sent") or {"why": "order gone before the start"},
+                 "sat_out": blob.get("line_hold") or blob.get("kalshi_cancel_sent") or {"why": "order gone before the start"},
                  "start": ev.astimezone(timezone.utc).isoformat(),
                  "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1)}
         try:
@@ -19728,6 +19741,70 @@ def _kalshi_ws_fresh(ticker: str) -> bool:
         return False
 
 
+def _hand_kalshi_box_cancel(blob: dict) -> str | None:
+    """Why a Kalshi pick whose order is off the book is the BOX'S doing and
+    never a hand cancel: sitting out under `line_hold`, a line-move cancel the
+    orders list has not confirmed yet (`kalshi_move_cancel_sent`), or a venue
+    switch's cancel awaiting its verify (`kalshi_cancel_sent`). None = no box
+    record, so the gone sweep may retire it. Pure; selftested."""
+    if isinstance(blob.get("line_hold"), dict):
+        return "line_hold"
+    if isinstance(blob.get("kalshi_move_cancel_sent"), dict):
+        return "move_cancel_sent"
+    if isinstance(blob.get("kalshi_cancel_sent"), dict):
+        return "switch_cancel_sent"
+    return None
+
+
+def _hand_kalshi_move_complete(sb, r: dict, blob: dict, now, st: dict, ticker: str, by: bool) -> bool:
+    """Finish a line-move cancel whose verify lagged (`kalshi_move_cancel_sent`):
+    fresh reads first; still resting → wait (the marker clears after 3 min so a
+    cancel the venue never took goes back under the move rule); a held lot →
+    the fill; gone → the pick sits out under `line_hold` exactly as a verified
+    cancel would have left it. True when the pick was handled here."""
+    import kalshi_venue as _kv
+    mc = blob.get("kalshi_move_cancel_sent")
+    if not isinstance(mc, dict):
+        return False
+    orders2, pos2 = _kalshi_acct(fresh=True)
+    if orders2 is None or pos2 is None:
+        return True                                  # unreadable — never act on a failed read
+    if _kalshi_pick_order(blob, orders2) is not None:
+        try:
+            age = (now - datetime.fromisoformat(str(mc.get("sent_at") or mc.get("at")))).total_seconds()
+        except (TypeError, ValueError):
+            age = 0.0
+        if age > 180.0:                              # the venue never took the cancel: back under the rule
+            nb = {k: v for k, v in blob.items() if k != "kalshi_move_cancel_sent"}
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            _probe_log({"hand_move_cancel": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
+                        "slug": blob.get("pmm_twin_slug"), "order_id": mc.get("order_id"),
+                        "result": "cancel_not_taken", "age_s": round(age), "at": now.isoformat()})
+        return True
+    held = _kv.held_for(pos2, ticker, by)
+    stamp = {"hand_move_cancel": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
+             "slug": blob.get("pmm_twin_slug"), "order_id": mc.get("order_id"), "at": now.isoformat(),
+             "sent_at": mc.get("sent_at"), "from_c": mc.get("from_c"), "rejoin_c": mc.get("rejoin_c")}
+    nb = {k: v for k, v in blob.items() if k not in ("kalshi_move_cancel_sent", "chase_hold")}
+    if held is not None and held >= 1.0:
+        nb.update({"filled": True, "filled_qty": round(float(held), 2), "kalshi_order_id": None,
+                   "kalshi_gone": {"at": now.isoformat(), "result": "filled", "held": round(float(held), 2)}})
+        stamp["result"], stamp["held"] = "cancel_raced_fill", round(float(held), 2)
+    else:
+        nb.update({"kalshi_order_id": None,
+                   "line_hold": {k: mc.get(k) for k in ("at", "resume_at", "from_c", "rejoin_c", "detail", "qty")},
+                   "line_cancels": int(blob.get("line_cancels") or 0) + 1})
+        stamp["result"] = "cancel_completed"
+        st["cancelled"] = st.get("cancelled", 0) + 1
+    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+    try:
+        _probe_log(stamp)
+    except Exception:
+        pass
+    app.logger.warning("hand move-cancel KALSHI %s pick %s completed → %s", ticker, r["id"], stamp["result"])
+    return True
+
+
 def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg: dict, kctx: dict) -> None:
     """THE LINE-MOVE RULE ON A KALSHI BET — the same rule as the Polymarket
     one (`_hand_move_plan`: collapse + relocation = cancel, sit out, rejoin
@@ -19820,6 +19897,9 @@ def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg
         return
 
     # ── resting: did the line move against us? ──
+    if isinstance(blob.get("kalshi_move_cancel_sent"), dict):
+        _hand_kalshi_move_complete(sb, r, blob, now, st, ticker, by)
+        return
     if not kctx.get("tried"):
         kctx["orders"], kctx["pos"] = _kalshi_acct()
         kctx["tried"] = True
@@ -19889,24 +19969,45 @@ def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg
         except Exception:
             pass
         return
-    _kv.cancel_order(koid, ticker)
-    vr = _kv.order_resting(koid, ticker)
+    cr = _kv.cancel_order(koid, ticker)
+    vr = {}
+    for _i in range(3):                               # the orders list lags the cancel by a beat
+        vr = _kv.order_resting(koid, ticker)
+        if vr.get("resting") is False:
+            break
+        _time.sleep(0.7)
     gone = vr.get("resting") is False
+    resume = datetime.fromtimestamp(now_ts + calm_s, tz=timezone.utc)
+    hold_new = {"at": now.isoformat(), "resume_at": resume.isoformat(),
+                "from_c": price_c, "rejoin_c": det.get("rejoin_c"), "detail": det,
+                "qty": int(round(leaves)) or None}
     stamp = {"hand_move_cancel": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
              "slug": blob.get("pmm_twin_slug"), "order_id": koid,
+             "cancel": {"ok": cr.get("ok"), "status": cr.get("status"), "error": (cr.get("error") or "")[:160] or None},
              "price_c": price_c, "leaves": leaves, "gone": gone, "lead_s": round(lead_s),
              "rule_pct": pct, "at": now.isoformat(), **det}
     if gone:
-        resume = datetime.fromtimestamp(now_ts + calm_s, tz=timezone.utc)
-        nb = {**blob, "kalshi_order_id": None,
-              "line_hold": {"at": now.isoformat(), "resume_at": resume.isoformat(),
-                            "from_c": price_c, "rejoin_c": det.get("rejoin_c"), "detail": det,
-                            "qty": int(round(leaves)) or None},
+        nb = {**blob, "kalshi_order_id": None, "line_hold": hold_new,
               "line_cancels": int(blob.get("line_cancels") or 0) + 1}
         nb.pop("chase_hold", None)
+        nb.pop("kalshi_move_cancel_sent", None)
         sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
         st["cancelled"] += 1
+    elif cr.get("ok"):
+        # THE CANCEL LANDED, THE LIST HAD NOT CAUGHT UP (Oct 19 2026 — four Kalshi
+        # bets in one day: ANA@NYR U6.5 twice, WAS@SF U52.5, CLE ML. The single
+        # verify read the order still resting, so no line_hold was written and
+        # the pick kept its order id; ten seconds later the chase found the
+        # order gone with no box record and DELETED the pick as "a hand cancel".
+        # The box's cancel is recorded on the pick now; the move tick / chase
+        # finish the sit-out once the order reads gone (`_hand_kalshi_move_complete`).
+        nb = {**blob, "kalshi_move_cancel_sent": {**hold_new, "order_id": koid, "sent_at": now.isoformat()}}
+        nb.pop("chase_hold", None)
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+        stamp["result"] = "cancel_unverified"
+        st["cancel_sent"] = st.get("cancel_sent", 0) + 1
     else:
+        stamp["result"] = "cancel_failed"
         st["errors"] += 1
     try:
         _probe_log(stamp)

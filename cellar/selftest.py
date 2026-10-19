@@ -4266,6 +4266,20 @@ def test_kalshi_hand_lane() -> None:
     assert hp.find("_ws_depth(") < hp.find("_bet_sheet_book("), "depth table before REST"
     sk = _ins.getsource(_app._hand_switch_to_kalshi)
     assert "not _kalshi_ws_fresh(ticker)" in sk and 'kctx["kbooks"]' in sk, "REST cap only while the socket is dark"
+    # A BOX CANCEL IS NEVER A HAND CANCEL (Oct 19 2026: four Kalshi picks were
+    # deleted by the gone sweep seconds after the box's own line-move cancel,
+    # whose single verify read the order still resting). The move cancel
+    # re-reads 3x, records itself on the pick when the list lags, and the
+    # gone sweep stands down on any box record.
+    assert _app._hand_kalshi_box_cancel({"line_hold": {"at": "x"}}) == "line_hold"
+    assert _app._hand_kalshi_box_cancel({"kalshi_move_cancel_sent": {"order_id": "o"}}) == "move_cancel_sent"
+    assert _app._hand_kalshi_box_cancel({"kalshi_cancel_sent": {"to": "POLYMARKET"}}) == "switch_cancel_sent"
+    assert _app._hand_kalshi_box_cancel({"kalshi_order_id": "o", "line_hold": None}) is None
+    gs = _ins.getsource(_app._hand_kalshi_gone)
+    assert gs.find("_hand_kalshi_box_cancel(") < gs.find("_kalshi_acct("), "the box record is checked before any read"
+    mv = _ins.getsource(_app._hand_move_kalshi)
+    assert "for _i in range(3)" in mv and "kalshi_move_cancel_sent" in mv, "move cancel re-reads and records itself"
+    assert "kalshi_move_cancel_sent" in _ins.getsource(_app._hand_chase_kalshi)
     # a NO bet reads the inverted book exactly like a synthetic Polymarket NO
     assert _app._manual_side_book(bk, True) == (37.0, 38.0)
     assert _app._manual_side_book(bk, False) == (62.0, 63.0)
