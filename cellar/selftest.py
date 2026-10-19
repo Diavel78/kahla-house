@@ -2824,6 +2824,14 @@ def test_hand_start_plan() -> None:
     assert f(pre + [row(S - 2, 1000, 1000)], S, S - 1, 90)[0] == "pre"
     # no tape before the start → no baseline
     assert f([row(S + 1, 100, 100), row(S + 2, 100, 100)], S, S + 3, 90)[0] == "no_baseline"
+    # THE QUIET BOOK CARRIES FORWARD (Oct 18 2026, CAR -1.5 @ CGY): the last
+    # frame 14 min before the start IS the book at the start when nothing
+    # changed since — it is the baseline, and the drop measures against it
+    quiet = [row(S - 840, 2, 1623)]
+    v = f(quiet + [row(S + 1, 2, 10), row(S + 2, 2, 8)], S, S + 3, 95)
+    assert v[0] == "started" and v[1] == 1625, v
+    # …but a frame older than an hour is history, not a baseline
+    assert f([row(S - 4000, 2, 1623), row(S + 1, 2, 10), row(S + 2, 2, 8)], S, S + 3, 95)[0] == "no_baseline"
     # one post-start frame is not enough
     assert f(pre + [row(S + 2, 5000, 4000)], S, S + 3, 90)[0] == "wait"
     # two frames 90%+ off the 270k high → started (baseline is the HIGH, not the last pre-start size)

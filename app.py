@@ -3630,7 +3630,10 @@ def api_poly_touch():
                 pass
             last_n = int(request.args.get("n") or 40)
             az = ZoneInfo("America/Phoenix")
+            want_sl = (request.args.get("slug") or "").strip().lower()      # substring filter (the job log truncates ~60KB)
             for sl, rows in (pl.get("slugs") or {}).items():
+                if want_sl and want_sl not in sl.lower():
+                    continue
                 rows = rows or []
                 hi = max((r_[2] + r_[4] for r_ in rows[-90:]), default=0)
                 for r_ in rows[-last_n:]:
@@ -3639,7 +3642,8 @@ def api_poly_touch():
                     out["lines"].append(
                         f"{ts} {sl[-34:]:>34} bid {r_[1]}x{r_[2]} ask {r_[3]}x{r_[4]} touch {tq}"
                         f" top3 {r_[5]}/{r_[6]} vs90hi {round(100.0 * tq / hi, 1) if hi else None}%")
-                out["rows"].append({"slug": sl, "n": len(rows), "last": rows[-1] if rows else None})
+                out["rows"].append({"slug": sl, "n": len(rows), "last": rows[-1] if rows else None,
+                                    "first_at": datetime.fromtimestamp(rows[0][0], az).strftime("%H:%M:%S") if rows else None})
             return jsonify(out)
         if request.args.get("slate"):
             # The venue IS the schedule: list its events for this league
@@ -15621,6 +15625,7 @@ HAND_START_CANCEL_ENABLED = True
 _HAND_START_DROP_PCT = 95.0
 _HAND_START_BASE_S = 90.0          # pre-start window the baseline high comes from
 _HAND_START_BASE_FALLBACK_S = 600.0
+_HAND_START_CARRY_S = 3600.0        # the newest frame this old before the window is the book at its open
 _HAND_START_FRAMES = 2             # consecutive post-start samples under the line
 _HAND_START_STALE_S = 90.0         # the newest sample must be this fresh
 # 90% OFF THE PRE-START HIGH (Oct 12 2026, Ottawa @ New Jersey, Rob: "the
@@ -15666,6 +15671,18 @@ def _hand_start_plan(samples, start_ts: float, now_ts: float, drop_pct: float,
     pre = [r[2] + r[4] for r in rows if start_ts - _HAND_START_BASE_S <= r[0] < start_ts]
     if not pre:
         pre = [r[2] + r[4] for r in rows if start_ts - _HAND_START_BASE_FALLBACK_S <= r[0] < start_ts]
+    # THE BOOK CARRIES FORWARD (Oct 18 2026, CAR -1.5 @ CGY: a 1,600-contract
+    # puck line placed 14 min before the start, the socket live, and the rule
+    # read `no_baseline` — a depth frame arrives only when the book CHANGES,
+    # and a quiet book changed nothing in the ten minutes before the start,
+    # so the window was empty while the book was known). The newest frame
+    # before the window IS the book at the window's open; it joins the
+    # baseline. Capped at an hour: past that the socket's own liveness
+    # checks are what vouch for it, not this rule.
+    older = [r for r in rows if start_ts - _HAND_START_CARRY_S <= r[0] < start_ts - _HAND_START_BASE_S]
+    if older:
+        c = max(older, key=lambda r: r[0])
+        pre = list(pre) + [c[2] + c[4]]
     if not pre or max(pre) <= 0:
         return ("no_baseline", None, None, None)
     base = max(pre)
@@ -15766,6 +15783,23 @@ def _hand_take_ioc(client, slug: str, synthetic: bool, price_c: float, qty: int)
         return (cr.get("id") if isinstance(cr, dict) else getattr(cr, "id", None)), None
     except Exception as e:
         return None, str(e)[:200]
+
+
+def _hand_order_cum(client, oid):
+    """cumQuantity of ONE order off the venue's full list (terminal states
+    included — an IOC is terminal the moment it lands). None when unreadable
+    or not listed; the positions delta is the fallback then."""
+    if not oid:
+        return None
+    try:
+        _r = client.orders.list({})
+        for _o in ((_r.get("orders") if isinstance(_r, dict) else getattr(_r, "orders", [])) or []):
+            _g = (lambda k: _o.get(k) if isinstance(_o, dict) else getattr(_o, k, None))
+            if str(_g("id") or "") == str(oid):
+                return float(_safe_float(_g("cumQuantity")) or 0.0)
+    except Exception:
+        return None
+    return None
 
 
 def _hand_start_tick(sb, client, now) -> dict:
@@ -15909,7 +15943,7 @@ def _hand_start_tick(sb, client, now) -> dict:
                     pass
                 if leaves >= 1 and pc is not None:
                     syn_t = bool(blob.get("pmm_synthetic"))
-                    book = _pmm_book(client, slug)
+                    book = _hand_poly_book(client, slug, tries=1)      # the depth socket first (Rob: everything on the WebSocket)
                     if book is None:
                         take = {"error": "book unreadable"}
                     else:
@@ -15922,7 +15956,11 @@ def _hand_start_tick(sb, client, now) -> dict:
                         tp = _hand_take_plan(pc, s_ask, cap, start_ts, now_ts, tick_t)
                         asks_t = _hand_side_asks(book, syn_t)
                         take = {"price_c": pc, "ask_c": s_ask, "cap_c": cap, "qty": leaves,
-                                "tick_c": tick_t, "asks": asks_t[:6]}
+                                "tick_c": tick_t, "asks": asks_t[:6],
+                                "book_src": "ws" if _ws_depth(slug) is not None else "rest",
+                                # the last tape frames, OUR side (ts, bid_c, bid_q, ask_c, ask_q):
+                                # the ladder on both sides of the take instant (the TEN O43.5 argument)
+                                "tape": [list(x[:5]) for x in _hand_side_rows(TOUCH_TAPE.get(slug) or [], syn_t)[-12:]]}
                         if tp is not None and leaves * tp / 100.0 <= 500.0:
                             oid_t, err_t = _hand_take_ioc(client, slug, syn_t, tp, leaves)
                             vw = _hand_take_vwap(asks_t, leaves, tp)
@@ -15930,6 +15968,7 @@ def _hand_start_tick(sb, client, now) -> dict:
                             took_px = (vw or tp) if oid_t else None
                             if oid_t:
                                 _time.sleep(1.5)        # let the fill reach positions before the cancel's read
+                                take["ioc_cum"] = _hand_order_cum(client, oid_t)   # the IOC's OWN fill, off the venue's list
                         else:
                             take["skip"] = "ask past the cap" if tp is None else "over $500"
                 stamp["start_take"] = take
@@ -15940,6 +15979,9 @@ def _hand_start_tick(sb, client, now) -> dict:
                     took = max(0.0, float(held or 0) - cum0)
                 except (TypeError, ValueError):
                     took = 0.0
+                ic = (take or {}).get("ioc_cum") if isinstance(take, dict) else None
+                if ic is not None and ic > 0:
+                    took = float(ic)                 # the order says what it filled; positions can lag it
                 if took > 0:
                     # the lot is part maker fill (resting price) and part take (the ask)
                     _r2, b2 = _bet_sheet_pick(sb, r["id"])
