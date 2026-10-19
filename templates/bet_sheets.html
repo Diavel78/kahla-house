@@ -1012,7 +1012,8 @@
             // showed them nowhere). Cancel, or keep it as a live snipe.
             const cn = inSlip(opKey('cancel', b.id)), lv = inSlip(opKey('live', b.id));
             h += '<div class="note">' + (b.live_snipe ? 'Moved to live — yours to watch.'
-                : b.take_window ? 'Game started — the box is working the take inside your 1¢ until ' + fmtClock(b.take_window.until) + ' (' + (b.take_window.tries || 0) + ' tries so far), then cancels.'
+                : b.take_window ? 'Game started — the box is working the take inside your 1¢ until ' + fmtClock(b.take_window.until) + ' (' + (b.take_window.tries || 0) + ' tries so far'
+                    + (b.take_window.bump && b.take_window.bump.verdict === 'amended' ? ', bid moved up to ' + b.take_window.bump.to_c + '¢ as the maker' : '') + '), then cancels.'
                 : b.start_seen ? 'Game started and the cancel didn\'t take — this order is still resting at its pre-game price.'
                 : b.start_blind ? 'The box has no pre-start book for this game, so it can\'t see game start — cancel or move it yourself.'
                 : 'Past the listed time — the box cancels it at game start (the 95% drop in the bids).') + '</div>';
@@ -1208,7 +1209,9 @@
                  + '<div class="c-top"><span class="tags">' + tag + (b.app ? '<span class="tag gry">APP</span>' : '') + venueTag(b) + '<span class="tag gry">' + esc(String(b.sport || '')) + '</span></span></div>'
                  + '<div class="c-t">' + esc(betLabel(b)) + ' <span class="g">· ' + esc(gameShort(b)) + '</span></div>'
                  + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + n + '</div>'
-                 + '<div class="c-n">' + (tw ? ((tw.tries || 0) + ' tries · last ask ' + (tw.last && tw.last.ask_c != null ? tw.last.ask_c + '¢' : '—') + ' · tap to cancel now') : 'tap to cancel or move to live') + '</div></div>';
+                 + '<div class="c-n">' + (tw ? ((tw.tries || 0) + ' tries · last ask ' + (tw.last && tw.last.ask_c != null ? tw.last.ask_c + '¢' : '—')
+                        + (tw.bump && tw.bump.verdict === 'amended' ? ' · bid moved up to ' + tw.bump.to_c + '¢ (maker, top of book)' : '')
+                        + ' · tap to cancel now') : 'tap to cancel or move to live') + '</div></div>';
         }).join('');
     }
     function renderBets(d) {

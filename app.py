@@ -15916,6 +15916,77 @@ def _hand_take_window_add(tw: dict, take: dict) -> dict:
     return tw
 
 
+def _hand_take_bump_plan(pc0, cur_pc, ask_c, cap_c, tick=1.0, bumped=None):
+    """Pure. THE MAKER BUMP inside the take window (Rob, Oct 18 2026: "you go
+    up to 1 cent to take, but you could also just make 1 cent higher… if
+    those are all gone… we just make and we'll be at the top of the book.
+    And then we don't have to pay the take fee"). When no ask sits inside
+    the cap, the resting bid moves UP to the cap itself — the top of the
+    book, still a maker, no taker fee — ONCE per window, measured from the
+    price the order rested at when the drop fired (`pc0`, never the current
+    price, so the cap cannot creep a cent a tick). None when already
+    bumped, already there, or when the ask sits at/under the target (a
+    post-only bid there would cross — that is the take's job)."""
+    if bumped:
+        return None
+    try:
+        pc0, cur_pc, cap_c = float(pc0), float(cur_pc), float(cap_c)
+        tick = float(tick) if tick else 1.0
+    except (TypeError, ValueError):
+        return None
+    if cap_c <= 0 or tick <= 0:
+        return None
+    tgt = round(math.floor((pc0 + cap_c) / tick + 1e-9) * tick, 4)
+    if tgt > 99.0 or tgt <= cur_pc + 1e-9:
+        return None
+    if ask_c is not None:
+        try:
+            if float(ask_c) <= tgt + 1e-9:
+                return None                             # inside the cap: take it, don't lead into it
+        except (TypeError, ValueError):
+            pass
+    return tgt
+
+
+def _hand_window_bump_poly(client, r: dict, blob: dict, o, slug: str, oid, tw: dict, take: dict, pc, now) -> tuple:
+    """One maker bump on a Polymarket bet inside its take window: the plan
+    off the window's ORIGINAL price, one `_repeg_amend` (post-only, same
+    id, verified on the re-listed book). Returns (tw, blob_updates) —
+    the caller writes both. Never raises past the caller."""
+    tgt = _hand_take_bump_plan(tw.get("price_c", pc), pc, (take or {}).get("ask_c"),
+                               (take or {}).get("cap_c", _HAND_START_TAKE_C), (take or {}).get("tick_c") or 1.0,
+                               tw.get("bump"))
+    if tgt is None or not o or (take or {}).get("ioc_cum"):
+        return tw, {}
+    syn = bool(blob.get("pmm_synthetic"))
+    qty_total = _amend_total(o.get("leaves"), o.get("cum"))
+    v = "skip"
+    if qty_total >= 1:
+        try:
+            ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+            gtt = _hand_gtt(ev)
+        except (TypeError, ValueError):
+            gtt = None
+        canon = (100.0 - float(tgt)) / 100.0 if syn else float(tgt) / 100.0
+        try:
+            v = _repeg_amend(client, oid, slug, canon, qty_total, gtt)
+        except Exception as e:
+            v = f"error: {e}"[:80]
+    bump = {"at": now.isoformat(), "from_c": pc, "to_c": tgt, "qty": qty_total, "verdict": v,
+            "ask_c": (take or {}).get("ask_c")}
+    tw = {**tw, "bump": bump}
+    upd = {}
+    if v == "amended":
+        upd = {"price_c": float(tgt), "amended": True, "start_bump": bump}
+    try:
+        _probe_log({"kind": "hand_start_take_bump", "hand_start_take_bump": True, "pick_id": r["id"], "slug": slug,
+                    "order_id": oid, "bet": _hand_start_bet(r, blob), **bump})
+    except Exception:
+        pass
+    app.logger.warning("hand take-window bump %s pick %s %s→%s¢ (ask %s) → %s", slug, r["id"], pc, tgt, bump["ask_c"], v)
+    return tw, upd
+
+
 def _hand_take_window_poly(sb, client, r: dict, blob: dict, o, slug: str, oid, now, now_ts: float, st: dict) -> None:
     """One tick inside an open take window on a Polymarket bet. The resting
     order stays on the book the whole window; each tick re-tries the take
@@ -15951,13 +16022,24 @@ def _hand_take_window_poly(sb, client, r: dict, blob: dict, o, slug: str, oid, n
     except (TypeError, ValueError):
         pass
     take, took_px = None, None
+    # THE CAP IS OFF THE WINDOW'S ORIGINAL PRICE (the order's own price when
+    # the drop fired) — after a maker bump the order rests at pc0 + cap, and a
+    # cap measured off THAT would creep a cent every tick.
+    pc0 = tw.get("price_c") if tw.get("price_c") is not None else pc
     if now_ts < until_ts and leaves >= 1 and pc is not None and _machine_flag("hand_start_take", True):
-        take = _hand_take_attempt_poly(client, slug, bool(blob.get("pmm_synthetic")), pc, leaves, start_ts, now_ts)
+        take = _hand_take_attempt_poly(client, slug, bool(blob.get("pmm_synthetic")), pc0, leaves, start_ts, now_ts)
         took_px = take.get("took_px")
         tw = _hand_take_window_add(tw, take)
         got = float(take.get("ioc_cum") or 0.0)
         if got + 1e-6 < leaves and now_ts + 1.0 < until_ts:
-            sb.table("bot_picks").update({"signal_blob": {**nb, "start_take_window": tw}}).eq("id", r["id"]).execute()
+            upd = {}
+            if got <= 0 and take.get("skip") == "ask past the cap" and _machine_flag("hand_start_take_bump", True):
+                tw, upd = _hand_window_bump_poly(client, r, blob, o, slug, oid, tw, take, pc, now)
+            sb.table("bot_picks").update({"signal_blob": {**nb, **upd, "start_take_window": tw}}).eq("id", r["id"]).execute()
+            if upd.get("price_c") is not None:
+                am_b = _cents_to_american_py(float(upd["price_c"]))
+                if am_b is not None:
+                    sb.table("bot_picks").update({"entry_price": am_b}).eq("id", r["id"]).execute()
             return                                      # still working it
         closed = "filled" if got + 1e-6 >= leaves else "window_end"
     else:
@@ -16159,14 +16241,24 @@ def _hand_start_tick(sb, client, now) -> dict:
                     # the cancel comes at the window's end, or when the take
                     # fills the bet.
                     tw = _hand_take_window_new(now, now_ts, win_s, gs, take, leaves, pc)
-                    sb.table("bot_picks").update({"signal_blob": {**nb0, "game_started": gs, "start_take_window": tw}}
+                    upd = {}
+                    if got <= 0 and take.get("skip") == "ask past the cap" and _machine_flag("hand_start_take_bump", True):
+                        # THE MAKER BUMP (Rob, Oct 18 2026): nothing inside the cap →
+                        # the bid moves up to the cap and sits at the top of the book
+                        tw, upd = _hand_window_bump_poly(client, r, blob, o, slug, oid, tw, take, pc, now)
+                    sb.table("bot_picks").update({"signal_blob": {**nb0, **upd, "game_started": gs, "start_take_window": tw}}
                                                  ).eq("id", r["id"]).execute()
+                    if upd.get("price_c") is not None:
+                        am_b = _cents_to_american_py(float(upd["price_c"]))
+                        if am_b is not None:
+                            sb.table("bot_picks").update({"entry_price": am_b}).eq("id", r["id"]).execute()
                     stamp.update({"kind": "hand_start_take_window", "hand_start_cancel": False,
                                   "hand_start_take_window": True, "window": tw, "start_take": take})
                     st["windowed"] = st.get("windowed", 0) + 1
                     _probe_log(stamp)
-                    app.logger.warning("hand start-take window %s pick %s open %ss (ask %s, cap %s)",
-                                       slug, r["id"], int(win_s), take.get("ask_c"), take.get("cap_c"))
+                    app.logger.warning("hand start-take window %s pick %s open %ss (ask %s, cap %s, bump %s)",
+                                       slug, r["id"], int(win_s), take.get("ask_c"), take.get("cap_c"),
+                                       (tw.get("bump") or {}).get("verdict"))
                     continue
                 stamp["start_take"] = take
             _hand_start_finish_poly(sb, client, r, stamp, take, cum0, took_px, now, st)
@@ -18622,13 +18714,23 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
                 # (A take that went in ends the window either way: the resting
                 # order was cancelled to make room for it.)
                 tw = _hand_take_window_new(now, now_ts, win_s, gs, take, leaves, pc)
-                sb.table("bot_picks").update({"signal_blob": {**blob, "game_started": gs, "start_take_window": tw}}
+                upd = {}
+                if take.get("skip") and _machine_flag("hand_start_take_bump", True):
+                    # THE MAKER BUMP (Rob, Oct 18 2026): nothing inside the cap on
+                    # either venue → the Kalshi bid moves up to the cap, top of book
+                    tw, upd = _hand_window_bump_kalshi(r, blob, o, ticker, by, tw, take, pc, now)
+                sb.table("bot_picks").update({"signal_blob": {**blob, **upd, "game_started": gs, "start_take_window": tw}}
                                              ).eq("id", r["id"]).execute()
+                if upd.get("price_c") is not None:
+                    am_b = _cents_to_american_py(float(upd["price_c"]))
+                    if am_b is not None:
+                        sb.table("bot_picks").update({"entry_price": am_b}).eq("id", r["id"]).execute()
                 stamp.update({"kind": "hand_start_take_window", "hand_start_cancel": False,
                               "hand_start_take_window": True, "window": tw, "start_take": take})
                 st["windowed"] = st.get("windowed", 0) + 1
                 _probe_log(stamp)
-                app.logger.warning("hand start-take window KALSHI %s pick %s open %ss", ticker, r["id"], int(win_s))
+                app.logger.warning("hand start-take window KALSHI %s pick %s open %ss (bump %s)", ticker, r["id"], int(win_s),
+                                   (tw.get("bump") or {}).get("verdict"))
                 return
             stamp["start_take"] = take
         _hand_start_finish_kalshi(sb, client, r, stamp, take, cum0, took_px, took_venue, cancelled, now, st)
@@ -18784,6 +18886,36 @@ def _hand_start_finish_kalshi(sb, client, r: dict, stamp: dict, take, cum0: floa
         pass
 
 
+def _hand_window_bump_kalshi(r: dict, blob: dict, o, ticker: str, by: bool, tw: dict, take: dict, pc, now) -> tuple:
+    """The maker bump for a Kalshi-resting bet: plan off the window's
+    original price (whole cents), one `_kalshi_amend_pick` (the venue may
+    re-id the order — the verified id comes back in the updates). Returns
+    (tw, blob_updates); the caller writes both."""
+    tgt = _hand_take_bump_plan(tw.get("price_c", pc), pc, (take or {}).get("kalshi_ask_c"),
+                               (take or {}).get("cap_c", _HAND_START_TAKE_C), _KALSHI_TICK_C, tw.get("bump"))
+    if tgt is None or not o or (take or {}).get("ioc_cum"):
+        return tw, {}
+    try:
+        v, new_id, det = _kalshi_amend_pick(blob, int(round(tgt)), o=o)
+    except Exception as e:
+        v, new_id, det = f"error: {e}"[:80], None, {}
+    bump = {"at": now.isoformat(), "from_c": pc, "to_c": int(round(tgt)), "verdict": v, "venue": "KALSHI",
+            "ask_c": (take or {}).get("kalshi_ask_c"), "order_id": new_id, "detail": det}
+    tw = {**tw, "bump": bump}
+    upd = {}
+    if v == "amended":
+        upd = {"price_c": float(int(round(tgt))), "amended": True, "start_bump": bump,
+               "kalshi_order_id": new_id or blob.get("kalshi_order_id"),
+               "contracts": (det or {}).get("total") or blob.get("contracts")}
+    try:
+        _probe_log({"kind": "hand_start_take_bump", "hand_start_take_bump": True, "venue": "KALSHI", "pick_id": r["id"],
+                    "ticker": ticker, "slug": blob.get("pmm_twin_slug"), "bet": _hand_start_bet(r, blob), **bump})
+    except Exception:
+        pass
+    app.logger.warning("hand take-window bump KALSHI %s pick %s %s→%s¢ (ask %s) → %s", ticker, r["id"], pc, tgt, bump["ask_c"], v)
+    return tw, upd
+
+
 def _hand_take_window_kalshi(sb, client, r: dict, blob: dict, o, ticker: str, by: bool, koid, twin,
                              now, now_ts: float, st: dict, kctx: dict) -> None:
     """One tick inside an open take window on a Kalshi-resting bet: the
@@ -18811,13 +18943,23 @@ def _hand_take_window_kalshi(sb, client, r: dict, blob: dict, o, ticker: str, by
         start_ts = 0.0
     cum0 = float(o.get("filled") or 0.0)
     leaves, pc = _hand_kalshi_leaves_pc(o, blob, by)
+    # the cap measures from the window's ORIGINAL price (the order's own price
+    # at the drop) — a maker bump moves the order to pc0 + cap, never the cap
+    pc0 = tw.get("price_c") if tw.get("price_c") is not None else pc
     take, took_px, took_venue, cancelled = None, None, None, False
     if now_ts < until_ts and leaves >= 1 and pc is not None and _machine_flag("hand_start_take", True):
         take, took_px, took_venue, cancelled = _hand_take_attempt_kalshi(
-            sb, client, r, blob, ticker, by, koid, twin, pc, leaves, start_ts, now_ts, now)
+            sb, client, r, blob, ticker, by, koid, twin, pc0, leaves, start_ts, now_ts, now)
         tw = _hand_take_window_add(tw, take)
         if not cancelled and now_ts + 1.0 < until_ts:
-            sb.table("bot_picks").update({"signal_blob": {**nb, "start_take_window": tw}}).eq("id", r["id"]).execute()
+            upd = {}
+            if took_px is None and take.get("skip") and _machine_flag("hand_start_take_bump", True):
+                tw, upd = _hand_window_bump_kalshi(r, blob, o, ticker, by, tw, take, pc, now)
+            sb.table("bot_picks").update({"signal_blob": {**nb, **upd, "start_take_window": tw}}).eq("id", r["id"]).execute()
+            if upd.get("price_c") is not None:
+                am_b = _cents_to_american_py(float(upd["price_c"]))
+                if am_b is not None:
+                    sb.table("bot_picks").update({"entry_price": am_b}).eq("id", r["id"]).execute()
             return                                      # still working it
         closed = "taken" if cancelled else "window_end"
     else:

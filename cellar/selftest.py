@@ -2825,6 +2825,19 @@ def test_hand_take_window() -> None:
     for _ in range(20):
         tw = _app._hand_take_window_add(tw, {"skip": "ask past the cap"})
     assert len(tw["attempts"]) == 15 and tw["tries"] == 23, tw
+    # THE MAKER BUMP (Rob, Oct 18 2026): no ask inside the cap → the bid moves up
+    # to the cap, once, measured from the window's original price
+    bp = _app._hand_take_bump_plan
+    assert bp(50.0, 50.0, 51.5, 1.0, 0.5) == 51.0, bp(50.0, 50.0, 51.5, 1.0, 0.5)   # ask past the cap: lead to 51
+    assert bp(50.0, 50.0, 52.0, 1.0, 1.0) == 51.0                                  # whole-cent grid (Kalshi)
+    assert bp(50.0, 50.0, 51.0, 1.0, 0.5) is None                                   # ask AT the cap: the take's job
+    assert bp(50.0, 50.0, 50.5, 1.0, 0.5) is None                                   # ask inside: take, never lead into it
+    assert bp(50.0, 50.0, None, 1.0, 0.5) == 51.0                                   # no ask at all: still the top of the book
+    assert bp(50.0, 51.0, 53.0, 1.0, 0.5) is None                                   # already at the cap: no creep
+    assert bp(50.0, 50.0, 53.0, 1.0, 0.5, bumped={"to_c": 51.0}) is None            # once per window
+    assert bp(50.0, 50.0, 53.0, 0.0, 0.5) is None                                   # cap 0 = no bump
+    assert bp(98.5, 98.5, None, 1.0, 0.5) is None                                   # off the top of the grid
+    assert bp("x", 50.0, 53.0, 1.0, 0.5) is None
 
 
 def test_hand_start_plan() -> None:
@@ -4245,7 +4258,8 @@ def test_kalshi_hand_lane() -> None:
     for fn in (_app._hand_switch_to_poly, _app._hand_start_kalshi, _app._bet_sheet_resolve,
                _app._bet_sheet_rerung_exec, _app._bet_sheet_repeg_exec, _app._bet_sheet_live_exec,
                _app._hand_chase_tick, _app._hand_move_tick, _app._hand_take_attempt_poly,
-               _app._hand_take_attempt_kalshi, _app._hand_take_window_poly, _app._hand_take_window_kalshi):
+               _app._hand_take_attempt_kalshi, _app._hand_take_window_poly, _app._hand_take_window_kalshi,
+               _app._hand_window_bump_kalshi):
         src = _ins.getsource(fn)
         assert "_bet_sheet_book(client" not in src and "_pmm_book(client, twin)" not in src, fn.__name__
     hp = _ins.getsource(_app._hand_poly_book)
