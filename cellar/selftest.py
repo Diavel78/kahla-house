@@ -4394,6 +4394,31 @@ def test_kalshi_venue_math() -> None:
     # Poly take 0.0695 → 1.7375; Poly rest = 0 ALWAYS (Rob: ignore the dying
     # rebate); Kalshi take 1.75, rest 0.4375 on a maker-fee series / 0 on
     # plain quadratic / 0.875 on combo-maker-fee
+    # THE SHARD RULE (Oct 19 2026): MLB/NBA/tennis on shard 3, the rest on 0;
+    # the funding planner moves the shortfall from the richest other shard,
+    # rounded up to $5, exact when only the exact amount fits, never from a
+    # breakdown it cannot read
+    assert kv.shard_for_prefix("KXMLBGAME-26OCT192008CLETB-CLE") == 3
+    assert kv.shard_for_prefix("KXNBAGAME-X") == 3 and kv.shard_for_prefix("KXNHLTOTAL-X") == 0
+    assert kv.shard_for_prefix("KXNFLSPREAD-X") == 0 and kv.shard_for_prefix(None) == 0
+    bb = {0: 48722.83, 1: 0.18, 2: 0.0, 3: 0.0}
+    p = kv.shard_fund_plan(bb, 3, 215.0)
+    assert p["ok"] and p["move_c"] == 500.0 and p["from_shard"] == 0 and p["why"] == "move", p
+    p = kv.shard_fund_plan(bb, 3, 1250.0)
+    assert p["ok"] and p["move_c"] == 1500.0 and p["from_shard"] == 0, p
+    p = kv.shard_fund_plan({0: 1000.0, 3: 800.0}, 3, 1000.0)
+    assert p["ok"] and p["move_c"] == 500.0 and p["from_shard"] == 0, p
+    p = kv.shard_fund_plan({0: 300.0, 3: 800.0}, 3, 1000.0)
+    assert p["ok"] and p["move_c"] == 200.0 and p["why"] == "move_exact", p   # $5 won't fit, the exact $2 does
+    p = kv.shard_fund_plan({0: 100.0, 3: 800.0}, 3, 1000.0)
+    assert not p["ok"] and "shortfall" in p["why"], p
+    p = kv.shard_fund_plan(bb, 0, 215.0)
+    assert p["ok"] and p["move_c"] == 0 and p["why"] == "funded", p
+    assert not kv.shard_fund_plan(None, 3, 1.0)["ok"]
+    assert kv.shard_balances({"ok": True, "data": {"balance_breakdown": [
+        {"balance": "487.2283", "exchange_index": 0}, {"balance": "0.0000", "exchange_index": 3}]}}) \
+        == {0: 48722.83, 3: 0.0}
+    assert kv.shard_balances({"ok": False}) is None and kv.shard_balances({"ok": True, "data": {}}) is None
     assert abs(kv.fee_per_contract_c("POLYMARKET", "take", 50) - 1.7375) < 1e-9
     assert kv.fee_per_contract_c("POLYMARKET", "rest", 50, at=BEFORE) == 0.0
     assert kv.fee_per_contract_c("POLYMARKET", "rest", 50, at=AFTER) == 0.0

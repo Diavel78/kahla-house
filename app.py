@@ -4473,6 +4473,11 @@ def api_bet_sheets_picks():
                                              if ro.get("ok") else {"error": ro.get("error")})
             except Exception as e:
                 out["kalshi_orders_live"] = {"error": str(e)[:160]}
+            try:
+                import kalshi_venue as _kv
+                out["kalshi_shards"] = _kv.shard_balances()      # {shard: cents} — MLB/NBA live on 3
+            except Exception as e:
+                out["kalshi_shards"] = {"error": str(e)[:160]}
             kt = (request.args.get("korders") or "").strip()
             if kt:
                 # THE ORDER'S FATE (Oct 18 2026, the ARI +13.5 that rested nowhere):
@@ -18018,6 +18023,37 @@ def _hand_venue_pick(want, poly_rs, k_rs, qty, min_gain_c=None):
     return v, {**det, "poly_ok": p_ok, "kalshi_ok": k_ok}
 
 
+def _kalshi_shard_fund(ticker: str, contracts: int, price_c: float) -> dict:
+    """THE SHARD RULE (Oct 19 2026 — the CLE ML that 404'd
+    `insufficient_shard_balance` / "Exchange user not found"): Kalshi keeps
+    collateral PER EXCHANGE SHARD and API orders never move it (only the
+    app does). MLB / NBA / tennis live on shard 3; everything this lane had
+    bet before lived on shard 0, so shard 3 read $0.00 while shard 0 held
+    $487. Before EVERY Kalshi create the market's shard is read, the
+    bet's cost (+2¢ a contract for fees) is checked against that shard's
+    balance, and the shortfall is moved from the richest other shard
+    (rounded up to $5) and re-read until it lands. Stamp `kalshi_shard_fund`
+    on every move. Kill switch `machine_flags kalshi_shard_fund` (off = the
+    old behaviour: the venue's own refusal)."""
+    import kalshi_venue as _kv
+    if not _machine_flag("kalshi_shard_fund", True):
+        return {"ok": True, "skipped": "flag off"}
+    try:
+        need_c = int(math.ceil(int(contracts) * float(price_c) + int(contracts) * 2.0))
+        fund = _kv.ensure_shard_funded(ticker, need_c)
+    except Exception as e:  # noqa: BLE001
+        fund = {"ok": False, "ticker": ticker, "error": f"shard check: {type(e).__name__}: {e}"[:160]}
+    if fund.get("moved_c") or not fund.get("ok"):
+        try:
+            _probe_log({"kalshi_shard_fund": True, "ticker": ticker, "contracts": int(contracts),
+                        "price_c": float(price_c), **{k: v for k, v in fund.items() if k != "ticker"}})
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning("kalshi shard fund stamp %s: %s", ticker, e)
+    if not fund.get("ok"):
+        fund["error"] = f"Kalshi shard {fund.get('shard', '?')}: {fund.get('error')}"[:200]
+    return fund
+
+
 def _kalshi_order_place(ticker: str, buy_yes: bool, price_c, contracts, event_start, book=None):
     """THE KALSHI HAND BET — one post-only good-till-cancel order on the V2
     path under the Polymarket rails (whole cents, 1-99¢, 1-250 contracts,
@@ -18052,6 +18088,9 @@ def _kalshi_order_place(ticker: str, buy_yes: bool, price_c, contracts, event_st
         return {"ok": False, "error": "event_start (ISO) required — pre-game bets only"}, 400
     if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
         return {"ok": False, "error": "game already started — pre-game bets only"}, 400
+    fund = _kalshi_shard_fund(ticker, contracts, price_c)
+    if not fund.get("ok"):
+        return {"ok": False, "error": fund.get("error") or "Kalshi shard unfunded"}, 502
     cr = _kv.create_order(ticker, buy_yes, int(round(price_c)), contracts,
                           tif="good_till_canceled", post_only=True)
     oid = cr.get("order_id")
@@ -18061,6 +18100,9 @@ def _kalshi_order_place(ticker: str, buy_yes: bool, price_c, contracts, event_st
         code = (d.get("error") or {}).get("code") if isinstance(d.get("error"), dict) else None
         if code == "insufficient_balance":
             err = "insufficient balance — fund the Kalshi account"
+        elif code == "insufficient_shard_balance":
+            err = (f"no funds on Kalshi exchange shard {fund.get('shard')} (this market's shard) — the box "
+                   f"moves money there before each order; this one slipped past (shard read {fund.get('have_c')}¢)")
         elif code == "insufficient_scope":
             err = "the API key has no trade scope"
         return {"ok": False, "error": f"Kalshi: {err}"[:200]}, 502
@@ -18859,8 +18901,11 @@ def _hand_take_attempt_kalshi(sb, client, r: dict, blob: dict, ticker: str, by: 
             vr = _kv.order_resting(koid, ticker)
             if vr.get("resting") is False:
                 cancelled = True
-                ioc = _kv.create_order(ticker, by, int(round(lim)), leaves,
-                                       tif="immediate_or_cancel", post_only=False)
+                fund = _kalshi_shard_fund(ticker, leaves, lim)       # the take sits a cent over the rest
+                take["shard"] = {k: fund.get(k) for k in ("ok", "shard", "moved_c", "error")}
+                ioc = (_kv.create_order(ticker, by, int(round(lim)), leaves,
+                                        tif="immediate_or_cancel", post_only=False)
+                       if fund.get("ok") else {"ok": False, "error": fund.get("error"), "data": {}})
                 afp = _kv._num(((ioc.get("data") or {}).get("average_fill_price")))
                 take.update({"take_c": lim, "order_id": ioc.get("order_id"), "error": ioc.get("error"),
                              "fill_count": ioc.get("fill_count"), "ioc_cum": ioc.get("fill_count"),

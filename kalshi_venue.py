@@ -695,6 +695,170 @@ def balance_c(res: dict | None = None):
     return None
 
 
+# ── EXCHANGE SHARDS (Oct 19 2026 — the CLE ML that answered 404
+# `insufficient_shard_balance` / "Exchange user not found") ──────────────
+# Kalshi runs several matching engines ("exchange indexes"). Per the venue's
+# own doc (docs.kalshi.com/getting_started/exchange_sharding.md): shard 3 =
+# Sports tagged Tennis / Baseball / Basketball, shard 1 = Exotics (combos),
+# shard 2 = Crypto + Commodities, shard 0 = everything else (NFL, NCAAF, NHL
+# — every bet this lane had placed before Oct 19 2026). Collateral lives
+# PER SHARD: an API order on a shard with no balance is refused, and ONLY
+# app/web orders auto-move money. The market's `exchange_index` is the
+# authoritative routing field; the prefix table below is the fallback when
+# a market read fails. A shard the account has never held money on reads
+# "Exchange user not found" — the first transfer provisions it.
+SHARD_PREFIX = (("KXMLB", 3), ("KXNBA", 3), ("KXWNBA", 3), ("KXNCAAB", 3), ("KXNCAAMB", 3),
+                ("KXNCAAWB", 3), ("KXATP", 3), ("KXWTA", 3), ("KXTENNIS", 3))
+TRANSFER_PATH = "/portfolio/intra_exchange_instance_transfer"
+
+
+def shard_for_prefix(ticker: str | None) -> int:
+    t = str(ticker or "").upper()
+    for pre, sh in SHARD_PREFIX:
+        if t.startswith(pre):
+            return sh
+    return 0
+
+
+def market_shard(ticker: str, ttl_s: float = 24 * 3600) -> dict:
+    """{shard, src: 'market'|'prefix', error} — the market's `exchange_index`
+    off GET /markets/{ticker} (cached a day; a live market never migrates per
+    the venue), else the prefix table."""
+    key = f"shard:{ticker}"
+    hit = _CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl_s:
+        return hit[1]
+    data, err = _get(f"/markets/{ticker}")
+    m = (data or {}).get("market") if isinstance(data, dict) else None
+    if not isinstance(m, dict) and isinstance(data, dict) and data.get("ticker"):
+        m = data
+    out: dict
+    if isinstance(m, dict) and m.get("exchange_index") is not None:
+        try:
+            out = {"shard": int(m["exchange_index"]), "src": "market", "error": None}
+        except (TypeError, ValueError):
+            out = {"shard": shard_for_prefix(ticker), "src": "prefix",
+                   "error": f"bad exchange_index {m.get('exchange_index')!r}"}
+    else:
+        out = {"shard": shard_for_prefix(ticker), "src": "prefix",
+               "error": err or ("no exchange_index on the market" if m else "market unreadable")}
+    if out["src"] == "market":
+        _CACHE[key] = (time.time(), out)
+    return out
+
+
+def shard_balances(res: dict | None = None) -> dict | None:
+    """{shard: cents} off the balance read's `balance_breakdown` (dollar
+    strings). None when the read failed or carries no breakdown — never
+    'nothing anywhere'."""
+    res = res or balance()
+    if not res or not res.get("ok"):
+        return None
+    rows = ((res.get("data") or {}).get("balance_breakdown"))
+    if not isinstance(rows, list):
+        return None
+    out = {}
+    for r in rows:
+        try:
+            out[int(r.get("exchange_index"))] = round(float(r.get("balance") or 0.0) * 100.0, 2)
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
+def shard_fund_plan(balances: dict | None, shard: int, need_c: float, round_c: float = 500.0,
+                    keep_c: float = 0.0) -> dict:
+    """PURE. Does `shard` hold `need_c` cents; if not, which shard moves how
+    much? Moves round UP to `round_c` (a $5 grain — one transfer funds the
+    next few bets too) when a donor can cover it, else the exact shortfall;
+    a donor keeps `keep_c`. {ok, move_c, from_shard, have_c, short_c, why}."""
+    if balances is None:
+        return {"ok": False, "move_c": 0, "from_shard": None, "have_c": None, "short_c": None,
+                "why": "balance breakdown unreadable"}
+    have = float(balances.get(int(shard), 0.0) or 0.0)
+    need_c = float(need_c)
+    if have >= need_c:
+        return {"ok": True, "move_c": 0, "from_shard": None, "have_c": have, "short_c": 0.0, "why": "funded"}
+    short = need_c - have
+    move = math.ceil(short / round_c) * round_c if round_c > 0 else math.ceil(short)
+    donors = sorted(((float(b or 0.0), int(s)) for s, b in balances.items() if int(s) != int(shard)),
+                    reverse=True)
+    for b, s in donors:
+        if b - keep_c >= move:
+            return {"ok": True, "move_c": float(move), "from_shard": s, "have_c": have, "short_c": short,
+                    "why": "move"}
+    exact = float(math.ceil(short))
+    for b, s in donors:
+        if b - keep_c >= exact:
+            return {"ok": True, "move_c": exact, "from_shard": s, "have_c": have, "short_c": short,
+                    "why": "move_exact"}
+    return {"ok": False, "move_c": 0, "from_shard": None, "have_c": have, "short_c": short,
+            "why": f"no shard can cover the ${short / 100.0:.2f} shortfall on shard {int(shard)} "
+                   f"(balances: " + ", ".join(f"{s}=${b / 100.0:.2f}" for b, s in donors) + ")"}
+
+
+def shard_transfer(src_shard: int, dst_shard: int, cents: float, client_transfer_id: str | None = None) -> dict:
+    """POST intra_exchange_instance_transfer — primary account, event
+    contracts, `amount` in CENTICENTS (the venue's unit: $1 = 10,000).
+    Async on the venue side; the caller re-reads the balance."""
+    import uuid
+    body = {"source": "event_contract", "destination": "event_contract",
+            "amount": int(round(float(cents) * 100.0)),
+            "source_exchange_shard": int(src_shard), "destination_exchange_shard": int(dst_shard),
+            "client_transfer_id": client_transfer_id or str(uuid.uuid4())}
+    res = signed_request("POST", TRANSFER_PATH, body=body)
+    res["transfer_id"] = ((res.get("data") or {}).get("transfer_id")) if res.get("ok") else None
+    return res
+
+
+def ensure_shard_funded(ticker: str, need_c: float, wait_s: float = 8.0, round_c: float = 500.0) -> dict:
+    """Before a Kalshi create: the market's shard holds `need_c` cents, or
+    the shortfall (rounded up to $5) is moved there from the richest other
+    shard and the shard is re-read until it shows. {ok, shard, shard_src,
+    have_c, moved_c, from_shard, transfer, after_c, wait_s, error}."""
+    ms = market_shard(ticker)
+    out: dict = {"ok": False, "ticker": ticker, "shard": ms.get("shard"), "shard_src": ms.get("src"),
+                 "need_c": float(need_c), "moved_c": 0.0}
+    if ms.get("shard") is None:
+        out["error"] = ms.get("error") or "shard unknown"
+        return out
+    shard = int(ms["shard"])
+    bal = balance()
+    bb = shard_balances(bal)
+    if bb is None:
+        out["error"] = f"balance breakdown unreadable: {bal.get('error') or bal.get('status')}"
+        return out
+    plan = shard_fund_plan(bb, shard, need_c, round_c=round_c)
+    out.update(have_c=plan.get("have_c"), plan=plan, balances=bb)
+    if not plan.get("ok"):
+        out["error"] = plan.get("why")
+        return out
+    if not plan.get("move_c"):
+        out["ok"] = True
+        return out
+    tr = shard_transfer(plan["from_shard"], shard, plan["move_c"])
+    out.update(moved_c=float(plan["move_c"]), from_shard=plan["from_shard"],
+               transfer={"ok": tr.get("ok"), "status": tr.get("status"), "transfer_id": tr.get("transfer_id"),
+                         "error": tr.get("error"), "body": tr.get("body_sent")})
+    if not tr.get("ok"):
+        out["error"] = (f"transfer shard {plan['from_shard']}→{shard} ${plan['move_c'] / 100.0:.2f} failed: "
+                        f"{tr.get('error')}")[:220]
+        return out
+    t0 = time.monotonic()
+    after = None
+    while True:
+        time.sleep(1.0)                              # the balance bucket is 1 call/s
+        after = (shard_balances(balance()) or {}).get(shard)
+        if after is not None and after >= float(need_c):
+            out.update(ok=True, after_c=after, wait_s=round(time.monotonic() - t0, 1))
+            return out
+        if time.monotonic() - t0 > wait_s:
+            out.update(after_c=after, wait_s=round(time.monotonic() - t0, 1),
+                       error=f"transfer sent (id {tr.get('transfer_id')}) but shard {shard} reads "
+                             f"{after if after is not None else 'unreadable'}¢ after {wait_s:g}s — try again")
+            return out
+
+
 def my_orders(ticker: str | None = None, status: str | None = "resting") -> dict:
     p = {}
     if ticker:
