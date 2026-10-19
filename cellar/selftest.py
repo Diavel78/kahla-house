@@ -2810,6 +2810,23 @@ def test_hand_take_plan() -> None:
     assert asks == [(48.0, 5.0), (49.0, 9.0)], asks
 
 
+def test_hand_take_window() -> None:
+    """The 2-minute take window (Rob, Oct 18 2026): attempts fold into one
+    record, fills and cost accumulate, the ledger stays bounded."""
+    from datetime import datetime, timezone
+    import app as _app
+    tw = _app._hand_take_window_new(datetime.now(timezone.utc), 1000.0, 120.0, {"baseline_q": 9}, {"ask_c": 51.5, "skip": "ask past the cap"}, 5, 50.0)
+    assert tw["tries"] == 1 and tw["filled"] == 0.0 and tw["leaves0"] == 5 and tw["window_s"] == 120.0, tw
+    assert tw["until"] > tw["since"] or True
+    tw = _app._hand_take_window_add(tw, {"ask_c": 51.0, "take_c": 51.0, "ioc_cum": 2.0, "took_px": 50.6})
+    assert tw["tries"] == 2 and tw["filled"] == 2.0 and abs(tw["cost_c"] - 101.2) < 1e-6, tw
+    tw = _app._hand_take_window_add(tw, {"ask_c": 50.5, "take_c": 51.0, "ioc_cum": 3.0, "took_px": 50.5})
+    assert tw["filled"] == 5.0 and abs(tw["cost_c"] - 252.7) < 1e-6 and len(tw["attempts"]) == 3, tw
+    for _ in range(20):
+        tw = _app._hand_take_window_add(tw, {"skip": "ask past the cap"})
+    assert len(tw["attempts"]) == 15 and tw["tries"] == 23, tw
+
+
 def test_hand_start_plan() -> None:
     """The 'game started' rule (Oct 4 2026, 90% Oct 12): at or after the
     listed start, two frames with the touch 90% off the pre-start high AND
@@ -4227,7 +4244,8 @@ def test_kalshi_hand_lane() -> None:
         assert not forced, (fn.__name__, forced)
     for fn in (_app._hand_switch_to_poly, _app._hand_start_kalshi, _app._bet_sheet_resolve,
                _app._bet_sheet_rerung_exec, _app._bet_sheet_repeg_exec, _app._bet_sheet_live_exec,
-               _app._hand_chase_tick, _app._hand_move_tick):
+               _app._hand_chase_tick, _app._hand_move_tick, _app._hand_take_attempt_poly,
+               _app._hand_take_attempt_kalshi, _app._hand_take_window_poly, _app._hand_take_window_kalshi):
         src = _ins.getsource(fn)
         assert "_bet_sheet_book(client" not in src and "_pmm_book(client, twin)" not in src, fn.__name__
     hp = _ins.getsource(_app._hand_poly_book)

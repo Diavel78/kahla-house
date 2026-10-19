@@ -15802,6 +15802,230 @@ def _hand_order_cum(client, oid):
     return None
 
 
+_HAND_START_TAKE_WINDOW_S = 120.0   # Rob, Oct 18 2026: "I would say 2 minutes"
+
+
+def _hand_take_window_s() -> float:
+    try:
+        return max(0.0, float(_machine_flag_val("hand_start_take_window_s", _HAND_START_TAKE_WINDOW_S)))
+    except (TypeError, ValueError):
+        return _HAND_START_TAKE_WINDOW_S
+
+
+def _hand_start_bet(r: dict, blob: dict) -> dict:
+    """The bet itself, on every start stamp: an unfilled cancel DELETES the
+    pick, and the Bet Sheets "Missed at game start" list is read off this."""
+    return {"sport": r.get("sport"), "event_name": r.get("event_name"),
+            "event_start": r.get("event_start"), "market_id": r.get("market_id"),
+            "market_type": r.get("market_type"), "side": r.get("side"),
+            "line": r.get("entry_line"), "entry_price": r.get("entry_price"),
+            "label": blob.get("label"), "price_c": blob.get("price_c"),
+            "anchor_c": blob.get("anchor_c"), "contracts": blob.get("contracts"),
+            "synthetic": bool(blob.get("pmm_synthetic")), "app": bool(blob.get("app_adopted"))}
+
+
+def _hand_book_pre(slug: str, syn: bool, start_ts: float):
+    """Our side's touch over the 90s before the listed start, off the tape."""
+    try:
+        srows = _hand_side_rows(TOUCH_TAPE.get(slug) or [], syn)
+        pre = [x for x in srows if start_ts - 90.0 <= x[0] <= start_ts]
+        if not pre:
+            return None
+        return {"bid_c": pre[-1][1], "ask_c": pre[-1][3],
+                "bid_q": round(sum(x[2] for x in pre) / len(pre), 1),
+                "ask_q": round(sum(x[4] for x in pre) / len(pre), 1), "n": len(pre)}
+    except Exception:
+        return None
+
+
+def _hand_order_leaves_pc(o: dict, blob: dict):
+    """(unfilled size to take, the resting order's own our-side price)."""
+    try:
+        leaves = int(round(float(o.get("leaves") or 0)))
+        cum0 = float(o.get("cum") or 0)
+        if blob.get("contracts"):                       # never buy past the bet's own size
+            leaves = min(leaves, int(round(float(blob["contracts"]) - cum0)))
+    except (TypeError, ValueError):
+        leaves = 0
+    pc = blob.get("price_c")
+    try:                                                # the resting order's own price beats the blob
+        if o.get("price_yes") is not None:
+            py_ = float(o["price_yes"]) * 100.0
+            pc = round((100.0 - py_) if bool(blob.get("pmm_synthetic")) else py_, 2)
+    except (TypeError, ValueError):
+        pass
+    return leaves, pc
+
+
+def _hand_take_attempt_poly(client, slug: str, syn_t: bool, pc, leaves: int, start_ts: float, now_ts: float) -> dict:
+    """ONE take attempt on Polymarket: the depth-socket book, the plan, one
+    IOC limited at resting + cap when the best ask sits inside the cap,
+    and the IOC's own fill off the venue's list. Never raises past the
+    caller; returns the attempt record (`ioc_cum` = what it bought,
+    `took_px` = the ladder's average up to the limit when an order went in)."""
+    book = _hand_poly_book(client, slug, tries=1)       # the depth socket first (Rob: everything on the WebSocket)
+    if book is None:
+        return {"error": "book unreadable", "price_c": pc, "qty": leaves}
+    _sb_bid, s_ask = _manual_side_book(book, syn_t)
+    try:
+        cap = float(_machine_flag_val("hand_start_take_c", _HAND_START_TAKE_C))
+    except (TypeError, ValueError):
+        cap = _HAND_START_TAKE_C
+    tick_t = _pmm_tick_c(client, slug)
+    tp = _hand_take_plan(pc, s_ask, cap, start_ts, now_ts, tick_t)
+    asks_t = _hand_side_asks(book, syn_t)
+    take = {"price_c": pc, "ask_c": s_ask, "cap_c": cap, "qty": leaves,
+            "tick_c": tick_t, "asks": asks_t[:6],
+            "book_src": "ws" if _ws_depth(slug) is not None else "rest",
+            # the last tape frames, OUR side (ts, bid_c, bid_q, ask_c, ask_q):
+            # the ladder on both sides of the take instant (the TEN O43.5 argument)
+            "tape": [list(x[:5]) for x in _hand_side_rows(TOUCH_TAPE.get(slug) or [], syn_t)[-12:]],
+            "at": datetime.now(timezone.utc).isoformat()}
+    if tp is not None and leaves * tp / 100.0 <= 500.0:
+        oid_t, err_t = _hand_take_ioc(client, slug, syn_t, tp, leaves)
+        vw = _hand_take_vwap(asks_t, leaves, tp)
+        take.update({"take_c": tp, "vwap_c": vw, "order_id": oid_t, "error": err_t})
+        if oid_t:
+            take["took_px"] = vw or tp
+            _time.sleep(1.5)                            # let the fill reach positions / the list
+            take["ioc_cum"] = _hand_order_cum(client, oid_t)   # the IOC's OWN fill, off the venue's list
+    else:
+        take["skip"] = "ask past the cap" if tp is None else "over $500"
+    return take
+
+
+def _hand_take_window_new(now, now_ts: float, win_s: float, gs: dict, take: dict, leaves: int, pc) -> dict:
+    tw = {"since": now.isoformat(), "until": datetime.fromtimestamp(now_ts + win_s, timezone.utc).isoformat(),
+          "window_s": win_s, "tries": 0, "filled": 0.0, "cost_c": 0.0, "price_c": pc, "leaves0": leaves,
+          "drop": gs, "attempts": []}
+    return _hand_take_window_add(tw, take)
+
+
+def _hand_take_window_add(tw: dict, take: dict) -> dict:
+    """Pure. Fold one attempt into the window record."""
+    got = float((take or {}).get("ioc_cum") or 0.0)
+    px = (take or {}).get("took_px")
+    tw = dict(tw)
+    tw["tries"] = int(tw.get("tries") or 0) + 1
+    if got > 0 and px is not None:
+        tw["filled"] = round(float(tw.get("filled") or 0.0) + got, 2)
+        tw["cost_c"] = round(float(tw.get("cost_c") or 0.0) + got * float(px), 2)
+    rec = {k: (take or {}).get(k) for k in ("at", "ask_c", "take_c", "ioc_cum", "skip", "error", "book_src")}
+    tw["attempts"] = (list(tw.get("attempts") or []) + [rec])[-15:]
+    tw["last"] = rec
+    return tw
+
+
+def _hand_take_window_poly(sb, client, r: dict, blob: dict, o, slug: str, oid, now, now_ts: float, st: dict) -> None:
+    """One tick inside an open take window on a Polymarket bet. The resting
+    order stays on the book the whole window; each tick re-tries the take
+    within the cap. The window closes on a full take, on the order leaving
+    the book by itself (a fill — the lot is booked by the fill paths), or
+    at its end (the old cancel)."""
+    tw = dict(blob.get("start_take_window") or {})
+    st["window"] = st.get("window", 0) + 1
+    try:
+        until_ts = datetime.fromisoformat(str(tw.get("until")).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        until_ts = 0.0
+    nb = {k: v for k, v in blob.items() if k != "start_take_window"}
+    if not (o and o.get("state") in _OPEN_ORDER_STATES):
+        fresh = _pmm_open_orders_raw(client, fresh=True)
+        if fresh is None:
+            return                                      # the venue is unreadable this tick — wait, never close blind
+        o2 = next((x for x in fresh if x.get("id") == oid), None)
+        if o2 and o2.get("state") in _OPEN_ORDER_STATES:
+            o = o2
+    if not (o and o.get("state") in _OPEN_ORDER_STATES):
+        # the resting order left the book on its own (filled, or cancelled elsewhere)
+        sb.table("bot_picks").update({"signal_blob": {**nb, "start_take_window_done": {**tw, "closed": "order_gone", "at": now.isoformat()}}}
+                                     ).eq("id", r["id"]).execute()
+        _probe_log({"kind": "hand_start_take_window", "hand_start_take_window": True, "pick_id": r["id"],
+                    "slug": slug, "order_id": oid, "closed": "order_gone", "window": tw, "at": now.isoformat()})
+        return
+    leaves, pc = _hand_order_leaves_pc(o, blob)
+    cum0 = float(o.get("cum") or 0)
+    start_ts = 0.0
+    try:
+        start_ts = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        pass
+    take, took_px = None, None
+    if now_ts < until_ts and leaves >= 1 and pc is not None and _machine_flag("hand_start_take", True):
+        take = _hand_take_attempt_poly(client, slug, bool(blob.get("pmm_synthetic")), pc, leaves, start_ts, now_ts)
+        took_px = take.get("took_px")
+        tw = _hand_take_window_add(tw, take)
+        got = float(take.get("ioc_cum") or 0.0)
+        if got + 1e-6 < leaves and now_ts + 1.0 < until_ts:
+            sb.table("bot_picks").update({"signal_blob": {**nb, "start_take_window": tw}}).eq("id", r["id"]).execute()
+            return                                      # still working it
+        closed = "filled" if got + 1e-6 >= leaves else "window_end"
+    else:
+        closed = "window_end" if now_ts >= until_ts else "nothing_to_take"
+    # the window is over: the old cancel, the lot blended across every take
+    bet = _hand_start_bet(r, blob)
+    stamp = {"kind": "hand_start_cancel", "bet": bet, "hand_start_cancel": True, "pick_id": r["id"],
+             "slug": slug, "order_id": oid, "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1),
+             "baseline_q": (tw.get("drop") or {}).get("baseline_q"), "touch_q": (tw.get("drop") or {}).get("touch_q"),
+             "drop_pct": (tw.get("drop") or {}).get("drop_pct"), "window": {**tw, "closed": closed},
+             "start_take": take}
+    sb.table("bot_picks").update({"signal_blob": {**nb, "start_take_window_done": {**tw, "closed": closed, "at": now.isoformat()}}}
+                                 ).eq("id", r["id"]).execute()
+    r2 = {**r, "signal_blob": {**nb}}
+    _hand_start_finish_poly(sb, client, r2, stamp, take, cum0, took_px, now, st, tw=tw)
+    app.logger.warning("hand take window %s pick %s closed %s after %s tries, filled %s → %s",
+                       slug, r["id"], closed, tw.get("tries"), tw.get("filled"), stamp.get("result"))
+
+
+def _hand_start_finish_poly(sb, client, r: dict, stamp: dict, take, cum0: float, took_px, now, st: dict, tw=None) -> None:
+    """The cancel after the take(s): unfilled → pick gone, a lot → kept at
+    the held size with the price blended across the maker fill and every
+    take (`tw` carries the window's totals when there was one). Stamps."""
+    out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
+    took_total = float((tw or {}).get("filled") or 0.0) if tw else 0.0
+    cost_total = float((tw or {}).get("cost_c") or 0.0) if tw else 0.0
+    if took_px is not None and not tw:
+        took_total = 0.0
+    if out.get("ok") and not out.get("deleted") and (took_px is not None or took_total > 0):
+        held = out.get("held")
+        try:
+            took = max(0.0, float(held or 0) - cum0)
+        except (TypeError, ValueError):
+            took = 0.0
+        ic = (take or {}).get("ioc_cum") if isinstance(take, dict) else None
+        if tw and took_total > 0:
+            took = took_total
+        elif ic is not None and ic > 0:
+            took = float(ic)                         # the order says what it filled; positions can lag it
+        if took > 0:
+            _r2, b2 = _bet_sheet_pick(sb, r["id"])
+            if _r2:
+                pc0 = float(b2.get("price_c") or took_px or 0.0)
+                rest = max(0.0, float(held or 0) - took)
+                tcost = cost_total if (tw and took_total > 0) else took * float(took_px or pc0)
+                newp = round((rest * pc0 + tcost) / max(rest + took, 1e-9), 2)
+                b2 = {**b2, "price_c": newp, "start_take": {
+                    "at": now.isoformat(), "take_c": (round(tcost / took, 2) if took else took_px), "qty": round(took, 2),
+                    "from_c": pc0, "tries": (tw or {}).get("tries", 1)}}
+                upd = {"signal_blob": b2}
+                am_ = _cents_to_american_py(newp)
+                if am_ is not None:
+                    upd["entry_price"] = am_
+                sb.table("bot_picks").update(upd).eq("id", r["id"]).execute()
+            if isinstance(stamp.get("start_take"), dict):
+                stamp["start_take"]["filled"] = round(took, 2)
+            st["taken"] = st.get("taken", 0) + 1
+    stamp["result"], stamp["http"] = out, code
+    if out.get("ok"):
+        st["started"] += 1
+    else:
+        st["errors"] += 1
+    try:
+        _probe_log(stamp)
+    except Exception:
+        pass
+
+
 def _hand_start_tick(sb, client, now) -> dict:
     """Pending sheet bets with a resting order whose listed start has passed:
     cancel the unfilled remainder the moment the tape says the makers left.
@@ -15848,6 +16072,14 @@ def _hand_start_tick(sb, client, now) -> dict:
         # resolver grades a bet that never rested off the final score.
         sat_out = bool(slug and isinstance(blob.get("line_hold"), dict) and not oid)
         o = by_id.get(oid) if oid else None
+        if not sat_out and isinstance(blob.get("start_take_window"), dict) and slug:
+            # inside the take window: keep working the take, the resting order stays
+            try:
+                _hand_take_window_poly(sb, client, r, blob, o, slug, oid, now, now_ts, st)
+            except Exception as e:
+                st["errors"] += 1
+                app.logger.warning("hand take window pick %s: %s", r["id"], str(e)[:120])
+            continue
         if not sat_out and not (slug and o and o.get("state") in _OPEN_ORDER_STATES):
             continue
         try:
@@ -15886,15 +16118,7 @@ def _hand_start_tick(sb, client, now) -> dict:
         if _time.monotonic() - last < 20.0:
             continue
         _HAND_START_DONE[r["id"]] = _time.monotonic()
-        # the bet itself rides the stamp: an unfilled cancel DELETES the pick,
-        # and the Bet Sheets "Not filled, started" list is read off this row
-        bet = {"sport": r.get("sport"), "event_name": r.get("event_name"),
-               "event_start": r.get("event_start"), "market_id": r.get("market_id"),
-               "market_type": r.get("market_type"), "side": r.get("side"),
-               "line": r.get("entry_line"), "entry_price": r.get("entry_price"),
-               "label": blob.get("label"), "price_c": blob.get("price_c"),
-               "anchor_c": blob.get("anchor_c"), "contracts": blob.get("contracts"),
-               "synthetic": bool(blob.get("pmm_synthetic")), "app": bool(blob.get("app_adopted"))}
+        bet = _hand_start_bet(r, blob)
         stamp = {"kind": "hand_start_cancel", "bet": bet,
                  "hand_start_cancel": True, "pick_id": r["id"], "slug": slug, "order_id": oid,
                  "baseline_q": round(base, 1), "touch_q": round(cur, 1), "drop_pct": seen,
@@ -15907,109 +16131,52 @@ def _hand_start_tick(sb, client, now) -> dict:
         # the sellers don't sell, they hold the contracts. Those things are
         # winning"): bids vs sellers at the touch over the last 90s before the
         # listed start, so the unfilled-and-sellers-holding case can be graded.
-        try:
-            srows = _hand_side_rows(TOUCH_TAPE.get(slug) or [], bool(blob.get("pmm_synthetic")))
-            pre = [x for x in srows if start_ts - 90.0 <= x[0] <= start_ts]
-            if pre:
-                stamp["book_pre"] = {
-                    "bid_c": pre[-1][1], "ask_c": pre[-1][3],
-                    "bid_q": round(sum(x[2] for x in pre) / len(pre), 1),
-                    "ask_q": round(sum(x[4] for x in pre) / len(pre), 1), "n": len(pre)}
-        except Exception:
-            pass
+        bp = _hand_book_pre(slug, bool(blob.get("pmm_synthetic")), start_ts)
+        if bp:
+            stamp["book_pre"] = bp
         try:
             # remember the verdict on the pick first — a partial fill keeps the row
             # (and a sat-out pick drops its hold, so a kept row is never re-run)
             nb0 = {k: v for k, v in blob.items() if not (sat_out and k == "line_hold")}
-            sb.table("bot_picks").update({"signal_blob": {**nb0, "game_started": {
-                "at": now.isoformat(), "baseline_q": round(base, 1), "touch_q": round(cur, 1),
-                "drop_pct": seen, "sat_out": sat_out}}}).eq("id", r["id"]).execute()
+            gs = {"at": now.isoformat(), "baseline_q": round(base, 1), "touch_q": round(cur, 1),
+                  "drop_pct": seen, "sat_out": sat_out}
+            sb.table("bot_picks").update({"signal_blob": {**nb0, "game_started": gs}}).eq("id", r["id"]).execute()
             take, cum0, took_px = None, 0.0, None
+            leaves, pc = _hand_order_leaves_pc(o, blob) if (not sat_out and o) else (0, None)
+            cum0 = float((o or {}).get("cum") or 0) if o else 0.0
             if (not sat_out and o and now_ts >= start_ts
-                    and _machine_flag("hand_start_take", True)):
-                try:
-                    leaves = int(round(float(o.get("leaves") or 0)))
-                    cum0 = float(o.get("cum") or 0)
-                    if blob.get("contracts"):           # never buy past the bet's own size
-                        leaves = min(leaves, int(round(float(blob["contracts"]) - cum0)))
-                except (TypeError, ValueError):
-                    leaves = 0
-                pc = blob.get("price_c")
-                try:                                    # the resting order's own price beats the blob
-                    if o.get("price_yes") is not None:
-                        py_ = float(o["price_yes"]) * 100.0
-                        pc = round((100.0 - py_) if bool(blob.get("pmm_synthetic")) else py_, 2)
-                except (TypeError, ValueError):
-                    pass
-                if leaves >= 1 and pc is not None:
-                    syn_t = bool(blob.get("pmm_synthetic"))
-                    book = _hand_poly_book(client, slug, tries=1)      # the depth socket first (Rob: everything on the WebSocket)
-                    if book is None:
-                        take = {"error": "book unreadable"}
-                    else:
-                        _sb_bid, s_ask = _manual_side_book(book, syn_t)
-                        try:
-                            cap = float(_machine_flag_val("hand_start_take_c", _HAND_START_TAKE_C))
-                        except (TypeError, ValueError):
-                            cap = _HAND_START_TAKE_C
-                        tick_t = _pmm_tick_c(client, slug)
-                        tp = _hand_take_plan(pc, s_ask, cap, start_ts, now_ts, tick_t)
-                        asks_t = _hand_side_asks(book, syn_t)
-                        take = {"price_c": pc, "ask_c": s_ask, "cap_c": cap, "qty": leaves,
-                                "tick_c": tick_t, "asks": asks_t[:6],
-                                "book_src": "ws" if _ws_depth(slug) is not None else "rest",
-                                # the last tape frames, OUR side (ts, bid_c, bid_q, ask_c, ask_q):
-                                # the ladder on both sides of the take instant (the TEN O43.5 argument)
-                                "tape": [list(x[:5]) for x in _hand_side_rows(TOUCH_TAPE.get(slug) or [], syn_t)[-12:]]}
-                        if tp is not None and leaves * tp / 100.0 <= 500.0:
-                            oid_t, err_t = _hand_take_ioc(client, slug, syn_t, tp, leaves)
-                            vw = _hand_take_vwap(asks_t, leaves, tp)
-                            take.update({"take_c": tp, "vwap_c": vw, "order_id": oid_t, "error": err_t})
-                            took_px = (vw or tp) if oid_t else None
-                            if oid_t:
-                                _time.sleep(1.5)        # let the fill reach positions before the cancel's read
-                                take["ioc_cum"] = _hand_order_cum(client, oid_t)   # the IOC's OWN fill, off the venue's list
-                        else:
-                            take["skip"] = "ask past the cap" if tp is None else "over $500"
+                    and _machine_flag("hand_start_take", True) and leaves >= 1 and pc is not None):
+                syn_t = bool(blob.get("pmm_synthetic"))
+                take = _hand_take_attempt_poly(client, slug, syn_t, pc, leaves, start_ts, now_ts)
+                took_px = take.get("took_px")
+                win_s = _hand_take_window_s()
+                got = float(take.get("ioc_cum") or 0.0)
+                if win_s > 0 and got + 1e-6 < leaves:
+                    # THE TAKE WINDOW (Rob, Oct 18 2026: "I would say 2 minutes"):
+                    # one snapshot missed TEN O43.5 while his own 49 fill landed
+                    # 90s later. The resting order STAYS on the book, and every
+                    # tick inside the window re-tries the take within the cap;
+                    # the cancel comes at the window's end, or when the take
+                    # fills the bet.
+                    tw = _hand_take_window_new(now, now_ts, win_s, gs, take, leaves, pc)
+                    sb.table("bot_picks").update({"signal_blob": {**nb0, "game_started": gs, "start_take_window": tw}}
+                                                 ).eq("id", r["id"]).execute()
+                    stamp.update({"kind": "hand_start_take_window", "hand_start_cancel": False,
+                                  "hand_start_take_window": True, "window": tw, "start_take": take})
+                    st["windowed"] = st.get("windowed", 0) + 1
+                    _probe_log(stamp)
+                    app.logger.warning("hand start-take window %s pick %s open %ss (ask %s, cap %s)",
+                                       slug, r["id"], int(win_s), take.get("ask_c"), take.get("cap_c"))
+                    continue
                 stamp["start_take"] = take
-            out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
-            if took_px is not None and out.get("ok") and not out.get("deleted"):
-                held = out.get("held")
-                try:
-                    took = max(0.0, float(held or 0) - cum0)
-                except (TypeError, ValueError):
-                    took = 0.0
-                ic = (take or {}).get("ioc_cum") if isinstance(take, dict) else None
-                if ic is not None and ic > 0:
-                    took = float(ic)                 # the order says what it filled; positions can lag it
-                if took > 0:
-                    # the lot is part maker fill (resting price) and part take (the ask)
-                    _r2, b2 = _bet_sheet_pick(sb, r["id"])
-                    if _r2:
-                        pc0 = float(b2.get("price_c") or took_px)
-                        newp = round((cum0 * pc0 + took * took_px) / (cum0 + took), 2)
-                        b2 = {**b2, "price_c": newp, "start_take": {
-                            "at": now.isoformat(), "take_c": took_px, "qty": round(took, 2),
-                            "from_c": pc0}}       # took_px = the ladder's average up to the limit
-                        upd = {"signal_blob": b2}
-                        am_ = _cents_to_american_py(newp)
-                        if am_ is not None:
-                            upd["entry_price"] = am_
-                        sb.table("bot_picks").update(upd).eq("id", r["id"]).execute()
-                    stamp["start_take"]["filled"] = round(took, 2)
-                    st["taken"] = st.get("taken", 0) + 1
-            stamp["result"], stamp["http"] = out, code
-            if out.get("ok"):
-                st["started"] += 1
-            else:
-                st["errors"] += 1
+            _hand_start_finish_poly(sb, client, r, stamp, take, cum0, took_px, now, st)
         except Exception as e:
             st["errors"] += 1
             stamp["error"] = str(e)[:160]
-        try:
-            _probe_log(stamp)
-        except Exception:
-            pass
+            try:
+                _probe_log(stamp)
+            except Exception:
+                pass
         app.logger.warning("hand start-cancel %s pick %s touch %.0f/%.0f (-%.0f%%) %+.0fs after start → %s",
                            slug, r["id"], cur, base, seen or 0, now_ts - start_ts, stamp.get("result"))
     return st
@@ -18157,14 +18324,21 @@ def _kalshi_cancel_exec(sb, client, pick_id, skip_cancel: bool = False):
             app.logger.warning("kalshi cancel %s: %s", koid, e)
     if koid:
         vr = {}
-        for _i in range(4):                       # the orders list lags a 200 cancel by a beat (Oct 18 2026)
+        for _i in range(8):                       # the orders list lags a 200 cancel by a beat (Oct 18 2026)
             try:
                 vr = _kv.order_resting(koid, ticker)
             except Exception as e:
                 vr = {"resting": None, "error": str(e)[:120]}
             if vr.get("resting") is False or vr.get("resting") is None:
                 break
-            _time.sleep(0.6)
+            if _i == 3 and not skip_cancel:
+                # still listed after ~3s: say it again (Oct 18 2026, NYJ U43.5 + BAL O39.5 —
+                # "Kalshi did not cancel it" on a 2.4s read while both orders were gone minutes later)
+                try:
+                    _kv.cancel_order(koid, ticker)
+                except Exception:
+                    pass
+            _time.sleep(0.75)
         if vr.get("resting") is None:
             return {"ok": False, "error": "Kalshi orders unreadable — check the app"}, 503
         if vr.get("resting"):
@@ -18347,6 +18521,10 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
     except (TypeError, ValueError):
         return
     start_ts = ev.astimezone(timezone.utc).timestamp()
+    if isinstance(blob.get("start_take_window"), dict):
+        _hand_take_window_kalshi(sb, client, r, blob, o, ticker, by, koid, blob.get("pmm_twin_slug"),
+                                 now, now_ts, st, kctx)
+        return
     if o is None:
         # NO ORDER AT THE START (Oct 18 2026): a Kalshi pick whose order is
         # gone and nothing held once the game has started is a box cancel
@@ -18427,129 +18605,237 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
              "rule_pct": _d, "start": ev.astimezone(timezone.utc).isoformat(),
              "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1)}
     try:
-        sb.table("bot_picks").update({"signal_blob": {**blob, "game_started": {
-            "at": now.isoformat(), "baseline_q": round(base, 1), "touch_q": round(cur, 1),
-            "drop_pct": seen, "tape_src": tape_src}}}).eq("id", r["id"]).execute()
+        gs = {"at": now.isoformat(), "baseline_q": round(base, 1), "touch_q": round(cur, 1),
+              "drop_pct": seen, "tape_src": tape_src}
+        sb.table("bot_picks").update({"signal_blob": {**blob, "game_started": gs}}).eq("id", r["id"]).execute()
         take, took_px, took_venue, cancelled = None, None, None, False
         cum0 = float(o.get("filled") or 0.0)
-        if now_ts >= start_ts and _machine_flag("hand_start_take", True):
-            try:
-                leaves = int(round(float(o.get("remaining") or 0)))
-                if blob.get("contracts"):
-                    leaves = min(leaves, int(round(float(blob["contracts"]) - cum0)))
-            except (TypeError, ValueError):
-                leaves = 0
-            # THE CAP IS OFF THE ORDER'S OWN PRICE, never the blob (Oct 18 2026:
-            # two Kalshi bets the chase had lifted to 49 and 53 still carried
-            # 5 and 52 on the blob after 'unverified' amends — cap 6 and 53
-            # against asks at 50 and 54, both takes skipped 'past the cap').
-            pc = _kv.our_c(o.get("yes_c"), by)
-            if pc is None:
-                pc = blob.get("price_c")
-            if leaves >= 1 and pc is not None:
-                # both asks off the sockets (the frame is the freshest read there is);
-                # REST only for a market neither feed vouches for
-                kbook, _ = _kalshi_hand_book(ticker)
-                k_ask = _manual_side_book(kbook, not by)[1] if kbook else None
-                p_ask, pbook, twin_syn = None, None, bool(blob.get("pmm_twin_synthetic"))
-                if twin and client is not None:
-                    pbook = _hand_poly_book(client, twin, tries=1)
-                    if pbook:
-                        p_ask = _manual_side_book(pbook, twin_syn)[1]
-                try:
-                    cap = float(_machine_flag_val("hand_start_take_c", _HAND_START_TAKE_C))
-                except (TypeError, ValueError):
-                    cap = _HAND_START_TAKE_C
-                venue_t, tdet = _kv.compare_take(p_ask, k_ask, leaves, blob.get("kalshi_fee"),
-                                                 resting_c=pc, cap_c=cap)
-                take = {"price_c": pc, "kalshi_ask_c": k_ask, "poly_ask_c": p_ask, "cap_c": cap,
-                        "qty": leaves, "compare": tdet, "venue": venue_t}
-                if venue_t == "KALSHI":
-                    lim = _hand_take_plan(pc, k_ask, cap, start_ts, now_ts, _KALSHI_TICK_C)
-                    if lim is not None and leaves * lim / 100.0 <= 500.0:
-                        _kv.cancel_order(koid, ticker)
-                        vr = _kv.order_resting(koid, ticker)
-                        if vr.get("resting") is False:
-                            cancelled = True
-                            ioc = _kv.create_order(ticker, by, int(round(lim)), leaves,
-                                                   tif="immediate_or_cancel", post_only=False)
-                            afp = _kv._num(((ioc.get("data") or {}).get("average_fill_price")))
-                            take.update({"take_c": lim, "order_id": ioc.get("order_id"), "error": ioc.get("error"),
-                                         "fill_count": ioc.get("fill_count"),
-                                         "avg_fill_c": (round(afp * 100.0, 2) if afp is not None and afp <= 1.0 else afp)})
-                            if ioc.get("ok") and (ioc.get("fill_count") or 0) > 0:
-                                took_px = take["avg_fill_c"] if take.get("avg_fill_c") else lim
-                                took_venue = "KALSHI"
-                                _time.sleep(1.0)
-                        else:
-                            take["error"] = "resting order did not cancel — no take"
-                    else:
-                        take["skip"] = "ask past the cap" if lim is None else "over $500"
-                elif venue_t == "POLYMARKET" and twin and pbook is not None:
-                    tick_t = _pmm_tick_c(client, twin)
-                    lim = _hand_take_plan(pc, p_ask, cap, start_ts, now_ts, tick_t)
-                    if lim is not None and leaves * lim / 100.0 <= 500.0:
-                        _kv.cancel_order(koid, ticker)
-                        vr = _kv.order_resting(koid, ticker)
-                        if vr.get("resting") is False:
-                            cancelled = True
-                            asks_t = _hand_side_asks(pbook, twin_syn)
-                            oid_t, err_t = _hand_take_ioc(client, twin, twin_syn, lim, leaves)
-                            vw = _hand_take_vwap(asks_t, leaves, lim)
-                            take.update({"take_c": lim, "vwap_c": vw, "order_id": oid_t, "error": err_t,
-                                         "asks": asks_t[:6]})
-                            if oid_t:
-                                took_px, took_venue = (vw or lim), "POLYMARKET"
-                                # the lot now lives on Polymarket: the pick learns the slug so the
-                                # strip, the sold rule and the resolver's venue pass can see it
-                                sb.table("bot_picks").update({"signal_blob": {
-                                    **blob, "pmm_slug": twin, "pmm_synthetic": twin_syn,
-                                    "poly_take": {"at": now.isoformat(), "slug": twin, "qty": leaves, "limit_c": lim}}}
-                                ).eq("id", r["id"]).execute()
-                                _time.sleep(1.5)
-                        else:
-                            take["error"] = "resting order did not cancel — no take"
-                    else:
-                        take["skip"] = "ask past the cap" if lim is None else "over $500"
-                else:
-                    take["skip"] = (tdet or {}).get("why")
+        leaves, pc = _hand_kalshi_leaves_pc(o, blob, by)
+        if now_ts >= start_ts and _machine_flag("hand_start_take", True) and leaves >= 1 and pc is not None:
+            take, took_px, took_venue, cancelled = _hand_take_attempt_kalshi(
+                sb, client, r, blob, ticker, by, koid, twin, pc, leaves, start_ts, now_ts, now)
+            win_s = _hand_take_window_s()
+            if win_s > 0 and not cancelled and took_px is None:
+                # THE TAKE WINDOW (Rob, Oct 18 2026: "I would say 2 minutes"): no
+                # ask inside the cap on either venue right now — the Kalshi order
+                # keeps resting and every tick re-asks until the window ends.
+                # (A take that went in ends the window either way: the resting
+                # order was cancelled to make room for it.)
+                tw = _hand_take_window_new(now, now_ts, win_s, gs, take, leaves, pc)
+                sb.table("bot_picks").update({"signal_blob": {**blob, "game_started": gs, "start_take_window": tw}}
+                                             ).eq("id", r["id"]).execute()
+                stamp.update({"kind": "hand_start_take_window", "hand_start_cancel": False,
+                              "hand_start_take_window": True, "window": tw, "start_take": take})
+                st["windowed"] = st.get("windowed", 0) + 1
+                _probe_log(stamp)
+                app.logger.warning("hand start-take window KALSHI %s pick %s open %ss", ticker, r["id"], int(win_s))
+                return
             stamp["start_take"] = take
-        out, code = _kalshi_cancel_exec(sb, client, r["id"], skip_cancel=cancelled)
-        if took_px is not None and out.get("ok") and not out.get("deleted"):
-            held = out.get("held")
-            try:
-                took = max(0.0, float(held or 0) - cum0)
-            except (TypeError, ValueError):
-                took = 0.0
-            if took > 0:
-                _r2, b2 = _bet_sheet_pick(sb, r["id"])
-                if _r2:
-                    pc0 = float(b2.get("price_c") or took_px)
-                    newp = round((cum0 * pc0 + took * float(took_px)) / (cum0 + took), 2)
-                    b2 = {**b2, "price_c": newp, "start_take": {
-                        "at": now.isoformat(), "take_c": took_px, "qty": round(took, 2),
-                        "from_c": pc0, "venue": took_venue}}
-                    upd = {"signal_blob": b2}
-                    am_ = _cents_to_american_py(newp)
-                    if am_ is not None:
-                        upd["entry_price"] = am_
-                    sb.table("bot_picks").update(upd).eq("id", r["id"]).execute()
-                stamp["start_take"]["filled"] = round(took, 2)
-                st["taken"] = st.get("taken", 0) + 1
-        stamp["result"], stamp["http"] = out, code
-        if out.get("ok"):
-            st["started"] += 1
-        else:
-            st["errors"] += 1
+        _hand_start_finish_kalshi(sb, client, r, stamp, take, cum0, took_px, took_venue, cancelled, now, st)
     except Exception as e:
         st["errors"] += 1
         stamp["error"] = str(e)[:160]
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+    app.logger.warning("hand start-cancel KALSHI %s pick %s touch %.0f/%.0f (-%.0f%%) %+.0fs after start → %s",
+                       ticker, r["id"], cur, base, seen or 0, now_ts - start_ts, stamp.get("result"))
+
+
+def _hand_kalshi_leaves_pc(o: dict, blob: dict, by: bool):
+    """(unfilled size to take, the Kalshi order's own our-side price). THE
+    CAP IS OFF THE ORDER'S OWN PRICE, never the blob (Oct 18 2026: two
+    Kalshi bets the chase had lifted to 49 and 53 still carried 5 and 52
+    on the blob after 'unverified' amends — cap 6 and 53 against asks at
+    50 and 54, both takes skipped 'past the cap')."""
+    import kalshi_venue as _kv
+    try:
+        cum0 = float(o.get("filled") or 0.0)
+        leaves = int(round(float(o.get("remaining") or 0)))
+        if blob.get("contracts"):
+            leaves = min(leaves, int(round(float(blob["contracts"]) - cum0)))
+    except (TypeError, ValueError):
+        leaves = 0
+    pc = _kv.our_c(o.get("yes_c"), by)
+    if pc is None:
+        pc = blob.get("price_c")
+    return leaves, pc
+
+
+def _hand_take_attempt_kalshi(sb, client, r: dict, blob: dict, ticker: str, by: bool, koid, twin,
+                              pc, leaves: int, start_ts: float, now_ts: float, now):
+    """ONE take attempt for a Kalshi-resting bet: both venues' asks off the
+    sockets, `compare_take`, and — only when an ask sits inside the cap —
+    the resting Kalshi order is cancelled (verified) BEFORE one IOC on the
+    cheaper venue, so one bet never has two live orders. Returns
+    (take, took_px, took_venue, cancelled)."""
+    import kalshi_venue as _kv
+    take, took_px, took_venue, cancelled = None, None, None, False
+    twin_syn = bool(blob.get("pmm_twin_synthetic"))
+    kbook, _ = _kalshi_hand_book(ticker)
+    k_ask = _manual_side_book(kbook, not by)[1] if kbook else None
+    p_ask, pbook = None, None
+    if twin and client is not None:
+        pbook = _hand_poly_book(client, twin, tries=1)
+        if pbook:
+            p_ask = _manual_side_book(pbook, twin_syn)[1]
+    try:
+        cap = float(_machine_flag_val("hand_start_take_c", _HAND_START_TAKE_C))
+    except (TypeError, ValueError):
+        cap = _HAND_START_TAKE_C
+    venue_t, tdet = _kv.compare_take(p_ask, k_ask, leaves, blob.get("kalshi_fee"), resting_c=pc, cap_c=cap)
+    take = {"price_c": pc, "kalshi_ask_c": k_ask, "poly_ask_c": p_ask, "cap_c": cap,
+            "qty": leaves, "compare": tdet, "venue": venue_t, "at": now.isoformat(),
+            "book_src": ("kalshi_ws" if _kalshi_ws_fresh(ticker) else "kalshi_rest")}
+    if venue_t == "KALSHI":
+        lim = _hand_take_plan(pc, k_ask, cap, start_ts, now_ts, _KALSHI_TICK_C)
+        if lim is not None and leaves * lim / 100.0 <= 500.0:
+            _kv.cancel_order(koid, ticker)
+            vr = _kv.order_resting(koid, ticker)
+            if vr.get("resting") is False:
+                cancelled = True
+                ioc = _kv.create_order(ticker, by, int(round(lim)), leaves,
+                                       tif="immediate_or_cancel", post_only=False)
+                afp = _kv._num(((ioc.get("data") or {}).get("average_fill_price")))
+                take.update({"take_c": lim, "order_id": ioc.get("order_id"), "error": ioc.get("error"),
+                             "fill_count": ioc.get("fill_count"), "ioc_cum": ioc.get("fill_count"),
+                             "avg_fill_c": (round(afp * 100.0, 2) if afp is not None and afp <= 1.0 else afp)})
+                if ioc.get("ok") and (ioc.get("fill_count") or 0) > 0:
+                    took_px = take["avg_fill_c"] if take.get("avg_fill_c") else lim
+                    took_venue = "KALSHI"
+                    take["took_px"] = took_px
+                    _time.sleep(1.0)
+            else:
+                take["error"] = "resting order did not cancel — no take"
+        else:
+            take["skip"] = "ask past the cap" if lim is None else "over $500"
+    elif venue_t == "POLYMARKET" and twin and pbook is not None:
+        tick_t = _pmm_tick_c(client, twin)
+        lim = _hand_take_plan(pc, p_ask, cap, start_ts, now_ts, tick_t)
+        if lim is not None and leaves * lim / 100.0 <= 500.0:
+            _kv.cancel_order(koid, ticker)
+            vr = _kv.order_resting(koid, ticker)
+            if vr.get("resting") is False:
+                cancelled = True
+                asks_t = _hand_side_asks(pbook, twin_syn)
+                oid_t, err_t = _hand_take_ioc(client, twin, twin_syn, lim, leaves)
+                vw = _hand_take_vwap(asks_t, leaves, lim)
+                take.update({"take_c": lim, "vwap_c": vw, "order_id": oid_t, "error": err_t, "asks": asks_t[:6]})
+                if oid_t:
+                    took_px, took_venue = (vw or lim), "POLYMARKET"
+                    take["took_px"] = took_px
+                    # the lot now lives on Polymarket: the pick learns the slug so the
+                    # strip, the sold rule and the resolver's venue pass can see it
+                    sb.table("bot_picks").update({"signal_blob": {
+                        **blob, "pmm_slug": twin, "pmm_synthetic": twin_syn,
+                        "poly_take": {"at": now.isoformat(), "slug": twin, "qty": leaves, "limit_c": lim}}}
+                    ).eq("id", r["id"]).execute()
+                    _time.sleep(1.5)
+                    take["ioc_cum"] = _hand_order_cum(client, oid_t)
+            else:
+                take["error"] = "resting order did not cancel — no take"
+        else:
+            take["skip"] = "ask past the cap" if lim is None else "over $500"
+    else:
+        take["skip"] = (tdet or {}).get("why")
+    return take, took_px, took_venue, cancelled
+
+
+def _hand_start_finish_kalshi(sb, client, r: dict, stamp: dict, take, cum0: float, took_px, took_venue,
+                              cancelled: bool, now, st: dict) -> None:
+    """The cancel after the take: the pick keeps a held lot at a price
+    blended across the maker fill and the take; unfilled → pick gone."""
+    out, code = _kalshi_cancel_exec(sb, client, r["id"], skip_cancel=cancelled)
+    if took_px is not None and out.get("ok") and not out.get("deleted"):
+        held = out.get("held")
+        try:
+            took = max(0.0, float(held or 0) - cum0)
+        except (TypeError, ValueError):
+            took = 0.0
+        ic = (take or {}).get("ioc_cum") if isinstance(take, dict) else None
+        if ic is not None and float(ic) > 0:
+            took = float(ic)
+        if took > 0:
+            _r2, b2 = _bet_sheet_pick(sb, r["id"])
+            if _r2:
+                pc0 = float(b2.get("price_c") or took_px)
+                rest = max(0.0, float(held or 0) - took)
+                newp = round((rest * pc0 + took * float(took_px)) / max(rest + took, 1e-9), 2)
+                b2 = {**b2, "price_c": newp, "start_take": {
+                    "at": now.isoformat(), "take_c": took_px, "qty": round(took, 2),
+                    "from_c": pc0, "venue": took_venue}}
+                upd = {"signal_blob": b2}
+                am_ = _cents_to_american_py(newp)
+                if am_ is not None:
+                    upd["entry_price"] = am_
+                sb.table("bot_picks").update(upd).eq("id", r["id"]).execute()
+            if isinstance(stamp.get("start_take"), dict):
+                stamp["start_take"]["filled"] = round(took, 2)
+            st["taken"] = st.get("taken", 0) + 1
+    stamp["result"], stamp["http"] = out, code
+    if out.get("ok"):
+        st["started"] += 1
+    else:
+        st["errors"] += 1
     try:
         _probe_log(stamp)
     except Exception:
         pass
-    app.logger.warning("hand start-cancel KALSHI %s pick %s touch %.0f/%.0f (-%.0f%%) %+.0fs after start → %s",
-                       ticker, r["id"], cur, base, seen or 0, now_ts - start_ts, stamp.get("result"))
+
+
+def _hand_take_window_kalshi(sb, client, r: dict, blob: dict, o, ticker: str, by: bool, koid, twin,
+                             now, now_ts: float, st: dict, kctx: dict) -> None:
+    """One tick inside an open take window on a Kalshi-resting bet: the
+    order keeps resting; re-ask both venues; a take inside the cap ends the
+    window (the order is cancelled to make room for it); the window's end
+    is the old cancel."""
+    tw = dict(blob.get("start_take_window") or {})
+    st["window"] = st.get("window", 0) + 1
+    try:
+        until_ts = datetime.fromisoformat(str(tw.get("until")).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        until_ts = 0.0
+    nb = {k: v for k, v in blob.items() if k != "start_take_window"}
+    if o is None:
+        if kctx.get("orders") is None:
+            return                                      # orders unreadable this tick — wait
+        sb.table("bot_picks").update({"signal_blob": {**nb, "start_take_window_done": {**tw, "closed": "order_gone", "at": now.isoformat()}}}
+                                     ).eq("id", r["id"]).execute()
+        _probe_log({"kind": "hand_start_take_window", "hand_start_take_window": True, "pick_id": r["id"],
+                    "ticker": ticker, "venue": "KALSHI", "closed": "order_gone", "window": tw, "at": now.isoformat()})
+        return
+    try:
+        start_ts = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        start_ts = 0.0
+    cum0 = float(o.get("filled") or 0.0)
+    leaves, pc = _hand_kalshi_leaves_pc(o, blob, by)
+    take, took_px, took_venue, cancelled = None, None, None, False
+    if now_ts < until_ts and leaves >= 1 and pc is not None and _machine_flag("hand_start_take", True):
+        take, took_px, took_venue, cancelled = _hand_take_attempt_kalshi(
+            sb, client, r, blob, ticker, by, koid, twin, pc, leaves, start_ts, now_ts, now)
+        tw = _hand_take_window_add(tw, take)
+        if not cancelled and now_ts + 1.0 < until_ts:
+            sb.table("bot_picks").update({"signal_blob": {**nb, "start_take_window": tw}}).eq("id", r["id"]).execute()
+            return                                      # still working it
+        closed = "taken" if cancelled else "window_end"
+    else:
+        closed = "window_end" if now_ts >= until_ts else "nothing_to_take"
+    stamp = {"kind": "hand_start_cancel", "bet": {**_hand_start_bet(r, blob), "venue": "KALSHI", "ticker": ticker},
+             "hand_start_cancel": True, "venue": "KALSHI", "pick_id": r["id"], "slug": twin, "ticker": ticker,
+             "order_id": koid, "at": now.isoformat(), "after_start_s": round(now_ts - start_ts, 1),
+             "baseline_q": (tw.get("drop") or {}).get("baseline_q"), "touch_q": (tw.get("drop") or {}).get("touch_q"),
+             "drop_pct": (tw.get("drop") or {}).get("drop_pct"), "window": {**tw, "closed": closed},
+             "start_take": take}
+    # the pick's blob may have grown a pmm_slug from a Polymarket take — re-read before the cancel
+    _r2, b2 = _bet_sheet_pick(sb, r["id"])
+    b2 = {k: v for k, v in (b2 or nb).items() if k != "start_take_window"}
+    sb.table("bot_picks").update({"signal_blob": {**b2, "start_take_window_done": {**tw, "closed": closed, "at": now.isoformat()}}}
+                                 ).eq("id", r["id"]).execute()
+    _hand_start_finish_kalshi(sb, client, r, stamp, take, cum0, took_px, took_venue, cancelled, now, st)
+    app.logger.warning("hand take window KALSHI %s pick %s closed %s after %s tries → %s",
+                       ticker, r["id"], closed, tw.get("tries"), stamp.get("result"))
 
 
 # ── THE VENUE SWITCH (Oct 18 2026, Rob: "If it repegs, the machine
@@ -19739,6 +20025,7 @@ def api_bet_sheets_mine():
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
             "live_snipe": bool(blob.get("live_snipe")),
             "start_seen": bool(blob.get("game_started")), "start_blind": bool(blob.get("start_blind")),
+            "take_window": (blob.get("start_take_window") if isinstance(blob.get("start_take_window"), dict) else None),
             "order": (bx.get("order") if bx is not None else
                       ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
                         "price_c": (round((1 - float(o["price_yes"])) * 100, 2) if syn

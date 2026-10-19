@@ -1012,6 +1012,7 @@
             // showed them nowhere). Cancel, or keep it as a live snipe.
             const cn = inSlip(opKey('cancel', b.id)), lv = inSlip(opKey('live', b.id));
             h += '<div class="note">' + (b.live_snipe ? 'Moved to live — yours to watch.'
+                : b.take_window ? 'Game started — the box is working the take inside your 1¢ until ' + fmtClock(b.take_window.until) + ' (' + (b.take_window.tries || 0) + ' tries so far), then cancels.'
                 : b.start_seen ? 'Game started and the cancel didn\'t take — this order is still resting at its pre-game price.'
                 : b.start_blind ? 'The box has no pre-start book for this game, so it can\'t see game start — cancel or move it yourself.'
                 : 'Past the listed time — the box cancels it at game start (the 95% drop in the bids).') + '</div>';
@@ -1183,27 +1184,31 @@
     // drop, then lands in Missed at game start.
     function renderStartedResting(d) {
         const rows = (d.bets || []).filter(b => b.status === 'pending' && (b.order || {}).resting
-                && ((b.started && (b.live_snipe || b.in_play)) || b.start_seen || b.start_blind))
+                && ((b.started && (b.live_snipe || b.in_play)) || b.start_seen || b.start_blind || b.take_window))
             .sort((x, y) => String(x.event_start).localeCompare(String(y.event_start)));
         document.getElementById('srSec').classList.toggle('hide', !rows.length);
         if (!rows.length) { document.getElementById('srBody').innerHTML = ''; return; }
-        const bad = rows.filter(b => !((b.live_snipe || b.in_play) && !b.start_seen && !b.start_blind)).length;
+        const bad = rows.filter(b => !b.take_window && !((b.live_snipe || b.in_play) && !b.start_seen && !b.start_blind)).length;
         document.getElementById('srMeta').textContent = rows.length + (bad ? ' · ' + bad + ' need you' : '');
         document.getElementById('srBody').innerHTML = rows.map(b => {
             const o = b.order || {}, sl = _scoreLine(b), held = Number(b.held || 0);
             const mine = (b.live_snipe || b.in_play) && !b.start_seen && !b.start_blind;
-            const tag = mine ? '<span class="tag amb">LIVE · YOURS</span>'
+            const tw = b.take_window;
+            // THE TAKE WINDOW (Rob, Oct 18 2026: "I would say 2 minutes"): the drop fired,
+            // the box is re-trying the take inside the 1¢ cap until the window ends
+            const tag = tw ? '<span class="tag amb">TAKING · 1¢ window · until ' + esc(fmtClock(tw.until)) + '</span>'
+                      : mine ? '<span class="tag amb">LIVE · YOURS</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
                       : '<span class="tag red">BOX CAN\'T SEE GAME START</span>';
             const n = Math.round(o.leaves || 0) + ' @ ' + (o.price_c != null ? cA(o.price_c) : '?') + ' resting'
                     + (held > 0 ? ' · ' + fmtQ(held) + ' filled' : '')
                     + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '')
                     + (b.cur_c != null ? ' · now ' + b.cur_c + '¢' : '');
-            return '<div class="card' + (mine ? ' rest' : ' miss') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(b.id)).replace(/"/g, '&quot;') + ')">'
+            return '<div class="card' + ((mine || tw) ? ' rest' : ' miss') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(b.id)).replace(/"/g, '&quot;') + ')">'
                  + '<div class="c-top"><span class="tags">' + tag + (b.app ? '<span class="tag gry">APP</span>' : '') + venueTag(b) + '<span class="tag gry">' + esc(String(b.sport || '')) + '</span></span></div>'
                  + '<div class="c-t">' + esc(betLabel(b)) + ' <span class="g">· ' + esc(gameShort(b)) + '</span></div>'
                  + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + n + '</div>'
-                 + '<div class="c-n">tap to cancel or move to live</div></div>';
+                 + '<div class="c-n">' + (tw ? ((tw.tries || 0) + ' tries · last ask ' + (tw.last && tw.last.ask_c != null ? tw.last.ask_c + '¢' : '—') + ' · tap to cancel now') : 'tap to cancel or move to live') + '</div></div>';
         }).join('');
     }
     function renderBets(d) {
