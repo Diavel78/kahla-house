@@ -4398,6 +4398,19 @@ def test_kalshi_venue_math() -> None:
     # the funding planner moves the shortfall from the richest other shard,
     # rounded up to $5, exact when only the exact amount fits, never from a
     # breakdown it cannot read
+    # FULL-GAME SERIES ONLY (Oct 19 2026, the South Alabama −2.5 that rested
+    # on KXNCAAF1HSPREAD): period / inning / team-total / series tickers are
+    # never a seat for a full-game bet
+    assert kv.full_game_series("NCAAF", "spread", "KXNCAAFSPREAD")
+    assert not kv.full_game_series("NCAAF", "spread", "KXNCAAF1HSPREAD")
+    assert kv.full_game_series("NCAAF", "total", "KXNCAAFTOTAL") and not kv.full_game_series("NCAAF", "total", "KXNCAAF1QTOTAL")
+    assert kv.full_game_series("MLB", "spread", "KXMLBSPREAD")
+    for bad in ("KXMLBF5SPREAD", "KXMLBSERIESSPREAD", "KXMLBF5TOTAL", "KXMLBTEAMTOTAL", "KXMLBINNINGTOTAL",
+                "KXMLBSERIESGAMES", "KXMLBPLAYOFFS"):
+        assert not kv.full_game_series("MLB", "spread", bad) and not kv.full_game_series("MLB", "total", bad) \
+            and not kv.full_game_series("MLB", "ml", bad), bad
+    assert kv.full_game_series("MLB", "ml", "KXMLBGAME") and not kv.full_game_series("MLB", "ml", "KXMLBBGAME")
+    assert kv.full_game_series("NHL", "total", "KXNHLTOTAL") and kv.full_game_series("NFL", "ml", "KXNFLGAME")
     assert kv.shard_for_prefix("KXMLBGAME-26OCT192008CLETB-CLE") == 3
     assert kv.shard_for_prefix("KXNBAGAME-X") == 3 and kv.shard_for_prefix("KXNHLTOTAL-X") == 0
     assert kv.shard_for_prefix("KXNFLSPREAD-X") == 0 and kv.shard_for_prefix(None) == 0

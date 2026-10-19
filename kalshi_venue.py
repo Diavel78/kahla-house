@@ -346,10 +346,28 @@ def catalog(ttl_s: float = 6 * 3600) -> list:
     return rows
 
 
+def full_game_series(sport: str, mt: str, ticker: str) -> bool:
+    """PURE. Is this series the FULL-GAME main line for (sport, mt)? The
+    venue names them `KX<SPORT>GAME` / `KX<SPORT>SPREAD` / `KX<SPORT>TOTAL`
+    with nothing between the sport and the market word; a period, inning,
+    team-total, playoff-series or futures series carries extra letters
+    (`KXNCAAF1HSPREAD`, `KXMLBF5TOTAL`, `KXMLBSERIESSPREAD`, `KXMLBTEAMTOTAL`).
+    Oct 19 2026: South Alabama −2.5 rested 10 contracts on the FIRST-HALF
+    spread at 44¢ because the full-game ladder had no −2.5 rung and the
+    walk fell through to the next series carrying 'SPREAD' — a different
+    bet read as 8.5¢ cheaper. A wrong market is never a seat; no rung on
+    the full-game series = no Kalshi seat, Polymarket takes the bet."""
+    sport = (sport or "").upper()
+    tags = _SPORT_TAGS.get(sport, (sport,))
+    word = "GAME" if mt == "ml" else ("TOTAL" if mt == "total" else "SPREAD")
+    return bool(re.fullmatch(r"KX(?:%s)%s" % ("|".join(re.escape(t) for t in tags), word), str(ticker or "").upper()))
+
+
 def discover_series(sport: str, mt: str) -> list:
     """Candidate series for (sport, ml|spread|total): the named guesses
     first, then every catalog ticker carrying the sport's tag and a
-    market-type word in its ticker or title."""
+    market-type word in its ticker or title — EVERY candidate filtered to
+    the full-game main-line shape (`full_game_series`)."""
     sport = (sport or "").upper()
     if mt == "ml":
         cands = [SERIES_ML[sport]] if sport in SERIES_ML else []
@@ -365,7 +383,7 @@ def discover_series(sport: str, mt: str) -> list:
                 continue
             if tk not in cands:
                 cands.append(tk)
-    return cands
+    return [tk for tk in cands if full_game_series(sport, mt, tk)]
 
 
 # ─────────────────────── matching (pure helpers) ───────────────────────
