@@ -18109,11 +18109,15 @@ def _kalshi_order_place(ticker: str, buy_yes: bool, price_c, contracts, event_st
             err = "the API key has no trade scope"
         return {"ok": False, "error": f"Kalshi: {err}"[:200]}, 502
     resting = None
-    try:
-        vr = _kv.order_resting(oid, ticker)
-        resting = vr.get("resting")
-    except Exception:
-        resting = None
+    for _i in range(3):                                   # the orders list lags a create by a beat, like a cancel
+        try:                                              # (Oct 19 2026: every Kalshi create read "not resting"
+            vr = _kv.order_resting(oid, ticker)           # on its first read and the slip showed a false warning)
+            resting = vr.get("resting")
+        except Exception:
+            resting = None
+        if resting:
+            break
+        _time.sleep(0.7)
     _probe_log({"kalshi_order": True, "ticker": ticker, "buy_yes": buy_yes, "price_c": price_c,
                 "contracts": contracts, "order_id": oid, "state": cr.get("order_status"),
                 "resting": resting, "fill_count": cr.get("fill_count"),
