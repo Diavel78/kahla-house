@@ -12622,6 +12622,68 @@ def api_docs_fetch():
     return jsonify(out)
 
 
+@app.route("/api/bet105/probe")
+def api_bet105_probe():
+    """Shared-secret (site-curl), read-only. Oct 18 2026, Rob: "pull the
+    bet105 lines into the dashboard". The sandbox cannot reach bet105.ag,
+    Vercel can: fetch ONE page on a bet105/Heritage host and report what a
+    lines reader would need — status, final URL, content type, every
+    hostname the body references (the API host hides in the script tags),
+    JSON top-level keys when the answer is JSON, and a raw head. Nothing
+    is written anywhere but exec_probe_runs."""
+    import re as _re
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    url = (request.args.get("url") or "https://www.bet105.ag/").strip()
+    allow_suffix = ("bet105.ag", "bet105.com", "heritagesports.eu", "bet105.global")
+    try:
+        from urllib.parse import urlparse as _up
+        host = (_up(url).hostname or "").lower()
+    except Exception:
+        host = ""
+    if not url.startswith("https://") or not any(host == a or host.endswith("." + a) for a in allow_suffix):
+        return jsonify({"ok": False, "error": "host not allowed", "host": host}), 400
+    out: dict = {"kind": "bet105_probe", "bet105_probe": True, "ok": True, "url": url}
+    try:
+        hdrs = {"User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                               "(KHTML, like Gecko) Chrome/129.0 Safari/537.36"),
+                "Accept": "text/html,application/json,text/plain,*/*", "Accept-Language": "en-US,en;q=0.9"}
+        extra = request.args.get("hdr")            # e.g. "X-Requested-With:XMLHttpRequest"
+        if extra and ":" in extra:
+            k_, v_ = extra.split(":", 1)
+            hdrs[k_.strip()] = v_.strip()
+        r = _http.get(url, timeout=25, headers=hdrs, allow_redirects=True)
+        body = r.text or ""
+        out.update({"status": r.status_code, "final_url": r.url, "content_type": r.headers.get("content-type"),
+                    "chars": len(body), "server": r.headers.get("server"),
+                    "set_cookie": bool(r.headers.get("set-cookie"))})
+        hosts = sorted(set(_re.findall(r"https?://([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", body)))
+        out["hosts"] = hosts[:80]
+        scripts = _re.findall(r"<script[^>]+src=[\"']([^\"']+)", body)
+        out["scripts"] = scripts[:40]
+        hints = sorted(set(m for m in _re.findall(r"[\"'](/?(?:api|odds|lines|sports|events|markets|feed|graphql)[A-Za-z0-9_/.-]*)[\"']", body)))
+        out["path_hints"] = hints[:60]
+        if "json" in (r.headers.get("content-type") or ""):
+            try:
+                j = r.json()
+                out["json_type"] = type(j).__name__
+                out["json_keys"] = list(j.keys())[:40] if isinstance(j, dict) else (list(j[0].keys())[:40] if j and isinstance(j[0], dict) else None)
+                out["json_len"] = len(j) if hasattr(j, "__len__") else None
+            except Exception as e:
+                out["json_error"] = str(e)[:120]
+        n = int(request.args.get("head") or 3000)
+        out["head"] = body[:max(0, min(n, 12000))]
+    except Exception as e:
+        out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
+    try:
+        _probe_log({k: v for k, v in out.items() if k != "head"})
+    except Exception:
+        pass
+    return jsonify(out)
+
+
 # ─────────── KALSHI INCENTIVE PROGRAMS, READ FROM THE VENUE ───────────
 # Aug 26 2026. Rule #1 (rent) has a Polymarket answer (_rent_ok +
 # /v1/incentives) and, until tonight, an ASSUMED Kalshi answer: this repo
@@ -37510,6 +37572,18 @@ def api_parlay_probe():
     out["key_source"] = ("env" if (os.environ.get("PARLAY_API_KEY") or "").strip()
                          else ("db" if pk else "none"))
     out["key_len"] = len(pk or "")
+    if request.args.get("bookmakers") and pk:
+        # the vendor's own catalog (a meta read; the credit headers say what it cost)
+        try:
+            r = _http.get(f"{_PARLAY_BASE}/bookmakers", params={"apiKey": pk}, timeout=10)
+            body = r.json() if "json" in (r.headers.get("content-type") or "") else None
+            rows = body if isinstance(body, list) else ((body or {}).get("data") or (body or {}).get("bookmakers") or [])
+            keys = [(b.get("key") or b.get("id") or b.get("slug") or b.get("name")) if isinstance(b, dict) else b for b in rows]
+            out["bookmakers"] = {"status": r.status_code, "n": len(keys), "keys": keys[:200],
+                                 "hdr": {h: r.headers.get(h) for h in ("x-requests-used", "x-requests-remaining", "x-requests-last")},
+                                 "first": (rows[0] if rows else None), "body": (r.text or "")[:400] if not rows else None}
+        except Exception as e:
+            out["bookmakers"] = {"error": f"{type(e).__name__}: {e}"[:200]}
     sport = (request.args.get("sport") or "NFL").upper()
     if request.args.get("pull") and pk and _PARLAY_SPORT_KEY.get(sport):
         books = request.args.get("books") or "pinnacle,draftkings,fanduel"
