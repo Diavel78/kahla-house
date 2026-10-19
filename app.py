@@ -1505,8 +1505,9 @@ def api_sheet_tv():
 # on each. The venue layer is kalshi_venue.py; the math is pure and
 # selftested. Spec: docs/dual-venue-hand-bets-spec.md.
 # ═══════════════════════════════════════════════════════════════════════
-def _sheet_games_today(sb, sport: str) -> list:
-    """Today's (AZ) upcoming sheet games for a sport, in the page's shape."""
+def _sheet_games_today(sb, sport: str, days: int = 1) -> list:
+    """Today's (AZ) upcoming sheet games for a sport, in the page's shape
+    (`days` widens the window: 2 = today + tomorrow)."""
     wk = (sb.table("football_sheet_weeks").select("week_key").eq("sport", sport)
           .order("week_key", desc=True).limit(1).execute().data or [{}])[0]
     if not wk.get("week_key"):
@@ -1516,7 +1517,7 @@ def _sheet_games_today(sb, sport: str) -> list:
     rows = (sb.table("football_sheets").select("market_id,event_name,event_start,tier,data_blob,friday_md,data_built_at")
             .eq("week_key", wk["week_key"]).eq("sport", sport)
             .gte("event_start", day0.astimezone(timezone.utc).isoformat())
-            .lte("event_start", (day0 + timedelta(days=1)).astimezone(timezone.utc).isoformat())
+            .lte("event_start", (day0 + timedelta(days=max(1, int(days)))).astimezone(timezone.utc).isoformat())
             .order("event_start").limit(200).execute().data or [])
     shape = {"NHL": _sheet_game_nhl, "NBA": _sheet_game_nba, "MLB": _sheet_game_mlb}.get(sport, _sheet_game_football)
     now = datetime.now(timezone.utc)
@@ -1567,7 +1568,7 @@ def _sheet_items(g: dict, sport: str) -> list:
 @app.route("/api/kalshi/coverage")
 def api_kalshi_coverage():
     """READ-ONLY, shared-secret (site-curl). ?sport=NCAAF [&game=nebraska]
-    [&n=6] [&creds=1] [&contracts=10]. Per pick: Polymarket rung + touch
+    [&n=6] [&days=1] [&creds=1] [&contracts=10]. Per pick: Polymarket rung + touch
     + ask (the slip's own resolver), Kalshi rung + touch + ask + fee terms,
     all-in rest/take on each venue, and the compare."""
     want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
@@ -1579,8 +1580,9 @@ def api_kalshi_coverage():
     try:
         n_max = max(1, min(12, int(request.args.get("n") or 6)))
         qty = max(1, min(250, int(request.args.get("contracts") or 10)))
+        days = max(1, min(7, int(request.args.get("days") or 1)))
     except ValueError:
-        return jsonify({"ok": False, "error": "bad n/contracts"}), 400
+        return jsonify({"ok": False, "error": "bad n/contracts/days"}), 400
     out: dict = {"ok": True, "sport": sport, "contracts": qty,
                  "at": datetime.now(ZoneInfo("America/Phoenix")).strftime("%Y-%m-%d %H:%M:%S")}
     if request.args.get("creds"):
@@ -1592,7 +1594,7 @@ def api_kalshi_coverage():
                                        "error": bal.get("error"), "data": bal.get("data")}
     sb = get_supabase()
     try:
-        games = _sheet_games_today(sb, sport)
+        games = _sheet_games_today(sb, sport, days)
     except Exception as e:
         return jsonify({"ok": False, "error": f"sheet read: {e}"[:200]}), 500
     if gq:

@@ -4537,6 +4537,23 @@ def test_kalshi_venue_math() -> None:
     assert kv.yes_price_c(False, 99) == 1 and kv.yes_price_c(True, 61) == 61
     assert kv.order_bodies("T", True, 50, 1)[0][0] == kv.CREATE_SCHEMA == "v2_events"
     assert kv.ORDERS_PATH == "/portfolio/events/orders"
+    # EVENT-FIRST RESOLVE (Oct 19 2026, South Alabama on the 1H series):
+    # the game's event row is found on the series' events list by name,
+    # nearest strike date wins a rematch; no row naming both teams → None.
+    evs = [{"event_ticker": "KXNCAAFSPREAD-26OCT20MOSUDEL", "title": "Missouri State vs Delaware",
+            "strike_date": "2026-10-21T02:00:00Z"},
+           {"event_ticker": "KXNCAAFSPREAD-26OCT20USAMRSH", "title": "South Alabama vs Marshall",
+            "strike_date": "2026-10-21T02:30:00Z"},
+           {"event_ticker": "KXNCAAFSPREAD-26NOV14USAMRSH", "title": "South Alabama vs Marshall",
+            "strike_date": "2026-11-15T02:30:00Z"},
+           {"event_ticker": "KXNCAAFSPREAD-26OCT25ALAMISS", "title": "Alabama vs Mississippi"}]
+    r = kv.pick_event_row(evs, "South Alabama Jaguars", "Marshall Thundering Herd", "2026-10-20T23:30:00+00:00")
+    assert r and r["event_ticker"] == "KXNCAAFSPREAD-26OCT20USAMRSH", r
+    r = kv.pick_event_row(evs, "South Alabama Jaguars", "Marshall Thundering Herd", "2026-11-14T23:30:00+00:00")
+    assert r and r["event_ticker"] == "KXNCAAFSPREAD-26NOV14USAMRSH", r
+    assert kv.pick_event_row(evs, "Missouri State Bears", "Delaware Blue Hens", None)["event_ticker"].endswith("MOSUDEL")
+    assert kv.pick_event_row(evs, "Troy Trojans", "Marshall Thundering Herd", None) is None
+    assert kv.pick_event_row([], "A", "B", None) is None
 
 
 def main() -> int:

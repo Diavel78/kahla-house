@@ -232,7 +232,7 @@ def _get(path: str, params: dict | None = None, timeout: float = 10.0):
     return None, last
 
 
-def markets(series: str, status: str = "open", max_pages: int = 8, ttl_s: float = 30.0) -> dict:
+def markets(series: str, status: str = "open", max_pages: int = 25, ttl_s: float = 30.0) -> dict:
     """EVERY open market of a series — paged on the cursor (a college
     Saturday's spread ladders run past one 200-row page). {ok, markets:
     [raw dicts], pages, error}. Short cache; failures are not cached."""
@@ -256,6 +256,55 @@ def markets(series: str, status: str = "open", max_pages: int = 8, ttl_s: float 
             break
     res = {"ok": pages > 0 and err is None or bool(out), "series": series,
            "markets": out, "pages": pages, "error": err}
+    if res["ok"]:
+        _CACHE[key] = (time.time(), res)
+    return res
+
+
+def events(series: str, status: str = "open", max_pages: int = 10, ttl_s: float = 60.0) -> dict:
+    """EVERY open EVENT of a series (one row per game — ~60 rows on a
+    college week, never the thousands of rungs `markets` pages through).
+    {ok, events: [raw dicts], pages, error}. Short cache; failures not
+    cached. Oct 19 2026: the series-wide markets walk capped at 8 × 200
+    rows, and KXNCAAFSPREAD on a 56-game week runs past that — South
+    Alabama's event sat beyond the last page, the walk fell through to
+    the FIRST-HALF series, and the bet rested on the wrong market while
+    Kalshi listed South Alabama −2.5 full game at 54¢ the whole time.
+    The game's event is found HERE first; its own ladder is one read."""
+    key = f"e:{series}:{status}"
+    hit = _CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl_s:
+        return hit[1]
+    out, cursor, pages, err = [], None, 0, None
+    while pages < max_pages:
+        params = {"series_ticker": series, "status": status, "limit": 200, "with_nested_markets": "false"}
+        if cursor:
+            params["cursor"] = cursor
+        data, err = _get("/events", params)
+        if data is None:
+            break
+        rows = data.get("events") or []
+        out.extend(rows)
+        pages += 1
+        cursor = data.get("cursor")
+        if not cursor or not rows:
+            break
+    res = {"ok": bool(out), "series": series, "events": out, "pages": pages, "error": err}
+    if res["ok"]:
+        _CACHE[key] = (time.time(), res)
+    return res
+
+
+def event_markets(event_ticker: str, status: str = "open", ttl_s: float = 30.0) -> dict:
+    """Every open market of ONE event — the game's whole ladder, one page.
+    {ok, markets, error}."""
+    key = f"em:{event_ticker}:{status}"
+    hit = _CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl_s:
+        return hit[1]
+    data, err = _get("/markets", {"event_ticker": event_ticker, "status": status, "limit": 200})
+    rows = (data or {}).get("markets") or [] if isinstance(data, dict) else []
+    res = {"ok": bool(rows), "event_ticker": event_ticker, "markets": rows, "error": err}
     if res["ok"]:
         _CACHE[key] = (time.time(), res)
     return res
@@ -472,6 +521,47 @@ def pick_event(rows: list, away: str, home: str, start_iso: str | None):
     return best
 
 
+def _event_text(e: dict) -> str:
+    return " ".join(str(e.get(k) or "") for k in ("title", "sub_title", "subtitle", "event_ticker"))
+
+
+def _event_dt(e: dict):
+    for k in ("strike_date", "expected_expiration_time", "close_time"):
+        v = e.get(k)
+        if v:
+            try:
+                return datetime.fromisoformat(str(v).replace("Z", "+00:00")).astimezone(timezone.utc)
+            except ValueError:
+                continue
+    return None
+
+
+def pick_event_row(events_rows: list, away: str, home: str, start_iso: str | None) -> dict | None:
+    """PURE. The EVENT row (from `events`) for this game: both teams named
+    in its title/sub-title ('South Alabama vs Marshall'); of several (a
+    series, a rematch) the one whose strike date is nearest the start.
+    None when no row names both teams."""
+    try:
+        want = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        want = None
+    best, best_gap = None, None
+    for e in events_rows or []:
+        if not isinstance(e, dict) or not e.get("event_ticker"):
+            continue
+        text = _event_text(e)
+        if not (team_mentioned(text, away) and team_mentioned(text, home)):
+            continue
+        gap = 0.0
+        if want is not None:
+            d = _event_dt(e)
+            if d is not None:
+                gap = abs((d - want).total_seconds())
+        if best is None or gap < best_gap:
+            best, best_gap = e, gap
+    return best
+
+
 def classify(m: dict, away: str, home: str) -> dict | None:
     """One Kalshi market → {mt, team_side ('home'|'away'|None), line,
     yes_is: 'team'|'over'|'cover', text}. Heuristic over the title and
@@ -581,19 +671,37 @@ def rung_for(item: dict, ev_markets: list, away: str, home: str) -> dict:
 
 def resolve(sport: str, away: str, home: str, start_iso: str | None, item: dict) -> dict:
     """One slip item → its Kalshi contract and our-side quote, plus the
-    series fee terms. Walks the candidate series for the market type."""
+    series fee terms. Walks the candidate (full-game) series for the
+    market type. EVENT FIRST: the series' events list (one row per game)
+    names the game, then that event's own ladder is read — the series-
+    wide markets walk is the fallback only when the events read answers
+    nothing for the series (it pages and can truncate; see `events`)."""
     mt = item.get("market_type")
     tried, found = [], None
     for series in discover_series(sport, mt):
-        res = markets(series)
-        tried.append({"series": series, "n": len(res.get("markets") or []), "err": res.get("error")})
-        if not res.get("markets"):
-            continue
-        ev = pick_event(res["markets"], away, home, start_iso)
-        if not ev:
-            continue
+        ev = None
+        src = "events"
+        evs = events(series)
+        row = pick_event_row(evs.get("events") or [], away, home, start_iso) if evs.get("events") else None
+        if row is not None:
+            em = event_markets(row["event_ticker"])
+            if em.get("markets"):
+                ev = (row["event_ticker"], em["markets"])
+            tried.append({"series": series, "src": src, "events": len(evs.get("events") or []),
+                          "event": row["event_ticker"], "n": len(em.get("markets") or []), "err": em.get("error")})
+        if ev is None:
+            src = "markets_walk"
+            res = markets(series)
+            tried.append({"series": series, "src": src, "events": len(evs.get("events") or []),
+                          "events_err": evs.get("error"), "n": len(res.get("markets") or []),
+                          "pages": res.get("pages"), "err": res.get("error")})
+            if not res.get("markets"):
+                continue
+            ev = pick_event(res["markets"], away, home, start_iso)
+            if not ev:
+                continue
         r = rung_for(item, ev[1], away, home)
-        found = {"series": series, "event_ticker": ev[0], "n_event_markets": len(ev[1]), **r}
+        found = {"series": series, "event_ticker": ev[0], "event_src": src, "n_event_markets": len(ev[1]), **r}
         if r.get("ok"):
             break
     if not found:
