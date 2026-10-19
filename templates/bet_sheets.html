@@ -883,6 +883,8 @@
             return lh.err ? { cls: 'warn', short: 'SITTING OUT', detail: txt + ' · ' + lh.err }
                           : { cls: 'rest', short: 'SITTING OUT', detail: txt + ' — the box rejoins when it calms' };
         }
+        if (b.poly_cancel_sent)
+            return { cls: 'rest', short: 'SWITCHING', detail: 'Polymarket cancel sent · the box is completing the move to Kalshi' };
         return { cls: 'warn', short: 'OFF THE BOOK', detail: 'no order resting and nothing held' };
     }
     function fmtQ(x) { return String(Math.round(Number(x || 0) * 100) / 100); }

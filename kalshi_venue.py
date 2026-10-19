@@ -169,7 +169,15 @@ def compare_rest(poly_touch_c, kalshi_touch_c, qty: int, kalshi_fee: dict | None
     best = min(opts, key=opts.get)
     det = {"all_in": opts, "best": best}
     if current and current in opts and best != current:
-        if opts[current] - opts[best] < float(min_gain_c) - 1e-9:
+        gain = opts[current] - opts[best]
+        if gain <= 1e-9:
+            # A TIE STAYS PUT (Oct 18 2026, the COL@PHI under: 19 switches in
+            # 4.5h — 53 vs 53 read "best = POLYMARKET" because min() takes the
+            # first key, and the bet walked home every other tick).
+            det["best"] = current
+            det["why"] = "tie"
+            return current, det
+        if gain < float(min_gain_c) - 1e-9:
             det["why"] = "gain_under_threshold"
             return current, det
         det["why"] = "switch"

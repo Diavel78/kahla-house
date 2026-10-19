@@ -4259,7 +4259,7 @@ def test_kalshi_hand_lane() -> None:
                _app._bet_sheet_rerung_exec, _app._bet_sheet_repeg_exec, _app._bet_sheet_live_exec,
                _app._hand_chase_tick, _app._hand_move_tick, _app._hand_take_attempt_poly,
                _app._hand_take_attempt_kalshi, _app._hand_take_window_poly, _app._hand_take_window_kalshi,
-               _app._hand_window_bump_kalshi):
+               _app._hand_window_bump_kalshi, _app._hand_switch_poly_complete, _app._hand_switch_kalshi_place):
         src = _ins.getsource(fn)
         assert "_bet_sheet_book(client" not in src and "_pmm_book(client, twin)" not in src, fn.__name__
     hp = _ins.getsource(_app._hand_poly_book)
@@ -4424,6 +4424,14 @@ def test_kalshi_venue_math() -> None:
     v, d = kv.compare_rest(50.0, 49.0, 10, NOMK, current="POLYMARKET", min_gain_c=0.5, at=AFTER)
     assert v == "KALSHI" and d["why"] == "switch", d
     assert kv.compare_rest(None, None, 10, None)[0] is None
+    # A TIE STAYS PUT whichever venue holds the bet (Oct 18 2026, the COL@PHI
+    # under: 53 vs 53 walked home every other tick)
+    v, d = kv.compare_rest(53.0, 53.0, 5, NOMK, current="KALSHI", min_gain_c=0.0, at=AFTER)
+    assert v == "KALSHI" and d["why"] == "tie", (v, d)
+    v, d = kv.compare_rest(53.0, 53.0, 5, NOMK, current="POLYMARKET", min_gain_c=0.0, at=AFTER)
+    assert v == "POLYMARKET" and d["why"] in ("stay", "tie"), (v, d)
+    v, d = kv.compare_rest(54.0, 53.0, 5, NOMK, current="POLYMARKET", min_gain_c=0.0, at=AFTER)
+    assert v == "KALSHI" and d["why"] == "switch", (v, d)
     # take at the drop: cheaper all-in ask wins; the cap is on the RAW ask
     v, d = kv.compare_take(51.0, 50.0, 10, MK)
     assert v == "KALSHI", d                       # 50 + 1.75 < 51 + 1.74
