@@ -886,10 +886,16 @@
         const touch = b.touch_c != null ? b.touch_c : (hold && hold.touch_c);
         if (o.resting) {
             const pre = held > 0 ? fill + ' · ' : '';
+            // The box stopped chasing: the touch ran past your leash (anchor +
+            // 2¢). Say that first — a cheaper rung on the ladder is an OPTION,
+            // not a line move (Rob, Oct 19 2026: "I can't even tell what I
+            // have bet" on a card headed LINE MOVED over a 1¢ drift).
+            const past = (hold && hold.touch_c != null && ch.anchor_c != null)
+                ? ', ' + Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢ (leash ' + (hold.leash_c != null ? hold.leash_c : 2) + '¢)' : ' past your leash';
             if (hold && hold.touch_c != null && rr)
-                return { cls: 'warn', short: 'LINE MOVED', detail: pre + rest + ' · touch ' + touch + '¢ here · current line ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') };
+                return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it, re-peg it or cancel') };
             if (hold && hold.touch_c != null)
-                return { cls: 'warn', short: 'RE-PEG', detail: pre + rest + ' · touch ' + touch + '¢' + (ch.anchor_c != null ? ', ' + Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢' : ' past the leash') + ' — ' + (b.read ? recShort(b, null) : 'the box stopped chasing') };
+                return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing — ' + (b.read ? recShort(b, null) : 'the box stopped chasing') };
             if (b.live_snipe)
                 return { cls: 'rest', short: 'LIVE', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · no game-start cancel · yours to watch' };
             if (b.outbid && b.in_play)
@@ -1018,7 +1024,7 @@
             touch += Math.abs(o.price_c - b.touch_c) < 0.01 ? ' · you\'re on it' : (b.touch_c > o.price_c ? ' · above you' : '');
         const cells = [
             ['Your order', o.resting ? Math.round(o.leaves || 0) + ' @ ' + (o.price_c != null ? cA(o.price_c) : '?') : 'none resting'],
-            ['Filled', held > 0 ? fmtQ(held) + ' @ ' + (b.price_c != null ? cA(b.price_c) : am(b.entry_price)) : '—'],
+            ['Filled', held > 0 ? fmtQ(held) + ' @ ' + (b.price_c != null ? cA(b.price_c) : am(b.entry_price)) : (o.resting ? '0 of ' + Math.round(o.leaves || 0) : '—')],
             ['Touch', touch],
             ['Now', b.cur_c != null ? b.cur_c + '¢' : '—'],
         ];
@@ -1075,12 +1081,13 @@
             if (x.pts != null) bits.push(sgn(x.pts) + ' pts');
             if (x.value_c != null) bits.push((x.value_c >= 0 ? '+' : '−') + Math.abs(x.value_c).toFixed(1) + '¢ value');
             return '<div class="ro">' + tag + ' <b>' + esc(lbl) + (x.price_c != null ? ' @ ' + x.price_c + '¢' : '') + '</b>'
-                 + (x.verdict ? verdictBadge(x.verdict) : '') + ' ' + bits.join(' · ') + '</div>';
+                 + (x.verdict ? verdictBadge(x.verdict) : '') + ' ' + bits.join(' · ')
+                 + (x.why ? '<div class="dim" style="font-size:12px;margin-top:2px">' + esc(x.why) + '</div>' : '') + '</div>';
         };
         const recTxt = rd.rec === 'move' ? 'Move to ' + rungLabel(b, rr && rr.line)
                      : rd.rec === 'repeg' ? 'Stay on ' + betLabel(b) + ' — re-peg to the touch'
                      : 'Cancel — no longer a play at either line';
-        const why = rd.rec === 'cancel' ? '' : ' <span class="g" style="font-weight:500;font-size:13px;color:var(--text2)">· more value per dollar</span>';
+        const why = rd.rec === 'cancel' ? '' : ' <span class="g" style="font-weight:500;font-size:13px;color:var(--text2)">· ' + ((rd.move && rd.stay && rd.move.verdict !== 'pass' && rd.stay.verdict !== 'pass') ? 'more value per dollar' : 'the only option the model trusts') + '</span>';
         let h = '<div class="rd"><div class="rh">THE MODEL\'S READ</div>'
               + '<div class="rec ' + (rd.rec === 'cancel' ? 'no' : 'go') + '">★ ' + esc(recTxt) + why + '</div>';
         if (rr) h += opt('Move', rd.move, rungLabel(b, rr.line));

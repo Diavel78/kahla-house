@@ -21070,6 +21070,7 @@ def _bs_option_read(sb, sport, blob, mt, side, line, price_c):
         v = "play" if e >= _BS_READ_FB_PLAY_PTS else "lean" if e >= _BS_READ_FB_LEAN_PTS else "pass"
         if abs(e) > _BS_READ_FB_GAP_PTS.get(mt, 99.0):
             v = "pass"
+            out["why"] = f"the model is {abs(e):.1f} pts off the market — too far to trust"
     else:
         play, lean, imp = _BS_READ_PP.get((sport, mt), (None, 4.0, 12.0))
         e = out["value_c"]
@@ -21078,7 +21079,10 @@ def _bs_option_read(sb, sport, blob, mt, side, line, price_c):
         else:
             v = "play" if (play is not None and e >= play) else "lean" if e >= lean else "pass"
             if e > imp:
+                # the claimed-edge cliff: a number this far past the market
+                # has meant the market was right every time it was measured
                 v = "pass"
+                out["why"] = f"a {e:.1f}¢ edge is past the {imp:.0f}¢ the model is trusted to"
     out["verdict"] = v
     return out
 
