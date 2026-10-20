@@ -3344,6 +3344,26 @@ def test_pmm_unsigned_cover_questions() -> None:
     check("_bet_sheet_resolve runs the slug guard", "_bet_sheet_slug_disagrees(entry, mt)" in inspect.getsource(_app._bet_sheet_resolve))
 
 
+def test_hand_start_complete() -> None:
+    """THE REFUSED CANCEL (Oct 20 2026, MoSU@Delaware O52.5): a game-start
+    cancel answered 502 off one lagging list read and the pick kept a dead
+    order id into the game. The verifier re-reads the list up to 3x, and the
+    start tick finishes any pick whose take window is done, whose order id
+    is still set, and whose order is not on the book."""
+    import inspect
+    import app as _app
+    src_c = inspect.getsource(_app._bet_sheet_cancel)
+    check("the cancel verifier re-reads the orders list (3 tries)", "for _try in range(3)" in src_c)
+    check("an unreadable list reads unverified, never 'gone'", "return False, None" in src_c)
+    src_t = inspect.getsource(_app._hand_start_tick)
+    check("the start tick finishes a refused cancel", "_hand_start_complete_poly(" in src_t)
+    i_done, i_skip = src_t.find("_hand_start_complete_poly("), src_t.find("if not sat_out and not (slug and o and o.get")
+    check("…before it skips picks whose order is not on the book", 0 < i_done < i_skip)
+    src_f = inspect.getsource(_app._hand_start_complete_poly)
+    check("the completion reads the venue fresh", "fresh=True" in src_f)
+    check("…stamps hand_start_cancel completed for the missed list", '"completed": True' in src_f and '"hand_start_cancel": True' in src_f)
+
+
 def test_pmm_thunder_total() -> None:
     """THE THUNDER RULE (Oct 20 2026): "ThUNDER" contains "under". The total
     classifier read every OKC total market as an UNDER market, so a Bet
@@ -4718,7 +4738,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

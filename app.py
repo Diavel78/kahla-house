@@ -16484,6 +16484,46 @@ def _hand_take_window_poly(sb, client, r: dict, blob: dict, o, slug: str, oid, n
                        slug, r["id"], closed, tw.get("tries"), tw.get("filled"), stamp.get("result"))
 
 
+def _hand_start_complete_poly(sb, client, r: dict, blob: dict, slug: str, oid: str, now, now_ts: float, st: dict) -> None:
+    """Finish a game-start cancel the venue answered badly: the pick's order
+    is not on the mirror; a FRESH list decides. Gone → the cancel path (a
+    cancel on a dead id errors harmlessly, the list confirms, positions say
+    delete-or-keep-held) and a `hand_start_cancel` stamp with
+    `completed=True` so the missed list sees it. Still resting → cancel it
+    again. Unreadable list → next tick. 20s debounce per pick."""
+    last = _HAND_START_DONE.get(r["id"], 0.0)
+    if _time.monotonic() - last < 20.0:
+        return
+    _HAND_START_DONE[r["id"]] = _time.monotonic()
+    ords = _pmm_open_orders_raw(client, fresh=True)
+    if ords is None:
+        st["complete_unreadable"] = st.get("complete_unreadable", 0) + 1
+        return
+    was_open = any(x.get("id") == oid and x.get("state") in _OPEN_ORDER_STATES for x in ords)
+    done = blob.get("start_take_window_done") if isinstance(blob.get("start_take_window_done"), dict) else {}
+    out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
+    stamp = {"kind": "hand_start_cancel", "bet": _hand_start_bet(r, blob), "hand_start_cancel": True,
+             "completed": True, "was_open": was_open, "pick_id": r["id"], "slug": slug, "order_id": oid,
+             "at": now.isoformat(), "baseline_q": (done.get("drop") or {}).get("baseline_q"),
+             "touch_q": (done.get("drop") or {}).get("touch_q"), "drop_pct": (done.get("drop") or {}).get("drop_pct"),
+             "window": done, "start_take": None, "result": out, "http": code}
+    try:
+        ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+        stamp["start"] = ev.astimezone(timezone.utc).isoformat()
+        stamp["after_start_s"] = round(now_ts - ev.astimezone(timezone.utc).timestamp(), 1)
+    except (TypeError, ValueError):
+        pass
+    if out.get("ok"):
+        st["completed"] = st.get("completed", 0) + 1
+    else:
+        st["errors"] += 1
+    try:
+        _probe_log(stamp)
+    except Exception:
+        pass
+    app.logger.warning("hand start complete %s pick %s was_open=%s → %s", slug, r["id"], was_open, out)
+
+
 def _hand_start_finish_poly(sb, client, r: dict, stamp: dict, take, cum0: float, took_px, now, st: dict, tw=None) -> None:
     """The cancel after the take(s): unfilled → pick gone, a lot → kept at
     the held size with the price blended across the maker fill and every
@@ -16586,6 +16626,22 @@ def _hand_start_tick(sb, client, now) -> dict:
             except Exception as e:
                 st["errors"] += 1
                 app.logger.warning("hand take window pick %s: %s", r["id"], str(e)[:120])
+            continue
+        if (not sat_out and slug and oid and isinstance(blob.get("start_take_window_done"), dict)
+                and not (o and o.get("state") in _OPEN_ORDER_STATES)):
+            # THE CANCEL THE VENUE "REFUSED" (Oct 20 2026, MoSU@Delaware O52.5):
+            # the take window closed, the cancel's one list read still showed
+            # the order, _bet_sheet_cancel_exec answered 502, and the pick kept
+            # its dead order id into the game — nothing retried, the page read
+            # it RESTING, and the resolver would have graded a bet that never
+            # rested. A successful cancel nulls order_id (kept) or deletes the
+            # pick, so "window done + order id + not on the book" IS the stuck
+            # state. Finish it off a fresh read.
+            try:
+                _hand_start_complete_poly(sb, client, r, blob, slug, oid, now, now_ts, st)
+            except Exception as e:
+                st["errors"] += 1
+                app.logger.warning("hand start complete pick %s: %s", r["id"], str(e)[:120])
             continue
         if not sat_out and not (slug and o and o.get("state") in _OPEN_ORDER_STATES):
             continue
@@ -21541,12 +21597,22 @@ def _bet_sheet_cancel(client, oid: str, slug: str):
         client.orders.cancel(oid, {"marketSlug": slug})
     except Exception as e:
         app.logger.warning("bet sheet cancel %s: %s", oid, e)
-    ords = _pmm_open_orders_raw(client, fresh=True)
+    # THE LIST LAGS A CANCEL BY A BEAT (Oct 20 2026, MoSU@Delaware O52.5 at
+    # the game-start cancel: one read still showed the order, the caller
+    # answered 502 "venue did not cancel it", the order was gone the next
+    # second and the pick kept the dead id into the game). Re-read up to 3x;
+    # an unreadable list on every try returns (False, None) — unverified,
+    # not "still resting".
+    ords = None
+    for _try in range(3):
+        ords = _pmm_open_orders_raw(client, fresh=True)
+        if ords is not None and not any(o.get("id") == oid and o.get("state") in _OPEN_ORDER_STATES
+                                        for o in ords):
+            return True, ords
+        _time.sleep(0.7)
     if ords is None:
         return False, None
-    gone = not any(o.get("id") == oid and o.get("state") in _OPEN_ORDER_STATES
-                   for o in ords)
-    return gone, ords
+    return False, ords
 
 
 def _bet_sheet_pick(sb, pick_id):
