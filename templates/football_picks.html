@@ -428,7 +428,7 @@
               : (P.spread_home_odds != null && P.spread_away_odds != null ? favLine(g, P.spread_home, 1) + ' ' + am(P.spread_home_odds) + ' / ' + am(P.spread_away_odds) : '');
         }
         if (!s) return '';
-        return ' <span class="pinq" title="Pinnacle\'s price at this line. Bet105 resells Pinnacle\'s lines, so this is the Bet105 number.">PIN ' + s + ' <span class="dim">(Bet105)</span></span>';
+        return ' <span class="pinq" title="Bet105\'s price at this line (Bet105 resells Pinnacle\'s lines; this is Pinnacle\'s feed)">Bet105 ' + s + '</span>';
     }
 
     // ---------- the Bet Sheets layout, read-only (Rob, Oct 11 2026: "keep
@@ -598,7 +598,7 @@
             ? 'Model = Diamond IQ (starter FIP, bullpen + fatigue, lineup wOBA, park). It trails the betting market in backtest, so every pick is LEAN at most — ML and run line need 4% over the no-vig price. The total is our number only, never a pick (the totals model failed its backtest). A favorite at −150 or shorter is too chalky to bet on the ML — see the run line. Starters are ESPN probables; * = no starts on record.'
             : _sport === 'NHL'
             ? 'Model = Crease IQ v2 (score model: xG, goalies, rest). ML and puck line: play ≥ 4% over the no-vig price, lean ≥ 2%. A favorite at −150 or shorter is too chalky to bet on the ML — the puck line is the play. Totals are LEAN at most. Starting goalies are projected until confirmed.'
-            : 'Model spread/total = our number (calibrated). Edges in points; fair = the price the bet is good to. PIN = Pinnacle\'s line and price, which is also Bet105\'s (they resell Pinnacle).';
+            : 'Model spread/total = our number (calibrated). Edges in points; fair = the price the bet is good to. PIN = Pinnacle\'s line. Bet105 = Pinnacle\'s price at it (they resell Pinnacle), the number to bet it at on Bet105.';
         _games = d.games.slice().sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
         renderGames();
     }

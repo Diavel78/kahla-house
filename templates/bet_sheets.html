@@ -561,7 +561,7 @@
               : (P.spread_home_odds != null && P.spread_away_odds != null ? favLine(g, P.spread_home, 1) + ' ' + am(P.spread_home_odds) + ' / ' + am(P.spread_away_odds) : '');
         }
         if (!s) return '';
-        return ' <span class="pinq" title="Pinnacle\'s price at this line. Bet105 resells Pinnacle\'s lines, so this is the Bet105 number.">PIN ' + s + ' <span class="dim">(Bet105)</span></span>';
+        return ' <span class="pinq" title="Bet105\'s price at this line (Bet105 resells Pinnacle\'s lines; this is Pinnacle\'s feed)">Bet105 ' + s + '</span>';
     }
 
 
@@ -696,7 +696,7 @@
         const p = i.q && i.q.pin;
         if (!p || p.price == null) return '';
         const ln = (p.line_differs && p.line != null) ? ' at ' + rungTxt(i, p.line) : '';
-        return ' · <span class="pinq" title="Pinnacle = Bet105">PIN ' + am(p.price) + ' (' + Number(p.cents).toFixed(1) + '¢' + ln + ')</span>';
+        return ' · <span class="pinq" title="Bet105 = Pinnacle\'s feed">Bet105 ' + am(p.price) + ' (' + Number(p.cents).toFixed(1) + '¢' + ln + ')</span>';
     }
     function rungTxt(i, ln) {
         if (ln == null) return '';
