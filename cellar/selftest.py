@@ -2813,6 +2813,22 @@ def test_hand_take_plan() -> None:
 def test_hand_take_window() -> None:
     """The 2-minute take window (Rob, Oct 18 2026): attempts fold into one
     record, fills and cost accumulate, the ledger stays bounded."""
+    # THE UNKNOWN FILL (Oct 19 2026, WAS@SF U52.5 — 15 bought on a 5-lot): the
+    # venue's order list drops a terminal IOC, so its fill read None, the window
+    # called that "nothing filled" and re-sent the IOC every tick. An order
+    # that went in with an unknown fill is NEVER re-sent; a filled bet ends it.
+    import app as _app
+    assert _app._hand_take_retry_ok({"order_id": "X", "ioc_cum": None}, 5) is False
+    assert _app._hand_take_retry_ok({"order_id": "X", "ioc_cum": 5.0}, 5) is False
+    assert _app._hand_take_retry_ok({"order_id": "X", "ioc_cum": 2.0}, 5) is True
+    assert _app._hand_take_retry_ok({"order_id": None, "ioc_cum": None, "skip": "ask past the cap"}, 5) is True
+    assert _app._hand_take_retry_ok(None, 5) is True
+    import inspect as _ins
+    for fn in (_app._hand_take_attempt_poly, _app._hand_take_attempt_kalshi):
+        src = _ins.getsource(fn)
+        assert "_hand_ioc_fill(" in src and "_hand_order_cum(" not in src, (fn.__name__, "the fill is list-or-positions-delta, never the list alone")
+    assert "_hand_take_retry_ok(" in _ins.getsource(_app._hand_take_window_poly)
+    assert "_hand_take_retry_ok(" in _ins.getsource(_app._hand_start_tick)
     from datetime import datetime, timezone
     import app as _app
     tw = _app._hand_take_window_new(datetime.now(timezone.utc), 1000.0, 120.0, {"baseline_q": 9}, {"ask_c": 51.5, "skip": "ask past the cap"}, 5, 50.0)

@@ -15871,6 +15871,53 @@ def _hand_order_cum(client, oid):
     return None
 
 
+def _hand_poly_side_held(client, slug: str, synthetic: bool):
+    """Our-side contracts held on a slug off a FRESH positions read; None
+    when the venue is unreadable."""
+    ppos = _pmm_positions_raw(client, fresh=True)
+    if ppos is None:
+        return None
+    try:
+        return float(_bet_sheet_pick_side_held(ppos.get(slug), synthetic))
+    except Exception:
+        return None
+
+
+def _hand_ioc_fill(client, slug: str, synthetic: bool, oid, before, leaves) -> tuple:
+    """WHAT THE IOC BOUGHT — (cum, src). THE VENUE'S ORDER LIST DROPS TERMINAL
+    ORDERS (Oct 19 2026, WAS@SF U52.5: three IOC takes in 20 seconds each read
+    `None` off the list, the window called each one "nothing filled" and
+    re-sent the next — 15 contracts bought on a 5-contract bet, taker fee on
+    every one). The list is tried first; when the IOC is not on it the fill
+    is the POSITIONS DELTA across the take (our side, fresh read before and
+    after, capped at the order's size); unknown stays None and the caller
+    must never send another IOC on it."""
+    c = _hand_order_cum(client, oid)
+    if c is not None:
+        return min(float(c), float(leaves)), "orders_list"
+    if before is None:
+        return None, "unknown"
+    after = _hand_poly_side_held(client, slug, synthetic)
+    if after is None:
+        return None, "unknown"
+    return max(0.0, min(float(leaves), float(after) - float(before))), "positions_delta"
+
+
+def _hand_take_retry_ok(take, leaves) -> bool:
+    """Pure. May the take window send ANOTHER IOC after this attempt? Never
+    when an order went in and its fill is UNKNOWN (an unverified take is a
+    take — re-sending it is how a 5-lot became 20), never once the bet is
+    filled; otherwise the window keeps working it."""
+    t = take or {}
+    if t.get("order_id") and t.get("ioc_cum") is None:
+        return False
+    try:
+        got = float(t.get("ioc_cum") or 0.0)
+        return got + 1e-6 < float(leaves)
+    except (TypeError, ValueError):
+        return False
+
+
 _HAND_START_TAKE_WINDOW_S = 120.0   # Rob, Oct 18 2026: "I would say 2 minutes"
 
 
@@ -15951,13 +15998,14 @@ def _hand_take_attempt_poly(client, slug: str, syn_t: bool, pc, leaves: int, sta
             "tape": [list(x[:5]) for x in _hand_side_rows(TOUCH_TAPE.get(slug) or [], syn_t)[-12:]],
             "at": datetime.now(timezone.utc).isoformat()}
     if tp is not None and leaves * tp / 100.0 <= 500.0:
+        before = _hand_poly_side_held(client, slug, syn_t)   # the positions delta is the fill's truth
         oid_t, err_t = _hand_take_ioc(client, slug, syn_t, tp, leaves)
         vw = _hand_take_vwap(asks_t, leaves, tp)
-        take.update({"take_c": tp, "vwap_c": vw, "order_id": oid_t, "error": err_t})
+        take.update({"take_c": tp, "vwap_c": vw, "order_id": oid_t, "error": err_t, "held_before": before})
         if oid_t:
             take["took_px"] = vw or tp
             _time.sleep(1.5)                            # let the fill reach positions / the list
-            take["ioc_cum"] = _hand_order_cum(client, oid_t)   # the IOC's OWN fill, off the venue's list
+            take["ioc_cum"], take["fill_src"] = _hand_ioc_fill(client, slug, syn_t, oid_t, before, leaves)
     else:
         take["skip"] = "ask past the cap" if tp is None else "over $500"
     return take
@@ -15979,7 +16027,7 @@ def _hand_take_window_add(tw: dict, take: dict) -> dict:
     if got > 0 and px is not None:
         tw["filled"] = round(float(tw.get("filled") or 0.0) + got, 2)
         tw["cost_c"] = round(float(tw.get("cost_c") or 0.0) + got * float(px), 2)
-    rec = {k: (take or {}).get(k) for k in ("at", "ask_c", "take_c", "ioc_cum", "skip", "error", "book_src")}
+    rec = {k: (take or {}).get(k) for k in ("at", "ask_c", "take_c", "ioc_cum", "fill_src", "order_id", "skip", "error", "book_src")}
     tw["attempts"] = (list(tw.get("attempts") or []) + [rec])[-15:]
     tw["last"] = rec
     return tw
@@ -16100,7 +16148,8 @@ def _hand_take_window_poly(sb, client, r: dict, blob: dict, o, slug: str, oid, n
         took_px = take.get("took_px")
         tw = _hand_take_window_add(tw, take)
         got = float(take.get("ioc_cum") or 0.0)
-        if got + 1e-6 < leaves and now_ts + 1.0 < until_ts:
+        unknown = bool(take.get("order_id")) and take.get("ioc_cum") is None
+        if _hand_take_retry_ok(take, leaves) and now_ts + 1.0 < until_ts:
             upd = {}
             if got <= 0 and take.get("skip") == "ask past the cap" and _machine_flag("hand_start_take_bump", True):
                 tw, upd = _hand_window_bump_poly(client, r, blob, o, slug, oid, tw, take, pc, now)
@@ -16110,7 +16159,7 @@ def _hand_take_window_poly(sb, client, r: dict, blob: dict, o, slug: str, oid, n
                 if am_b is not None:
                     sb.table("bot_picks").update({"entry_price": am_b}).eq("id", r["id"]).execute()
             return                                      # still working it
-        closed = "filled" if got + 1e-6 >= leaves else "window_end"
+        closed = "filled" if got + 1e-6 >= leaves else ("take_unverified" if unknown else "window_end")
     else:
         closed = "window_end" if now_ts >= until_ts else "nothing_to_take"
     # the window is over: the old cancel, the lot blended across every take
@@ -16302,7 +16351,7 @@ def _hand_start_tick(sb, client, now) -> dict:
                 took_px = take.get("took_px")
                 win_s = _hand_take_window_s()
                 got = float(take.get("ioc_cum") or 0.0)
-                if win_s > 0 and got + 1e-6 < leaves:
+                if win_s > 0 and _hand_take_retry_ok(take, leaves):
                     # THE TAKE WINDOW (Rob, Oct 18 2026: "I would say 2 minutes"):
                     # one snapshot missed TEN O43.5 while his own 49 fill landed
                     # 90s later. The resting order STAYS on the book, and every
@@ -18947,9 +18996,11 @@ def _hand_take_attempt_kalshi(sb, client, r: dict, blob: dict, ticker: str, by: 
             if vr.get("resting") is False:
                 cancelled = True
                 asks_t = _hand_side_asks(pbook, twin_syn)
+                before_t = _hand_poly_side_held(client, twin, twin_syn)
                 oid_t, err_t = _hand_take_ioc(client, twin, twin_syn, lim, leaves)
                 vw = _hand_take_vwap(asks_t, leaves, lim)
-                take.update({"take_c": lim, "vwap_c": vw, "order_id": oid_t, "error": err_t, "asks": asks_t[:6]})
+                take.update({"take_c": lim, "vwap_c": vw, "order_id": oid_t, "error": err_t, "asks": asks_t[:6],
+                             "held_before": before_t})
                 if oid_t:
                     took_px, took_venue = (vw or lim), "POLYMARKET"
                     take["took_px"] = took_px
@@ -18960,7 +19011,7 @@ def _hand_take_attempt_kalshi(sb, client, r: dict, blob: dict, ticker: str, by: 
                         "poly_take": {"at": now.isoformat(), "slug": twin, "qty": leaves, "limit_c": lim}}}
                     ).eq("id", r["id"]).execute()
                     _time.sleep(1.5)
-                    take["ioc_cum"] = _hand_order_cum(client, oid_t)
+                    take["ioc_cum"], take["fill_src"] = _hand_ioc_fill(client, twin, twin_syn, oid_t, before_t, leaves)
             else:
                 take["error"] = "resting order did not cancel — no take"
         else:
