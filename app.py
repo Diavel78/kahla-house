@@ -12691,6 +12691,168 @@ def api_bet105_probe():
     return jsonify(out)
 
 
+# ─────────── ODDSPAPI (Bet105's lines) — the reader's first probe ───────────
+# Oct 19 2026, Rob: "pull the bet105 lines into the dashboard". Bet105
+# publishes no feed (bet105.ag + Heritage answer Vercel with a Cloudflare
+# challenge; parlay-api's 36-book catalog has no Bet105). OddsPapi carries
+# it as the `bet105.ag` book, and its /odds-by-tournaments answers a WHOLE
+# league per request (Rob, Oct 19: "one request = one game? absurd" — he
+# was right; /odds is the single-fixture call). Free tier 250 requests/mo.
+# Key: env ODDSPAPI_KEY, else the parlay_state 'oddspapi_key' row
+# ({"key": ...}) — the PARLAY_API_KEY pattern. Nothing here spends more
+# than the request the caller asks for; every answer lands in
+# exec_probe_runs kind=oddspapi_probe. The sandbox cannot resolve
+# oddspapi.io — this runs on Vercel via the site-curl bridge.
+_ODDSPAPI_BASE = "https://api.oddspapi.io/v4"
+_ODDSPAPI_TOURNAMENTS = {            # vendor's published ids — CONFIRM with ?tournaments=1&sport_id=14
+    "NFL": (14, 31), "NCAAF": (14, 27653),
+}
+
+
+def _oddspapi_key(sb) -> str:
+    k = (os.environ.get("ODDSPAPI_KEY") or os.environ.get("ODDS_PAPI_KEY") or "").strip()
+    if k:
+        return k
+    row = _parlay_state_get(sb, "oddspapi_key")
+    return ((row or {}).get("v") or {}).get("key") or ""
+
+
+def _oddspapi_get(path: str, params: dict, key: str, base: str | None = None) -> dict:
+    """ONE request. {ok, status, data|error, headers(rate/quota only), ms}."""
+    base = (base or _ODDSPAPI_BASE).rstrip("/")
+    url = f"{base}/{path.lstrip('/')}"
+    q = dict(params or {})
+    q["apiKey"] = key
+    t0 = _time.time()
+    try:
+        r = _http.get(url, params=q, timeout=25,
+                      headers={"Accept": "application/json", "User-Agent": "kahla-house/1.0"})
+        hdr = {k: v for k, v in r.headers.items()
+               if any(s in k.lower() for s in ("limit", "remaining", "quota", "usage", "reset", "retry"))}
+        out = {"ok": r.status_code == 200, "status": r.status_code, "url": url,
+               "params": {k: v for k, v in q.items() if k != "apiKey"},
+               "headers": hdr, "ms": int((_time.time() - t0) * 1000)}
+        try:
+            out["data"] = r.json()
+        except Exception:
+            out["text"] = (r.text or "")[:600]
+        return out
+    except Exception as e:
+        return {"ok": False, "url": url, "error": f"{type(e).__name__}: {e}"[:300],
+                "ms": int((_time.time() - t0) * 1000)}
+
+
+def _oddspapi_fixture_summary(fx: dict, book: str) -> dict:
+    """One fixture → {name, start, books, bet105: {market: [outcome, line, american]}}."""
+    bo = fx.get("bookmakerOdds") or fx.get("bookmakers") or {}
+    books = list(bo.keys()) if isinstance(bo, dict) else [b.get("slug") or b.get("bookmaker") for b in (bo or []) if isinstance(b, dict)]
+    mine = bo.get(book) if isinstance(bo, dict) else next((b for b in (bo or []) if isinstance(b, dict) and (b.get("slug") or b.get("bookmaker")) == book), None)
+    lines = []
+    mk = (mine or {}).get("markets") if isinstance(mine, dict) else None
+    if isinstance(mk, dict):
+        it = [(k, v) for k, v in mk.items()]
+    elif isinstance(mk, list):
+        it = [(m.get("marketId") or m.get("name") or m.get("id"), m) for m in mk if isinstance(m, dict)]
+    else:
+        it = []
+    for mid, m in it[:40]:
+        outs = (m.get("outcomes") if isinstance(m, dict) else None) or {}
+        oit = outs.items() if isinstance(outs, dict) else [((o.get("outcomeId") or o.get("name")), o) for o in outs if isinstance(o, dict)]
+        for oid, o in list(oit)[:12]:
+            if not isinstance(o, dict):
+                continue
+            lines.append({"market": mid, "name": (m.get("name") or m.get("marketName")) if isinstance(m, dict) else None,
+                          "outcome": oid, "player": o.get("playerName"), "line": o.get("line") if "line" in o else o.get("handicap"),
+                          "american": o.get("priceAmerican"), "price": o.get("price"),
+                          "limit": o.get("limit"), "active": o.get("active")})
+    name = fx.get("name") or " @ ".join(str(x) for x in ((fx.get("participant1Name") or fx.get("awayTeam")), (fx.get("participant2Name") or fx.get("homeTeam"))) if x)
+    return {"id": fx.get("fixtureId") or fx.get("id"), "name": name,
+            "start": fx.get("startTime") or fx.get("startDate"), "has_odds": fx.get("hasOdds"),
+            "books": books[:60], "n_books": len(books), "book_present": bool(mine), "lines": lines}
+
+
+@app.route("/api/oddspapi/probe")
+def api_oddspapi_probe():
+    """Shared-secret (site-curl), read-only, ONE vendor request per flag:
+    ?bookmakers=1 — the catalog; reports the bet105 rows + total count.
+    ?tournaments=1&sport_id=14 — league ids for a sport (NFL=31 claimed).
+    ?sport=NFL|NCAAF or ?tid=<id>[,<id>] — odds-by-tournaments for the
+      whole league, filtered to ?book= (default bet105.ag), American odds;
+      reports fixture count, per-fixture Bet105 lines, quota headers.
+    ?fixture=<id> — the single-fixture /odds call (the one that costs a
+      request per game). ?base= overrides the API base (v5 lives at
+      v5.oddspapi.io per the docs). No flag = key presence only (free)."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    ak = _oddspapi_key(sb)
+    out: dict = {"kind": "oddspapi_probe", "ok": True, "configured": bool(ak),
+                 "key_src": ("env" if (os.environ.get("ODDSPAPI_KEY") or os.environ.get("ODDS_PAPI_KEY")) else ("db" if ak else None)),
+                 "at": datetime.now(timezone.utc).isoformat()}
+    if not ak:
+        out["note"] = "set ODDSPAPI_KEY in Vercel env, or parlay_state row k='oddspapi_key' v={'key':...}"
+        _probe_log(out)
+        return jsonify(out)
+    base = (request.args.get("base") or "").strip() or None
+    book = (request.args.get("book") or "bet105.ag").strip()
+    spent = 0
+    try:
+        if request.args.get("bookmakers"):
+            r = _oddspapi_get("bookmakers", {"language": "en"}, ak, base); spent += 1
+            rows = r.get("data") if isinstance(r.get("data"), list) else ((r.get("data") or {}).get("bookmakers") if isinstance(r.get("data"), dict) else None)
+            rows = rows or []
+            hits = [b for b in rows if isinstance(b, dict) and any("105" in str(v).lower() or "heritage" in str(v).lower() for v in b.values())]
+            out["bookmakers"] = {"status": r.get("status"), "n": len(rows), "headers": r.get("headers"),
+                                 "bet105_rows": hits[:10], "sample": rows[:3], "error": r.get("error") or r.get("text")}
+        if request.args.get("tournaments"):
+            sid = request.args.get("sport_id") or "14"
+            r = _oddspapi_get("tournaments", {"sportId": sid, "language": "en"}, ak, base); spent += 1
+            rows = r.get("data") if isinstance(r.get("data"), list) else ((r.get("data") or {}).get("tournaments") if isinstance(r.get("data"), dict) else None)
+            rows = rows or []
+            slim = [{k: t.get(k) for k in ("tournamentId", "id", "name", "tournamentName", "futureFixtures", "sportId", "countryName")}
+                    for t in rows if isinstance(t, dict)]
+            out["tournaments"] = {"status": r.get("status"), "sport_id": sid, "n": len(rows), "headers": r.get("headers"),
+                                  "rows": slim[:120], "error": r.get("error") or r.get("text")}
+        tid = (request.args.get("tid") or "").strip()
+        sport = (request.args.get("sport") or "").strip().upper()
+        if not tid and sport in _ODDSPAPI_TOURNAMENTS:
+            tid = str(_ODDSPAPI_TOURNAMENTS[sport][1])
+        if tid:
+            params = {"tournamentIds": tid, "language": "en", "oddsFormat": "american", "verbosity": request.args.get("verbosity") or "3"}
+            if book and book != "*":
+                params["bookmakers"] = book
+            r = _oddspapi_get("odds-by-tournaments", params, ak, base); spent += 1
+            d = r.get("data")
+            fixtures = d if isinstance(d, list) else ((d or {}).get("fixtures") or (d or {}).get("data") or []) if isinstance(d, dict) else []
+            fsum = [_oddspapi_fixture_summary(fx, book) for fx in fixtures[:80] if isinstance(fx, dict)]
+            out["odds_by_tournaments"] = {
+                "status": r.get("status"), "tid": tid, "book": book, "headers": r.get("headers"), "ms": r.get("ms"),
+                "n_fixtures": len(fixtures), "n_with_book": sum(1 for f in fsum if f["book_present"]),
+                "n_with_lines": sum(1 for f in fsum if f["lines"]),
+                "top_keys": (list(d.keys())[:30] if isinstance(d, dict) else None),
+                "fixture_keys": (list(fixtures[0].keys())[:40] if fixtures and isinstance(fixtures[0], dict) else None),
+                "fixtures": fsum, "error": r.get("error") or r.get("text")}
+            if fixtures and request.args.get("raw"):
+                out["odds_by_tournaments"]["raw_first"] = fixtures[0]
+        fid = (request.args.get("fixture") or "").strip()
+        if fid:
+            params = {"fixtureId": fid, "language": "en", "oddsFormat": "american", "verbosity": "3"}
+            if book and book != "*":
+                params["bookmakers"] = book
+            r = _oddspapi_get("odds", params, ak, base); spent += 1
+            d = r.get("data")
+            out["odds"] = {"status": r.get("status"), "headers": r.get("headers"),
+                           "summary": _oddspapi_fixture_summary(d, book) if isinstance(d, dict) else None,
+                           "error": r.get("error") or r.get("text")}
+    except Exception as e:
+        out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
+    out["requests_spent"] = spent
+    _probe_log(out)
+    return jsonify(out)
+
+
 # ─────────── KALSHI INCENTIVE PROGRAMS, READ FROM THE VENUE ───────────
 # Aug 26 2026. Rule #1 (rent) has a Polymarket answer (_rent_ok +
 # /v1/incentives) and, until tonight, an ASSUMED Kalshi answer: this repo
