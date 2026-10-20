@@ -3284,6 +3284,15 @@ def test_hand_rerung_target() -> None:
     check("never the other side", _app._hand_rerung_target([E("home", 3.5, 49.0, "h")], "spread", "away", "x", 49.0, 2.0)[0] is None)
     check("a stub bid is not a line", _app._hand_rerung_target([E("under", 58.5, 1.0, "s")], "total", "under", "x", 3.0, 2.0)[0] is None)
     check("moneyline has no rungs", _app._hand_rerung_target(sp, "ml", "away", "x", 49.0, 2.0)[0] is None)
+    # THE EXEC USES THE PLACEMENT RULE (Oct 19 2026, OKC@SA U233.5 refused as
+    # "not the same side"): an NBA/NHL/MLB total slug (`-233pt5`, no
+    # `-total-` word) is unreadable to _slug_side_line, which placement
+    # treats as "not evidence"; the executor must do the same.
+    import inspect as _ins
+    src = _ins.getsource(_app._bet_sheet_rerung_exec)
+    check("re-rung exec cross-checks the slug with _bet_sheet_slug_disagrees", "_bet_sheet_slug_disagrees(" in src)
+    check("…and never refuses on an unreadable slug alone", "sl[1] != side" not in src and "if not sl or" not in src)
+    check("the suggester records the rung's side", '"side": e.get("side")' in _ins.getsource(_app._hand_rerung_suggest))
 
 
 def test_pmm_unsigned_cover_questions() -> None:

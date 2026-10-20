@@ -21615,10 +21615,23 @@ def _bet_sheet_rerung_exec(sb, client, pick_id, want_slug=None):
         return {"ok": False, "error": "no resting order on this bet"}, 400
     if (_event_slug_from_market(old_slug) or "x") != (_event_slug_from_market(new_slug) or "y"):
         return {"ok": False, "error": "the new rung is not the same game — not moving"}, 409
-    sl = _slug_side_line(new_slug, new_syn)
-    if not sl or sl[0] != mt or sl[1] != side or sl[2] is None:
+    # THE SAME RULE AS PLACEMENT (Oct 19 2026, OKC@SA U233.5 refused as "not
+    # the same side"): the suggester already took the rung from the venue's
+    # own text on the pick's side and ran _bet_sheet_slug_disagrees; the
+    # slug convention is a CROSS-CHECK that passes when it cannot read the
+    # slug (an NBA/NHL/MLB total tail like `-233pt5` has no `-total-` word,
+    # so _slug_side_line reads None) — never the only witness.
+    rr_side = rr.get("side") or side
+    if rr_side != side or rr.get("line") is None:
         return {"ok": False, "error": f"the new rung {new_slug} is not the same side — not moving"}, 409
-    new_line = float(sl[2])
+    dis = _bet_sheet_slug_disagrees({"slug": new_slug, "synthetic": new_syn, "side": side,
+                                     "line": rr.get("line")}, "ml" if mt == "moneyline" else mt)
+    if dis:
+        return {"ok": False, "error": dis + " — not moving"}, 409
+    try:
+        new_line = float(rr.get("line"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "the new rung has no line — not moving"}, 409
     try:
         ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
     except (TypeError, ValueError):
@@ -22136,7 +22149,7 @@ def _hand_rerung_suggest(client, r: dict, cur_slug, anchor_c, leash_c, now) -> d
     if _bet_sheet_slug_disagrees(e, mt):
         return {"none": True, "why": "slug_disagrees", "at": stamp}
     return {"slug": e["slug"], "synthetic": bool(e.get("synthetic")), "line": float(e["line"]),
-            "bid_c": bid_c, "at": stamp}
+            "side": e.get("side"), "bid_c": bid_c, "at": stamp}
 
 
 def _hand_chase_tick(sb, client, now) -> dict:
