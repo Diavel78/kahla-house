@@ -21087,6 +21087,58 @@ def _bs_option_read(sb, sport, blob, mt, side, line, price_c):
     return out
 
 
+def _bs_dominates(mt: str, side: str, a: dict, b: dict) -> bool:
+    """Pure. Does option `a` beat option `b` on the SAME side without the
+    model's help: a line at least as favorable (under higher, over lower,
+    a spread with more points for the side) AND a price no higher, and
+    better on at least one. Rob, Oct 19 2026, on Under 233.5 @ 48¢ reading
+    PASS beside Under 232.5 @ 50¢ reading LEAN: "if you wanted me to be
+    under 232.5, you can't pass under 233.5 at a cheaper vig."
+    Lines are each option's OWN line (the rung's number for the side)."""
+    try:
+        la, lb = float(a["line"]), float(b["line"])
+        pa, pb = float(a["price_c"]), float(b["price_c"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if mt == "total":
+        line_ok = la >= lb if side == "under" else la <= lb
+        line_better = la > lb if side == "under" else la < lb
+    elif mt == "spread":
+        line_ok, line_better = la >= lb, la > lb
+    else:
+        line_ok, line_better = la == lb, False
+    return line_ok and pa <= pb and (line_better or pa < pb)
+
+
+_BS_RANK = {"play": 2, "lean": 1, "pass": 0}
+
+
+def _bs_dominance_lift(mt, side, stay, move):
+    """A dominated option can never read worse than the option it beats:
+    the edge cap (`why`) judges the MODEL's number, not two rungs of the
+    same side. Mutates `move` (or `stay`) in place; pure otherwise."""
+    for better, worse in ((move, stay), (stay, move)):
+        if not (isinstance(better, dict) and isinstance(worse, dict)):
+            continue
+        if not _bs_dominates(mt, side, better, worse):
+            continue
+        wv, bv = worse.get("verdict"), better.get("verdict")
+        if wv in _BS_RANK and _BS_RANK.get(bv or "pass", 0) < _BS_RANK[wv]:
+            better["verdict"] = wv
+            better["why"] = ("a better line at a lower price than " + _bs_opt_label(mt, side, worse)
+                             + " — at least as good as that " + wv)
+
+
+def _bs_opt_label(mt, side, x) -> str:
+    try:
+        ln = float(x.get("line"))
+    except (TypeError, ValueError):
+        return "the other rung"
+    if mt == "total":
+        return ("U " if side == "under" else "O ") + f"{ln:g}"
+    return f"{ln:+g}"
+
+
 def _bs_recommend(stay, move):
     """'move' / 'repeg' / 'cancel' (None = the model could price neither)."""
     if stay is None and move is None:
@@ -21129,6 +21181,8 @@ def _bet_sheet_reads(sb, out: list) -> None:
         rr = hold.get("rerung") if isinstance(hold.get("rerung"), dict) else None
         move = (_bs_option_read(sb, sport, blob, mt, side, rr.get("line"), rr.get("bid_c"))
                 if rr and rr.get("slug") and rr.get("line") is not None else None)
+        if rr and move:
+            _bs_dominance_lift(mt, side, stay, move)
         rec = _bs_recommend(stay, move if rr else None)
         if rec is None:
             continue

@@ -4036,6 +4036,23 @@ def test_bet_sheet_reads() -> None:
           abs(o["model_p"] - 0.5402) < 1e-3 and o["verdict"] == "pass", str(o))
     check("NHL line the model never priced = None",
           _app._bs_option_read(None, "NHL", nhl, "total", "over", 7.5, 40.0) is None)
+    # DOMINANCE (Rob, Oct 19 2026, OKC@SA): Under 233.5 @ 48 beats Under 232.5
+    # @ 50 on both line and price — the edge cap may not PASS it below the LEAN.
+    okc = {"model": {"mu": 0.0, "sd": 12.0, "tu": 227.0, "tsd": 18.0}}
+    stay = _app._bs_option_read(None, "NBA", okc, "total", "under", 232.5, 50.0)
+    move = _app._bs_option_read(None, "NBA", okc, "total", "under", 233.5, 48.0)
+    check("stay U232.5 @ 50 = lean, move U233.5 @ 48 capped to pass by the model's number",
+          stay["verdict"] == "lean" and move["verdict"] == "pass" and move["value_c"] > stay["value_c"], str((stay, move)))
+    check("dominance: under higher+cheaper", _app._bs_dominates("total", "under", move, stay) and not _app._bs_dominates("total", "under", stay, move))
+    check("dominance: over wants LOWER", _app._bs_dominates("total", "over", {"line": 219.5, "price_c": 50}, {"line": 220.5, "price_c": 50})
+          and not _app._bs_dominates("total", "over", {"line": 221.5, "price_c": 48}, {"line": 220.5, "price_c": 50}))
+    check("dominance: spread = more points for the side, never a pricier rung",
+          _app._bs_dominates("spread", "away", {"line": 7.5, "price_c": 49}, {"line": 6.5, "price_c": 49})
+          and not _app._bs_dominates("spread", "home", {"line": -6.5, "price_c": 52}, {"line": -7.5, "price_c": 50}))
+    _app._bs_dominance_lift("total", "under", stay, move)
+    check("the dominated-rung lift: move reads at least the stay's LEAN, with a reason",
+          move["verdict"] == "lean" and "better line" in (move.get("why") or ""), str(move))
+    check("…and the recommendation is the move (more value per dollar)", _app._bs_recommend(stay, move) == "move")
     o = _app._bs_option_read(None, "NHL", nhl, "spread", "away", 1.5, 60.0)
     check("NHL puck +1.5 off away_cover, +5¢ = play", o["verdict"] == "play", str(o))
     mlb = {"model": {"win_home": 0.6}, "model_meta": {"run_line_shares": {"home": 0.6, "away": 0.7}}}
