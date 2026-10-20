@@ -120,8 +120,25 @@ def line_hook(sport: str, away: str, home: str, start=None) -> dict | None:
     tt = app._pin_line_from_events(events, away, home, "total", book="pinnacle", start=start)
     if sp is None and tt is None:
         return None
-    return {"spread_home": sp, "total": tt, "src": "pinnacle",
-            "age_min": round(age, 1)}
+    out = {"spread_home": sp, "total": tt, "src": "pinnacle", "age_min": round(age, 1)}
+    # THE PRICES TOO (Oct 19 2026 — Bet105 resells Pinnacle's lines, so
+    # Pinnacle's juice at this line IS the Bet105 number the card shows
+    # beside Rob's resting price; app._sheet_pin_block reads these keys).
+    def _px(o):
+        try:
+            return int(round(float(o.get("price")))) if o and o.get("price") is not None else None
+        except (TypeError, ValueError):
+            return None
+    try:
+        ph, pa = app._pin_outcomes(events, away, home, "spreads", "home", book="pinnacle", start=start)
+        ov, un = app._pin_outcomes(events, away, home, "totals", "over", book="pinnacle", start=start)
+        mh, ma = app._pin_outcomes(events, away, home, "h2h", "home", book="pinnacle", start=start)
+        out.update({"spread_home_odds": _px(ph), "spread_away_odds": _px(pa),
+                    "over_odds": _px(ov), "under_odds": _px(un),
+                    "ml_home": _px(mh), "ml_away": _px(ma)})
+    except Exception as e:                      # a price miss never costs the line
+        log.warning("pinnacle prices for %s @ %s: %s", away, home, e)
+    return out
 
 
 def price_hook(model: dict, home: str, away: str, neutral: bool) -> dict | None:

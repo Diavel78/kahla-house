@@ -3944,6 +3944,57 @@ def test_sheet_run_clocks() -> None:
     check("unknown sport -> None", _app._sheet_next_run("UFC", _dt(2026, 10, 10, 8, 0, tzinfo=az)) is None)
 
 
+def test_sheet_pin_quote() -> None:
+    """BET105 = PINNACLE (Oct 19 2026): every sheet game carries one `pin`
+    price block, and the slip quote prices the same bet off Pinnacle's slate
+    (`cents` = implied with the vig in; a different line is said so)."""
+    import app as _app
+    ev = [{"away_team": "Middle Tennessee State", "home_team": "Florida International",
+           "commence_time": "2026-10-20T23:00:00Z",
+           "bookmakers": [{"key": "pinnacle", "markets": [
+               {"key": "spreads", "outcomes": [
+                   {"name": "Florida International", "designation": "home", "point": -10.5, "price": -102},
+                   {"name": "Middle Tennessee State", "designation": "away", "point": 10.5, "price": -114}]},
+               {"key": "totals", "outcomes": [
+                   {"name": "Over", "designation": "over", "point": 46.0, "price": -102},
+                   {"name": "Under", "designation": "under", "point": 46.0, "price": -116}]},
+               {"key": "h2h", "outcomes": [
+                   {"name": "Florida International", "designation": "home", "price": -413},
+                   {"name": "Middle Tennessee State", "designation": "away", "price": 320}]}]}]}]
+    it = {"sport": "NCAAF", "away": "Middle Tennessee", "home": "Florida International",
+          "event_start": "2026-10-20T23:00:00Z"}
+    q = _app._pin_quote_from_events(ev, {**it, "market_type": "spread", "side": "away", "line": 10.5}, 12.0)
+    check("spread quote: the side's own price at Pinnacle's line", q and q["price"] == -114 and q["line"] == 10.5
+          and q["cents"] == 53.3 and q["line_differs"] is False and q["age_min"] == 12.0)
+    q = _app._pin_quote_from_events(ev, {**it, "market_type": "spread", "side": "away", "line": 11.5})
+    check("a rung off Pinnacle's line says so", q and q["line_differs"] is True)
+    q = _app._pin_quote_from_events(ev, {**it, "market_type": "total", "side": "under", "line": 46.0})
+    check("total under", q and q["price"] == -116 and q["line"] == 46.0)
+    q = _app._pin_quote_from_events(ev, {**it, "market_type": "ml", "side": "home"})
+    check("ML carries no line", q and q["price"] == -413 and "line" not in q and q["cents"] == 80.5)
+    check("a game two days off the slate's start never matches",
+          _app._pin_quote_from_events(ev, {**it, "market_type": "ml", "side": "home",
+                                           "event_start": "2026-10-22T23:00:00Z"}) is None)
+    check("no slate → None", _app._pin_quote_from_events([], {**it, "market_type": "ml", "side": "home"}) is None)
+    b = _app._sheet_pin_block({"spread_home": -10.5, "total": 46, "src": "pinnacle", "age_min": 3,
+                               "spread_home_odds": -102, "spread_away_odds": -114, "over_odds": -102,
+                               "under_odds": -116, "ml_home": -413, "ml_away": 320}, "src")
+    check("football pin_lines → pin block", b and b["spread_home_odds"] == -102 and b["ml_away"] == 320 and b["age_min"] == 3)
+    check("the old hook (line, no price) shows nothing",
+          _app._sheet_pin_block({"spread_home": -10.5, "total": 46, "src": "pinnacle"}, "src") is None)
+    b = _app._sheet_pin_block({"provider": "pinnacle", "ml_home": -158, "ml_away": 136, "puck_home": -1.5,
+                               "puck_home_odds": 150, "puck_away_odds": -170, "total": 6.5,
+                               "over_odds": -105, "under_odds": -115})
+    check("hockey lines → the puck line is the spread", b and b["spread_home"] == -1.5 and b["spread_home_odds"] == 150)
+    check("a book line is not Pinnacle's", _app._sheet_pin_block({"provider": "espn", "ml_home": -158}) is None)
+    # the slip's preview reads Pinnacle beside both venues, never instead of them
+    import inspect as _ins
+    src = _ins.getsource(_app.api_bet_sheets_place)
+    check("preview quotes Pinnacle for every item", "_bet_sheet_pin_quote(" in src and "pin_slates" in src)
+    src = _ins.getsource(_app._bet_sheet_pin_quote)
+    check("the quote never spends a parlay credit", "paid=False" in src and "paid=True" not in src)
+
+
 def test_bet_sheet_reads() -> None:
     """The model's read on a stopped bet (Oct 15 2026): each option priced
     by the sheet's own model at its own line and price; recommend the
@@ -4596,7 +4647,7 @@ def main() -> int:
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_gridiron_move_favorable, test_gridiron_key_hook, test_cfbd_consensus, test_gridiron_qb_adjust,
-              test_pin_line_center,
+              test_pin_line_center, test_sheet_pin_quote,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,

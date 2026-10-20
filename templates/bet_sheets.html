@@ -294,7 +294,8 @@
         .mk-open { font-size: 13px; color: var(--text3); margin-top: 6px; }
         .clv-b { color: var(--green, #3fb950); font-weight: 600; }
         .clv-l { color: var(--red, #f85149); font-weight: 600; }
-    </style>
+            .pinq { color: #9ad0ff; font-weight: 600; white-space: nowrap; }
+</style>
 </head>
 <body>
     <div id="auth-gate" style="padding:40px;text-align:center;color:var(--text2)">Checking access…</div>
@@ -540,6 +541,28 @@
         if (Math.abs(x) < 0.05) return "pick'em";
         return x < 0 ? nameOf(g, 'home') + ' ' + sgn(x, d) : nameOf(g, 'away') + ' ' + sgn(-x, d);
     }
+    // BET105 = PINNACLE (Oct 19 2026, measured: 18 numbers on three CFB
+    // games, 15 identical, 3 off a cent). Bet105 has no feed we can reach,
+    // so Pinnacle's price at the sheet's line is printed as the Bet105
+    // number next to the pick (`g.pin`, one shape on every sport). A side →
+    // that side's price; no side → both.
+    function pinTxt(g, mt, side) {
+        const P = g.pin;
+        if (!P) return '';
+        let s = '';
+        if (mt === 'ml') {
+            s = side ? am(P['ml_' + side])
+              : (P.ml_away != null && P.ml_home != null ? nameOf(g, 'away') + ' ' + am(P.ml_away) + ' / ' + nameOf(g, 'home') + ' ' + am(P.ml_home) : '');
+        } else if (mt === 'total') {
+            s = side ? am(P[side + '_odds'])
+              : (P.over_odds != null && P.under_odds != null ? 'O ' + am(P.over_odds) + ' / U ' + am(P.under_odds) : '');
+        } else {
+            s = side ? am(P[side === 'home' ? 'spread_home_odds' : 'spread_away_odds'])
+              : (P.spread_home_odds != null && P.spread_away_odds != null ? favLine(g, P.spread_home, 1) + ' ' + am(P.spread_home_odds) + ' / ' + am(P.spread_away_odds) : '');
+        }
+        if (!s) return '';
+        return ' <span class="pinq" title="Pinnacle\'s price at this line. Bet105 resells Pinnacle\'s lines, so this is the Bet105 number.">PIN ' + s + ' <span class="dim">(Bet105)</span></span>';
+    }
 
 
     // ───────────────────────── the slip ─────────────────────────
@@ -652,10 +675,10 @@
                         + (ai.POLYMARKET != null && ai.KALSHI != null ? ' · all-in Poly ' + Number(ai.POLYMARKET).toFixed(2) + '¢ vs Kalshi ' + Number(ai.KALSHI).toFixed(2) + '¢'
                            : (i.q.kalshi && i.q.kalshi.ok === false && i.q.kalshi.reason ? ' · ' + esc(i.q.kalshi.reason) : (i.q.poly && i.q.poly.reason ? ' · Poly: ' + esc(i.q.poly.reason) : ''))) + ' · ') : '';
                     q = '<div class="q ok">' + vtxt + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
-                      + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.stack_q || i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + '</div>';
+                      + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.stack_q || i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + pinQuoteTxt(i) + '</div>';
                     cost += n * i.q.price_c / 100; known++;
                 } else if (i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'placing on the box…') + '</div>';
-                else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
+                else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + pinQuoteTxt(i) + '</div>';
             }
             return '<div class="si"><div class="lab"><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport) + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                  + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
@@ -665,6 +688,15 @@
         document.getElementById('btnPlace').disabled = !_slip.length;
         document.getElementById('btnQuote').disabled = !nb;
         if (!_busy) document.getElementById('btnPlace').textContent = submitLabel();
+    }
+    // The slip's third quote (Rob, Oct 19 2026: "poly, Kalshi, and pin"):
+    // Pinnacle's price for the same bet = Bet105's. `cents` = implied with
+    // the vig in, to hold against the seat; a different line is said so.
+    function pinQuoteTxt(i) {
+        const p = i.q && i.q.pin;
+        if (!p || p.price == null) return '';
+        const ln = (p.line_differs && p.line != null) ? ' at ' + rungTxt(i, p.line) : '';
+        return ' · <span class="pinq" title="Pinnacle = Bet105">PIN ' + am(p.price) + ' (' + Number(p.cents).toFixed(1) + '¢' + ln + ')</span>';
     }
     function rungTxt(i, ln) {
         if (ln == null) return '';
@@ -1351,7 +1383,7 @@
         let ln = null;
         if (bs && L.spread_home != null) ln = bs.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home);
         if (bs || L.spread_home != null || M)
-            out.push(mkRow('Spread', bs, mdl + edgeTxt(bs, true),
+            out.push(mkRow('Spread', bs, mdl + edgeTxt(bs, true) + pinTxt(g, 'spread', bs ? bs.side : null),
                      mkBody(g, up, 'spread', bs, ln, bs ? nameOf(g, bs.side) + ' ' + sgn(ln, 1) : '', 'spread')));
         out.push(totalMarket(g, up, true));
         return out.join('');
@@ -1376,7 +1408,7 @@
         const tl = p && p.line != null ? p.line : L.total;
         if (tl != null && !p) mdl = 'line ' + tl + (mdl ? ' · ' + mdl : '');
         if (!p && tl == null && !mdl) return '';
-        return mkRow('Total', p, mdl + edgeTxt(p, pts),
+        return mkRow('Total', p, mdl + edgeTxt(p, pts) + pinTxt(g, 'total', p ? p.side : null),
                      mkBody(g, up, 'total', p, tl, p ? (p.side === 'over' ? 'Over ' : 'Under ') + tl : '', 'total') + openTxt(g));
     }
     // THE CHALK RULE (Rob, Oct 11 2026: "-180 and a -262? Yeah, I ain't
@@ -1395,7 +1427,7 @@
         if (!p && !mdl) return '';
         let body = mkBody(g, up, 'ml', p, 0, p && p.side ? nameOf(g, p.side) + ' ML' : '', 'ml');
         if (p && p.chalky && up) body = '<div class="mk-note">Too chalky to bet at ' + am(p.price) + ' — ' + (_sport === 'NHL' ? 'see the puck line' : _sport === 'MLB' ? 'see the run line' : 'see the spread') + '.</div>';
-        return mkRow('ML', p, mdl + edgeTxt(p, false), body);
+        return mkRow('ML', p, mdl + edgeTxt(p, false) + pinTxt(g, 'ml', p ? p.side : null), body);
     }
     // NBA spread (Hoops IQ: lean-capped, like the total)
     function nbaSpreadMarket(g, up) {
@@ -1405,7 +1437,7 @@
         if (!p && !mdl) return '';
         let ln = null;
         if (p && p.side) ln = p.line != null ? Number(p.line) : (L.spread_home != null ? (p.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home)) : null);
-        return mkRow(_sport === 'MLB' ? 'Run line' : 'Spread', p, mdl + edgeTxt(p, false),
+        return mkRow(_sport === 'MLB' ? 'Run line' : 'Spread', p, mdl + edgeTxt(p, false) + pinTxt(g, 'spread', p ? p.side : null),
                      mkBody(g, up, 'spread', p, ln, p && p.side ? nameOf(g, p.side) + ' ' + sgn(ln, 1) : '', 'spread'));
     }
     // Hockey puck line: priced server-side like the ML (`g.puck`, model cover
@@ -1419,7 +1451,7 @@
             mdl = 'line ' + favLine(g, L.puck_home, 1) + (po != null ? ' ' + am(po) : '') + (mdl ? ' · ' + mdl : '');
         }
         if (!p && !mdl) return '';
-        return mkRow('Puck', p, mdl + edgeTxt(p, false),
+        return mkRow('Puck', p, mdl + edgeTxt(p, false) + pinTxt(g, 'spread', p ? p.side : null),
                      mkBody(g, up, 'spread', p, p ? p.line : null, p && p.side ? nameOf(g, p.side) + ' ' + sgn(p.line, 1) : '', 'puck'));
     }
     function marketsFor(g, up) {

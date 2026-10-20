@@ -1104,6 +1104,36 @@ _SHEET_SPORTS = ("NHL", "NBA", "MLB", "NCAAF", "NFL")
 _SHEET_NHL_LOOKBACK_H = 36   # hockey sheet keeps last night's graded games on the page
 
 
+# BET105 = PINNACLE (measured Oct 19 2026 at 21:23 AZ against Pinnacle's own
+# feed: 18 numbers on three CFB games, 15 identical, 3 off by one cent — Rob:
+# "they maintain Pinnacle's lines"). Bet105 publishes no feed and sits on no
+# vendor we can reach (CLAUDE.md), so the card shows PINNACLE'S PRICE at the
+# sheet's line and calls it Bet105's. `pin` is the same shape on every
+# sport's game: {spread_home, spread_home_odds, spread_away_odds, total,
+# over_odds, under_odds, ml_home, ml_away, age_min} — None when the row's
+# line is not Pinnacle's (a stale slate, a game it doesn't price).
+def _sheet_pin_block(ln: dict | None, provider_key: str = "provider") -> dict | None:
+    """Pure. A sheet row's Pinnacle prices in one shape, or None.
+    Football rows pass `pin_lines` (box_sheets.line_hook — `src`), hockey /
+    NBA / MLB rows pass `lines` (nhl_sheet_data.pin_odds_from_events —
+    `provider`; the puck line IS the spread)."""
+    if not isinstance(ln, dict):
+        return None
+    if (ln.get(provider_key) or ln.get("provider") or ln.get("src")) != "pinnacle":
+        return None
+    sp = ln.get("spread_home", ln.get("puck_home"))
+    out = {"spread_home": sp,
+           "spread_home_odds": ln.get("spread_home_odds", ln.get("puck_home_odds")),
+           "spread_away_odds": ln.get("spread_away_odds", ln.get("puck_away_odds")),
+           "total": ln.get("total"), "over_odds": ln.get("over_odds"),
+           "under_odds": ln.get("under_odds"),
+           "ml_home": ln.get("ml_home"), "ml_away": ln.get("ml_away"),
+           "age_min": ln.get("age_min")}
+    if all(out[k] is None for k in ("spread_home_odds", "over_odds", "ml_home")):
+        return None                       # a line with no price is the old hook — nothing to show
+    return out
+
+
 def _sheet_game_football(r: dict) -> dict:
     """Football row → Line / Model / Picks. Line and model are both home-
     oriented (negative = home favored); the model spread is the CALIBRATED
@@ -1139,6 +1169,7 @@ def _sheet_game_football(r: dict) -> dict:
             "home_short": (g.get("locs") or {}).get("home"),
             "line": line, "model": mdl,
             "line_src": {"spread": (bs or {}).get("src"), "total": (bt or {}).get("src")},
+            "pin": _sheet_pin_block(fr.get("pin_lines") or blob.get("pin_lines"), "src"),
             "spread": bs, "total": bt, "unrated": model is None,
             "grade": blob.get("grade"),
             "friday_note": r.get("friday_md")}
@@ -1247,6 +1278,7 @@ def _sheet_game_nhl(r: dict) -> dict:
             "away": g.get("away"), "home": g.get("home"),
             "away_short": g.get("away_abbr"), "home_short": g.get("home_abbr"),
             "line": line, "model": mdl, "ml": _sheet_chalk_mark(picks.get("ml")),
+            "pin": _sheet_pin_block(ln),
             "puck": _sheet_puck_pick(line, model),
             "total": picks.get("total"), "unrated": model is None,
             "total_open": blob.get("total_open"),
@@ -1277,6 +1309,7 @@ def _sheet_game_nba(r: dict) -> dict:
             "away": g.get("away"), "home": g.get("home"),
             "away_short": g.get("away_abbr"), "home_short": g.get("home_abbr"),
             "line": line, "model": mdl, "ml": _sheet_chalk_mark(picks.get("ml")),
+            "pin": _sheet_pin_block(ln),
             "spread": picks.get("spread"), "total": picks.get("total"),
             "unrated": model is None, "grade": blob.get("grade"),
             "injuries": blob.get("injuries")}
@@ -14927,6 +14960,65 @@ def _bet_sheet_slug_disagrees(entry: dict, mt: str):
             f"{_fmt(s_side, s_line)}) — not placing")
 
 
+_PIN_QUOTE_FRESH_MIN = 20.0     # a cached slate this young answers a quote; older → Pinnacle's own feed (free)
+_PIN_QUOTE_MKT = {"ml": "h2h", "spread": "spreads", "total": "totals"}
+
+
+def _pin_quote_from_events(events, item: dict, age_min=None) -> dict | None:
+    """Pure. Pinnacle's price for one slip item (the SAME side, at Pinnacle's
+    own line) off a TOA-shaped slate: {line, price, cents, age_min,
+    line_differs}. `cents` = the implied probability with the vig in, the
+    number to hold next to the Poly/Kalshi seat; `line_differs` when
+    Pinnacle's line is not the rung on the slip. None when unmatched."""
+    mt = str(item.get("market_type") or "")
+    key = _PIN_QUOTE_MKT.get(mt)
+    if not key or not events:
+        return None
+    pick, _opp = _pin_outcomes(events, item.get("away"), item.get("home"), key,
+                               str(item.get("side") or ""), book="pinnacle",
+                               start=item.get("event_start"))
+    if not pick or pick.get("price") is None:
+        return None
+    try:
+        a = float(pick["price"])
+    except (TypeError, ValueError):
+        return None
+    p = 100.0 / (a + 100.0) if a > 0 else -a / (-a + 100.0)
+    out = {"price": int(round(a)), "cents": round(p * 100.0, 1),
+           "age_min": (round(float(age_min), 1) if age_min is not None else None)}
+    if mt != "ml":
+        try:
+            pl = float(pick.get("point"))
+        except (TypeError, ValueError):
+            return None
+        out["line"] = pl
+        try:
+            out["line_differs"] = abs(pl - float(item.get("line"))) > 0.01
+        except (TypeError, ValueError):
+            out["line_differs"] = None
+    return out
+
+
+def _bet_sheet_pin_quote(sb, item: dict, now, slates: dict) -> dict | None:
+    """Pinnacle's quote for a slip item (= Bet105's, see _sheet_pin_block).
+    One slate per sport per request: the cached slate when it is under
+    _PIN_QUOTE_FRESH_MIN old, else Pinnacle's own feed (`_pin_slate(paid=
+    False)` — never a parlay-api credit). Never raises; None on any miss."""
+    sport = str(item.get("sport") or "").upper()
+    try:
+        if sport not in slates:
+            events, age = _pin_slate_cached(sb, sport, now)
+            if not events or age is None or age > _PIN_QUOTE_FRESH_MIN:
+                fresh = _pin_slate(sb, sport, now, paid=False)
+                if fresh:
+                    events, age = fresh, 0.0
+            slates[sport] = (events, age)
+        events, age = slates[sport]
+        return _pin_quote_from_events(events, item, age)
+    except Exception:
+        return None
+
+
 def _bet_sheet_resolve(client, item: dict) -> dict:
     """One slip item → the Polymarket slug + the touch on our side. Reads
     the venue twice (event lookup, cached 120s across items; one book)."""
@@ -15096,6 +15188,7 @@ def api_bet_sheets_place():
     results, queued = [], []
     t_end = _time.monotonic() + 50.0          # under the Vercel function budget
     if preview:
+        pin_slates: dict = {}
         for n, it in enumerate(items):
             key = (it or {}).get("key")
             if _time.monotonic() > t_end - 10.0:
@@ -15106,6 +15199,10 @@ def api_bet_sheets_place():
             res = _bet_sheet_resolve(client, it or {})
             res.pop("_book", None)
             res["key"] = key
+            # PINNACLE = BET105 beside the seats (Rob, Oct 19 2026: "the quote
+            # function pulls quotes from poly, Kalshi, and pin") — read-only,
+            # never changes the venue pick.
+            res["pin"] = _bet_sheet_pin_quote(sb, it or {}, datetime.now(timezone.utc), pin_slates)
             want = str((it or {}).get("venue") or "auto").lower()
             if _hand_kalshi_on() and want != "poly":
                 # BOTH VENUES QUOTED (Oct 18 2026): the slip shows each seat
