@@ -9583,6 +9583,14 @@ def debug_pmm():
                 "total_count": len((res2 or {}).get("total") or []),
                 "diag": diag,
             }
+            # ?mslug=<substring> — ONLY the matching markets' question text +
+            # the classifier's read (the full dump overruns the site-curl
+            # log's 60KB; Oct 20 2026, the Thunder/'under' question).
+            _ms = (request.args.get("mslug") or "").strip().lower()
+            if _ms:
+                return jsonify({"game": grow["event_name"], "event_slug": (res2 or {}).get("event_slug"),
+                                "markets": [mm for mm in (diag.get("all_markets") or [])
+                                            if _ms in str(mm.get("slug") or "").lower()]})
     except Exception as e:
         import traceback
         out["lookup"] = {"error": f"{type(e).__name__}: {str(e)[:300]}",

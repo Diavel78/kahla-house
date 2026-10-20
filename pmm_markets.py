@@ -1403,12 +1403,15 @@ def lookup(client, sport: str, away: str, home: str, event_start_iso: str,
     # NRFI detection without being able to inspect the SDK from a sandbox.
     if diag is not None:
         diag["all_markets"] = [
-            {"q": (mm.get("question") or "")[:80],
+            {"q": (mm.get("question") or "")[:160],
+             "slug": mm.get("slug"),
+             "read": (lambda _r: {"mt": _r[0], "line": _r[1], "side": _r[2]} if _r else None)(
+                 _classify_market(mm, away, home)),
              "v1": mm.get("sportsMarketType"),
              "v2": mm.get("sportsMarketTypeV2"),
              "line": mm.get("line"),
              "closed": bool(mm.get("closed")), "active": bool(mm.get("active"))}
-            for mm in (ev.get("markets") or [])[:50]
+            for mm in (ev.get("markets") or [])[:400]
         ]
     for m in ev["markets"]:
         # Skip markets that have closed (settled, expired, etc.) — we
