@@ -5005,6 +5005,8 @@ def api_cellar_flag():
         sb.table("machine_flags").upsert(
             {"key": name, "value": val, "updated_at": datetime.now(timezone.utc).isoformat()},
             on_conflict="key").execute()
+        if name.endswith(("_key", "_secret")):      # a credential rides a flag row (oddspapi_key) — never echo it
+            prev, val = ("<set>" if prev else None), "<set>"
         _probe_log({"kind": "flag_set", "flag": name, "old": prev, "new": val})
         return jsonify({"ok": True, "flag": name, "old": prev, "new": val})
     except Exception as e:
@@ -5036,7 +5038,8 @@ def api_cellar_health():
         out["site_sha"] = (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:12]
         flags = (sb.table("machine_flags").select("key,value,updated_at")
                  .limit(60).execute().data) or []
-        out["flags"] = {f["key"]: f.get("value") for f in flags}
+        out["flags"] = {f["key"]: ("<set>" if f["key"].endswith(("_key", "_secret")) and f.get("value") else f.get("value"))
+                        for f in flags}
         try:
             # parlay-api (Pinnacle slate) credits this month + each cached
             # slate's age — the sheets price off these (Oct 5 2026).
@@ -12699,7 +12702,8 @@ def api_bet105_probe():
 # league per request (Rob, Oct 19: "one request = one game? absurd" — he
 # was right; /odds is the single-fixture call). Free tier 250 requests/mo.
 # Key: env ODDSPAPI_KEY, else the parlay_state 'oddspapi_key' row
-# ({"key": ...}) — the PARLAY_API_KEY pattern. Nothing here spends more
+# ({"key": ...}), else machine_flags 'oddspapi_key' (set via
+# /api/cellar/flag — where Rob's key went Oct 19 2026; redacted on health). Nothing here spends more
 # than the request the caller asks for; every answer lands in
 # exec_probe_runs kind=oddspapi_probe. The sandbox cannot resolve
 # oddspapi.io — this runs on Vercel via the site-curl bridge.
@@ -12714,7 +12718,15 @@ def _oddspapi_key(sb) -> str:
     if k:
         return k
     row = _parlay_state_get(sb, "oddspapi_key")
-    return ((row or {}).get("v") or {}).get("key") or ""
+    k = ((row or {}).get("v") or {}).get("key") or ""
+    if k:
+        return k
+    # the flag row — the one DB write a sandbox can make (/api/cellar/flag);
+    # health + the flag_set stamp redact any *_key flag.
+    v = _machine_flag_val("oddspapi_key")
+    if isinstance(v, dict):
+        return (v.get("key") or "").strip()
+    return (v or "").strip() if isinstance(v, str) else ""
 
 
 def _oddspapi_get(path: str, params: dict, key: str, base: str | None = None) -> dict:
