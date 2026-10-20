@@ -5063,10 +5063,10 @@ def api_cellar_health():
         out["cellar"] = _cellar_health(sb) or {}
         r = (sb.table("exec_probe_runs").select("at,result")
              .filter("params->>kind", "eq", "cellar_boot")
-             .order("at", desc=True).limit(3).execute().data) or []
+             .order("at", desc=True).limit(max(1, min(int(request.args.get("boots") or 3), 20))).execute().data) or []
         out["boots"] = [{"at": x.get("at"),
                          **{k: v for k, v in (x.get("result") or {}).items()
-                            if k in ("sha", "mode", "lanes", "side", "owner")}}
+                            if k in ("sha", "mode", "lanes", "side", "owner", "proc")}}
                         for x in r]
         out["site_sha"] = (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:12]
         flags = (sb.table("machine_flags").select("key,value,updated_at")
