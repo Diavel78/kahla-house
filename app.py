@@ -12815,9 +12815,12 @@ def api_oddspapi_probe():
             r = _oddspapi_get("bookmakers", {"language": "en"}, ak, base); spent += 1
             rows = r.get("data") if isinstance(r.get("data"), list) else ((r.get("data") or {}).get("bookmakers") if isinstance(r.get("data"), dict) else None)
             rows = rows or []
-            hits = [b for b in rows if isinstance(b, dict) and any("105" in str(v).lower() or "heritage" in str(v).lower() for v in b.values())]
+            hits = [b for b in rows if isinstance(b, dict) and any(t in str(v).lower() for v in b.values()
+                                                                    for t in ("105", "heritage", "bet10", "b105"))]
             out["bookmakers"] = {"status": r.get("status"), "n": len(rows), "headers": r.get("headers"),
-                                 "bet105_rows": hits[:10], "sample": rows[:3], "error": r.get("error") or r.get("text")}
+                                 "bet105_rows": hits[:10], "sample": rows[:3],
+                                 "slugs": sorted(str(b.get("slug")) for b in rows if isinstance(b, dict)),
+                                 "error": r.get("error") or r.get("text") or (r.get("data") if r.get("status") != 200 else None)}
         if request.args.get("tournaments"):
             sid = request.args.get("sport_id") or "14"
             r = _oddspapi_get("tournaments", {"sportId": sid, "language": "en"}, ak, base); spent += 1
@@ -12826,7 +12829,7 @@ def api_oddspapi_probe():
             slim = [{k: t.get(k) for k in ("tournamentId", "id", "name", "tournamentName", "futureFixtures", "sportId", "countryName")}
                     for t in rows if isinstance(t, dict)]
             out["tournaments"] = {"status": r.get("status"), "sport_id": sid, "n": len(rows), "headers": r.get("headers"),
-                                  "rows": slim[:120], "error": r.get("error") or r.get("text")}
+                                  "rows": slim[:120], "error": r.get("error") or r.get("text") or (r.get("data") if r.get("status") != 200 else None)}
         tid = (request.args.get("tid") or "").strip()
         sport = (request.args.get("sport") or "").strip().upper()
         if not tid and sport in _ODDSPAPI_TOURNAMENTS:
@@ -12835,7 +12838,15 @@ def api_oddspapi_probe():
             params = {"tournamentIds": tid, "language": "en", "oddsFormat": "american", "verbosity": request.args.get("verbosity") or "3"}
             if book and book != "*":
                 params["bookmakers"] = book
-            r = _oddspapi_get("odds-by-tournaments", params, ak, base); spent += 1
+            try:                                      # ?params={"bookmaker":"pinnacle"} merges/overrides (None drops a key)
+                for k_, v_ in (json.loads(request.args.get("params") or "{}") or {}).items():
+                    if v_ is None:
+                        params.pop(k_, None)
+                    else:
+                        params[k_] = v_
+            except ValueError:
+                out["params_error"] = "params is not JSON"
+            r = _oddspapi_get(request.args.get("path") or "odds-by-tournaments", params, ak, base); spent += 1
             d = r.get("data")
             fixtures = d if isinstance(d, list) else ((d or {}).get("fixtures") or (d or {}).get("data") or []) if isinstance(d, dict) else []
             fsum = [_oddspapi_fixture_summary(fx, book) for fx in fixtures[:80] if isinstance(fx, dict)]
@@ -12845,9 +12856,23 @@ def api_oddspapi_probe():
                 "n_with_lines": sum(1 for f in fsum if f["lines"]),
                 "top_keys": (list(d.keys())[:30] if isinstance(d, dict) else None),
                 "fixture_keys": (list(fixtures[0].keys())[:40] if fixtures and isinstance(fixtures[0], dict) else None),
-                "fixtures": fsum, "error": r.get("error") or r.get("text")}
+                "fixtures": fsum, "sent": r.get("params"),
+                "error": r.get("error") or r.get("text") or (r.get("data") if r.get("status") != 200 else None)}
             if fixtures and request.args.get("raw"):
                 out["odds_by_tournaments"]["raw_first"] = fixtures[0]
+        rc = (request.args.get("call") or "").strip()       # ?call=<path>&params=<json>: one raw request, answer head
+        if rc:
+            try:
+                rp = json.loads(request.args.get("params") or "{}") or {}
+            except ValueError:
+                rp = {}
+            r = _oddspapi_get(rc, rp, ak, base); spent += 1
+            d = r.get("data")
+            out["call"] = {"path": rc, "sent": r.get("params"), "status": r.get("status"), "headers": r.get("headers"), "ms": r.get("ms"),
+                           "type": type(d).__name__, "len": (len(d) if hasattr(d, "__len__") else None),
+                           "keys": (list(d.keys())[:40] if isinstance(d, dict) else (list(d[0].keys())[:40] if d and isinstance(d, list) and isinstance(d[0], dict) else None)),
+                           "head": json.dumps(d)[:int(request.args.get("head") or 4000)] if d is not None else r.get("text"),
+                           "error": r.get("error")}
         fid = (request.args.get("fixture") or "").strip()
         if fid:
             params = {"fixtureId": fid, "language": "en", "oddsFormat": "american", "verbosity": "3"}
@@ -12857,7 +12882,7 @@ def api_oddspapi_probe():
             d = r.get("data")
             out["odds"] = {"status": r.get("status"), "headers": r.get("headers"),
                            "summary": _oddspapi_fixture_summary(d, book) if isinstance(d, dict) else None,
-                           "error": r.get("error") or r.get("text")}
+                           "error": r.get("error") or r.get("text") or (d if r.get("status") != 200 else None)}
     except Exception as e:
         out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
     out["requests_spent"] = spent
