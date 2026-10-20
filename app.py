@@ -4680,9 +4680,12 @@ def api_bet_sheets_picks():
         # slug's answer. Dry unless &apply=1.
         sfixes = []
         try:
+            # Every pending sheet pick since Oct 20 2026 (was app-adopted
+            # only): the Thunder/'under' misread put a box-placed sheet bet
+            # on the wrong side of its own slug.
             prs = (sb.table("bot_picks").select("id,event_name,market_type,side,entry_line,signal_blob")
                    .eq("status", "pending").eq("signal_blob->>bet_sheet", "true")
-                   .eq("signal_blob->>app_adopted", "true").limit(300).execute().data) or []
+                   .limit(300).execute().data) or []
             for p in prs:
                 b = p.get("signal_blob") or {}
                 sl = _slug_side_line(b.get("pmm_slug") or "", bool(b.get("pmm_synthetic")))
@@ -11239,17 +11242,17 @@ def _football_ghost_row(sb, client, owner_uid, slug, syn, prob, qty,
         side = line = None
     if side is None:                         # slug-convention fallback
         if mt == "total":
-            sfx = _RUNG_SUFFIX_RE.search(slug)
-            if not sfx:
+            rp = _rung_parse(slug)
+            if not rp:
                 return None
-            line = float(sfx.group(2)) + (float(sfx.group(3)) / 10.0 if sfx.group(3) else 0.0)
+            line = rp[1]
             side = "under" if syn else "over"
         elif mt == "spread":
-            sfx = _RUNG_SUFFIX_RE.search(slug)
-            if not sfx or sfx.group(1) == "total":
+            rp = _rung_parse(slug)
+            if not rp or rp[0] == "total":
                 return None
-            v = float(sfx.group(2)) + (float(sfx.group(3)) / 10.0 if sfx.group(3) else 0.0)
-            away_line = v if sfx.group(1) == "pos" else -v
+            v = rp[1]
+            away_line = v if rp[0] == "pos" else -v
             side, line = (("home", -away_line) if syn else ("away", away_line))
         else:
             side, line = (("home", None) if syn else ("away", None))
@@ -17256,15 +17259,15 @@ def _slug_side_line(slug: str, syn: bool):
     fam = m.group(1)
     if fam == "aec":
         return "moneyline", ("home" if syn else "away"), None
-    sfx = _RUNG_SUFFIX_RE.search(slug)
-    if not sfx:
+    rp = _rung_parse(slug)
+    if not rp:
         return None
-    v = float(sfx.group(2)) + (float(sfx.group(3)) / 10.0 if sfx.group(3) else 0.0)
+    kind, v = rp
     if fam == "tsc":
         return "total", ("under" if syn else "over"), v
-    if sfx.group(1) == "total":
+    if kind == "total":
         return None
-    away_line = v if sfx.group(1) == "pos" else -v
+    away_line = v if kind == "pos" else -v
     return "spread", ("home" if syn else "away"), (-away_line if syn else away_line)
 
 
@@ -35461,17 +35464,36 @@ def _rent_enrolled_football(sb):
 # Rung suffix on football ladder slugs: pos-3pt5 (away +3.5), neg-21pt5
 # (away −21.5), total-47pt5. Whole-number rungs (no ptX) tolerated.
 _RUNG_SUFFIX_RE = re.compile(r"-(pos|neg|total)-(\d+)(?:pt(\d+))?$")
+# NBA/NHL/MLB totals carry the rung with no `-total-` word:
+# `tsc-nba-okc-sa-2026-10-20-232pt5`, `tsc-nhl-pit-phi-2026-09-30-6pt5`.
+# `pt` is required so a date tail (`-2026-10-20`) can never read as a rung.
+_RUNG_BARE_TOTAL_RE = re.compile(r"-(\d+)pt(\d+)$")
+
+
+def _rung_parse(slug: str):
+    """Pure. (kind, value) off a venue rung slug — kind in pos/neg/total —
+    or None. Football rungs name the kind (`-neg-9pt5`, `-total-49pt5`);
+    a `tsc-` slug ending in a bare `NptD` is a total (Oct 20 2026: until
+    then every NBA/NHL/MLB total slug read as nothing, so the slug guard
+    that catches a mis-sided placement never ran on those sports)."""
+    m = _RUNG_SUFFIX_RE.search(slug or "")
+    if m:
+        return m.group(1), float(m.group(2)) + (float(m.group(3)) / 10.0 if m.group(3) else 0.0)
+    if str(slug or "").startswith("tsc-"):
+        m = _RUNG_BARE_TOTAL_RE.search(slug or "")
+        if m:
+            return "total", float(m.group(1)) + float(m.group(2)) / 10.0
+    return None
 
 
 def _slug_rung_scalar(slug: str):
     """One ordering scalar per rung, home-perspective for spreads —
     the same normalization as _gridiron_try_bet's _rungv (pos-X is the
     AWAY team +X, i.e. home −X). Ordering is all the window needs."""
-    m = _RUNG_SUFFIX_RE.search(slug or "")
-    if not m:
+    rp = _rung_parse(slug)
+    if not rp:
         return None
-    v = float(m.group(2)) + (float(m.group(3)) / 10.0 if m.group(3) else 0.0)
-    return {"pos": -v, "neg": v, "total": v}[m.group(1)]
+    return {"pos": -rp[1], "neg": rp[1], "total": rp[1]}[rp[0]]
 
 
 def book_audit(sb=None, client=None, verbose=True):

@@ -1128,8 +1128,16 @@ def _classify_market(m: dict, away: str, home: str
         # Rays: O/" — PMM's convention is YES = OVER for these binary
         # total markets. If the question explicitly says "under" we
         # honor that; otherwise default to over.
+        # ⚠ WORD BOUNDARIES (Oct 20 2026): "ThUNDER" contains "under" — a
+        # bare substring read booked every OKC total as an UNDER market
+        # and a Bet Sheets "Under 232.5" rested BUY_LONG on "Will the total
+        # … be more than 232.5?" — long the OVER. The venue's words for a
+        # total are "more than" / "over"; an under market says "under",
+        # "less than" or "fewer than".
         q = question.lower()
-        if "under" in q and "over" not in q:
+        says_under = bool(re.search(r"\bunder\b|\b(?:less|fewer) than\b", q))
+        says_over = bool(re.search(r"\bover\b|\bmore than\b", q))
+        if says_under and not says_over:
             return ("total", line, "under")
         return ("total", line, "over")
 

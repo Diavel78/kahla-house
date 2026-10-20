@@ -2716,7 +2716,15 @@ def test_slug_side_line() -> None:
     assert f("asc-cfb-neb-ind-2026-10-04-neg-9pt5", True) == ("spread", "home", 9.5)
     assert f("asc-nfl-dal-hou-2026-10-04-pos-2pt5", False) == ("spread", "away", 2.5)
     assert f("tsc-nfl-ne-buf-2026-10-04-total-49pt5", False) == ("total", "over", 49.5)
-    assert f("tsc-nhl-pit-phi-2026-09-30-6pt5", True) is None or f("tsc-nhl-pit-phi-2026-09-30-6pt5", True)[1] == "under"
+    # NBA/NHL/MLB totals carry no `-total-` word (Oct 20 2026 — until then
+    # these read as nothing and the slug guard never ran on those sports)
+    assert f("tsc-nhl-pit-phi-2026-09-30-6pt5", True) == ("total", "under", 6.5)
+    assert f("tsc-nba-okc-sa-2026-10-20-232pt5", False) == ("total", "over", 232.5)
+    assert f("tsc-mlb-nym-stl-2026-04-01-7pt5", True) == ("total", "under", 7.5)
+    assert f("tsc-nba-okc-sa-2026-10-20", False) is None            # a date tail is not a rung
+    assert _app._rung_parse("asc-cfb-neb-ind-2026-10-04-neg-9pt5") == ("neg", 9.5)
+    assert _app._rung_parse("tsc-nba-okc-sa-2026-10-20-232pt5") == ("total", 232.5)
+    assert _app._slug_rung_scalar("tsc-nba-okc-sa-2026-10-20-232pt5") == 232.5
     assert f("aec-nfl-tb-sea-2026-10-05", False) == ("moneyline", "away", None)
     assert f("aec-nfl-tb-sea-2026-10-05", True) == ("moneyline", "home", None)
     assert f("astatc-nfl-foo-2026-10-05-pyd-abc-gte250", False) is None
@@ -3334,6 +3342,37 @@ def test_pmm_unsigned_cover_questions() -> None:
     check("an unreadable slug is no evidence — passes", f({"side": "away", "line": 3.5, "slug": "weird-slug"}, "spread") is None)
     import inspect
     check("_bet_sheet_resolve runs the slug guard", "_bet_sheet_slug_disagrees(entry, mt)" in inspect.getsource(_app._bet_sheet_resolve))
+
+
+def test_pmm_thunder_total() -> None:
+    """THE THUNDER RULE (Oct 20 2026): "ThUNDER" contains "under". The total
+    classifier read every OKC total market as an UNDER market, so a Bet
+    Sheets "Under 232.5" rested BUY_LONG on "Will the total in OKC Thunder
+    vs. SA Spurs be more than 232.5?" — long the OVER at 49c. Word
+    boundaries, and the slug guard now reads the NBA total slug too."""
+    import pmm_markets as pm
+    import app as _app
+    A, H = "Oklahoma City Thunder", "San Antonio Spurs"
+    def M(q, line=232.5):
+        return {"sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL", "sportsMarketType": "basketball_team_full_game_total",
+                "question": q, "line": line}
+    check("'more than' with Thunder in the title is an OVER market",
+          pm._classify_market(M("Will the total in OKC Thunder vs. SA Spurs be more than 232.5?"), A, H) == ("total", 232.5, "over"))
+    check("a bare Thunder title defaults to over (no 'under' word)",
+          pm._classify_market(M("OKC Thunder vs. SA Spurs: total 232.5"), A, H) == ("total", 232.5, "over"))
+    check("an explicit 'under' market still reads under",
+          pm._classify_market(M("Will the total in OKC Thunder vs. SA Spurs be under 232.5?"), A, H) == ("total", 232.5, "under"))
+    check("'fewer than' reads under",
+          pm._classify_market(M("Will the Thunder and Spurs score fewer than 232.5 points?"), A, H) == ("total", 232.5, "under"))
+    check("'Over/Under' in one title defaults to over",
+          pm._classify_market(M("Total Over/Under 232.5: OKC Thunder vs SA Spurs"), A, H) == ("total", 232.5, "over"))
+    f = _app._bet_sheet_slug_disagrees
+    check("the misread (text under, YES market) is REFUSED by the slug guard on an NBA total",
+          bool(f({"side": "under", "line": 232.5, "slug": "tsc-nba-okc-sa-2026-10-20-232pt5", "synthetic": False}, "total")))
+    check("under as the NO of the NBA total passes",
+          f({"side": "under", "line": 232.5, "slug": "tsc-nba-okc-sa-2026-10-20-232pt5", "synthetic": True}, "total") is None)
+    check("over on the YES of the NBA total passes",
+          f({"side": "over", "line": 232.5, "slug": "tsc-nba-okc-sa-2026-10-20-232pt5"}, "total") is None)
 
 
 def test_pmm_day_list_prefetch() -> None:
@@ -4679,7 +4718,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
