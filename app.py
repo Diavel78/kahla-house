@@ -15927,6 +15927,7 @@ def _hand_status_publish(sb, client) -> dict:
 # them). Kill switch `machine_flags hand_red_alert`.
 _HAND_STATUS_LAST: dict = {"at": 0.0, "rows": {}}
 _HAND_RED_SEEN: dict = {}
+_HAND_RED_RETRY_S = 300.0        # a failed Telegram send retries on this clock, never every 10s tick (Oct 21 2026: 50 stamps in 8 min)
 _HAND_RED_MIN_TICKS = 2
 _TG_RED_PREFIX = "\U0001f534"       # 🔴
 
@@ -16041,6 +16042,8 @@ def _hand_red_alert_tick(sb, now) -> dict:
             continue
         if ra and ra.get("code") == code:
             continue                            # this red already pinged
+        if float(e.get("retry_at") or 0) > _time.time():
+            continue                            # a failed send waits _HAND_RED_RETRY_S, not a tick
         msg = _hand_red_msg(r, blob, text)
         ok = False
         try:
@@ -16049,7 +16052,10 @@ def _hand_red_alert_tick(sb, now) -> dict:
             ok = False
         stamp = {"kind": "hand_red_alert", "hand_red_alert": True, "pick_id": r["id"], "code": code,
                  "text": text, "sent": ok, "creds": _tg_creds()[2],
+                 "err": None if ok else _TG_LAST_ERR.get("err"),
                  "at": datetime.now(timezone.utc).isoformat()}
+        if not ok:
+            e["retry_at"] = _time.time() + _HAND_RED_RETRY_S
         try:
             _probe_log(stamp)
         except Exception:
@@ -45180,29 +45186,40 @@ def _tg_creds():
     return None, None, None
 
 
+_TG_LAST_ERR: dict = {"err": None, "at": None}
+
+
 def _tg_send_now(text):
     """POST to Telegram sendMessage via the "Filled Bot" — the RAW sender.
     No-op (False) without creds (`_tg_creds`: env, else the seeded DB row).
-    Stdlib urllib so we don't add a new dep just for this. Almost nothing
-    should call this directly — go through _send_fill_telegram instead."""
-    import urllib.request
-    import urllib.error
+    Goes through `requests` (certifi inside) — the stdlib urllib send it
+    replaced verified TLS off the system store, which the box's framework
+    Python does not have, so the first red alert off the box failed its
+    handshake while every SDK call beside it worked (Oct 21 2026). Plain
+    text, no Markdown mode: a bet label can carry `_`/`*`/`[` and Markdown
+    would 400 on it. The last failure is kept in `_TG_LAST_ERR` so the
+    caller's stamp can say WHY a send failed. Almost nothing should call
+    this directly — go through _send_fill_telegram instead."""
     token, chat_id, _src = _tg_creds()
     if not token or not chat_id:
+        _TG_LAST_ERR.update({"err": "no_creds", "at": _time.time()})
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = json.dumps({
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-    }).encode()
-    req = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return r.status == 200
-    except (urllib.error.HTTPError, urllib.error.URLError):
+        r = _http.post(url, json={"chat_id": chat_id, "text": text,
+                                  "disable_web_page_preview": True}, timeout=10)
+        if r.status_code == 200:
+            _TG_LAST_ERR.update({"err": None, "at": _time.time()})
+            return True
+        body = ""
+        try:
+            body = str((r.json() or {}).get("description") or "")[:120]
+        except Exception:
+            body = (r.text or "")[:120]
+        _TG_LAST_ERR.update({"err": f"HTTP {r.status_code} {body}".strip(), "at": _time.time()})
+        return False
+    except Exception as e:
+        _TG_LAST_ERR.update({"err": f"{type(e).__name__}: {e}"[:160], "at": _time.time()})
         return False
 
 

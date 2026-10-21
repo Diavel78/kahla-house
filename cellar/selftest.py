@@ -3433,6 +3433,34 @@ def test_hand_red_alert() -> None:
           'ra.get("code") == code' in tsrc and 'k != "red_alert"' in tsrc)
     check("the raw sender reads creds through _tg_creds (env, else the seeded DB row)",
           '_tg_creds()' in _insp.getsource(_app._tg_send_now) and 'telegram_bot' in _insp.getsource(_app._tg_creds))
+    ssrc = _insp.getsource(_app._tg_send_now)
+    check("the raw sender posts through requests (certifi), never stdlib urllib, and sends plain text",
+          '_http.post(' in ssrc and 'import urllib' not in ssrc and 'urlopen' not in ssrc and 'parse_mode' not in ssrc)
+    check("a failed send records why (_TG_LAST_ERR) and the stamp carries it",
+          '_TG_LAST_ERR.update' in ssrc and '"err": None if ok else _TG_LAST_ERR.get("err")' in tsrc)
+    check("a failed send backs the pick off _HAND_RED_RETRY_S (>= 2 min), never a retry every tick",
+          _app._HAND_RED_RETRY_S >= 120 and 'e["retry_at"] = _time.time() + _HAND_RED_RETRY_S' in tsrc
+          and 'float(e.get("retry_at") or 0) > _time.time()' in tsrc)
+    # the sender itself against a fake HTTP layer: 200 → True, 400 → False with the description kept
+    class _R:
+        def __init__(self, code, body): self.status_code, self._b, self.text = code, body, str(body)
+        def json(self): return self._b
+    calls = []
+    old_post, old_creds = _app._http.post, _app._tg_creds
+    _app._tg_creds = lambda: ("t", "c", "env")
+    try:
+        _app._http.post = lambda url, json=None, timeout=None: calls.append(json) or _R(200, {"ok": True})
+        check("sender: 200 → True, plain-text payload", _app._tg_send_now("🔴 x") is True and calls[-1].get("text") == "🔴 x"
+              and "parse_mode" not in calls[-1])
+        _app._http.post = lambda url, json=None, timeout=None: _R(400, {"ok": False, "description": "Bad Request: chat not found"})
+        check("sender: 400 → False with the venue's description recorded",
+              _app._tg_send_now("🔴 x") is False and "chat not found" in str(_app._TG_LAST_ERR.get("err")))
+        def _boom(url, json=None, timeout=None): raise OSError("CERTIFICATE_VERIFY_FAILED")
+        _app._http.post = _boom
+        check("sender: a transport error → False with the exception recorded",
+              _app._tg_send_now("🔴 x") is False and "CERTIFICATE_VERIFY_FAILED" in str(_app._TG_LAST_ERR.get("err")))
+    finally:
+        _app._http.post, _app._tg_creds = old_post, old_creds
 
 
 def test_hand_guard_and_recon() -> None:
