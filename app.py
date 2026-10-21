@@ -16418,6 +16418,24 @@ def _hand_start_plan(samples, start_ts: float, now_ts: float, drop_pct: float,
 # before the start changes: a pre-start drop is the line-move rule's, never
 # this. Kill switch `machine_flags hand_start_take`; the cap is a flag too.
 _HAND_START_TAKE_C = 1.0
+# THE MAKER BUMP HAS ITS OWN CAP (Rob, Oct 20 2026: "Take 1 cent, make 2
+# cents cap. Hell, it's the same math… maker saves all the fees"): the IOC
+# take still pays up to 1¢ over the resting price; when no ask sits inside
+# that, the resting bid may be amended UP by as much as this, post-only.
+# An ask sitting between the two caps is LED by one tick, never crossed.
+_HAND_START_BUMP_C = 2.0           # machine_flags hand_start_bump_c overrides
+
+
+def _hand_start_bump_c(take_cap=None) -> float:
+    """The maker-bump cap: the flag (default 2¢), never under the take cap."""
+    try:
+        b = float(_machine_flag_val("hand_start_bump_c", _HAND_START_BUMP_C))
+    except (TypeError, ValueError):
+        b = _HAND_START_BUMP_C
+    try:
+        return max(b, float(take_cap)) if take_cap is not None else b
+    except (TypeError, ValueError):
+        return b
 
 
 def _hand_take_plan(price_c, ask_c, cap_c, start_ts, now_ts, tick=1.0):
@@ -16683,14 +16701,21 @@ def _hand_take_bump_plan(pc0, cur_pc, ask_c, cap_c, tick=1.0, bumped=None):
     if cap_c <= 0 or tick <= 0:
         return None
     tgt = round(math.floor((pc0 + cap_c) / tick + 1e-9) * tick, 4)
-    if tgt > 99.0 or tgt <= cur_pc + 1e-9:
+    if tgt > 99.0:
         return None
     if ask_c is not None:
         try:
             if float(ask_c) <= tgt + 1e-9:
-                return None                             # inside the cap: take it, don't lead into it
+                # THE ASK SITS INSIDE THE BUMP CAP (Oct 20 2026, the 2¢ maker cap over
+                # the 1¢ take cap): a post-only bid at the cap would cross it, and the
+                # take already judged it too dear — so LEAD it by one tick, the top of
+                # the book under the seller, still a maker. (With the caps equal this
+                # lands under the current price and reads None, as before.)
+                tgt = round(math.floor((float(ask_c) - tick) / tick + 1e-9) * tick, 4)
         except (TypeError, ValueError):
             pass
+    if tgt <= cur_pc + 1e-9:
+        return None
     return tgt
 
 
@@ -16700,8 +16725,8 @@ def _hand_window_bump_poly(client, r: dict, blob: dict, o, slug: str, oid, tw: d
     id, verified on the re-listed book). Returns (tw, blob_updates) —
     the caller writes both. Never raises past the caller."""
     tgt = _hand_take_bump_plan(tw.get("price_c", pc), pc, (take or {}).get("ask_c"),
-                               (take or {}).get("cap_c", _HAND_START_TAKE_C), (take or {}).get("tick_c") or 1.0,
-                               tw.get("bump"))
+                               _hand_start_bump_c((take or {}).get("cap_c", _HAND_START_TAKE_C)),
+                               (take or {}).get("tick_c") or 1.0, tw.get("bump"))
     if tgt is None or not o or (take or {}).get("ioc_cum"):
         return tw, {}
     syn = bool(blob.get("pmm_synthetic"))
@@ -19779,7 +19804,8 @@ def _hand_window_bump_kalshi(r: dict, blob: dict, o, ticker: str, by: bool, tw: 
     re-id the order — the verified id comes back in the updates). Returns
     (tw, blob_updates); the caller writes both."""
     tgt = _hand_take_bump_plan(tw.get("price_c", pc), pc, (take or {}).get("kalshi_ask_c"),
-                               (take or {}).get("cap_c", _HAND_START_TAKE_C), _KALSHI_TICK_C, tw.get("bump"))
+                               _hand_start_bump_c((take or {}).get("cap_c", _HAND_START_TAKE_C)),
+                               _KALSHI_TICK_C, tw.get("bump"))
     if tgt is None or not o or (take or {}).get("ioc_cum"):
         return tw, {}
     try:

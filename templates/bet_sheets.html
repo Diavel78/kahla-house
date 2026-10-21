@@ -1244,7 +1244,7 @@
             const tw = b.take_window;
             // THE TAKE WINDOW (Rob, Oct 18 2026: "I would say 2 minutes"): the drop fired,
             // the box is re-trying the take inside the 1¢ cap until the window ends
-            const tag = tw ? '<span class="tag amb">TAKING · 1¢ window · until ' + esc(fmtClock(tw.until)) + '</span>'
+            const tag = tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
                       : mine ? '<span class="tag amb">LIVE · YOURS</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
                       : '<span class="tag red">BOX CAN\'T SEE GAME START</span>';

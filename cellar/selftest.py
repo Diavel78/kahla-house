@@ -2856,6 +2856,16 @@ def test_hand_take_window() -> None:
     assert bp(50.0, 50.0, 52.0, 1.0, 1.0) == 51.0                                  # whole-cent grid (Kalshi)
     assert bp(50.0, 50.0, 51.0, 1.0, 0.5) is None                                   # ask AT the cap: the take's job
     assert bp(50.0, 50.0, 50.5, 1.0, 0.5) is None                                   # ask inside: take, never lead into it
+    # THE 2¢ MAKER CAP over the 1¢ take (Rob, Oct 20 2026: "Take 1 cent, make 2 cents cap")
+    assert bp(50.0, 50.0, 53.0, 2.0, 0.5) == 52.0                                   # no ask inside 2¢: bid to the cap
+    assert bp(50.0, 50.0, 51.5, 2.0, 0.5) == 51.0                                   # ask between the caps: lead it by a tick
+    assert bp(50.0, 50.0, 52.0, 2.0, 1.0) == 51.0                                   # whole-cent grid, same rule
+    assert bp(50.0, 51.0, 51.5, 2.0, 0.5) is None                                   # already leading it: nothing to do
+    check("the bump cap is its own flag, never under the take cap",
+          _app._hand_start_bump_c(1.0) >= 2.0 and _app._hand_start_bump_c(3.0) >= 3.0)
+    import inspect as _insp
+    for fn in (_app._hand_window_bump_poly, _app._hand_window_bump_kalshi):
+        check(f"{fn.__name__} bumps to the maker cap, not the take cap", "_hand_start_bump_c(" in _insp.getsource(fn))
     assert bp(50.0, 50.0, None, 1.0, 0.5) == 51.0                                   # no ask at all: still the top of the book
     assert bp(50.0, 51.0, 53.0, 1.0, 0.5) is None                                   # already at the cap: no creep
     assert bp(50.0, 50.0, 53.0, 1.0, 0.5, bumped={"to_c": 51.0}) is None            # once per window
