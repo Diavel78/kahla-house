@@ -16547,7 +16547,7 @@ def _hand_take_retry_ok(take, leaves) -> bool:
         return False
 
 
-_HAND_START_TAKE_WINDOW_S = 120.0   # Rob, Oct 18 2026: "I would say 2 minutes"
+_HAND_START_TAKE_WINDOW_S = 300.0   # Rob, Oct 20 2026: "change that damn make to 5 minutes… I want the damn bet filled" (was 120, Oct 18)
 
 
 def _hand_take_window_s() -> float:
