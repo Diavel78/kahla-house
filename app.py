@@ -5011,6 +5011,36 @@ def api_bet_sheets_picks():
     return jsonify(out)
 
 
+@app.route("/api/telegram/seed")
+def api_telegram_seed():
+    """Shared-secret: copy Vercel's FILLED_BOT_TOKEN / FILLED_BOT_CHAT_ID into
+    the parlay_state row `telegram_bot` so the BOX (whose .env never held
+    them) can send the red alert. Reports presence only — never a value.
+    `?test=1` sends one 🔴 TEST line from the site through the same sender;
+    `?seed=0` reports without writing."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    token = (os.environ.get("FILLED_BOT_TOKEN") or "").strip()
+    chat = (os.environ.get("FILLED_BOT_CHAT_ID") or "").strip()
+    out = {"ok": True, "env": {"token": bool(token), "chat_id": bool(chat)}, "seeded": False}
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    if token and chat and request.args.get("seed", "1") != "0":
+        _parlay_state_put(sb, "telegram_bot", {"token": token, "chat_id": chat, "src": "vercel_env"},
+                          datetime.now(timezone.utc))
+        out["seeded"] = True
+    row = _parlay_state_get(sb, "telegram_bot")
+    v = (row or {}).get("v") or {}
+    out["db"] = {"token": bool(v.get("token")), "chat_id": bool(v.get("chat_id")),
+                 "updated_at": (row or {}).get("updated_at")}
+    if request.args.get("test"):
+        out["test_sent"] = bool(_tg_send_now(f"{_TG_RED_PREFIX} TEST · the red alert line works"))
+    return jsonify(out)
+
+
 @app.route("/api/cellar/flag")
 def api_cellar_flag():
     """Shared-secret WRITER for one machine_flags row (Oct 6 2026): the box's
@@ -15860,6 +15890,7 @@ def _hand_status_publish(sb, client) -> dict:
     global HAND_HELD_SLUGS, KALSHI_WATCH_TICKERS
     HAND_HELD_SLUGS = held_slugs
     KALSHI_WATCH_TICKERS = k_watch                  # cellar/kalshifeed.py subscribes this set
+    _HAND_STATUS_LAST.update({"at": _time.time(), "rows": out})   # the red alert reads this tick's strip
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
         sb.table("lookup_cache").upsert({
@@ -15878,6 +15909,162 @@ def _hand_status_publish(sb, client) -> dict:
     except Exception as e:
         return {"err": f"publish: {e}"[:120]}
     return {"n": len(out), "quoted": quoted}
+
+
+# ── THE RED ALERT (Oct 20 2026, Rob: "If something goes Red on any of my
+# bets, I need an alert. That's it, no other alerts.") ────────────────────
+# RED = the Bet Sheets page's `warn` states (bet_sheets.html betState):
+# CHECK ME, PAST LEASH, OUTBID in play, a sit-out/re-place that errored,
+# OFF THE BOOK. `_hand_red_state` mirrors that function on the box off the
+# pick's blob + the strip entry the publisher just built; a red must hold
+# `_HAND_RED_MIN_TICKS` consecutive ticks (a cancel→create window flashes
+# OFF THE BOOK for a tick), pings ONCE per (pick, red) via `signal_blob.
+# red_alert`, and re-arms when the red clears. No "cleared" message, no
+# other message: `_send_fill_telegram` drops everything that does not open
+# with the red prefix (flag `telegram_all` restores the rest). Creds come
+# from env, else the parlay_state row `telegram_bot` that
+# /api/telegram/seed copies out of Vercel's env (the box .env never held
+# them). Kill switch `machine_flags hand_red_alert`.
+_HAND_STATUS_LAST: dict = {"at": 0.0, "rows": {}}
+_HAND_RED_SEEN: dict = {}
+_HAND_RED_MIN_TICKS = 2
+_TG_RED_PREFIX = "\U0001f534"       # 🔴
+
+
+def _hand_red_state(blob: dict, s: dict):
+    """Pure. (code, text) when the page would paint this bet RED, else None.
+    `s` = the strip entry (order/held/touch_c/outbid/held_unknown). A venue
+    read the box could not make (`held_unknown`) is never a red."""
+    o = s.get("order") if isinstance(s.get("order"), dict) else {}
+    resting = bool(o.get("resting"))
+    try:
+        held = float(s.get("held") or 0)
+    except (TypeError, ValueError):
+        held = 0.0
+    recon = blob.get("recon") if isinstance(blob.get("recon"), dict) else None
+    reds = [f for f in (recon or {}).get("red") or [] if isinstance(f, dict)]
+    if reds:
+        return "check_me", "CHECK ME · " + " · ".join(str(f.get("msg") or f.get("code")) for f in reds)
+    hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
+    if resting:
+        if hold and hold.get("touch_c") is not None:
+            anchor = blob.get("anchor_c", blob.get("price_c"))
+            try:
+                tc, ac = float(hold["touch_c"]), float(anchor)
+                past = f", {round((tc - ac) * 10) / 10:g}¢ past your {ac:g}¢ (leash {hold.get('leash_c', 2)}¢)"
+                touch = f"{tc:g}"
+            except (TypeError, ValueError):
+                past, touch = " past your leash", str(hold.get("touch_c"))
+            txt = f"PAST LEASH · bidders moved up to {touch}¢{past} · the box stopped chasing"
+            rr = hold.get("rerung") if isinstance(hold.get("rerung"), dict) else None
+            if rr and rr.get("slug"):
+                txt += f" · cheaper rung on the ladder: line {rr.get('line')} @ {rr.get('bid_c')}¢"
+            return "past_leash", txt
+        if s.get("outbid") and blob.get("in_play"):
+            return "outbid_live", f"OUTBID · in play · touch {s.get('touch_c')}¢ · re-peg in the app"
+        return None
+    if held > 0 or s.get("held_unknown"):
+        return None
+    lh = blob.get("line_hold") if isinstance(blob.get("line_hold"), dict) else None
+    if lh:
+        if lh.get("err"):
+            what = "RE-PLACING" if lh.get("why") == "venue_reset" else "SITTING OUT"
+            return "hold_err", f"{what} · {str(lh['err'])[:120]}"
+        return None
+    for k in ("poly_cancel_sent", "kalshi_cancel_sent", "kalshi_move_cancel_sent",
+              "start_take_window", "start_take_window_done"):
+        if isinstance(blob.get(k), dict):
+            return None                    # the box is mid-move; the page reads SWITCHING/CANCELLING
+    return "off_book", "OFF THE BOOK · no order resting and nothing held"
+
+
+def _hand_red_msg(r: dict, blob: dict, text: str) -> str:
+    label = blob.get("label") or f"{r.get('side') or ''} {r.get('market_type') or ''}".strip()
+    venue = "Kalshi" if _kalshi_pick(blob) else "Polymarket"
+    when = ""
+    try:
+        from zoneinfo import ZoneInfo
+        ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+        when = " · " + ev.astimezone(ZoneInfo("America/Phoenix")).strftime("%a %-I:%M%p").replace("AM", "a").replace("PM", "p")
+    except Exception:
+        pass
+    size = ""
+    if blob.get("contracts") is not None and blob.get("price_c") is not None:
+        size = f" · {blob['contracts']} @ {blob['price_c']}¢"
+    return f"{_TG_RED_PREFIX} {label} · {r.get('event_name') or ''}{when}\n{text}{size} · {venue}"
+
+
+def _hand_red_alert_tick(sb, now) -> dict:
+    """Handbets tick, after the reconcile: ping Telegram once per red."""
+    if not _machine_flag("hand_red_alert", True):
+        return {"off": True}
+    st = _HAND_STATUS_LAST
+    strip = st.get("rows") or {}
+    if not strip or _time.time() - float(st.get("at") or 0) > 120.0:
+        return {"skip": "no_strip"}
+    try:
+        picks = (sb.table("bot_picks")
+                 .select("id,event_name,event_start,sport,market_type,side,entry_line,signal_blob")
+                 .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                 .limit(300).execute().data or [])
+    except Exception as e:
+        return {"err": f"picks: {e}"[:120]}
+    reds = sent = cleared = 0
+    live_ids = set()
+    for r in picks:
+        pid = str(r.get("id"))
+        live_ids.add(pid)
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        s = strip.get(pid)
+        if s is None:
+            continue
+        red = _hand_red_state(blob, s)
+        ra = blob.get("red_alert") if isinstance(blob.get("red_alert"), dict) else None
+        if not red:
+            _HAND_RED_SEEN.pop(pid, None)
+            if ra:                              # the red cleared: re-arm so a recurrence pings again
+                try:
+                    nb = {k: v for k, v in blob.items() if k != "red_alert"}
+                    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                    cleared += 1
+                except Exception:
+                    pass
+            continue
+        code, text = red
+        reds += 1
+        e = _HAND_RED_SEEN.get(pid)
+        if not e or e.get("code") != code:
+            _HAND_RED_SEEN[pid] = {"code": code, "n": 1}
+            continue
+        e["n"] = int(e.get("n") or 0) + 1
+        if e["n"] < _HAND_RED_MIN_TICKS:
+            continue
+        if ra and ra.get("code") == code:
+            continue                            # this red already pinged
+        msg = _hand_red_msg(r, blob, text)
+        ok = False
+        try:
+            ok = bool(_send_fill_telegram(msg, urgent=True))
+        except Exception:
+            ok = False
+        stamp = {"kind": "hand_red_alert", "hand_red_alert": True, "pick_id": r["id"], "code": code,
+                 "text": text, "sent": ok, "creds": _tg_creds()[2],
+                 "at": datetime.now(timezone.utc).isoformat()}
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        if ok:
+            sent += 1
+            try:
+                sb.table("bot_picks").update({"signal_blob": {**blob, "red_alert": {
+                    "code": code, "at": stamp["at"], "text": text}}}).eq("id", r["id"]).execute()
+            except Exception:
+                pass
+    for pid in list(_HAND_RED_SEEN):
+        if pid not in live_ids:
+            _HAND_RED_SEEN.pop(pid, None)
+    return {"reds": reds, "sent": sent, "cleared": cleared, "creds": _tg_creds()[2]}
 
 
 _HAND_RECON_EVERY_S = 60.0
@@ -20995,6 +21182,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
             stats["recon"] = _hand_reconcile_tick(sb, client, now)   # every claim on a pick vs the venue, once a minute
         except Exception as e:
             stats["recon"] = {"err": str(e)[:80]}
+        try:
+            stats["red"] = _hand_red_alert_tick(sb, now)             # Telegram, once per red, nothing else
+        except Exception as e:
+            stats["red"] = {"err": str(e)[:80]}
     except Exception as e:
         stats["status"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     try:
@@ -21383,7 +21574,10 @@ def api_bet_sheets_mine():
             "start_seen": bool(blob.get("game_started")), "start_blind": bool(blob.get("start_blind")),
             "take_window": (blob.get("start_take_window") if isinstance(blob.get("start_take_window"), dict) else None),
             "poly_cancel_sent": (blob.get("poly_cancel_sent") if isinstance(blob.get("poly_cancel_sent"), dict) else None),
+            "kalshi_cancel_sent": bool(isinstance(blob.get("kalshi_cancel_sent"), dict)
+                                       or isinstance(blob.get("kalshi_move_cancel_sent"), dict)),
             "recon": (blob.get("recon") if isinstance(blob.get("recon"), dict) else None),
+            "red_alert": (blob.get("red_alert") if isinstance(blob.get("red_alert"), dict) else None),
             "order": (bx.get("order") if bx is not None else
                       ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
                         "price_c": (round((1 - float(o["price_yes"])) * 100, 2) if syn
@@ -44956,16 +45150,44 @@ def _early_rent_watch(sb, now=None) -> dict:
     return out
 
 
+_TG_CRED_CACHE: dict = {"ts": 0.0, "token": None, "chat": None}
+
+
+def _tg_creds():
+    """(token, chat_id, source) — Nones when unset. Env first; else the
+    parlay_state row `telegram_bot` (the kalshi_state / api_key precedent:
+    the box's .env never carried the Telegram creds, and
+    /api/telegram/seed copies Vercel's env into that row so the box reads
+    them without a .env edit). DB read cached 5 min."""
+    token = (os.environ.get("FILLED_BOT_TOKEN") or "").strip()
+    chat = (os.environ.get("FILLED_BOT_CHAT_ID") or "").strip()
+    if token and chat:
+        return token, chat, "env"
+    now = _time.time()
+    if now - _TG_CRED_CACHE["ts"] > 300:
+        _TG_CRED_CACHE["ts"] = now
+        try:
+            row = _parlay_state_get(get_supabase(), "telegram_bot")
+            v = (row or {}).get("v") or {}
+            _TG_CRED_CACHE["token"] = (str(v.get("token") or "")).strip() or None
+            _TG_CRED_CACHE["chat"] = (str(v.get("chat_id") or "")).strip() or None
+        except Exception:
+            pass
+    token = token or _TG_CRED_CACHE["token"]
+    chat = chat or _TG_CRED_CACHE["chat"]
+    if token and chat:
+        return token, chat, "db:parlay_state"
+    return None, None, None
+
+
 def _tg_send_now(text):
     """POST to Telegram sendMessage via the "Filled Bot" — the RAW sender.
-    No-op (False) when FILLED_BOT_TOKEN / FILLED_BOT_CHAT_ID aren't set in
-    Vercel env. Stdlib urllib so we don't add a new dep just for this.
-    Almost nothing should call this directly — go through
-    _send_fill_telegram (the 10-min batch queue) instead."""
+    No-op (False) without creds (`_tg_creds`: env, else the seeded DB row).
+    Stdlib urllib so we don't add a new dep just for this. Almost nothing
+    should call this directly — go through _send_fill_telegram instead."""
     import urllib.request
     import urllib.error
-    token = (os.environ.get("FILLED_BOT_TOKEN") or "").strip()
-    chat_id = (os.environ.get("FILLED_BOT_CHAT_ID") or "").strip()
+    token, chat_id, _src = _tg_creds()
     if not token or not chat_id:
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -45009,6 +45231,13 @@ def _send_fill_telegram(text, urgent=False):
     order is money off the board. An urgent send also writes a sent_at row
     so the batch window counts it (the "max one per 10 min" stays honest).
     DB unreachable → degrade to direct send rather than dropping the ping."""
+    # RED ONLY (Rob, Oct 20 2026: "If something goes Red on any of my bets,
+    # I need an alert. That's it, no other alerts"): everything that does
+    # not open with the red prefix is dropped here — 🚨-urgent included —
+    # unless `machine_flags telegram_all` is set. Dropped = True, so every
+    # caller's marker stamping keeps its semantics.
+    if not text.lstrip().startswith(_TG_RED_PREFIX) and not _machine_flag("telegram_all", False):
+        return True
     urgent = urgent or text.lstrip().startswith("🚨")
     # DIGEST DIET (user, Aug 3 — settled on: "I don't need filled
     # either"): ONLY REPEG STOP + failure states ride the digest. Fills

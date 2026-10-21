@@ -929,6 +929,8 @@
         }
         if (b.poly_cancel_sent)
             return { cls: 'rest', short: 'SWITCHING', detail: 'Polymarket cancel sent · the box is completing the move to Kalshi' };
+        if (b.kalshi_cancel_sent)
+            return { cls: 'rest', short: 'CANCELLING', detail: 'Kalshi cancel sent · the box is waiting for the book to agree' };
         return { cls: 'warn', short: 'OFF THE BOOK', detail: 'no order resting and nothing held' };
     }
     function fmtQ(x) { return String(Math.round(Number(x || 0) * 100) / 100); }

@@ -3374,6 +3374,67 @@ def test_hand_start_complete() -> None:
     check("…stamps hand_start_cancel completed for the missed list", '"completed": True' in src_f and '"hand_start_cancel": True' in src_f)
 
 
+def test_hand_red_alert() -> None:
+    """THE RED ALERT (Oct 20 2026, Rob: "If something goes Red on any of my
+    bets, I need an alert. That's it, no other alerts"): the box mirrors the
+    page's red states, pings once per red, and the sender drops every other
+    message."""
+    print("bet sheets: the red alert")
+    import app as _app
+    import inspect as _insp
+    R = _app._hand_red_state
+    resting = {"order": {"resting": True, "leaves": 5, "price_c": 44.0}, "held": 0.0, "touch_c": 45.5, "outbid": True}
+    off = {"order": {"resting": False}, "held": 0.0}
+    check("resting and chasing is not red", R({"anchor_c": 44.0}, resting) is None)
+    r = R({"anchor_c": 42.0, "chase_hold": {"touch_c": 45.0, "leash_c": 2.0, "rerung": {"slug": "x", "line": 58.5, "bid_c": 51}}}, resting)
+    check("PAST LEASH reads red with the leash math and the cheaper rung",
+          r and r[0] == "past_leash" and "3¢ past your 42¢" in r[1] and "58.5 @ 51¢" in r[1], str(r))
+    r = R({"recon": {"red": [{"code": "dead_order", "msg": "the pick's order X is not on the book"}]}}, resting)
+    check("CHECK ME is red before anything else", r and r[0] == "check_me" and "not on the book" in r[1], str(r))
+    check("outbid in play is red", R({"in_play": True}, resting)[0] == "outbid_live")
+    check("outbid pre-game is the chase's job, not red", R({}, resting) is None)
+    check("a held lot is green", R({}, {"order": {"resting": False}, "held": 5.0}) is None)
+    check("a venue read the box could not make is never red", R({}, {**off, "held_unknown": True}) is None)
+    check("nothing resting, nothing held, no box record = OFF THE BOOK", R({}, off)[0] == "off_book")
+    check("sitting out with an error is red", R({"line_hold": {"err": "create 502"}}, off)[0] == "hold_err")
+    check("sitting out cleanly is not red", R({"line_hold": {"resume_at": "x"}}, off) is None)
+    check("a Poly cancel in flight (switching) is not red", R({"poly_cancel_sent": {"at": "x"}}, off) is None)
+    check("a Kalshi move cancel in flight is not red", R({"kalshi_move_cancel_sent": {"at": "x"}}, off) is None)
+    msg = _app._hand_red_msg({"event_name": "Atlanta Hawks @ Orlando Magic", "event_start": "2026-10-21T23:00:00+00:00",
+                              "side": "away", "market_type": "moneyline"},
+                             {"label": "Atlanta ML", "contracts": 5, "price_c": 44.0}, "PAST LEASH · x")
+    check("the message opens with the red dot and names the bet, the game, the AZ time and the venue",
+          msg.startswith(_app._TG_RED_PREFIX) and "Atlanta ML" in msg and "Wed 4:00p" in msg and "Polymarket" in msg and "5 @ 44.0¢" in msg, msg)
+    # THE GATE: nothing but a red leaves the box
+    sent = []
+    old_now, old_flag, old_sb = _app._tg_send_now, _app._machine_flag, _app.get_supabase
+    _app._tg_send_now = lambda t: sent.append(t) or True
+    _app._machine_flag = lambda k, default=True: default
+    _app.get_supabase = lambda: None
+    try:
+        ok = _app._send_fill_telegram("🚨 ORDER LOST — anything", urgent=True)
+        check("an urgent non-red message is dropped (and reads as handled)", ok is True and not sent)
+        ok = _app._send_fill_telegram("LOST: a digest line")
+        check("a digest-class message is dropped too", ok is True and not sent)
+        ok = _app._send_fill_telegram(_app._TG_RED_PREFIX + " Atlanta ML\nPAST LEASH", urgent=True)
+        check("a red message goes out now", ok is True and len(sent) == 1 and sent[0].startswith(_app._TG_RED_PREFIX))
+        _app._machine_flag = lambda k, default=True: True if k == "telegram_all" else default
+        _app._send_fill_telegram("🚨 ORDER LOST — anything", urgent=True)
+        check("machine_flags telegram_all restores the rest", len(sent) == 2)
+    finally:
+        _app._tg_send_now, _app._machine_flag, _app.get_supabase = old_now, old_flag, old_sb
+    src = _insp.getsource(_app._hand_orders_tick)
+    check("the handbets tick runs the red alert after the reconcile",
+          '_hand_red_alert_tick(sb, now)' in src and src.index('_hand_reconcile_tick') < src.index('_hand_red_alert_tick'))
+    check("a red must hold two ticks before it pings", _app._HAND_RED_MIN_TICKS >= 2)
+    check("the publisher hands the red tick its strip", '_HAND_STATUS_LAST.update' in _insp.getsource(_app._hand_status_publish))
+    tsrc = _insp.getsource(_app._hand_red_alert_tick)
+    check("one ping per (pick, red): the blob stamp gates the resend and clears with the red",
+          'ra.get("code") == code' in tsrc and 'k != "red_alert"' in tsrc)
+    check("the raw sender reads creds through _tg_creds (env, else the seeded DB row)",
+          '_tg_creds()' in _insp.getsource(_app._tg_send_now) and 'telegram_bot' in _insp.getsource(_app._tg_creds))
+
+
 def test_hand_guard_and_recon() -> None:
     """THE RELIABILITY LAYER (Oct 20 2026, Rob: "wrong sides, bad bets,
     duplicated bets… I want this fucker humming"): (1) the rejoin-hold cap
@@ -4881,7 +4942,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_guard_and_recon, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
