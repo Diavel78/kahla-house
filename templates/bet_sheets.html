@@ -901,7 +901,7 @@
             if (hold && hold.touch_c != null && rr)
                 return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it, re-peg it or cancel') };
             if (hold && hold.touch_c != null)
-                return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing — ' + (b.read ? recShort(b, null) : 'the box stopped chasing') };
+                return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing — ' + (b.read ? recShort(b, null) : 'no model read on this game — re-peg it or cancel') };
             if (b.live_snipe)
                 return { cls: 'rest', short: 'LIVE', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · no game-start cancel · yours to watch' };
             if (b.outbid && b.in_play)

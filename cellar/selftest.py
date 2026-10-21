@@ -4191,6 +4191,7 @@ def test_bet_sheet_reads() -> None:
     playable option that earns more per dollar, else cancel."""
     print("bet sheets: the model's read on a moved line")
     import app as _app
+    import inspect as _insp
     # football: the sheet's ECU@UAB shape — model total 49.6 (cal), stay O 47.5
     # @ 52¢ vs move O 48.5 @ 49¢; snapshot fit = identity, sd 13.
     snap = {"params": {"total_fit": {"alpha": 0.0, "beta": 1.0, "sd": 13.0, "mean": 0.0},
@@ -4256,6 +4257,21 @@ def test_bet_sheet_reads() -> None:
     check("negative value at the price is not playable", R({**a, "value_c": -1.0}, {**m, "verdict": "pass"}) == "cancel")
     check("neither priced → no recommendation", R(None, None) is None)
     check("no rung found → re-peg or cancel only", R(a, None) == "repeg" and R({**a, "verdict": "pass"}, None) == "cancel")
+    # MONEYLINES (Oct 20 2026, the Atlanta ML past its leash with no star):
+    # priced off the sheet's win prob; the chalk rule caps the read at 60¢.
+    o = _app._bs_option_read(None, "NBA", {"model": {"win_home": 0.42}}, "moneyline", "away", None, 45.5)
+    check("NBA away ML off win_home: 58% vs 45.5¢ = +12.5 is past the cap → pass with a reason",
+          o is not None and abs(o["model_p"] - 0.58) < 1e-9 and o["verdict"] == "pass" and "past" in (o.get("why") or ""), str(o))
+    o = _app._bs_option_read(None, "NBA", {"model": {"win_home": 0.42}}, "moneyline", "away", None, 54.0)
+    check("…at 54¢ the same side is +4 = PLAY", o["verdict"] == "play" and o["value_c"] == 4.0, str(o))
+    o = _app._bs_option_read(None, "NHL", {"model": {"win_home": 0.66}}, "moneyline", "home", None, 61.0)
+    check("NHL home ML at 61¢: +5 but the chalk rule passes it", o["verdict"] == "pass" and "chalk" in (o.get("why") or ""), str(o))
+    o = _app._bs_option_read(None, "NCAAF", {"friday": {"model": {"win_prob_home": 0.70}}}, "moneyline", "home", None, 59.0)
+    check("football ML reads win_prob_home on the pp bar, not the points bar", o["model_p"] == 0.7 and o["verdict"] == "play" and o["pts"] is None, str(o))
+    check("MLB ML is lean-capped", _app._bs_option_read(None, "MLB", {"model": {"win_home": 0.55}}, "moneyline", "home", None, 48.0)["verdict"] == "lean")
+    check("an ML the blob cannot price reads None", _app._bs_option_read(None, "NBA", {"model": {}}, "moneyline", "home", None, 50.0) is None)
+    src = _insp.getsource(_app._bet_sheet_reads)
+    check("_bet_sheet_reads prices moneylines", '"moneyline"' in src)
 
 
 def test_mlb_sheet() -> None:

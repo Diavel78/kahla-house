@@ -21448,7 +21448,15 @@ _BS_READ_PP = {   # (play, lean, implausible) in pp — None play = lean-capped
     ("NHL", "spread"): (4.0, 2.0, 12.0), ("NHL", "total"): (5.0, 5.0, 12.0),
     ("NBA", "spread"): (None, 4.0, 12.0), ("NBA", "total"): (None, 4.0, 12.0),
     ("MLB", "spread"): (None, 4.0, 12.0),
+    # MONEYLINES (Oct 20 2026, Rob on an Atlanta ML reading PAST LEASH with no
+    # star: "If it's red... I want the recommendation"): the sheet's own ML
+    # thresholds (nhl/nba_sheet_data ML_*_PP; MLB lean-capped; football's
+    # win prob is gate-1 validated, same 4/2 bar as hockey).
+    ("NHL", "moneyline"): (4.0, 2.0, 12.0), ("NBA", "moneyline"): (4.0, 2.0, 12.0),
+    ("MLB", "moneyline"): (None, 4.0, 12.0),
+    ("NFL", "moneyline"): (4.0, 2.0, 12.0), ("NCAAF", "moneyline"): (4.0, 2.0, 12.0),
 }
+_BS_READ_CHALK_C = 60.0       # the chalk rule (−150) in cents: no ML read past it
 
 
 def _bs_ncdf(x: float) -> float:
@@ -21481,6 +21489,19 @@ def _bs_sheet_blob(sb, sport: str, market_id, event_name, cache: dict):
 def _bs_line_prob(sb, sport: str, blob: dict, mt: str, side: str, line):
     """(model P(this side wins at this line), football points past the
     line or None). None when the sheet's model cannot price the line."""
+    if mt == "moneyline":
+        if side not in ("home", "away"):
+            return None
+        if sport in ("NFL", "NCAAF"):
+            m = (blob.get("friday") or {}).get("model") or blob.get("model") or {}
+            wh = m.get("win_prob_home")
+        else:
+            wh = (blob.get("model") or {}).get("win_home")
+        try:
+            wh = float(wh)
+        except (TypeError, ValueError):
+            return None
+        return (wh if side == "home" else 1.0 - wh), None
     try:
         L = float(line)
     except (TypeError, ValueError):
@@ -21557,7 +21578,7 @@ def _bs_option_read(sb, sport, blob, mt, side, line, price_c):
     out = {"line": line, "model_p": round(p, 4), "fair": _american_from_p(p), "pts": pts,
            "price_c": price_c,
            "value_c": (round(p * 100.0 - float(price_c), 1) if price_c is not None else None)}
-    if sport in ("NFL", "NCAAF"):
+    if sport in ("NFL", "NCAAF") and mt != "moneyline":
         e = pts or 0.0
         v = "play" if e >= _BS_READ_FB_PLAY_PTS else "lean" if e >= _BS_READ_FB_LEAN_PTS else "pass"
         if abs(e) > _BS_READ_FB_GAP_PTS.get(mt, 99.0):
@@ -21575,6 +21596,9 @@ def _bs_option_read(sb, sport, blob, mt, side, line, price_c):
                 # has meant the market was right every time it was measured
                 v = "pass"
                 out["why"] = f"a {e:.1f}¢ edge is past the {imp:.0f}¢ the model is trusted to"
+            if mt == "moneyline" and v != "pass" and float(price_c) >= _BS_READ_CHALK_C:
+                v = "pass"   # THE CHALK RULE: the sheet gives no ML bet at −150 or shorter
+                out["why"] = f"{price_c:g}¢ is −150 or shorter — the chalk rule, no moneyline past it"
     out["verdict"] = v
     return out
 
@@ -21663,7 +21687,9 @@ def _bet_sheet_reads(sb, out: list) -> None:
             continue
         mt, side = b.get("market_type"), b.get("side")
         sport = (b.get("sport") or "").upper()
-        if mt not in ("spread", "total") or b.get("line") is None:
+        if mt == "moneyline":
+            pass                                   # no line, no ladder: stay or cancel
+        elif mt not in ("spread", "total") or b.get("line") is None:
             continue
         blob = _bs_sheet_blob(sb, sport, b.get("market_id"), b.get("event_name"), cache)
         if not blob:
