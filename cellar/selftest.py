@@ -3364,6 +3364,118 @@ def test_hand_start_complete() -> None:
     check("…stamps hand_start_cancel completed for the missed list", '"completed": True' in src_f and '"hand_start_cancel": True' in src_f)
 
 
+def test_hand_guard_and_recon() -> None:
+    """THE RELIABILITY LAYER (Oct 20 2026, Rob: "wrong sides, bad bets,
+    duplicated bets… I want this fucker humming"): (1) the rejoin-hold cap
+    reads the same on every climb path — the Kalshi chase ignored it and
+    chased every vanish drop straight back up (SALA −2.5, three drops in 64s);
+    (2) a venue switch is a climb too and may not land above the cap, and may
+    not run twice inside the gap (8 switches in 90 min on one bet); (3) one
+    order per bet per slug + slug-agrees-with-bet, checked AT the create, on
+    both venues; (4) the minute reconcile flags a dead order id, a wrong side,
+    duplicate orders/picks, and heals a price drift."""
+    import inspect
+    import app as _app
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 10, 20, 20, 0, tzinfo=timezone.utc)
+    ev = now + timedelta(hours=3)
+    # (1) the cap
+    hold = {"cap_c": 47.0, "until": (now + timedelta(minutes=20)).isoformat()}
+    check("a live rejoin hold caps at its rung", _app._hand_rejoin_cap({"rejoin_hold": hold}, now, ev, 30.0) == 47.0)
+    check("an expired hold caps nothing",
+          _app._hand_rejoin_cap({"rejoin_hold": {**hold, "until": (now - timedelta(seconds=1)).isoformat()}}, now, ev, 30.0) is None)
+    check("inside T-30 the hold is over whatever it says",
+          _app._hand_rejoin_cap({"rejoin_hold": hold}, now, now + timedelta(minutes=20), 30.0) is None)
+    check("no hold, no cap", _app._hand_rejoin_cap({}, now, ev, 30.0) is None)
+    src_k = inspect.getsource(_app._hand_chase_kalshi)
+    check("the Kalshi chase passes the rejoin cap to the planner", "cap_c=_hand_rejoin_cap(" in src_k)
+    src_p = inspect.getsource(_app._hand_chase_tick)
+    check("the Polymarket chase reads the cap through the same helper", "_hand_rejoin_cap(" in src_p)
+    # (2) the switch brake
+    sw = {"venue_switches": [{"at": (now - timedelta(minutes=3)).isoformat()}]}
+    check("a switch 3 min after the last is refused", _app._hand_switch_gap_s_ok(sw, now, 900.0) is False)
+    check("…20 min after is allowed", _app._hand_switch_gap_s_ok({"venue_switches": [{"at": (now - timedelta(minutes=20)).isoformat()}]}, now, 900.0))
+    check("a never-switched bet may switch", _app._hand_switch_gap_s_ok({}, now, 900.0))
+    r = {"event_start": ev.isoformat()}
+    check("a switch may not land above the rejoin cap", _app._hand_switch_cap_ok({"rejoin_hold": hold}, r, now, 49.0) is False)
+    check("…at or under the cap is fine", _app._hand_switch_cap_ok({"rejoin_hold": hold}, r, now, 47.0))
+    for fn in (_app._hand_switch_to_poly, _app._hand_switch_to_kalshi):
+        check(f"{fn.__name__} checks the cap", "_hand_switch_cap_ok(" in inspect.getsource(fn))
+    check("the switch gate reads the persisted gap", "_hand_switch_gap_s_ok(" in inspect.getsource(_app._hand_switch_ok))
+    # (3) the create guard
+    O = lambda oid, slug, intent, state="ORDER_STATE_NEW": {"id": oid, "slug": slug, "intent": intent, "state": state,
+                                                             "price_yes": 0.49, "leaves": 5}
+    orders = [O("A", "s1", "ORDER_INTENT_BUY_LONG"), O("B", "s1", "ORDER_INTENT_BUY_SHORT"),
+              O("C", "s2", "ORDER_INTENT_BUY_LONG", "ORDER_STATE_FILLED")]
+    check("dup read: our side of the slug only", [o["id"] for o in _app._hand_dup_from_orders(orders, "s1", False)] == ["A"])
+    check("dup read: a NO bet sees the SHORT order", [o["id"] for o in _app._hand_dup_from_orders(orders, "s1", True)] == ["B"])
+    check("dup read: a terminal order is not a dup", _app._hand_dup_from_orders(orders, "s2", False) == [])
+    check("dup read: unreadable list reads None", _app._hand_dup_from_orders(None, "s1", False) is None)
+    ko = {"k1": {"ticker": "T", "status": "resting", "remaining": 5, "side": "yes", "action": "buy"},
+          "k2": {"ticker": "T", "status": "resting", "remaining": 5, "side": "no", "action": "buy"},
+          "k3": {"ticker": "T", "status": "canceled", "remaining": 0, "side": "yes", "action": "buy"}}
+    check("kalshi dup read: ticker + side", [o["side"] for o in _app._kalshi_dup_from_orders(ko, "T", True)] == ["yes"])
+    check("kalshi dup read: none on another ticker", _app._kalshi_dup_from_orders(ko, "U", True) == [])
+    check("the row's identity feeds the slug check",
+          _app._hand_expect({"market_type": "moneyline", "side": "away", "entry_line": None}) == {"mt": "ml", "side": "away", "line": None}
+          and _app._hand_expect({"id": 1}) is None)
+    src_m = inspect.getsource(_app._manual_order_place)
+    check("every Polymarket hand create runs the guard", "_hand_create_guard(client, slug, synthetic, expect" in src_m)
+    i_g, i_c = src_m.find("_hand_create_guard("), src_m.find("client.orders.create(")
+    check("…before the create", 0 < i_g < i_c)
+    src_g = inspect.getsource(_app._hand_create_guard)
+    check("the guard asks the mirror first and confirms a dup fresh",
+          "fresh=False" in src_g and "fresh=True" in src_g and src_g.find("fresh=False") < src_g.find("fresh=True"))
+    check("the guard refuses a slug that disagrees with the bet", "_bet_sheet_slug_disagrees(" in src_g and '"side_slug"' in src_g)
+    src_kp = inspect.getsource(_app._kalshi_order_place)
+    i_d, i_cr = src_kp.find("_kalshi_dup_from_orders("), src_kp.find("_kv.create_order(")
+    check("every Kalshi hand create checks for a resting twin first", 0 < i_d < i_cr)
+    for fn in (_app._hand_move_tick, _app._hand_switch_to_poly):
+        check(f"{fn.__name__} tells the create what the bet is", "expect=_hand_expect(r)" in inspect.getsource(fn))
+    # (4) the reconcile
+    base = {"id": 1, "event_start": ev.isoformat(), "market_type": "spread", "side": "away", "entry_line": -2.5}
+    slug = "asc-cfb-sala-marsh-2026-10-20-neg-2pt5"
+    blob = {"bet_sheet": True, "pmm_slug": slug, "pmm_synthetic": False, "order_id": "X1", "price_c": 49.0}
+    ctx = {"poly_orders": [O("X1", slug, "ORDER_INTENT_BUY_LONG")], "positions": {}, "k_orders": {}, "k_pos": {},
+           "pending_keys": {("P", slug, False): 1}}
+    check("a resting bet that matches its slug is clean", _app._hand_recon_flags(base, blob, now, ctx) == [])
+    f = _app._hand_recon_flags(base, {**blob, "order_id": "GONE"}, now, ctx)
+    check("a dead order id is red", [x["code"] for x in f] == ["dead_order"] and f[0]["level"] == "red")
+    f = _app._hand_recon_flags(base, {**blob, "order_id": "GONE", "line_hold": {"at": now.isoformat()}}, now, ctx)
+    check("…unless the box has a record (sitting out)", f == [])
+    f = _app._hand_recon_flags(base, {**blob, "order_id": "GONE", "filled": True, "filled_qty": 5}, now, ctx)
+    check("…or the bet filled", f == [])
+    f = _app._hand_recon_flags({**base, "side": "home", "entry_line": 2.5}, blob, now, ctx)
+    check("a side that disagrees with the slug is red", "side_slug" in [x["code"] for x in f])
+    ctx2 = {**ctx, "poly_orders": ctx["poly_orders"] + [O("X2", slug, "ORDER_INTENT_BUY_LONG")]}
+    f = _app._hand_recon_flags(base, blob, now, ctx2)
+    check("two orders on one bet is red", [x["code"] for x in f] == ["dup_order"])
+    f = _app._hand_recon_flags(base, blob, now, {**ctx, "pending_keys": {("P", slug, False): 2}})
+    check("two pending picks on one slug+side is red", [x["code"] for x in f] == ["dup_pick"])
+    f = _app._hand_recon_flags(base, {**blob, "price_c": 47.0}, now, ctx)
+    check("a price drift is amber with the venue's number", f and f[0]["code"] == "price_drift" and f[0]["level"] == "amber" and f[0]["venue_c"] == 49.0)
+    check("a started game is nobody's to reconcile", _app._hand_recon_flags({**base, "event_start": (now - timedelta(minutes=5)).isoformat()}, {**blob, "order_id": "GONE"}, now, ctx) == [])
+    check("an unreadable orders list flags nothing", _app._hand_recon_flags(base, {**blob, "order_id": "GONE"}, now, {**ctx, "poly_orders": None}) == [])
+    kb = {"bet_sheet": True, "venue": "KALSHI", "kalshi_ticker": "T", "kalshi_buy_yes": True, "kalshi_order_id": "k1", "price_c": 49.0}
+    kctx = {"poly_orders": [], "positions": {}, "pending_keys": {("K", "T", True): 1},
+            "k_orders": {"k1": {"order_id": "k1", "ticker": "T", "status": "resting", "remaining": 5, "side": "yes", "action": "buy", "yes_c": 49.0}},
+            "k_pos": {}}
+    check("a resting Kalshi bet is clean", _app._hand_recon_flags(base, kb, now, kctx) == [])
+    f = _app._hand_recon_flags(base, {**kb, "kalshi_order_id": "zz"}, now, kctx)
+    check("a dead Kalshi order id is red", [x["code"] for x in f] == ["dead_order"])
+    f = _app._hand_recon_flags(base, {**kb, "kalshi_order_id": "zz", "kalshi_move_cancel_sent": {"at": now.isoformat()}}, now, kctx)
+    check("…unless the box's move cancel is pending", f == [])
+    src_t = inspect.getsource(_app._hand_orders_tick)
+    check("the reconcile rides the handbets tick", "_hand_reconcile_tick(" in src_t)
+    src_r = inspect.getsource(_app._hand_reconcile_tick)
+    check("the reconcile reads both venues fresh", src_r.count("fresh=True") >= 3)
+    check("…heals a drift only when seen twice", "_HAND_RECON_PRICE_SEEN" in src_r and "anchor_c" not in src_r.split("nb[\"price_c\"]")[1][:400].replace("never touched", ""))
+    import os as _os
+    _root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    html = open(_os.path.join(_root, "templates", "bet_sheets.html"), encoding="utf-8").read()
+    check("the page reads CHECK ME off a red reconcile", "b.recon.red" in html and "CHECK ME" in html)
+
+
 def test_pmm_thunder_total() -> None:
     """THE THUNDER RULE (Oct 20 2026): "ThUNDER" contains "under". The total
     classifier read every OKC total market as an UNDER market, so a Bet
@@ -4374,9 +4486,14 @@ def test_sheet_pinnacle_line() -> None:
     src = inspect.getsource(_app._pin_stamp_rows)
     check("the bet-time Pinnacle stamp is CACHE-ONLY (never spends a credit)",
           "_pin_slate(" not in src and "_pin_slate_cached(" in src)
+    import re as _re
+    def _spends(f):
+        src_f = inspect.getsource(f) if inspect.isfunction(f) else ""
+        # a `paid=False` pull is Pinnacle's own free feed (Oct 10 2026) — never a credit
+        return any("paid=False" not in c for c in _re.findall(r"_pin_slate\(sb[^)]*\)", src_f))
     spenders = [n for n, f in vars(_app).items()
                 if callable(f) and getattr(f, "__module__", None) == _app.__name__
-                and n not in ("_pin_slate",) and "_pin_slate(sb" in (inspect.getsource(f) if inspect.isfunction(f) else "")]
+                and n not in ("_pin_slate",) and _spends(f)]
     check("only _pin_daily_refresh spends Pinnacle credits inside app.py",
           set(spenders) == {"_pin_daily_refresh"}, f"got {spenders}")
 
@@ -4738,7 +4855,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_guard_and_recon, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

@@ -14671,8 +14671,114 @@ def _mirror_order_seen(oid, wait_s: float = 2.5):
         _time.sleep(0.1)
 
 
+def _hand_dup_from_orders(orders, slug: str, synthetic: bool):
+    """Pure. The open orders already resting on OUR side of `slug`
+    (BUY_SHORT when synthetic, else BUY_LONG) off a `_pmm_open_orders_raw`
+    list. [] = none; None = the list was unreadable."""
+    if orders is None:
+        return None
+    want = "BUY_SHORT" if synthetic else "BUY_LONG"
+    out = []
+    for o in orders:
+        if not isinstance(o, dict) or o.get("slug") != slug:
+            continue
+        if o.get("state") not in _OPEN_ORDER_STATES:
+            continue
+        if want not in str(o.get("intent") or ""):
+            continue
+        out.append(o)
+    return out
+
+
+def _hand_expect(r: dict | None):
+    """The (market type, side, line) a pick row says it is — the shape
+    `_bet_sheet_slug_disagrees` checks a slug against. None when the row
+    was not selected with those columns."""
+    if not isinstance(r, dict) or not r.get("market_type") or not r.get("side"):
+        return None
+    mt = str(r.get("market_type"))
+    return {"mt": {"moneyline": "ml"}.get(mt, mt), "side": r.get("side"), "line": r.get("entry_line")}
+
+
+def _hand_create_guard(client, slug: str, synthetic: bool, expect: dict | None, allow_dup: bool = False):
+    """THE PRE-WRITE INVARIANTS, AT THE WRITE (Oct 20 2026, Rob: "wrong sides,
+    bad bets, duplicated bets… let's get our shit together"). Every path that
+    rests a Polymarket hand order — the slip, a line-move rejoin, a venue
+    switch, a re-rung, a venue-reset re-seat — runs through
+    `_manual_order_place`, so the two rules live HERE and not in each caller:
+    (1) ONE ORDER PER BET PER SLUG — a fresh orders list; an order already
+    resting on our side of the slug refuses the create (the chase moves ONE
+    order id; a twin is stranded the first time the book moves); an
+    unreadable list refuses too — never a blind write. (2) THE SLUG AGREES
+    WITH THE BET — when the caller says what the bet is (`expect`), the
+    venue's slug convention must read the same side and line
+    (`_bet_sheet_slug_disagrees`: the NMSU +6.5 on FIU, the Thunder "Under"
+    long the over). None = clear; else (payload, http) to return."""
+    if expect:
+        try:
+            why = _bet_sheet_slug_disagrees({"slug": slug, "synthetic": synthetic,
+                                             "side": expect.get("side"), "line": expect.get("line")},
+                                            str(expect.get("mt") or ""))
+        except Exception:
+            why = None
+        if why:
+            try:
+                _probe_log({"hand_guard_refused": True, "venue": "POLYMARKET", "slug": slug, "why": "side_slug",
+                            "expect": expect, "synthetic": synthetic, "at": datetime.now(timezone.utc).isoformat()})
+            except Exception:
+                pass
+            return {"ok": False, "error": why, "guard": "side_slug"}, 409
+    if allow_dup:
+        return None
+    # MIRROR FIRST (Oct 7 2026: a full orders.list per create tripped the venue's
+    # 20s rate-limit breaker every 5-6 bets of a slip). The socket-fed mirror
+    # answers "is there already an order on this slug"; a dup it reports is
+    # CONFIRMED with one fresh read before the create is refused, so a stale
+    # mirror can never block a bet — and an empty mirror never costs a read.
+    dups = _hand_dup_from_orders(_pmm_open_orders_raw(client, fresh=False), slug, synthetic)
+    if dups:
+        dups = _hand_dup_from_orders(_pmm_open_orders_raw(client, fresh=True), slug, synthetic)
+    if dups is None:
+        return {"ok": False, "error": "orders unreadable — not placing blind (one order per bet)",
+                "guard": "orders_unreadable"}, 503
+    if dups:
+        d = dups[0]
+        try:
+            pc = round((1 - float(d["price_yes"])) * 100, 2) if synthetic else round(float(d["price_yes"]) * 100, 2)
+        except (TypeError, ValueError, KeyError):
+            pc = None
+        try:
+            _probe_log({"hand_guard_refused": True, "venue": "POLYMARKET", "slug": slug, "why": "dup_order",
+                        "existing": [{"id": x.get("id"), "leaves": x.get("leaves"), "price_yes": x.get("price_yes"),
+                                      "manual": x.get("manual")} for x in dups][:4],
+                        "at": datetime.now(timezone.utc).isoformat()})
+        except Exception:
+            pass
+        return {"ok": False, "guard": "dup_order", "dup_order_id": d.get("id"),
+                "error": (f"an order already rests on this side of {slug} (id {d.get('id')}, "
+                          f"{d.get('leaves')} left" + (f" at {pc:g}¢" if pc is not None else "") +
+                          ") — one order per bet; re-peg or cancel that one instead")}, 409
+    return None
+
+
+def _kalshi_dup_from_orders(orders, ticker: str, buy_yes: bool):
+    """Pure. Resting Kalshi BUY orders already on our side of `ticker` off a
+    `resting_orders()["by_id"]` map. [] = none; None = unreadable."""
+    import kalshi_venue as _kv
+    if orders is None:
+        return None
+    want = "yes" if buy_yes else "no"
+    out = []
+    for o in (orders or {}).values():
+        if (o.get("ticker") == ticker and o.get("status") in _kv.RESTING and float(o.get("remaining") or 0) > 0
+                and str(o.get("side") or "").lower() == want and str(o.get("action") or "buy").lower() == "buy"):
+            out.append(o)
+    return out
+
+
 def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
-                        event_start, book: dict | None = None, verify: str = "fresh"):
+                        event_start, book: dict | None = None, verify: str = "fresh",
+                        expect: dict | None = None, allow_dup: bool = False):
     """THE HAND BET — one post-only MANUAL order (Aug 22 2026 rails, lifted
     out of the route Oct 3 2026 so the Bet Sheets slip can place a list of
     them). Returns (payload, http_status); payload['ok'] False carries
@@ -14713,6 +14819,9 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
                 "bets only"}, 400
     if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
         return {"ok": False, "error": "game already started — pre-game bets only"}, 400
+    guard = _hand_create_guard(client, slug, synthetic, expect, allow_dup=allow_dup)
+    if guard is not None:
+        return guard                     # one order per bet / the slug agrees with the bet (Oct 20 2026)
     canon = (100.0 - price_c) / 100.0 if synthetic else price_c / 100.0
     params = {"marketSlug": slug,
               "intent": ("ORDER_INTENT_BUY_SHORT" if synthetic
@@ -15769,6 +15878,219 @@ def _hand_status_publish(sb, client) -> dict:
     except Exception as e:
         return {"err": f"publish: {e}"[:120]}
     return {"n": len(out), "quoted": quoted}
+
+
+_HAND_RECON_EVERY_S = 60.0
+_HAND_RECON_LAST: dict = {"at": 0.0}
+_HAND_RECON_PRICE_SEEN: dict = {}       # pick_id → (venue price, monotonic) — heal a drift seen twice, never a lagging list
+
+
+def _hand_recon_flags(r: dict, blob: dict, now, ctx: dict) -> list:
+    """Pure. THE VENUE RECONCILE for one pending hand bet — every fact the
+    pick claims, checked against fresh venue reads (`ctx`: poly_orders list,
+    positions map, k_orders by id, k_pos, pending_keys Counter of every
+    pending sheet pick's (venue, market, side)). Each flag: {code, level
+    red|amber, msg}. RED = the page says CHECK ME and nothing else about the
+    bet is trusted until it clears. Built Oct 20 2026 after a day of wrong
+    sides, dead order ids and duplicate orders that each sat unseen for
+    hours: the Thunder U232.5 long the over (8h), the Delaware O52.5 keeping
+    a cancelled order id into the game, SALA −2.5 dropped three times in a
+    minute. Pre-game picks only — a started game belongs to the start rule
+    and the resolver."""
+    import kalshi_venue as _kv
+    flags = []
+    try:
+        ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return flags
+    if ev.astimezone(timezone.utc) <= now:
+        return flags
+    if blob.get("live_snipe") or blob.get("in_play"):
+        return flags
+    box_markers = ("line_hold", "poly_cancel_sent", "kalshi_cancel_sent", "kalshi_move_cancel_sent",
+                   "start_take_window_done", "start_take_window")
+    marked = any(isinstance(blob.get(k), dict) for k in box_markers)
+    filled = bool(blob.get("filled")) or float(blob.get("filled_qty") or 0) > 0
+    keys = ctx.get("pending_keys") or {}
+
+    def _mt():
+        return {"moneyline": "ml"}.get(str(r.get("market_type") or ""), str(r.get("market_type") or ""))
+
+    if _kalshi_pick(blob):
+        ticker, by, koid = blob.get("kalshi_ticker"), bool(blob.get("kalshi_buy_yes")), blob.get("kalshi_order_id")
+        k_orders, k_pos = ctx.get("k_orders"), ctx.get("k_pos")
+        if not ticker:
+            flags.append({"code": "no_ticker", "level": "red", "msg": "Kalshi pick with no ticker"})
+            return flags
+        held = _kv.held_for(k_pos, ticker, by) if k_pos is not None else None
+        o = _kalshi_pick_order(blob, k_orders) if k_orders is not None else None
+        if k_orders is not None:
+            dups = _kalshi_dup_from_orders(k_orders, ticker, by)
+            if dups is not None and len(dups) > 1:
+                flags.append({"code": "dup_order", "level": "red",
+                              "msg": f"{len(dups)} orders rest on this side of {ticker} — one order per bet"})
+            if koid and o is None and (held is not None and held < 1) and not marked and not filled:
+                flags.append({"code": "dead_order", "level": "red",
+                              "msg": f"the pick's Kalshi order {str(koid)[:8]}… is not on the book and nothing is held"})
+            if not koid and (held is not None and held < 1) and not marked and not filled:
+                flags.append({"code": "off_book", "level": "red", "msg": "no order resting on Kalshi and nothing held"})
+            if o is not None and blob.get("price_c") is not None:
+                try:
+                    vc = _kv.our_c(o.get("yes_c"), by)
+                    if vc is not None and abs(float(vc) - float(blob["price_c"])) > 0.01:
+                        flags.append({"code": "price_drift", "level": "amber", "venue_c": vc,
+                                      "msg": f"the order rests at {vc:g}¢, the pick says {float(blob['price_c']):g}¢"})
+                except (TypeError, ValueError):
+                    pass
+        if keys.get(("K", ticker, by), 0) > 1:
+            flags.append({"code": "dup_pick", "level": "red",
+                          "msg": f"{keys[('K', ticker, by)]} pending sheet picks on this side of {ticker}"})
+        return flags
+
+    slug, syn, oid = blob.get("pmm_slug"), bool(blob.get("pmm_synthetic")), blob.get("order_id")
+    orders, positions = ctx.get("poly_orders"), ctx.get("positions")
+    if not slug:
+        return flags
+    exp = _hand_expect(r)
+    if exp:
+        try:
+            why = _bet_sheet_slug_disagrees({"slug": slug, "synthetic": syn, "side": exp["side"], "line": exp["line"]},
+                                            exp["mt"])
+        except Exception:
+            why = None
+        if why:
+            flags.append({"code": "side_slug", "level": "red", "msg": why.replace(" — not placing", "")})
+    held = _bet_sheet_pick_side_held((positions or {}).get(slug), syn) if positions is not None else None
+    if orders is not None:
+        mine = _hand_dup_from_orders(orders, slug, syn) or []
+        if len(mine) > 1:
+            flags.append({"code": "dup_order", "level": "red",
+                          "msg": f"{len(mine)} orders rest on this side of {slug} — one order per bet"})
+        o = next((x for x in mine if x.get("id") == oid), None) if oid else None
+        if oid and o is None and (held is not None and held < 1) and not marked and not filled:
+            flags.append({"code": "dead_order", "level": "red",
+                          "msg": f"the pick's order {oid} is not on the book and nothing is held"})
+        if not oid and (held is not None and held < 1) and not marked and not filled:
+            flags.append({"code": "off_book", "level": "red", "msg": "no order resting and nothing held"})
+        if o is not None and blob.get("price_c") is not None and o.get("price_yes") is not None:
+            try:
+                vc = round((1 - float(o["price_yes"])) * 100, 2) if syn else round(float(o["price_yes"]) * 100, 2)
+                if abs(vc - float(blob["price_c"])) > 0.01:
+                    flags.append({"code": "price_drift", "level": "amber", "venue_c": vc,
+                                  "msg": f"the order rests at {vc:g}¢, the pick says {float(blob['price_c']):g}¢"})
+            except (TypeError, ValueError):
+                pass
+    if keys.get(("P", slug, syn), 0) > 1:
+        flags.append({"code": "dup_pick", "level": "red",
+                      "msg": f"{keys[('P', slug, syn)]} pending sheet picks on this side of {slug}"})
+    return flags
+
+
+def _hand_reconcile_tick(sb, client, now) -> dict:
+    """THE HAND-LANE RECONCILE (Oct 20 2026, Rob: "I want this fucker
+    humming"). Once a minute: fresh venue reads (Polymarket orders +
+    positions, Kalshi orders + positions when any Kalshi pick rests), then
+    `_hand_recon_flags` on every pending pre-game sheet pick. Red flags land
+    on the pick as `signal_blob.recon` (the page reads CHECK ME, red) and
+    stamp `exec_probe_runs hand_recon` the first time they appear; a clean
+    pick loses the field. The one self-heal: a price drift the venue has
+    shown on two passes rewrites `price_c` to the venue's number (the venue
+    is the truth of where the order sits; `anchor_c` — Rob's price — is
+    never touched). Kill switch `machine_flags hand_recon`."""
+    st = {"picks": 0, "red": 0, "amber": 0, "changed": 0, "healed": 0, "cleared": 0}
+    if not _machine_flag("hand_recon", True):
+        return {"off": True}
+    if _time.monotonic() - _HAND_RECON_LAST["at"] < _HAND_RECON_EVERY_S:
+        return {"skip": True}
+    _HAND_RECON_LAST["at"] = _time.monotonic()
+    try:
+        rows = (sb.table("bot_picks").select("id,event_start,event_name,market_type,side,entry_line,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .limit(300).execute().data or [])
+    except Exception as e:
+        return {"err": f"picks: {e}"[:120]}
+    orders = _pmm_open_orders_raw(client, fresh=True)
+    positions = _pmm_positions_raw(client, fresh=True)
+    if positions is not None and _hand_positions_partial(sb, positions):
+        positions = None                      # a partial positions read is no read (the Oct 5 retire scar)
+    k_orders = k_pos = None
+    if any(_kalshi_pick(r.get("signal_blob") or {}) for r in rows):
+        k_orders, k_pos = _kalshi_acct(fresh=True)
+    keys: dict = {}
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if _kalshi_pick(b):
+            if b.get("kalshi_ticker"):
+                k = ("K", b["kalshi_ticker"], bool(b.get("kalshi_buy_yes")))
+                keys[k] = keys.get(k, 0) + 1
+        elif b.get("pmm_slug"):
+            k = ("P", b["pmm_slug"], bool(b.get("pmm_synthetic")))
+            keys[k] = keys.get(k, 0) + 1
+    ctx = {"poly_orders": orders, "positions": positions, "k_orders": k_orders, "k_pos": k_pos, "pending_keys": keys}
+    t0 = _time.monotonic()
+    for r in rows:
+        if _time.monotonic() - t0 > 20.0:
+            st["budget"] = True
+            break
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        st["picks"] += 1
+        try:
+            flags = _hand_recon_flags(r, blob, now, ctx)
+        except Exception as e:
+            st["errors"] = st.get("errors", 0) + 1
+            app.logger.warning("hand recon pick %s: %s", r["id"], str(e)[:120])
+            continue
+        nb = dict(blob)
+        write = False
+        drift = next((f for f in flags if f["code"] == "price_drift"), None)
+        if drift is not None:
+            seen = _HAND_RECON_PRICE_SEEN.get(r["id"])
+            if seen and abs(float(seen[0]) - float(drift["venue_c"])) < 0.01:
+                nb["price_c"] = float(drift["venue_c"])
+                nb["price_healed"] = {"from_c": blob.get("price_c"), "to_c": drift["venue_c"], "at": now.isoformat()}
+                write = True
+                st["healed"] += 1
+                _HAND_RECON_PRICE_SEEN.pop(r["id"], None)
+                flags = [f for f in flags if f["code"] != "price_drift"]
+            else:
+                _HAND_RECON_PRICE_SEEN[r["id"]] = (float(drift["venue_c"]), _time.monotonic())
+        else:
+            _HAND_RECON_PRICE_SEEN.pop(r["id"], None)
+        red = [f for f in flags if f["level"] == "red"]
+        amber = [f for f in flags if f["level"] == "amber"]
+        st["red"] += 1 if red else 0
+        st["amber"] += 1 if amber else 0
+        old = blob.get("recon") if isinstance(blob.get("recon"), dict) else None
+        old_codes = sorted(f.get("code") for f in (old or {}).get("red") or [])
+        new_codes = sorted(f["code"] for f in red)
+        if red:
+            if old_codes != new_codes:
+                nb["recon"] = {"at": now.isoformat(), "red": [{k: v for k, v in f.items() if k != "venue_c"} for f in red],
+                               "amber": [{k: v for k, v in f.items() if k != "venue_c"} for f in amber]}
+                write = True
+                st["changed"] += 1
+                try:
+                    _probe_log({"hand_recon": True, "pick_id": r["id"], "game": r.get("event_name"),
+                                "mt": r.get("market_type"), "side": r.get("side"), "line": r.get("entry_line"),
+                                "venue": "KALSHI" if _kalshi_pick(blob) else "POLYMARKET",
+                                "slug": blob.get("pmm_slug") or blob.get("pmm_twin_slug"),
+                                "ticker": blob.get("kalshi_ticker"), "order_id": blob.get("order_id") or blob.get("kalshi_order_id"),
+                                "red": red, "amber": amber, "at": now.isoformat()})
+                except Exception:
+                    pass
+        elif old is not None:
+            nb.pop("recon", None)
+            write = True
+            st["cleared"] += 1
+        if write:
+            try:
+                sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            except Exception as e:
+                st["errors"] = st.get("errors", 0) + 1
+                app.logger.warning("hand recon write %s: %s", r["id"], str(e)[:120])
+    st["reads"] = {"orders": orders is not None, "positions": positions is not None,
+                   "k_orders": k_orders is not None, "k_pos": k_pos is not None}
+    return st
 
 
 def _hand_status_read(sb):
@@ -17018,7 +17340,7 @@ def _hand_move_tick(sb, client, now) -> dict:
     leash = _fl("hand_chase_leash_c", _HAND_CHASE_LEASH_C)
     t0 = _time.monotonic()
     try:
-        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob,market_type,side,entry_line")
                 .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                 .gt("event_start", now.isoformat()).limit(300).execute().data or [])
     except Exception as e:
@@ -17129,7 +17451,8 @@ def _hand_move_tick(sb, client, now) -> dict:
             _HAND_MOVE_LAST[r["id"]] = _time.monotonic()
             contracts = int(hold.get("qty") or blob.get("contracts") or 1)   # a reset re-seats the unfilled part
             try:
-                out, code = _manual_order_place(client, slug, syn, touch, contracts, r.get("event_start"))
+                out, code = _manual_order_place(client, slug, syn, touch, contracts, r.get("event_start"),
+                                                expect=_hand_expect(r))
             except Exception as e:
                 out, code = {"ok": False, "error": str(e)[:160]}, 500
             acts += 1
@@ -18131,7 +18454,7 @@ def _hand_reset_tick(sb, client, now) -> dict:
     except (TypeError, ValueError):
         min_n = _HAND_RESET_MIN
     try:
-        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob,market_type,side,entry_line")
                 .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                 .gt("event_start", now.isoformat()).limit(300).execute().data or [])
     except Exception as e:
@@ -18502,6 +18825,27 @@ def _kalshi_order_place(ticker: str, buy_yes: bool, price_c, contracts, event_st
         return {"ok": False, "error": "event_start (ISO) required — pre-game bets only"}, 400
     if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
         return {"ok": False, "error": "game already started — pre-game bets only"}, 400
+    # ONE ORDER PER BET PER TICKER+SIDE (Oct 20 2026 — the Polymarket rule's twin, see `_hand_create_guard`)
+    try:
+        ro = _kv.resting_orders()
+        k_orders = ro["by_id"] if ro.get("ok") else None
+    except Exception:
+        k_orders = None
+    dups = _kalshi_dup_from_orders(k_orders, ticker, buy_yes)
+    if dups is None:
+        return {"ok": False, "error": "Kalshi orders unreadable — not placing blind (one order per bet)",
+                "guard": "orders_unreadable"}, 503
+    if dups:
+        d = dups[0]
+        try:
+            _probe_log({"hand_guard_refused": True, "venue": "KALSHI", "ticker": ticker, "why": "dup_order",
+                        "existing": [{"id": x.get("order_id"), "remaining": x.get("remaining"), "yes_c": x.get("yes_c")}
+                                     for x in dups][:4], "at": datetime.now(timezone.utc).isoformat()})
+        except Exception:
+            pass
+        return {"ok": False, "guard": "dup_order", "dup_order_id": d.get("order_id"),
+                "error": (f"an order already rests on this side of {ticker} (id {d.get('order_id')}, "
+                          f"{d.get('remaining')} left at {_kv.our_c(d.get('yes_c'), buy_yes)}¢) — one order per bet")}, 409
     fund = _kalshi_shard_fund(ticker, contracts, price_c)
     if not fund.get("ok"):
         return {"ok": False, "error": fund.get("error") or "Kalshi shard unfunded"}, 502
@@ -18837,7 +19181,10 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
             return
     except Exception as e:
         app.logger.warning("hand venue switch (kalshi→poly) pick %s: %s", r["id"], str(e)[:120])
-    verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash)
+    # THE REJOIN HOLD CAPS THIS CHASE TOO (Oct 20 2026 — see `_hand_rejoin_cap`:
+    # without it every Kalshi vanish drop was chased straight back up).
+    verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash,
+                                             cap_c=_hand_rejoin_cap(blob, now, ev))
     hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
     thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
     thin_join = None
@@ -19699,7 +20046,50 @@ def _hand_switch_ok(blob: dict, r: dict, now, st: dict, filled) -> bool:
         return False
     if _time.monotonic() - _HAND_SWITCH_LAST.get(r["id"], 0.0) < _HAND_SWITCH_DEBOUNCE_S:
         return False
+    if not _hand_switch_gap_s_ok(blob, now):
+        st["switch_too_soon"] = st.get("switch_too_soon", 0) + 1
+        return False
     return True
+
+
+_HAND_SWITCH_MIN_GAP_S = 900.0    # machine_flags hand_switch_min_gap_s overrides
+
+
+def _hand_switch_gap_s_ok(blob: dict, now, min_gap_s=None) -> bool:
+    """Pure. THE PING-PONG BRAKE (Oct 20 2026, SALA −2.5: eight venue switches
+    in 90 minutes — Kalshi 50 vs Poly 51 → to Kalshi, the Kalshi chase joins
+    51, 51 + fee loses to Poly 51 → back, every three minutes; MIN@EDM and
+    the Delaware total ran the same loop). The in-memory debounce is 120s and
+    dies with the daemon; this one reads the pick's own `venue_switches` and
+    refuses a second switch inside `min_gap_s` of the last. The cheaper venue
+    still wins — once a quarter hour, not once a tick."""
+    if min_gap_s is None:
+        try:
+            min_gap_s = float(_machine_flag_val("hand_switch_min_gap_s", _HAND_SWITCH_MIN_GAP_S))
+        except (TypeError, ValueError):
+            min_gap_s = _HAND_SWITCH_MIN_GAP_S
+    sw = blob.get("venue_switches") if isinstance(blob.get("venue_switches"), list) else []
+    if not sw or min_gap_s <= 0:
+        return True
+    try:
+        last = datetime.fromisoformat(str((sw[-1] or {}).get("at")).replace("Z", "+00:00"))
+    except (TypeError, ValueError, AttributeError):
+        return True
+    return (now - last).total_seconds() >= float(min_gap_s)
+
+
+def _hand_switch_cap_ok(blob: dict, r: dict, now, dest_c) -> bool:
+    """A switch may not land above a live rejoin-hold cap — it is a climb in
+    disguise (Oct 20 2026; see `_hand_rejoin_cap`)."""
+    try:
+        ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        ev = None
+    cap = _hand_rejoin_cap(blob, now, ev)
+    try:
+        return cap is None or dest_c is None or float(dest_c) <= cap + 1e-9
+    except (TypeError, ValueError):
+        return True
 
 
 def _hand_switch_leash_ok(blob: dict, dest_c: float) -> bool:
@@ -19782,7 +20172,8 @@ def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict
         if not _hand_switch_persists(_HAND_SWITCH_SEEN, r["id"], "POLYMARKET", _time.monotonic(), _hand_switch_persist_s()):
             st["switch_pending"] = st.get("switch_pending", 0) + 1
             return False
-        if not _hand_switch_gap_ok(k_seat_c, p_seat) or not _hand_switch_leash_ok(blob, p_seat):
+        if (not _hand_switch_gap_ok(k_seat_c, p_seat) or not _hand_switch_leash_ok(blob, p_seat)
+                or not _hand_switch_cap_ok(blob, r, now, p_seat)):
             st["switch_refused"] = st.get("switch_refused", 0) + 1
             return False
         _HAND_SWITCH_LAST[r["id"]] = _time.monotonic()
@@ -19812,7 +20203,7 @@ def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict
             _probe_log(stamp)
             return False
     out, _http = _manual_order_place(client, twin, tsyn, p_seat, qty, r.get("event_start"),
-                                     book=pbook, verify="fresh")
+                                     book=pbook, verify="fresh", expect=_hand_expect(r))
     nb = {**blob, "kalshi_order_id": None, "kalshi_twin_ticker": ticker, "kalshi_twin_buy_yes": by,
           "venue_switches": (blob.get("venue_switches") or []) + [
               {"at": now.isoformat(), "from": "KALSHI", "to": "POLYMARKET", "from_c": k_touch_c, "to_c": p_seat}][-10:]}
@@ -19909,7 +20300,8 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
     if not _hand_switch_persists(_HAND_SWITCH_SEEN, r["id"], "KALSHI", _time.monotonic(), _hand_switch_persist_s()):
         st["switch_pending"] = st.get("switch_pending", 0) + 1
         return False
-    if not _hand_switch_gap_ok(p_seat, k_seat) or not _hand_switch_leash_ok(blob, k_seat):
+    if (not _hand_switch_gap_ok(p_seat, k_seat) or not _hand_switch_leash_ok(blob, k_seat)
+            or not _hand_switch_cap_ok(blob, r, now, k_seat)):
         st["switch_refused"] = st.get("switch_refused", 0) + 1
         if not isinstance(blob.get("switch_refused"), dict) or abs(float(blob["switch_refused"].get("to_c") or -1) - k_seat) >= 0.99:
             nb = {**blob, "switch_refused": {"to": "KALSHI", "from_c": p_seat, "to_c": k_seat,
@@ -19968,7 +20360,8 @@ def _hand_switch_kalshi_place(sb, client, r: dict, blob: dict, now, st: dict, st
         _probe_log(stamp)
         return True
     stamp["kalshi_error"] = out.get("error")
-    back, _h2 = _manual_order_place(client, slug, syn, p_seat, qty, r.get("event_start"), book=bk, verify="fresh")
+    back, _h2 = _manual_order_place(client, slug, syn, p_seat, qty, r.get("event_start"), book=bk, verify="fresh",
+                                    expect=_hand_expect(r))
     if back.get("ok") and back.get("order_id"):
         nb.update({"order_id": back["order_id"], "price_c": p_seat, "contracts": qty})
         stamp["result"] = "kalshi_failed_back_on_poly"
@@ -20101,7 +20494,8 @@ def _hand_switch_poly_complete(sb, client, r: dict, blob: dict, now, st: dict, k
                                   slug, syn, p_seat, bk, blob.get("price_c"))
         return
     # Kalshi has no seat inside the leash: back onto Polymarket at its seat
-    back, _h2 = _manual_order_place(client, slug, syn, p_seat, qty, r.get("event_start"), book=bk, verify="fresh")
+    back, _h2 = _manual_order_place(client, slug, syn, p_seat, qty, r.get("event_start"), book=bk, verify="fresh",
+                                    expect=_hand_expect(r))
     nb = {k: v for k, v in blob.items() if k not in ("poly_cancel_sent", "chase_hold", "thin_hold")}
     if back.get("ok") and back.get("order_id"):
         nb.update({"order_id": back["order_id"], "price_c": p_seat, "contracts": qty})
@@ -20571,6 +20965,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
             stats["move"] = _hand_move_tick(sb, client, now)
         except Exception as e:
             stats["move"] = {"err": str(e)[:80]}
+        try:
+            stats["recon"] = _hand_reconcile_tick(sb, client, now)   # every claim on a pick vs the venue, once a minute
+        except Exception as e:
+            stats["recon"] = {"err": str(e)[:80]}
     except Exception as e:
         stats["status"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     try:
@@ -20959,6 +21357,7 @@ def api_bet_sheets_mine():
             "start_seen": bool(blob.get("game_started")), "start_blind": bool(blob.get("start_blind")),
             "take_window": (blob.get("start_take_window") if isinstance(blob.get("start_take_window"), dict) else None),
             "poly_cancel_sent": (blob.get("poly_cancel_sent") if isinstance(blob.get("poly_cancel_sent"), dict) else None),
+            "recon": (blob.get("recon") if isinstance(blob.get("recon"), dict) else None),
             "order": (bx.get("order") if bx is not None else
                       ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"),
                         "price_c": (round((1 - float(o["price_yes"])) * 100, 2) if syn
@@ -22129,6 +22528,35 @@ def _rejoin_hold_until(now, ev, hold_s, lead_min):
         return end
 
 
+def _hand_rejoin_cap(blob: dict, now, ev, lead_min=None):
+    """The live REJOIN-HOLD cap on a pick, or None. Pure read: the hold the
+    line-move rule armed (a rejoin, a vanish drop) caps every climb — the
+    chase on EITHER venue and a venue switch — until it expires, and never
+    past T-`lead_min` (`_rejoin_hold_until`). ⚠ THE KALSHI CHASE IGNORED IT
+    (Oct 20 2026, SALA −2.5 on KXNCAAFSPREAD: three vanish drops 49→47 in 64s,
+    each 'amended', because the chase joined the 49 touch back within a tick
+    and the move rule dropped it again 30s later; TOR@CBJ U6.5 ran the same
+    loop nine times as cancel→rejoin→chase-up→cancel). One reader, every
+    climb path."""
+    rh = blob.get("rejoin_hold") if isinstance(blob.get("rejoin_hold"), dict) else None
+    if not rh or rh.get("cap_c") is None:
+        return None
+    if lead_min is None:
+        try:
+            lead_min = float(_machine_flag_val("hand_move_min_lead_min", _HAND_MOVE_MIN_LEAD_MIN))
+        except (TypeError, ValueError):
+            lead_min = _HAND_MOVE_MIN_LEAD_MIN
+    try:
+        until = datetime.fromisoformat(str(rh.get("until")).replace("Z", "+00:00"))
+        if until <= now:
+            return None
+        if ev is not None and _rejoin_hold_until(now, ev, 1e9, lead_min) <= now:
+            return None                       # inside the lead floor the hold is over whatever it says
+        return float(rh.get("cap_c"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c, cap_c=None):
     """Pure. ('stay'|'move'|'hold', target_c, note). Our-side cents in,
     our-side cents out. `anchor_c` None → the current price is the anchor.
@@ -22252,7 +22680,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
     lead_min = _fl("hand_move_min_lead_min", _HAND_MOVE_MIN_LEAD_MIN)
     t0 = _time.monotonic()
     try:
-        rows = (sb.table("bot_picks").select("id,event_start,signal_blob,sport,event_name,market_type,side")
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob,sport,event_name,market_type,side,entry_line")
                 .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                 .limit(300).execute().data or [])
     except Exception as e:
@@ -22323,16 +22751,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
                     continue
             except Exception as e:
                 app.logger.warning("hand venue switch (poly→kalshi) pick %s: %s", r["id"], str(e)[:120])
-        cap_c = None
-        rh = blob.get("rejoin_hold") if isinstance(blob.get("rejoin_hold"), dict) else None
-        if rh:
-            try:
-                # a hold set before this rule may run past T-30: the read caps it too
-                if (datetime.fromisoformat(str(rh.get("until")).replace("Z", "+00:00"))
-                        > now and _rejoin_hold_until(now, ev, 1e9, lead_min) > now):
-                    cap_c = rh.get("cap_c")
-            except (TypeError, ValueError):
-                pass
+        cap_c = _hand_rejoin_cap(blob, now, ev, lead_min)   # a hold set before this rule may run past T-30: the read caps it too
         verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash, cap_c=cap_c)
         hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
         thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
