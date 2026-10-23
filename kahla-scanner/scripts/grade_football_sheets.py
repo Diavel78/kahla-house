@@ -184,7 +184,8 @@ def grade_model(sport: str, data_blob: dict, hs: float, aws: float) -> dict:
         if res:
             out["spread"] = res
     mt = blob.get("total_cal", blob.get("total_raw"))
-    lt = (blob.get("bet_total") or {}).get("line")
+    _bt = blob.get("bet_total") or {}
+    lt = _bt.get("market_line", _bt.get("line"))   # the MODEL is graded at the market's number; the pick at its rung
     if mt is not None and lt is not None and mt != lt:
         res = grade_total({"line": lt, "side": "over" if mt > lt else "under"}, hs, aws)
         if res:

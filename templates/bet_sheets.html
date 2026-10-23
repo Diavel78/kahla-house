@@ -898,6 +898,11 @@
             // have bet" on a card headed LINE MOVED over a 1¢ drift).
             const past = (hold && hold.touch_c != null && ch.anchor_c != null)
                 ? ', ' + Math.round((hold.touch_c - ch.anchor_c) * 10) / 10 + '¢ past your ' + ch.anchor_c + '¢ (leash ' + (hold.leash_c != null ? hold.leash_c : 2) + '¢)' : ' past your leash';
+            // THE CHALK CAP (Oct 23 2026, Rob: "ML chalk should be -140, O/U
+            // chalk should be -120"): the touch sits at or past the cap, so
+            // the box will not chase — the cheaper rung is the way back in.
+            if (hold && hold.touch_c != null && hold.chalk_c != null)
+                return { cls: 'warn', short: 'CHALK', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, at or past the ' + hold.chalk_c + '¢ chalk cap, so the box stopped chasing' + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') : ' — ' + (b.read ? recShort(b, null) : 'no cheaper rung yet — hold or cancel')) };
             if (hold && hold.touch_c != null && rr)
                 return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it, re-peg it or cancel') };
             if (hold && hold.touch_c != null)
@@ -1410,7 +1415,8 @@
         const o = g.total_open;
         if (!o || !o.side) return '';
         const now = o.now || {};
-        const moved = now.line != null && Number(now.line) !== Number(o.line) ? ' · now ' + now.line
+        const oLine = o.market_line != null ? o.market_line : o.line;   // the market's number; o.line is the rung Rob bets
+        const moved = now.line != null && Number(now.line) !== Number(oLine) ? ' · now ' + now.line
                     : (now.price != null && now.price !== o.price ? ' · now ' + am(now.price) : '');
         const c = o.clv === 'beat' ? ' <span class="clv-b" title="the market moved to our side">✓ market moved our way</span>'
                 : o.clv === 'lost' ? ' <span class="clv-l" title="the market moved against us">✗ market moved away</span>' : '';

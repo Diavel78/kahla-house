@@ -404,6 +404,14 @@ def _no_vig(a, b):
     return pa / (pa + pb), pb / (pa + pb)
 
 
+def _bettable_half(L: float, side: str) -> float:
+    """A whole total → the half point in the side's favor; a half stays."""
+    L = float(L)
+    if abs(L - round(L)) > 0.01:
+        return L
+    return L - 0.5 if side == "over" else L + 0.5
+
+
 def verdicts(g: dict, pr: dict) -> dict:
     o = g["odds"]
     out: dict = {}
@@ -432,10 +440,18 @@ def verdicts(g: dict, pr: dict) -> dict:
             e_over, e_under = (p_over - po) * 100, ((1 - p_over) - pu) * 100
             side = "over" if e_over >= e_under else "under"
             edge = max(e_over, e_under)
-            out["total"] = {"side": side, "line": L,
+            # THE RUNG ROB BETS (Oct 23 2026): a whole total becomes the half
+            # point in the side's favor (O 6 → O 5.5, U 6 → U 6.5); the fair is
+            # priced THERE, the edge stays measured against the market's price
+            bet_L = _bettable_half(L, side)
+            p_bet = ci2.over_prob(pr, bet_L) if bet_L != L else p_over
+            if p_bet is None:
+                bet_L, p_bet = L, p_over
+            out["total"] = {"side": side, "line": bet_L, "market_line": L,
                             "price": o.get(f"{side}_odds"),
-                            "fair": _american(p_over if side == "over" else 1 - p_over),
-                            "model_p": round(p_over if side == "over" else 1 - p_over, 4),
+                            "fair": _american(p_bet if side == "over" else 1 - p_bet),
+                            "fair_market": _american(p_over if side == "over" else 1 - p_over),
+                            "model_p": round(p_bet if side == "over" else 1 - p_bet, 4),
                             "edge_pp": round(edge, 1),
                             "verdict": ("play" if edge >= TOT_PLAY_PP
                                         else "lean" if edge >= TOT_LEAN_PP else "pass")}
@@ -480,7 +496,8 @@ def total_open(prev: dict | None, pick: dict | None, odds: dict, now_iso: str) -
     if op is None:
         if not pick or pick.get("verdict") not in ("play", "lean") or pick.get("line") is None:
             return None
-        op = {"side": pick["side"], "line": pick["line"], "price": pick.get("price"),
+        op = {"side": pick["side"], "line": pick["line"], "market_line": pick.get("market_line", pick["line"]),
+              "price": pick.get("price"),
               "edge_pp": pick.get("edge_pp"), "verdict": pick.get("verdict"), "at": now_iso}
     L = odds.get("total")
     if L is None:
@@ -488,8 +505,9 @@ def total_open(prev: dict | None, pick: dict | None, odds: dict, now_iso: str) -
     price = odds.get("over_odds" if op["side"] == "over" else "under_odds")
     op["now"] = {"line": L, "price": price, "at": now_iso}
     sgn = 1 if op["side"] == "over" else -1
-    if float(L) != float(op["line"]):
-        op["clv"] = "beat" if sgn * (float(L) - float(op["line"])) > 0 else "lost"
+    o_line = op.get("market_line", op["line"])     # the market's number at the open, not the rung he bets
+    if float(L) != float(o_line):
+        op["clv"] = "beat" if sgn * (float(L) - float(o_line)) > 0 else "lost"
     else:
         a, b = _imp(op.get("price")), _imp(price)
         op["clv"] = ("flat" if a is None or b is None or abs(b - a) < 0.005

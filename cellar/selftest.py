@@ -2531,6 +2531,7 @@ def test_bet_sheet_rung() -> None:
     FAVORABLE rung (Rob: "auto pick the more favorable side"), never a worse
     one; ML is side-only."""
     import app as _app
+    import inspect as _insp
     sp = [{"side": "home", "line": -3.5, "slug": "h35"}, {"side": "home", "line": -3.0, "slug": "h3"},
           {"side": "home", "line": -4.5, "slug": "h45"}, {"side": "away", "line": 3.5, "slug": "a35"},
           {"side": "away", "line": 4.5, "slug": "a45", "synthetic": True}, {"side": "away", "line": 2.5, "slug": "a25"}]
@@ -2554,6 +2555,44 @@ def test_bet_sheet_rung() -> None:
     check("ML is side-only", e["slug"] == "ma")
     e, why = _app._bet_sheet_rung([], "spread", "home", -3.5)
     check("empty ladder → reason, no crash", e is None and why)
+    # THE CHALK STEP (Oct 23 2026, Rob on O 50 with 49.5 resting 56¢: "ML chalk
+    # should be -140, O/U chalk should be -120… on this one, we should go to
+    # O 50.5"): a favorable rung priced at or past the cap is skipped for the
+    # next LESS favorable one; whole-number rungs are never bet.
+    cap = _app._hand_chalk_cap_c("total")
+    check("O/U chalk cap = −120 = 54.55¢", abs(cap - 54.55) < 0.01, cap)
+    check("ML chalk cap = −140 = 58.33¢", abs(_app._hand_chalk_cap_c("ml") - 58.33) < 0.01)
+    q = lambda b: {"bid": b / 100.0, "ask": b / 100.0 + 0.01}
+    ladder = [{"side": "over", "line": 49.5, "slug": "o495", "quote": q(56.0)},
+              {"side": "over", "line": 50.0, "slug": "o50", "quote": q(50.0)},
+              {"side": "over", "line": 50.5, "slug": "o505", "quote": q(52.0)},
+              {"side": "over", "line": 51.5, "slug": "o515", "quote": q(47.0)}]
+    e, why = _app._bet_sheet_rung(ladder, "total", "over", 50.0, cap_c=cap)
+    check("O 50: 49.5 at 56¢ is chalk → O 50.5 at 52¢ (never the whole-number 50)",
+          e and e["slug"] == "o505" and why == "unfavorable" and e.get("chalk_skipped")
+          and e["chalk_skipped"][0]["line"] == 49.5, (e or {}).get("slug"))
+    e, why = _app._bet_sheet_rung(ladder, "total", "over", 50.0, cap_c=None)
+    check("no cap → the favorable 49.5 as before", e["slug"] == "o495" and why == "favorable")
+    e, why = _app._bet_sheet_rung(ladder, "total", "over", 50.0, cap_c=50.0)
+    check("49.5 and 50.5 both chalk → the next rung down the ladder (51.5)", e["slug"] == "o515" and why == "unfavorable")
+    e, why = _app._bet_sheet_rung(ladder, "total", "over", 50.0, cap_c=40.0)
+    check("every rung chalk → refused, naming the prices", e is None and "chalk" in why and "49.5 @ 56" in why, why)
+    e, why = _app._bet_sheet_rung([{"side": "over", "line": 50.0, "slug": "o50", "quote": q(50.0)}], "total", "over", 50.0, cap_c=cap)
+    check("only a whole-number rung → nothing to bet", e is None and "half-point" in why, why)
+    sp2 = [{"side": "home", "line": -11.5, "slug": "h115", "quote": q(57.0)}, {"side": "home", "line": -12.5, "slug": "h125", "quote": q(50.0)}]
+    e, why = _app._bet_sheet_rung(sp2, "spread", "home", -12.0, cap_c=cap)
+    check("favorite −12: −11.5 at 57¢ is chalk → −12.5 at 50¢", e["slug"] == "h125" and why == "unfavorable")
+    e, why = _app._bet_sheet_rung([{"side": "home", "line": -12.5, "slug": "h125", "quote": q(50.0)}], "spread", "home", -12.0, cap_c=cap)
+    check("no favorable rung at all → still refused (the chalk step needs a chalky favorable rung)", e is None)
+    B = _app._bettable_half
+    check("bettable half: O 50 → 49.5, U 50 → 50.5, −12 → −11.5, +12 → +12.5, a half stays",
+          B(50, "total", "over") == 49.5 and B(50, "total", "under") == 50.5 and B(-12, "spread", "home") == -11.5
+          and B(12, "spread", "away") == 12.5 and B(49.5, "total", "over") == 49.5)
+    src_rs = _insp.getsource(_app._bet_sheet_resolve) if False else open(_app.__file__).read()
+    i = src_rs.index("def _bet_sheet_resolve(")
+    body = src_rs[i:i + 9000]
+    check("the slip's resolve passes the chalk cap to the rung walk and guards the fresh seat",
+          "cap_c=chalk_c" in body and "chalk, not betting it" in body)
 
 
 def test_rejoin_hold_until() -> None:
@@ -2970,6 +3009,22 @@ def test_hand_chase_plan() -> None:
     check("rejoin hold: touch AT the cap → at_touch", plan(51.0, 51.0, 51.0, 2.0, cap_c=51.0)[0] == "stay")
     check("rejoin hold: below the cap still moves", plan(50.0, 50.5, 50.0, 2.0, cap_c=51.0)[0] == "move")
     check("no cap → the old rule", plan(51.0, 51.5, 51.0, 2.0)[0] == "move")
+    # THE CHALK CAP (Oct 23 2026): a touch at or past −120 (54.55¢) is a hold,
+    # not a join — the box never chases a bet into chalk.
+    v, tgt, note = plan(53.0, 54.5, 53.0, 2.0, chalk_c=54.55)
+    check("chalk: touch 54.5 under the 54.55 cap, inside the leash → move", v == "move" and tgt == 54.5)
+    v, tgt, note = plan(53.5, 55.0, 53.5, 2.0, chalk_c=54.55)
+    check("chalk: touch 55 past the cap → hold with note chalk", v == "hold" and tgt == 55.0 and note == "chalk")
+    check("chalk: at the touch stays", plan(55.0, 55.0, 55.0, 2.0, chalk_c=54.55)[0] == "stay")
+    import inspect as _insp
+    for fn in (_app._hand_chase_tick, _app._hand_chase_kalshi):
+        src = _insp.getsource(fn)
+        check(f"{fn.__name__} passes the chalk cap and records it on the hold",
+              "chalk_c=chalk_c" in src and '"chalk_c"' in src)
+    R = _app._hand_red_state
+    resting = {"order": {"resting": True, "leaves": 5, "price_c": 53.0}, "held": 0.0, "touch_c": 55.0, "outbid": True}
+    r = R({"anchor_c": 53.0, "chase_hold": {"touch_c": 55.0, "chalk_c": 54.55, "leash_c": 2.0}}, resting)
+    check("a chalk hold reads CHALK (red)", r and r[0] == "chalk" and "CHALK" in r[1] and "54.55" in r[1], str(r))
 
 
 def test_hand_thin_touch() -> None:
@@ -4404,7 +4459,9 @@ def test_bet_sheet_reads() -> None:
           move["verdict"] == "lean" and "better line" in (move.get("why") or ""), str(move))
     check("…and the recommendation is the move (more value per dollar)", _app._bs_recommend(stay, move) == "move")
     o = _app._bs_option_read(None, "NHL", nhl, "spread", "away", 1.5, 60.0)
-    check("NHL puck +1.5 off away_cover, +5¢ = play", o["verdict"] == "play", str(o))
+    check("NHL puck +1.5 at 60¢: +5 but the O/U chalk (−120) passes it", o["verdict"] == "pass" and "chalk" in (o.get("why") or ""), str(o))
+    o = _app._bs_option_read(None, "NHL", nhl, "spread", "away", 1.5, 54.0)
+    check("NHL puck +1.5 at 54¢ (under the cap) = play", o["verdict"] == "play", str(o))
     mlb = {"model": {"win_home": 0.6}, "model_meta": {"run_line_shares": {"home": 0.6, "away": 0.7}}}
     o = _app._bs_option_read(None, "MLB", mlb, "spread", "home", -1.5, 30.0)
     check("MLB home −1.5 = p × home share", abs(o["model_p"] - 0.36) < 1e-9 and o["verdict"] == "lean", str(o))
@@ -4426,7 +4483,9 @@ def test_bet_sheet_reads() -> None:
     o = _app._bs_option_read(None, "NHL", {"model": {"win_home": 0.66}}, "moneyline", "home", None, 61.0)
     check("NHL home ML at 61¢: +5 but the chalk rule passes it", o["verdict"] == "pass" and "chalk" in (o.get("why") or ""), str(o))
     o = _app._bs_option_read(None, "NCAAF", {"friday": {"model": {"win_prob_home": 0.70}}}, "moneyline", "home", None, 59.0)
-    check("football ML reads win_prob_home on the pp bar, not the points bar", o["model_p"] == 0.7 and o["verdict"] == "play" and o["pts"] is None, str(o))
+    check("football ML at 59¢: the −140 chalk rule passes it", o["verdict"] == "pass" and "chalk" in (o.get("why") or ""), str(o))
+    o = _app._bs_option_read(None, "NCAAF", {"friday": {"model": {"win_prob_home": 0.62}}}, "moneyline", "home", None, 56.0)
+    check("football ML reads win_prob_home on the pp bar, not the points bar", o["model_p"] == 0.62 and o["verdict"] == "play" and o["pts"] is None, str(o))
     check("MLB ML is lean-capped", _app._bs_option_read(None, "MLB", {"model": {"win_home": 0.55}}, "moneyline", "home", None, 48.0)["verdict"] == "lean")
     check("an ML the blob cannot price reads None", _app._bs_option_read(None, "NBA", {"model": {}}, "moneyline", "home", None, 50.0) is None)
     src = _insp.getsource(_app._bet_sheet_reads)
@@ -4536,8 +4595,8 @@ def test_sheet_puck_and_chalk() -> None:
     check("no model -> no pick", P({"puck_home": -1.5, "puck_home_odds": 144, "puck_away_odds": -170}, None) is None)
     C = _app._sheet_chalk_mark
     check("-180 play is chalky", C({"verdict": "play", "price": -180}).get("chalky") is True)
-    check("-150 lean is chalky (at the line)", C({"verdict": "lean", "price": -150}).get("chalky") is True)
-    check("-140 play is not chalky", "chalky" not in C({"verdict": "play", "price": -140}))
+    check("-140 lean is chalky (at the line — Rob, Oct 23 2026)", C({"verdict": "lean", "price": -140}).get("chalky") is True)
+    check("-139 play is not chalky", "chalky" not in C({"verdict": "play", "price": -139}))
     check("a PASS is never chalky", "chalky" not in C({"verdict": "pass", "price": -300}))
     check("a dog is never chalky", "chalky" not in C({"verdict": "play", "price": 130}))
     check("None passes through", C(None) is None)

@@ -183,6 +183,17 @@ def verdicts(g, pr):
                        {"team": g["away"]["name"], "abbr": g["away"]["abbr"], "line": -L},
                        True)
         if p:
+            # THE RUNG ROB BETS (Oct 23 2026): a whole spread becomes the half
+            # point in the side's favor; the fair is priced there, the edge
+            # stays measured against the market's price at its own number
+            own = float(p["line"])
+            bet_own = _bettable_half(own, "spread", p["side"])
+            if bet_own != own:
+                hl = bet_own if p["side"] == "home" else -bet_own
+                ph = hq.ncdf((pr["mu"] + hl) / pr["sd"])
+                pb = ph if p["side"] == "home" else 1 - ph
+                p.update({"line": bet_own, "market_line": own, "fair_market": p["fair"],
+                          "fair": _american(pb), "model_p": round(pb, 4)})
             picks["spread"] = p
     T = o.get("total")
     if T is not None:
@@ -190,8 +201,25 @@ def verdicts(g, pr):
         p = _side_pick(po, o.get("over_odds"), o.get("under_odds"), "over", "under",
                        {"line": T}, {"line": T}, True)
         if p:
+            bet_T = _bettable_half(float(T), "total", p["side"])
+            if bet_T != float(T):
+                pob = hq.ncdf((pr["tu"] - bet_T) / pr["tsd"])
+                pb = pob if p["side"] == "over" else 1 - pob
+                p.update({"line": bet_T, "market_line": T, "fair_market": p["fair"],
+                          "fair": _american(pb), "model_p": round(pb, 4)})
             picks["total"] = p
     return picks
+
+
+def _bettable_half(L: float, mt: str, side: str) -> float:
+    """A whole line → the half point in the side's favor (own line +0.5 on a
+    spread, −0.5 on an over, +0.5 on an under); a half stays."""
+    L = float(L)
+    if abs(L - round(L)) > 0.01:
+        return L
+    if mt == "total":
+        return L - 0.5 if side == "over" else L + 0.5
+    return L + 0.5
 
 
 def run(days: int, commit: bool, preseason: bool = False, pin: bool | None = None) -> dict:

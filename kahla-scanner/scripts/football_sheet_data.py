@@ -931,6 +931,20 @@ _PLAY_SPREAD_PTS, _LEAN_SPREAD_PTS = 1.5, 0.75
 _PLAY_TOTAL_PTS, _LEAN_TOTAL_PTS = 1.5, 0.75
 
 
+def bettable_half(line: float, mt: str, side: str) -> float:
+    """THE RUNG ROB ACTUALLY BETS (Oct 23 2026, Rob: "the computer knows I
+    don't bet even… calculate the actual fair odds for what I can bet"): a
+    whole-number line becomes the half point in the side's favor — a
+    spread's own line +0.5 (−12 → −11.5, +12 → +12.5), an over −0.5 (50 →
+    49.5), an under +0.5. A half point stays. Mirrors app._bettable_half."""
+    L = float(line)
+    if abs(L - round(L)) > 0.01:
+        return L
+    if mt == "total":
+        return L - 0.5 if side == "over" else L + 0.5
+    return L + 0.5
+
+
 def _bet_spread(model: dict, priced: dict, away: str, home: str,
                 mkt: dict) -> dict | None:
     """The spread play, in a handicapper's terms: the side our number
@@ -952,10 +966,12 @@ def _bet_spread(model: dict, priced: dict, away: str, home: str,
             return None
         return gsp.american(p if side == "home" else 1.0 - p)
 
-    own_line = line if side == "home" else -line
+    own_line = bettable_half(line if side == "home" else -line, "spread", side)
+    bet_home_line = own_line if side == "home" else -own_line
+    edge = round(margin + bet_home_line, 1)   # the edge at the rung he bets, not the market's whole number
     ladder = []
     for d in (0.0, 1.0, -1.0):
-        hl = line + (d if side == "home" else -d)
+        hl = bet_home_line + (d if side == "home" else -d)
         f = _fair(hl)
         if f is not None:
             ladder.append({"line": round(own_line + d, 1), "fair": f})
@@ -968,7 +984,8 @@ def _bet_spread(model: dict, priced: dict, away: str, home: str,
         verdict = "pass"
     return {"side": side, "team": team, "line": ladder[0]["line"],
             "fair": ladder[0]["fair"], "ladder": ladder,
-            "market_home_line": line, "src": node["src"],
+            "market_home_line": line, "market_line": line if side == "home" else -line,
+            "fair_market": _fair(line), "src": node["src"],
             "edge_pts": edge, "verdict": verdict,
             "model_gap_implausible": implausible}
 
@@ -988,11 +1005,13 @@ def _bet_total(model: dict, priced: dict, mkt: dict) -> dict | None:
             return None
         return gsp.american(p if side == "over" else 1.0 - p)
 
+    bet_line = bettable_half(line, "total", side)
+    edge = round(total - bet_line, 1)       # the edge at the rung he bets (O 49.5, not O 50)
     ladder = []
     for d in (0.0, 1.0, -1.0):
-        f = _fair(line + d)
+        f = _fair(bet_line + d)
         if f is not None:
-            ladder.append({"line": round(line + d, 1), "fair": f})
+            ladder.append({"line": round(bet_line + d, 1), "fair": f})
     if not ladder:
         return None
     verdict = ("play" if abs(edge) >= _PLAY_TOTAL_PTS
@@ -1002,6 +1021,7 @@ def _bet_total(model: dict, priced: dict, mkt: dict) -> dict | None:
         verdict = "pass"
     return {"side": side, "line": ladder[0]["line"],
             "fair": ladder[0]["fair"], "ladder": ladder, "src": node["src"],
+            "market_line": line, "fair_market": _fair(line),
             "edge_pts": edge, "verdict": verdict,
             "model_gap_implausible": implausible}
 

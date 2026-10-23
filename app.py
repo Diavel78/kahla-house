@@ -1148,7 +1148,7 @@ def _sheet_game_football(r: dict) -> dict:
     if bs and bs.get("market_home_line") is not None:
         line["spread_home"] = bs["market_home_line"]
     if bt and bt.get("line") is not None:
-        line["total"] = bt["line"]
+        line["total"] = bt.get("market_line", bt["line"])
     if not line:
         bo = fr.get("book_odds") or blob.get("book_odds") or {}
         if bo.get("spread_home") is not None:
@@ -1180,7 +1180,64 @@ def _sheet_game_football(r: dict) -> dict:
 # plays the puck line instead (`_sheet_puck_pick`), NBA the spread. Same
 # idea as the Pick Bot's ML→spread chalk filter. Both sheet pages read
 # `ml.chalky` and show the ML as information, with no bet on it.
-_SHEET_CHALK_ML = -150
+# Oct 23 2026 (Rob, on an Over 50 resting 56¢ at 49.5: "-127 is pretty
+# chalky… ML chalk should be -140, O/U chalk should be -120"): the ML line
+# moved to −140, and spreads/totals got their own cap at −120 — the slip
+# walks to the next LESS favorable half-point rung (O 50.5) when the
+# favorable one is past it, the chase never climbs past it, the model read
+# PASSes at it. `machine_flags hand_chalk_ml` / `hand_chalk_ou` override.
+_SHEET_CHALK_ML = -140
+_SHEET_CHALK_OU = -120
+
+
+def _chalk_cents(american) -> float:
+    """An American price as the cents a contract costs (−120 → 54.55)."""
+    a = float(american)
+    return round((-a / (-a + 100.0) if a < 0 else 100.0 / (a + 100.0)) * 100.0, 2)
+
+
+def _hand_chalk_cap_c(mt) -> float:
+    """The chalk cap in cents for a market type: a seat AT or past it is
+    chalky. ML −140, spread/total −120 (flags `hand_chalk_ml`/`hand_chalk_ou`)."""
+    m = str(mt or "").lower()
+    ml = m in ("ml", "moneyline")
+    dflt = _SHEET_CHALK_ML if ml else _SHEET_CHALK_OU
+    try:
+        return _chalk_cents(_machine_flag_val("hand_chalk_ml" if ml else "hand_chalk_ou", dflt))
+    except Exception:
+        return _chalk_cents(dflt)
+
+
+def _hand_pick_chalk_c(blob: dict) -> float:
+    """The chalk cap for a resting hand bet, read off its market family
+    (aec- = moneyline; asc-/tsc- and every Kalshi SPREAD/TOTAL = the O/U cap)."""
+    slug = str((blob or {}).get("pmm_slug") or (blob or {}).get("pmm_twin_slug") or "")
+    tick = str((blob or {}).get("kalshi_ticker") or "").upper()
+    if slug.startswith("aec-"):
+        return _hand_chalk_cap_c("ml")
+    if slug.startswith(("asc-", "tsc-")):
+        return _hand_chalk_cap_c("total")
+    if tick and "SPREAD" not in tick and "TOTAL" not in tick and "GAME" in tick:
+        return _hand_chalk_cap_c("ml")
+    return _hand_chalk_cap_c("total")
+
+
+def _bettable_half(line, mt: str, side: str):
+    """Pure. THE RUNG ROB ACTUALLY BETS (Oct 23 2026: "the computer knows I
+    don't bet even… calculate the actual fair odds for what I can bet"): a
+    whole-number line becomes the half point in the side's favor — the
+    favorite's own line +0.5 (−12 → −11.5), the dog's +0.5 (+12 → +12.5), an
+    over −0.5 (50 → 49.5), an under +0.5. A half point stays. The `line` is
+    the SIDE'S OWN number."""
+    try:
+        L = float(line)
+    except (TypeError, ValueError):
+        return None
+    if abs(L - round(L)) > 0.01:
+        return L
+    if mt == "total":
+        return L - 0.5 if side == "over" else L + 0.5
+    return L + 0.5                      # a spread: more points for either side's own line
 # Puck-line verdict thresholds = the hockey ML's (nhl_sheet_data ML_*_PP).
 # The puck line is calibrated vs outcomes in the Crease v2 backtest
 # (−1.5 .331 predicted / .329 actual) but has never been scored against
@@ -14939,14 +14996,32 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
 _BET_SHEET_MTS = ("ml", "spread", "total")
 
 
-def _bet_sheet_rung(entries, mt: str, side: str, want):
+def _entry_bid_c(e: dict):
+    """Our-side best bid of a pmm lookup entry, in cents (synthetic entries
+    carry the inverted quote already). None when the entry has no bid."""
+    q = (e or {}).get("quote") if isinstance((e or {}).get("quote"), dict) else None
+    if not q or q.get("bid") is None:
+        return None
+    try:
+        b = float(q["bid"])
+    except (TypeError, ValueError):
+        return None
+    return round(b * 100.0, 2) if b <= 1.0 else round(b, 2)
+
+
+def _bet_sheet_rung(entries, mt: str, side: str, want, cap_c=None):
     """Pure. Pick the venue rung for a sheet side. `entries` = the pmm
     lookup list for `mt` (each {side, line, slug, quote, synthetic?}); the
     line is the SIDE'S OWN number (home −3.5 / away +3.5; totals the posted
-    total). Exact rung first; else the nearest MORE FAVORABLE rung — a
-    spread's own line higher (−3 beats −3.5, +4 beats +3.5), an over LOWER,
-    an under HIGHER. Never a worse rung. Returns (entry, why) with why in
-    {'exact','favorable'} or (None, reason)."""
+    total). HALF POINTS ONLY (Rob: "the computer knows I don't bet even").
+    Exact rung first; else the nearest MORE FAVORABLE rung — a spread's own
+    line higher (−3 beats −3.5, +4 beats +3.5), an over LOWER, an under
+    HIGHER. THE CHALK STEP (Oct 23 2026, Rob on O 50 with 49.5 at 56¢: "we
+    should go to O 50.5"): a rung whose bid sits at or past `cap_c` is
+    skipped for the next LESS favorable one — the only time a worse rung is
+    taken. Returns (entry, why) with why in {'exact','favorable',
+    'unfavorable'} (the entry carries `chalk_skipped` when a rung was passed
+    over) or (None, reason)."""
     same = [e for e in (entries or []) if e.get("side") == side and e.get("slug")]
     if not same:
         return None, f"venue lists no {mt} market for that side"
@@ -14957,23 +15032,31 @@ def _bet_sheet_rung(entries, mt: str, side: str, want):
     except (TypeError, ValueError):
         return None, "sheet has no line"
     lined = [(float(e["line"]), e) for e in same if e.get("line") is not None]
+    lined = [(ln, e) for ln, e in lined if abs(ln - round(ln)) > 0.01]     # whole numbers push — never bet
     if not lined:
-        return None, "venue rungs carry no line"
-    for ln, e in lined:
-        if abs(ln - want) < 0.01:
-            return e, "exact"
-    if mt == "spread" or side == "under":
-        fav = [(ln, e) for ln, e in lined if ln > want]
-    else:
-        fav = [(ln, e) for ln, e in lined if ln < want]
-    if not fav:
-        have = ", ".join(f"{ln:+g}" if mt == "spread" else f"{ln:g}"
-                         for ln, _ in sorted(lined))
+        return None, "venue rungs carry no half-point line"
+    fav_dir = 1.0 if (mt == "spread" or side == "under") else -1.0         # which way is MORE favorable
+    exact = [(ln, e) for ln, e in lined if abs(ln - want) < 0.01]
+    fav = sorted([(ln, e) for ln, e in lined if (ln - want) * fav_dir > 0.01], key=lambda t: abs(t[0] - want))
+    unf = sorted([(ln, e) for ln, e in lined if (ln - want) * fav_dir < -0.01], key=lambda t: abs(t[0] - want))
+    if not exact and not fav:
+        have = ", ".join(f"{ln:+g}" if mt == "spread" else f"{ln:g}" for ln, _ in sorted(lined))
         return None, (f"no rung at {want:+g} or better; venue has {have}"
                       if mt == "spread" else
                       f"no rung at {want:g} or better; venue has {have}")
-    fav.sort(key=lambda t: abs(t[0] - want))
-    return fav[0][1], "favorable"
+    order = [(ln, e, "exact") for ln, e in exact] + [(ln, e, "favorable") for ln, e in fav] \
+        + [(ln, e, "unfavorable") for ln, e in unf]
+    skipped = []
+    for ln, e, why in order:
+        bid = _entry_bid_c(e)
+        if cap_c is not None and bid is not None and bid >= float(cap_c) - 1e-9:
+            skipped.append({"line": ln, "bid_c": bid})
+            continue
+        if skipped:
+            e = {**e, "chalk_skipped": skipped, "chalk_cap_c": float(cap_c)}
+        return e, why
+    sk = ", ".join(f"{x['line']:g} @ {x['bid_c']:g}¢" for x in skipped)
+    return None, f"every rung is chalk (at or past {float(cap_c):g}¢): {sk}"
 
 
 def _bet_sheet_wait_rl(max_s: float = 25.0) -> bool:
@@ -15210,7 +15293,8 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
                "total": "total"}
         return {"ok": False, "reason": f"Polymarket lists no {_nm[mt]} for this game"
                 + (f" — only the {', '.join(_nm[k] for k in _have)}" if _have else "")}
-    entry, why = _bet_sheet_rung(pmm.get(mt), mt, side, item.get("line"))
+    chalk_c = _hand_chalk_cap_c(mt)
+    entry, why = _bet_sheet_rung(pmm.get(mt), mt, side, item.get("line"), cap_c=chalk_c)
     if entry is None:
         return {"ok": False, "reason": why}
     slug = entry["slug"]
@@ -15238,8 +15322,16 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
     seat, sdet = _hand_seat_price(book, synthetic, es, datetime.now(timezone.utc), mp, oh)
     if seat is None:
         seat = s_bid
+    if float(seat) >= chalk_c - 1e-9:
+        # THE CHALK RULE at the fresh book: the ladder walk read the event's
+        # embedded quotes; the seat is priced off the live book, and a seat at
+        # or past the cap stays on the slip with the reason
+        _am = _SHEET_CHALK_ML if mt == "ml" else _SHEET_CHALK_OU
+        return {"ok": False, "reason": f"{float(seat):g}¢ at {entry.get('line')} is {_am} or shorter — chalk, not betting it",
+                "slug": slug, "rung_line": entry.get("line"), "chalk_cap_c": chalk_c}
     return {"ok": True, "slug": slug, "synthetic": synthetic,
             "rung_line": entry.get("line"), "rung_why": why,
+            "chalk_skipped": entry.get("chalk_skipped"), "chalk_cap_c": chalk_c,
             "price_c": seat, "touch_c": s_bid, "ask_c": s_ask,
             "thin": (sdet if sdet.get("thin") else None),
             "event_slug": pmm.get("event_slug"), "event_title": pmm.get("event_title"),
@@ -15956,6 +16048,16 @@ def _hand_red_state(blob: dict, s: dict, started: bool = False):
         return "check_me", "CHECK ME · " + " · ".join(str(f.get("msg") or f.get("code")) for f in reds)
     hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
     if resting:
+        if hold and hold.get("touch_c") is not None and hold.get("chalk_c") is not None:
+            try:
+                tc, cc = float(hold["touch_c"]), float(hold["chalk_c"])
+                txt = f"CHALK · bidders moved up to {tc:g}¢, at or past the {cc:g}¢ chalk cap · the box stopped chasing"
+            except (TypeError, ValueError):
+                txt = "CHALK · the touch is past the chalk cap · the box stopped chasing"
+            rr = hold.get("rerung") if isinstance(hold.get("rerung"), dict) else None
+            if rr and rr.get("slug"):
+                txt += f" · cheaper rung on the ladder: line {rr.get('line')} @ {rr.get('bid_c')}¢"
+            return "chalk", txt
         if hold and hold.get("touch_c") is not None:
             anchor = blob.get("anchor_c", blob.get("price_c"))
             try:
@@ -19540,8 +19642,9 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
         app.logger.warning("hand venue switch (kalshi→poly) pick %s: %s", r["id"], str(e)[:120])
     # THE REJOIN HOLD CAPS THIS CHASE TOO (Oct 20 2026 — see `_hand_rejoin_cap`:
     # without it every Kalshi vanish drop was chased straight back up).
+    chalk_c = _hand_pick_chalk_c(blob)
     verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash,
-                                             cap_c=_hand_rejoin_cap(blob, now, ev))
+                                             cap_c=_hand_rejoin_cap(blob, now, ev), chalk_c=chalk_c)
     hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
     thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
     thin_join = None
@@ -19590,8 +19693,11 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
                 return
     if verdict == "hold":
         st["held"] += 1
-        if not hold or abs(float(hold.get("touch_c") or -1) - target) >= 0.49 or thin_hold:
+        if (not hold or abs(float(hold.get("touch_c") or -1) - target) >= 0.49 or thin_hold
+                or (note == "chalk") != bool(hold.get("chalk_c"))):
             ch = {"touch_c": target, "price_c": price_c, "leash_c": leash, "at": now.isoformat()}
+            if note == "chalk":
+                ch["chalk_c"] = chalk_c
             nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c, "chase_hold": ch}
             nb.pop("thin_hold", None)
             sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
@@ -21797,7 +21903,7 @@ _BS_READ_PP = {   # (play, lean, implausible) in pp — None play = lean-capped
     ("MLB", "moneyline"): (None, 4.0, 12.0),
     ("NFL", "moneyline"): (4.0, 2.0, 12.0), ("NCAAF", "moneyline"): (4.0, 2.0, 12.0),
 }
-_BS_READ_CHALK_C = 60.0       # the chalk rule (−150) in cents: no ML read past it
+_BS_READ_CHALK_C = _chalk_cents(_SHEET_CHALK_ML)   # the chalk rule in cents: no ML read at −140 or shorter
 
 
 def _bs_ncdf(x: float) -> float:
@@ -21938,8 +22044,15 @@ def _bs_option_read(sb, sport, blob, mt, side, line, price_c):
                 v = "pass"
                 out["why"] = f"a {e:.1f}¢ edge is past the {imp:.0f}¢ the model is trusted to"
             if mt == "moneyline" and v != "pass" and float(price_c) >= _BS_READ_CHALK_C:
-                v = "pass"   # THE CHALK RULE: the sheet gives no ML bet at −150 or shorter
-                out["why"] = f"{price_c:g}¢ is −150 or shorter — the chalk rule, no moneyline past it"
+                v = "pass"   # THE CHALK RULE: the sheet gives no ML bet at −140 or shorter
+                out["why"] = f"{price_c:g}¢ is {_SHEET_CHALK_ML} or shorter — the chalk rule, no moneyline past it"
+    if v and v != "pass" and mt != "moneyline" and price_c is not None:
+        try:
+            if float(price_c) >= _hand_chalk_cap_c(mt) - 1e-9:
+                v = "pass"   # THE O/U CHALK (Oct 23 2026): no spread or total at −120 or shorter
+                out["why"] = f"{float(price_c):g}¢ is {_SHEET_CHALK_OU} or shorter — the chalk rule, nothing past it"
+        except (TypeError, ValueError):
+            pass
     out["verdict"] = v
     return out
 
@@ -22950,13 +23063,16 @@ def _hand_rejoin_cap(blob: dict, now, ev, lead_min=None):
         return None
 
 
-def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c, cap_c=None):
+def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c, cap_c=None, chalk_c=None):
     """Pure. ('stay'|'move'|'hold', target_c, note). Our-side cents in,
     our-side cents out. `anchor_c` None → the current price is the anchor.
     `cap_c` = the post-move REJOIN HOLD: after the line-move rule sat us
     back down at the rung the size relocated to, the chase may not climb
     back onto the straggler rung above it until the hold expires (Oct 4
-    2026: rejoined 51.0, chased to 51.5 within a tick, cancelled again)."""
+    2026: rejoined 51.0, chased to 51.5 within a tick, cancelled again).
+    `chalk_c` = THE CHALK CAP (Oct 23 2026): a touch at or past it is a
+    HOLD (note 'chalk') — the box never chases a bet into chalk; the strip
+    reads CHALK and offers the cheaper rung."""
     if price_c is None or touch_c is None:
         return "stay", None, "no_quote"
     try:
@@ -22969,6 +23085,8 @@ def _hand_chase_plan(price_c, touch_c, anchor_c, leash_c, cap_c=None):
         return "stay", None, "at_touch"
     if cap_c is not None and touch_c > float(cap_c) + 1e-9:
         return "stay", touch_c, "rejoin_hold"
+    if chalk_c is not None and touch_c >= float(chalk_c) - 1e-9:
+        return "hold", touch_c, "chalk"
     a = float(anchor_c) if anchor_c is not None else price_c
     if touch_c - a > float(leash_c) + 1e-9:
         return "hold", touch_c, "leash"
@@ -23145,7 +23263,8 @@ def _hand_chase_tick(sb, client, now) -> dict:
             except Exception as e:
                 app.logger.warning("hand venue switch (poly→kalshi) pick %s: %s", r["id"], str(e)[:120])
         cap_c = _hand_rejoin_cap(blob, now, ev, lead_min)   # a hold set before this rule may run past T-30: the read caps it too
-        verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash, cap_c=cap_c)
+        chalk_c = _hand_pick_chalk_c(blob)
+        verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash, cap_c=cap_c, chalk_c=chalk_c)
         hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
         thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
         thin_join = None                                # set when the guard retargets us to the rung under a thin touch
@@ -23236,13 +23355,16 @@ def _hand_chase_tick(sb, client, now) -> dict:
             if (st.get("rr_reads", 0) < _HAND_RERUNG_READS
                     and (rr is None or rr_age is None or rr_age > _HAND_RERUNG_REFRESH_S or moved_touch)):
                 st["rr_reads"] = st.get("rr_reads", 0) + 1
-                got = _hand_rerung_suggest(client, r, slug, anchor_c if anchor_c is not None else price_c,
-                                           leash, now)
+                _a0 = float(anchor_c if anchor_c is not None else price_c)
+                _rl = leash if note != "chalk" else max(0.0, min(float(leash), float(chalk_c) - 0.01 - _a0))
+                got = _hand_rerung_suggest(client, r, slug, _a0, _rl, now)
                 if got is not None:
                     rr = got
                     moved_touch = True                  # write the fresh suggestion
-            if moved_touch or thin_hold:
+            if moved_touch or thin_hold or (note == "chalk") != bool((hold or {}).get("chalk_c")):
                 ch = {"touch_c": target, "price_c": price_c, "leash_c": leash, "at": now.isoformat()}
+                if note == "chalk":
+                    ch["chalk_c"] = chalk_c
                 if rr:
                     ch["rerung"] = rr
                 nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c, "chase_hold": ch}
