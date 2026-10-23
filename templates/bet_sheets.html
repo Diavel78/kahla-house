@@ -186,6 +186,7 @@
               gap: 2px; padding: 6px 10px; cursor: pointer; }
         .bb .bl { font-family: var(--mono); font-size: 17px; font-weight: 600; color: var(--text); }
         .bb .bs { font-size: 12px; font-weight: 700; }
+        .bb .pr { font-size: 14px; color: var(--text2); font-weight: 500; }
         .bb.pass { min-height: 48px; background: transparent; border-style: dashed; border-color: var(--line2); }
         .bb.pass .bl { font-size: 16px; color: var(--text2); }
         .bb.in { border: 2px solid var(--blue); border-style: solid; }
@@ -522,6 +523,15 @@
         return a + (p === null ? '' : ' <span class="dim">(' + pct(p) + ')</span>');
     }
     // A probability printed as its fair American price: "52.0% (-108)".
+    // The price in both languages — "−120 / 54.5%" (Rob, Oct 23 2026: "it
+    // should say American Odds/%, since I primarily bet on the prediction
+    // markets" — the % is the cents a contract costs, vig in).
+    function amPct(x) {
+        const a = am(x);
+        if (!a) return '';
+        const p = impl(x);
+        return a + (p === null ? '' : ' / ' + pct(p));
+    }
     function pam(p) {
         if (p === null || p === undefined) return '';
         p = Number(p);
@@ -959,7 +969,7 @@
     // filled, red needs you; dashed + quiet on a PASS. Empty → tap adds it
     // to the slip; holding a bet → tap opens its action sheet.
     let _btnIds = {}, _btnSides = {};
-    function pickBtn(gi, g, mt, side, line, label, verdict) {
+    function pickBtn(gi, g, mt, side, line, label, verdict, price) {
         if (line === null || line === undefined || !side) return '';
         _btnSides[mt] = { side: side, label: label };       // this card's model side per market
         const key = slipKey(g, mt, side), on = inSlip(key), mine = myBetOn(g, mt, side);
@@ -974,7 +984,8 @@
             if (on) { cls += ' in'; sub = '<span class="bs">✓ on the slip</span>'; }
             click = 'toggleSide(' + args + ')';
         }
-        return '<button class="' + cls + '" onclick=\'' + click.replace(/'/g, '&#39;') + '\'><span class="bl">' + esc(label) + '</span>' + sub + '</button>';
+        const pr = price != null ? ' <span class="pr">' + amPct(price) + '</span>' : '';   // the sheet's book price, American / %
+        return '<button class="' + cls + '" onclick=\'' + click.replace(/'/g, '&#39;') + '\'><span class="bl">' + esc(label) + pr + '</span>' + sub + '</button>';
     }
     // The pending pre-game bets on a game (both lookups: market id, event name).
     function betsOnGame(g) {
@@ -1384,9 +1395,9 @@
     }
     // the market's body: the model-side button pre-game; on a final, the
     // pick and its ✅/❌ (a PASS shows nothing — it was never a pick)
-    function mkBody(g, up, mt, p, line, label, gradeKey) {
+    function mkBody(g, up, mt, p, line, label, gradeKey, price) {
         if (!p || !p.side || line == null) return '';
-        if (up) return pickBtn(g._gi, g, mt, p.side, line, label, p.verdict);
+        if (up) return pickBtn(g._gi, g, mt, p.side, line, label, p.verdict, price);
         return p.verdict !== 'pass' ? '<div class="mk-x">' + esc(label) + (gradeKey === 'puck' ? puckGrade(g, p) : gradeMark(g, gradeKey)) + '</div>' : '';
     }
     // The box's grader doesn't grade the puck line; read it off the final.
@@ -1400,8 +1411,9 @@
         const L = g.line || {}, M = g.model, bs = g.spread, bt = g.total, out = [];
         let mdl = M ? 'model ' + favLine(g, M.spread_home, 1) : (g.unrated ? '<span class="unrated">unrated</span>' : '');
         if (L.spread_home != null && !bs) mdl = 'line ' + favLine(g, L.spread_home, 1) + (mdl ? ' · ' + mdl : '');
-        let ln = null;
-        if (bs && L.spread_home != null) ln = bs.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home);
+        let ln = null;   // the rung Rob bets (bs.line = the bettable half point), else the market's number
+        if (bs && bs.line != null) ln = Number(bs.line);
+        else if (bs && L.spread_home != null) ln = bs.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home);
         if (bs || L.spread_home != null || M)
             out.push(mkRow('Spread', bs, mdl + edgeTxt(bs, true) + pinTxt(g, 'spread', bs ? bs.side : null),
                      mkBody(g, up, 'spread', bs, ln, bs ? nameOf(g, bs.side) + ' ' + sgn(ln, 1) : '', 'spread')));
@@ -1430,7 +1442,7 @@
         if (tl != null && !p) mdl = 'line ' + tl + (mdl ? ' · ' + mdl : '');
         if (!p && tl == null && !mdl) return '';
         return mkRow('Total', p, mdl + edgeTxt(p, pts) + pinTxt(g, 'total', p ? p.side : null),
-                     mkBody(g, up, 'total', p, tl, p ? (p.side === 'over' ? 'Over ' : 'Under ') + tl : '', 'total') + openTxt(g));
+                     mkBody(g, up, 'total', p, tl, p ? (p.side === 'over' ? 'Over ' : 'Under ') + tl : '', 'total', p ? p.price : null) + openTxt(g));
     }
     // THE CHALK RULE (Rob, Oct 11 2026: "-180 and a -262? Yeah, I ain't
     // betting that"): a chalky ML pick (server `ml.chalky`, ≤ −150) keeps its
@@ -1446,7 +1458,7 @@
         if (p && p.side && L['ml_' + p.side] != null) mdl = nameOf(g, p.side) + ' ' + am(L['ml_' + p.side]) + (mdl ? ' · ' + mdl : '');
         else if (!p && L.ml_away != null && L.ml_home != null) mdl = nameOf(g, 'away') + ' ' + am(L.ml_away) + ' · ' + nameOf(g, 'home') + ' ' + am(L.ml_home) + (mdl ? ' · ' + mdl : '');
         if (!p && !mdl) return '';
-        let body = mkBody(g, up, 'ml', p, 0, p && p.side ? nameOf(g, p.side) + ' ML' : '', 'ml');
+        let body = mkBody(g, up, 'ml', p, 0, p && p.side ? nameOf(g, p.side) + ' ML' : '', 'ml', p ? (p.price != null ? p.price : L['ml_' + p.side]) : null);
         if (p && p.chalky && up) body = '<div class="mk-note">Too chalky to bet at ' + am(p.price) + ' — ' + (_sport === 'NHL' ? 'see the puck line' : _sport === 'MLB' ? 'see the run line' : 'see the spread') + '.</div>';
         return mkRow('ML', p, mdl + edgeTxt(p, false) + pinTxt(g, 'ml', p ? p.side : null), body);
     }
@@ -1459,7 +1471,7 @@
         let ln = null;
         if (p && p.side) ln = p.line != null ? Number(p.line) : (L.spread_home != null ? (p.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home)) : null);
         return mkRow(_sport === 'MLB' ? 'Run line' : 'Spread', p, mdl + edgeTxt(p, false) + pinTxt(g, 'spread', p ? p.side : null),
-                     mkBody(g, up, 'spread', p, ln, p && p.side ? nameOf(g, p.side) + ' ' + sgn(ln, 1) : '', 'spread'));
+                     mkBody(g, up, 'spread', p, ln, p && p.side ? nameOf(g, p.side) + ' ' + sgn(ln, 1) : '', 'spread', p ? p.price : null));
     }
     // Hockey puck line: priced server-side like the ML (`g.puck`, model cover
     // at the book's line vs the no-vig price — _sheet_puck_pick).
@@ -1473,7 +1485,7 @@
         }
         if (!p && !mdl) return '';
         return mkRow('Puck', p, mdl + edgeTxt(p, false) + pinTxt(g, 'spread', p ? p.side : null),
-                     mkBody(g, up, 'spread', p, p ? p.line : null, p && p.side ? nameOf(g, p.side) + ' ' + sgn(p.line, 1) : '', 'puck'));
+                     mkBody(g, up, 'spread', p, p ? p.line : null, p && p.side ? nameOf(g, p.side) + ' ' + sgn(p.line, 1) : '', 'puck', p ? p.price : null));
     }
     function marketsFor(g, up) {
         if (_sport === 'NHL') return mlMarket(g, up) + puckMarket(g, up) + totalMarket(g, up, false);

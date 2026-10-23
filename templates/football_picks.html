@@ -448,9 +448,18 @@
         const e = pts ? sgn(p.edge_pts) + ' pts' : sgn(p.edge_pp) + '%';
         return ' <span class="dim">· edge ' + e + (p.fair != null ? ' · fair ' + am(p.fair) : '') + '</span>';
     }
+    // The price in both languages — "−120 / 54.5%" (Rob, Oct 23 2026: "it
+    // should say American Odds/%, since I primarily bet on the prediction
+    // markets" — the % is the cents a contract costs, vig in).
+    function amPct(x) {
+        const a = am(x);
+        if (!a) return '';
+        const p = impl(x);
+        return a + (p === null ? '' : ' / ' + pct(p));
+    }
     function pickBox(p, label, price, grade) {
         return '<div class="pb' + (p.verdict === 'pass' ? ' pass' : '') + '">' + esc(label)
-             + (price != null ? ' <span class="pr">' + am(price) + '</span>' : '') + (grade || '') + '</div>';
+             + (price != null ? ' <span class="pr">' + amPct(price) + '</span>' : '') + (grade || '') + '</div>';
     }
     // The box's grader doesn't grade the puck line; read it off the final.
     function puckGrade(g, p) {
@@ -474,8 +483,9 @@
         const L = g.line || {}, M = g.model, bs = g.spread, out = [];
         let mdl = M ? 'model ' + favLine(g, M.spread_home, 1) : (g.unrated ? '<span class="unrated">unrated</span>' : '');
         if (L.spread_home != null && !bs) mdl = 'line ' + favLine(g, L.spread_home, 1) + (mdl ? ' · ' + mdl : '');
-        let ln = null;
-        if (bs && L.spread_home != null) ln = bs.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home);
+        let ln = null;   // the rung Rob bets (bs.line = the bettable half point), else the market's number
+        if (bs && bs.line != null) ln = Number(bs.line);
+        else if (bs && L.spread_home != null) ln = bs.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home);
         if (bs || L.spread_home != null || M)
             out.push(mkRow('Spread', bs, mdl + edgeTxt(bs, true) + srcTag((g.line_src || {}).spread) + pinTxt(g, 'spread', bs ? bs.side : null),
                      mkBody(g, bs, ln, bs ? nameOf(g, bs.side) + ' ' + sgn(ln, 1) : '', null, 'spread')));
