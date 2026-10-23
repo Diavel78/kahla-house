@@ -3391,7 +3391,13 @@ def test_hand_red_alert() -> None:
           r and r[0] == "past_leash" and "3¢ past your 42¢" in r[1] and "58.5 @ 51¢" in r[1], str(r))
     r = R({"recon": {"red": [{"code": "dead_order", "msg": "the pick's order X is not on the book"}]}}, resting)
     check("CHECK ME is red before anything else", r and r[0] == "check_me" and "not on the book" in r[1], str(r))
-    check("outbid in play is red", R({"in_play": True}, resting)[0] == "outbid_live")
+    check("an in-play app bet is never red (outbid in play is Rob's to move)", R({"in_play": True}, resting) is None)
+    check("PRE-GAME ONLY: a started game is never red, whatever the strip says (settled lot gone, sold, past leash)",
+          R({}, off, started=True) is None and R({"anchor_c": 42.0, "chase_hold": {"touch_c": 45.0}}, resting, started=True) is None
+          and R({"recon": {"red": [{"code": "x", "msg": "y"}]}}, resting, started=True) is None)
+    check("a FILLED bet whose lot is gone pre-game is the sold tick's job, not OFF THE BOOK",
+          R({"filled_qty": 5.0}, off) is None and R({"filled": True}, off) is None)
+    check("the tick passes started= off event_start", "started=started" in _insp.getsource(_app._hand_red_alert_tick))
     check("outbid pre-game is the chase's job, not red", R({}, resting) is None)
     check("a held lot is green", R({}, {"order": {"resting": False}, "held": 5.0}) is None)
     check("a venue read the box could not make is never red", R({}, {**off, "held_unknown": True}) is None)

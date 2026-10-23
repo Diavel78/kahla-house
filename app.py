@@ -15932,10 +15932,18 @@ _HAND_RED_MIN_TICKS = 2
 _TG_RED_PREFIX = "\U0001f534"       # 🔴
 
 
-def _hand_red_state(blob: dict, s: dict):
+def _hand_red_state(blob: dict, s: dict, started: bool = False):
     """Pure. (code, text) when the page would paint this bet RED, else None.
     `s` = the strip entry (order/held/touch_c/outbid/held_unknown). A venue
-    read the box could not make (`held_unknown`) is never a red."""
+    read the box could not make (`held_unknown`) is never a red.
+    PRE-GAME ONLY (Rob, Oct 22 2026, after OFF THE BOOK pings on two settled
+    games and a bet he had sold in the app: "I wanted the bet at the start,
+    it didn't fill and cancelled, that's it"): once the game has started
+    nothing is red — a lot that vanishes is a settlement or a sale, an
+    in-play app bet is his to move — and a FILLED bet whose lot is gone
+    pre-game is the sold tick's job, never a red."""
+    if started or blob.get("in_play"):
+        return None
     o = s.get("order") if isinstance(s.get("order"), dict) else {}
     resting = bool(o.get("resting"))
     try:
@@ -15961,11 +15969,14 @@ def _hand_red_state(blob: dict, s: dict):
             if rr and rr.get("slug"):
                 txt += f" · cheaper rung on the ladder: line {rr.get('line')} @ {rr.get('bid_c')}¢"
             return "past_leash", txt
-        if s.get("outbid") and blob.get("in_play"):
-            return "outbid_live", f"OUTBID · in play · touch {s.get('touch_c')}¢ · re-peg in the app"
         return None
     if held > 0 or s.get("held_unknown"):
         return None
+    try:
+        if float(blob.get("filled_qty") or 0) > 0 or blob.get("filled"):
+            return None                    # a filled lot that is gone = sold or settled, the sold tick's call
+    except (TypeError, ValueError):
+        pass
     lh = blob.get("line_hold") if isinstance(blob.get("line_hold"), dict) else None
     if lh:
         if lh.get("err"):
@@ -16019,7 +16030,13 @@ def _hand_red_alert_tick(sb, now) -> dict:
         s = strip.get(pid)
         if s is None:
             continue
-        red = _hand_red_state(blob, s)
+        started = False
+        try:
+            ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+            started = ev <= datetime.now(timezone.utc)
+        except Exception:
+            started = False
+        red = _hand_red_state(blob, s, started=started)
         ra = blob.get("red_alert") if isinstance(blob.get("red_alert"), dict) else None
         if not red:
             _HAND_RED_SEEN.pop(pid, None)
