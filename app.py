@@ -16006,10 +16006,127 @@ def _hand_red_msg(r: dict, blob: dict, text: str) -> str:
     return f"{_TG_RED_PREFIX} {label} · {r.get('event_name') or ''}{when}\n{text}{size} · {venue}"
 
 
+_HAND_START_ALERTED: dict = {}      # pick_id → monotonic: one game-start ping per bet, whichever path stamps it
+_HAND_START_ALERT_Q: list = []       # failed sends: {msg, pick_id, code, tries, next_at} — drained by the red-alert tick
+_HAND_START_ALERT_MAX_TRIES = 3
+
+
+def _hand_start_cancel_text(stamp: dict):
+    """Pure. THE ALERT ROB ASKED FOR (Oct 22 2026: "I wanted the bet at the
+    start, it didn't fill and cancelled, that's it… it doesn't cancel until
+    5 minutes into the game now… those are the alerts I need"): what the
+    box did with his bet when the makers left, read off the
+    `hand_start_cancel` stamp. (code, text), or None when the bet filled in
+    full (the bet is on and the app shows it — nothing to say)."""
+    bet = stamp.get("bet") if isinstance(stamp.get("bet"), dict) else {}
+    out = stamp.get("result") if isinstance(stamp.get("result"), dict) else {}
+    tw = stamp.get("window") if isinstance(stamp.get("window"), dict) else {}
+    try:
+        want = float(bet.get("contracts") or 0)
+    except (TypeError, ValueError):
+        want = 0.0
+    if stamp.get("error") or not out.get("ok"):
+        err = str(stamp.get("error") or out.get("error") or "cancel failed")[:80]
+        return "start_cancel_err", f"GAME STARTED · CANCEL FAILED · {err} · still on the book, check the app"
+    if stamp.get("sat_out"):
+        so = stamp.get("sat_out") if isinstance(stamp.get("sat_out"), dict) else {}
+        why = str(so.get("why") or "sitting out a line move, never rejoined")[:60]
+        return "start_sat_out", f"GAME STARTED · {why} · bet retired"
+    tries = tw.get("tries")
+    took = ""
+    if tries:
+        took = f" · {int(tries)} take tries inside the cap, nothing there"
+    if out.get("deleted"):
+        return "start_not_filled", f"NOT FILLED · cancelled at game start{took}"
+    held = out.get("held")
+    if held is None:
+        return "start_held_unknown", "GAME STARTED · rest cancelled · held size UNREADABLE, check the app"
+    try:
+        held_f = float(held)
+    except (TypeError, ValueError):
+        return "start_held_unknown", "GAME STARTED · rest cancelled · held size UNREADABLE, check the app"
+    if want > 0 and held_f + 1e-6 < want:
+        return "start_partial", f"PARTIAL · {held_f:g} of {want:g} filled · rest cancelled at game start{took}"
+    return None
+
+
+def _hand_start_cancel_alert(stamp: dict) -> None:
+    """Send the game-start red for one `hand_start_cancel` stamp, once per
+    pick. The outcome rides the stamp (`alert`); a failed send is queued for
+    the red-alert tick to retry on the red clock — the pick is usually gone
+    by then, so the queue, not the pick, remembers it."""
+    try:
+        if not _machine_flag("hand_red_alert", True):
+            return
+        pid = str(stamp.get("pick_id") or "")
+        if not pid or pid in _HAND_START_ALERTED:
+            return
+        ct = _hand_start_cancel_text(stamp)
+        if not ct:
+            return
+        code, text = ct
+        bet = stamp.get("bet") if isinstance(stamp.get("bet"), dict) else {}
+        kalshi = str(stamp.get("venue") or bet.get("venue") or "").upper() == "KALSHI"
+        r = {"event_name": bet.get("event_name"), "event_start": bet.get("event_start"),
+             "side": bet.get("side"), "market_type": bet.get("market_type")}
+        blob = {"label": bet.get("label"), "contracts": bet.get("contracts"), "price_c": bet.get("price_c"),
+                "venue": "KALSHI" if kalshi else "POLYMARKET"}
+        msg = _hand_red_msg(r, blob, text)
+        _HAND_START_ALERTED[pid] = _time.monotonic()
+        ok = False
+        try:
+            ok = bool(_send_fill_telegram(msg, urgent=True))
+        except Exception:
+            ok = False
+        stamp["alert"] = {"code": code, "text": text, "sent": ok, "creds": _tg_creds()[2],
+                          "err": None if ok else _TG_LAST_ERR.get("err")}
+        if not ok:
+            _HAND_START_ALERT_Q.append({"msg": msg, "pick_id": pid, "code": code, "tries": 1,
+                                        "next_at": _time.time() + _HAND_RED_RETRY_S})
+        if len(_HAND_START_ALERTED) > 500:
+            for k in sorted(_HAND_START_ALERTED, key=_HAND_START_ALERTED.get)[:250]:
+                _HAND_START_ALERTED.pop(k, None)
+    except Exception as e:
+        try:
+            stamp["alert"] = {"err": f"{type(e).__name__}: {e}"[:120], "sent": False}
+        except Exception:
+            pass
+
+
+def _hand_start_alert_retry() -> int:
+    """Drain the failed game-start pings (top of the red-alert tick)."""
+    sent = 0
+    now_t = _time.time()
+    for q in list(_HAND_START_ALERT_Q):
+        if q["next_at"] > now_t:
+            continue
+        ok = False
+        try:
+            ok = bool(_send_fill_telegram(q["msg"], urgent=True))
+        except Exception:
+            ok = False
+        q["tries"] += 1
+        try:
+            _probe_log({"kind": "hand_start_alert_retry", "hand_start_alert_retry": True, "pick_id": q["pick_id"],
+                        "code": q["code"], "tries": q["tries"], "sent": ok,
+                        "err": None if ok else _TG_LAST_ERR.get("err"), "at": datetime.now(timezone.utc).isoformat()})
+        except Exception:
+            pass
+        if ok:
+            sent += 1
+            _HAND_START_ALERT_Q.remove(q)
+        elif q["tries"] >= _HAND_START_ALERT_MAX_TRIES:
+            _HAND_START_ALERT_Q.remove(q)
+        else:
+            q["next_at"] = now_t + _HAND_RED_RETRY_S
+    return sent
+
+
 def _hand_red_alert_tick(sb, now) -> dict:
     """Handbets tick, after the reconcile: ping Telegram once per red."""
     if not _machine_flag("hand_red_alert", True):
         return {"off": True}
+    retried = _hand_start_alert_retry()
     st = _HAND_STATUS_LAST
     strip = st.get("rows") or {}
     if not strip or _time.time() - float(st.get("at") or 0) > 120.0:
@@ -16087,7 +16204,8 @@ def _hand_red_alert_tick(sb, now) -> dict:
     for pid in list(_HAND_RED_SEEN):
         if pid not in live_ids:
             _HAND_RED_SEEN.pop(pid, None)
-    return {"reds": reds, "sent": sent, "cleared": cleared, "creds": _tg_creds()[2]}
+    return {"reds": reds, "sent": sent, "cleared": cleared, "creds": _tg_creds()[2],
+            "start_retried": retried, "start_queue": len(_HAND_START_ALERT_Q)}
 
 
 _HAND_RECON_EVERY_S = 60.0
@@ -17074,6 +17192,7 @@ def _hand_start_complete_poly(sb, client, r: dict, blob: dict, slug: str, oid: s
         st["completed"] = st.get("completed", 0) + 1
     else:
         st["errors"] += 1
+    _hand_start_cancel_alert(stamp)
     try:
         _probe_log(stamp)
     except Exception:
@@ -17124,6 +17243,7 @@ def _hand_start_finish_poly(sb, client, r: dict, stamp: dict, take, cum0: float,
         st["started"] += 1
     else:
         st["errors"] += 1
+    _hand_start_cancel_alert(stamp)
     try:
         _probe_log(stamp)
     except Exception:
@@ -17303,6 +17423,8 @@ def _hand_start_tick(sb, client, now) -> dict:
         except Exception as e:
             st["errors"] += 1
             stamp["error"] = str(e)[:160]
+            if stamp.get("hand_start_cancel"):
+                _hand_start_cancel_alert(stamp)
             try:
                 _probe_log(stamp)
             except Exception:
@@ -19768,6 +19890,7 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
         except Exception as e:
             stamp["error"] = str(e)[:160]
             st["errors"] += 1
+        _hand_start_cancel_alert(stamp)
         _probe_log(stamp)
         app.logger.warning("hand start KALSHI orphan pick %s %s → %s", r["id"], ticker, stamp.get("result"))
         return
@@ -20002,6 +20125,7 @@ def _hand_start_finish_kalshi(sb, client, r: dict, stamp: dict, take, cum0: floa
         st["started"] += 1
     else:
         st["errors"] += 1
+    _hand_start_cancel_alert(stamp)
     try:
         _probe_log(stamp)
     except Exception:

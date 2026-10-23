@@ -3468,6 +3468,70 @@ def test_hand_red_alert() -> None:
     finally:
         _app._http.post, _app._tg_creds = old_post, old_creds
 
+    # THE GAME-START CANCEL ALERT (Rob, Oct 22 2026: "I wanted the bet at the
+    # start, it didn't fill and cancelled, that's it… it doesn't cancel until
+    # 5 minutes into the game now… those are the alerts I need"): every
+    # hand_start_cancel stamp site pings once — unfilled, partial, failed
+    # cancel, sat out — and a full fill says nothing.
+    T = _app._hand_start_cancel_text
+    bet = {"label": "Under 52.5", "event_name": "WAS @ SF", "event_start": "2026-10-22T20:00:00+00:00",
+           "contracts": 5, "price_c": 49.0, "side": "under", "market_type": "total"}
+    ct = T({"bet": bet, "result": {"ok": True, "deleted": True}, "window": {"tries": 7}})
+    check("start cancel: unfilled → NOT FILLED with the take tries", ct and ct[0] == "start_not_filled"
+          and "NOT FILLED" in ct[1] and "7 take tries" in ct[1], str(ct))
+    ct = T({"bet": bet, "result": {"ok": True, "deleted": False, "held": 2.0}})
+    check("start cancel: partial → PARTIAL 2 of 5", ct and ct[0] == "start_partial" and "2 of 5" in ct[1], str(ct))
+    check("start cancel: filled in full → no alert", T({"bet": bet, "result": {"ok": True, "deleted": False, "held": 5.0}}) is None)
+    ct = T({"bet": bet, "result": {"ok": False, "error": "venue did not cancel it — check the app"}})
+    check("start cancel: a failed cancel → CANCEL FAILED, still on the book",
+          ct and ct[0] == "start_cancel_err" and "CANCEL FAILED" in ct[1] and "still on the book" in ct[1], str(ct))
+    ct = T({"bet": bet, "result": {"ok": True, "deleted": True}, "sat_out": {"why": "order gone before the start"}})
+    check("start cancel: sat out → retired with the why", ct and ct[0] == "start_sat_out" and "order gone before the start" in ct[1], str(ct))
+    ct = T({"bet": bet, "result": {"ok": True, "deleted": False, "held": None}})
+    check("start cancel: unreadable held → check the app", ct and ct[0] == "start_held_unknown", str(ct))
+    # the sender: one ping per pick, the outcome rides the stamp, a failed send queues
+    sent = []
+    old_send, old_flag = _app._send_fill_telegram, _app._machine_flag
+    _app._machine_flag = lambda name, default=None: default
+    _app._HAND_START_ALERTED.clear(); _app._HAND_START_ALERT_Q.clear()
+    try:
+        _app._send_fill_telegram = lambda msg, urgent=False: sent.append(msg) or True
+        st1 = {"kind": "hand_start_cancel", "hand_start_cancel": True, "pick_id": "p1", "bet": bet,
+               "result": {"ok": True, "deleted": True}, "window": {"tries": 3}}
+        _app._hand_start_cancel_alert(st1)
+        check("start alert: sends one 🔴 with the bet, the game and the venue",
+              len(sent) == 1 and sent[0].startswith("🔴") and "Under 52.5" in sent[0] and "WAS @ SF" in sent[0]
+              and "NOT FILLED" in sent[0] and "Polymarket" in sent[0] and "5 @ 49.0¢" in sent[0], sent[-1:] )
+        check("start alert: the outcome rides the stamp", st1.get("alert", {}).get("sent") is True
+              and st1["alert"]["code"] == "start_not_filled")
+        _app._hand_start_cancel_alert(st1)
+        check("start alert: the same pick never pings twice", len(sent) == 1)
+        st2 = {**st1, "pick_id": "p2", "venue": "KALSHI", "result": {"ok": True, "deleted": False, "held": 1.0}}
+        _app._hand_start_cancel_alert(st2)
+        check("start alert: a Kalshi partial names Kalshi", len(sent) == 2 and "Kalshi" in sent[1] and "PARTIAL" in sent[1], sent[-1:])
+        st3 = {k: v for k, v in st1.items() if k != "alert"} | {"pick_id": "p3", "result": {"ok": True, "deleted": False, "held": 5.0}}
+        _app._hand_start_cancel_alert(st3)
+        check("start alert: a full fill is silent", len(sent) == 2 and "alert" not in st3)
+        _app._send_fill_telegram = lambda msg, urgent=False: False
+        st4 = {**st1, "pick_id": "p4"}
+        _app._hand_start_cancel_alert(st4)
+        check("start alert: a failed send is recorded and queued for the red clock",
+              st4["alert"]["sent"] is False and len(_app._HAND_START_ALERT_Q) == 1
+              and _app._HAND_START_ALERT_Q[0]["next_at"] > _app._time.time() + 100)
+        _app._HAND_START_ALERT_Q[0]["next_at"] = 0
+        _app._send_fill_telegram = lambda msg, urgent=False: sent.append(msg) or True
+        check("start alert: the retry drains the queue", _app._hand_start_alert_retry() == 1 and not _app._HAND_START_ALERT_Q
+              and len(sent) == 3)
+    finally:
+        _app._send_fill_telegram, _app._machine_flag = old_send, old_flag
+        _app._HAND_START_ALERTED.clear(); _app._HAND_START_ALERT_Q.clear()
+    src_fin = _insp.getsource(_app._hand_start_finish_poly) + _insp.getsource(_app._hand_start_finish_kalshi) \
+        + _insp.getsource(_app._hand_start_complete_poly) + _insp.getsource(_app._hand_start_kalshi)
+    check("start alert: every start-cancel finish path calls the alert",
+          src_fin.count("_hand_start_cancel_alert(stamp)") >= 4, src_fin.count("_hand_start_cancel_alert(stamp)"))
+    check("start alert: the red-alert tick drains the retry queue",
+          "_hand_start_alert_retry()" in _insp.getsource(_app._hand_red_alert_tick))
+
 
 def test_hand_guard_and_recon() -> None:
     """THE RELIABILITY LAYER (Oct 20 2026, Rob: "wrong sides, bad bets,
