@@ -86,6 +86,10 @@
         .alert { background: var(--r-bg); border: 1px solid var(--r-bd); color: var(--r-tx); border-radius: 12px;
                  padding: 10px 12px; font-size: 14px; font-weight: 600; }
         .alert.amb { background: var(--a-bg); border-color: var(--a-bd2); color: var(--a-tx); }
+        .alert.tap { cursor: pointer; }
+        .alert.tap::after { content: ' ↓'; opacity: .7; }
+        @keyframes khflash { 0%, 100% { box-shadow: none; } 50% { box-shadow: 0 0 0 4px var(--r-bd); } }
+        .flash { animation: khflash .8s ease-in-out 2; }
 
         /* sections (missed, live) */
         .sec { margin-top: 22px; }
@@ -1315,7 +1319,22 @@
     }
     function money(x) { if (x == null) return ''; return (x >= 0 ? '+$' : '−$') + Math.abs(x).toFixed(2); }
     function setAlerts(list) {
-        document.getElementById('alerts').innerHTML = list.map(a => '<div class="alert' + (a[1] ? ' ' + a[1] : '') + '">' + a[0] + '</div>').join('');
+        document.getElementById('alerts').innerHTML = list.map(a => '<div class="alert' + (a[1] ? ' ' + a[1] : '') + (a[2] ? ' tap' : '') + '"' + (a[2] ? ' onclick="' + a[2] + '"' : '') + '>' + a[0] + '</div>').join('');
+    }
+    // THE RED BAR JUMPS (Rob, Oct 24 2026: "make this fucking red bar
+    // clickable, so I don't have to scroll through the entire list to find
+    // the one fucking red game"): each tap scrolls to the next red button on
+    // the page (card buttons and the my-bets strips), wrapping, and flashes it.
+    let _redIdx = -1;
+    function jumpRed() {
+        const reds = Array.from(document.querySelectorAll('.bb.st-warn, .xb.st-warn'));
+        if (!reds.length) { toast('No red button on this tab right now'); return; }
+        _redIdx = (_redIdx + 1) % reds.length;
+        const el = reds[_redIdx];
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('flash');
+        setTimeout(() => el.classList.remove('flash'), 1600);
+        if (reds.length > 1) toast('Red ' + (_redIdx + 1) + ' of ' + reds.length);
     }
     async function loadBets() {
         let r;
@@ -1472,7 +1491,7 @@
         if (d.tape_dark) al.push(['🚨 ORDER-BOOK FEED DOWN (' + d.tape_dark[0] + '/' + d.tape_dark[1] + ' bets blind) — no game-start or line-move cancels']);
         if (d.src !== 'box') al.push(['⚠ The box is not publishing — bet status is read from the venue directly', 'amb']);
         if (!d.venue_ok) al.push(['⚠ Polymarket unreadable — bet status may be stale', 'amb']);
-        if (warn) al.push([warn + ' ' + _sport + ' bet' + (warn === 1 ? ' needs' : 's need') + ' you — the red buttons below']);
+        if (warn) al.push([warn + ' ' + _sport + ' bet' + (warn === 1 ? ' needs' : 's need') + ' you — tap to jump to ' + (warn === 1 ? 'it' : 'the next one'), '', 'jumpRed()']);
         setAlerts(al);
         // MISSED AT KICKOFF = WHAT THE BOX CANCELLED AT KICKOFF, NOTHING ELSE
         // (Rob, Oct 10 2026: "If you cancel a bet that I have resting at
