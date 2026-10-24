@@ -3302,10 +3302,16 @@ def test_hand_live_chase() -> None:
     v, d = P(quiet + [row(0.5, 49.5, 1000.0, 51.0, lad((49.5, 1000), (49, 400)))], lad((49.5, 1000), (49, 400)), 49.5, 10, 49.5, 0.5, now)
     check("on the target with the rung intact → stay", v == "stay" and d["why"] == "on_target", str(d))
     v, d = P(quiet + [row(0.5, 49.5, 210.0, 51.0, lad((49.5, 210), (49, 400)))], lad((49.5, 210), (49, 400)), 49.5, 10, 49.5, 0.5, now)
-    check("1000 → 200 at our rung = a pull (cancel)", v == "cancel" and d["why"] == "collapse" and d["drop_pct"] >= 70, str(d))
+    check("1000 → 200 on ONE fresh frame is not yet a pull (unconfirmed)", v == "stay" and d["why"] == "collapse_unconfirmed" and d["drop_pct"] >= 70, str(d))
+    v, d = P(quiet + [row(4.0, 49.5, 210.0, 51.0, lad((49.5, 210), (49, 400))), row(0.5, 49.5, 210.0, 51.0, lad((49.5, 210), (49, 400)))], lad((49.5, 210), (49, 400)), 49.5, 10, 49.5, 0.5, now)
+    check("1000 → 200 held 4s = a pull (cancel)", v == "cancel" and d["why"] == "collapse" and d["collapse_s"] >= 3, str(d))
+    v, d = P(quiet + [row(3.5, 49.5, 210.0, 51.0, lad((49.5, 210), (49, 400)))], lad((49.5, 210), (49, 400)), 49.5, 10, 49.5, 0.5, now)
+    check("a quiet book confirms by the frame's age (one collapsed frame, 3.5s old)", v == "cancel", str(d))
+    v, d = P(quiet + [row(4.0, 49.5, 0.0, 51.0, lad((49.5, 0), (49, 400))), row(0.5, 49.5, 0.0, 51.0, lad((49.5, 0), (49, 400)))], lad((49.5, 1000), (49, 400)), 49.5, 10, 49.5, 0.5, now)
+    check("the live book still showing the rung outvotes a collapsed tape row (Louisiana, 39,000 → 0 → 39,000)", v != "cancel" and d.get("cur_q", 0) >= 900, str(d))
     v, d = P(quiet + [row(0.5, 49.5, 610.0, 51.0, lad((49.5, 610), (49, 400)))], lad((49.5, 610), (49, 400)), 49.5, 10, 49.5, 0.5, now)
     check("a 40% drop is not a pull", v == "stay", str(d))
-    v, d = P(quiet + [row(0.5, 46.0, 300.0, 47.0, lad((46, 300), (45, 900)))], lad((46, 300), (45, 900)), 49.5, 10, 49.5, 0.5, now)
+    v, d = P(quiet + [row(4.0, 46.0, 300.0, 47.0, lad((46, 300), (45, 900))), row(0.5, 46.0, 300.0, 47.0, lad((46, 300), (45, 900)))], lad((46, 300), (45, 900)), 49.5, 10, 49.5, 0.5, now)
     check("our rung emptied AND the market re-posted lower = the pull, not a chase", v == "cancel", str(d))
     alone = [row(50, 49.5, 15.0, 51.0, lad((49.5, 15), (47, 400))), row(30, 49.5, 14.0, 51.0, lad((49.5, 14), (47, 400)))]
     v, d = P(alone + [row(0.5, 46.0, 300.0, 47.0, lad((46, 300), (45, 900)))], lad((46, 300), (45, 900)), 49.5, 10, 49.5, 0.5, now)
@@ -3323,6 +3329,11 @@ def test_hand_live_chase() -> None:
     check("the worker sizes the amend off the mirror (leaves + cum)", "_amend_total(o.get(\"leaves\"), o.get(\"cum\"))" in src_w)
     check("…pops the snapshot when the mirror no longer shows the order", "LIVE_SNAP.pop(slug, None)" in src_w)
     check("…pulls through the verified cancel", "_bet_sheet_cancel(client, oid, slug)" in src_w)
+    check("…re-judges an unconfirmed collapse on a timer, on both venues",
+          '_hand_live_recheck(slug)' in src_w and '_hand_live_recheck(ticker)' in inspect.getsource(_app._hand_live_one_kalshi))
+    check("…a pull stamps its frames + the live book", src_w.count('"frames": _hand_live_frames(rows') == 1
+          and '"frames": _hand_live_frames(rows' in inspect.getsource(_app._hand_live_one_kalshi))
+    check("the tick re-judges every live bet once (a quiet book sends no frame)", "for k in list(LIVE_SNAP):\n        _hand_live_frame(k)" in inspect.getsource(_app._hand_live_tick))
     check("…rejoins with the started-game rail lifted", "allow_started=True" in src_w)
     check("…re-reads the pick before a rejoin (a cancelled pick never gets an order)", 'r.get("status") != "pending" or not isinstance(blob.get("live_hold"), dict)' in src_w)
     check("wsfeed feeds every depth frame to the live worker", "_app._hand_live_frame(slug)" in open(__import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(_app.__file__)), "cellar", "wsfeed.py")).read())
@@ -3341,8 +3352,8 @@ def test_hand_live_chase() -> None:
     v, d = P(deep + [row(0.5, 70.0, 300.0, 71.0, lad((70, 300), (69, 900), (68, 800), (67, 700), (66, 600), (65, 500)))],
              lad((70, 300), (69, 900), (68, 800), (67, 700), (66, 600), (65, 500)), 49.0, 10, 49.5, 0.5, now)
     check("our rung beyond the snapshot's depth is NOT a collapse (the BC@GT loop)", v != "cancel" and d.get("rung") == "beyond_snapshot", str(d))
-    v, d = P(deep + [row(0.5, 56.0, 300.0, 57.0, lad((56, 300), (52, 600), (49, 10)))], lad((56, 300), (52, 600), (49, 10)), 49.0, 10, 49.5, 0.5, now)
-    check("…while a real emptying of a covered rung still pulls", v == "cancel" and d["why"] == "collapse", str(d))
+    v, d = P(deep + [row(4.0, 56.0, 300.0, 57.0, lad((56, 300), (52, 600), (49, 10))), row(0.5, 56.0, 300.0, 57.0, lad((56, 300), (52, 600), (49, 10)))], lad((56, 300), (52, 600), (49, 10)), 49.0, 10, 49.5, 0.5, now)
+    check("…while a real emptying of a covered rung, held 4s, still pulls", v == "cancel" and d["why"] == "collapse", str(d))
     # THE REJOIN SIZES OFF THE VENUE (same game: 23 rejoins of 10 on a lot already held in full)
     check("the rejoin reads the venue's held lot before it rests anything", "_hand_poly_side_held(client, slug, syn)" in src_w
           and "lot_held_no_rejoin" in src_w and "min(qty, int(round(contracts - held)))" in src_w)

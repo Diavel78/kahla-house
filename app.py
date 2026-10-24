@@ -23816,6 +23816,23 @@ _HAND_START_CHASE_S = 3600.0
 _HAND_LIVE_BASE_S = 60.0           # the rung's high is read over [now-60s, now-2s]
 _HAND_LIVE_RECENT_S = 2.0
 _HAND_LIVE_STALE_S = 20.0          # the newest frame must be this fresh to call a collapse
+_HAND_LIVE_CONFIRM_S = 3.0         # a collapse must HOLD this long before the pull (Oct 24 2026, Louisiana −9.5 on
+                                   # Kalshi: 8 pulls in 7 min, every one hi 39,000 → cur 0 on ONE frame — a maker
+                                   # re-quote flicker read as a hit-and-pull; the book was back the next frame)
+_LIVE_RECHECK: dict = {}
+
+
+def _hand_live_recheck(key: str) -> None:
+    """A collapse read on one frame is re-judged `_HAND_LIVE_CONFIRM_S` later
+    whether or not another frame arrives (a quiet book sends none)."""
+    try:
+        now_m = _time.monotonic()
+        if now_m - float(_LIVE_RECHECK.get(key) or 0.0) < _HAND_LIVE_CONFIRM_S:
+            return
+        _LIVE_RECHECK[key] = now_m
+        threading.Timer(_HAND_LIVE_CONFIRM_S + 0.3, _hand_live_frame, [key]).start()
+    except Exception:
+        pass
 _HAND_LIVE_DEBOUNCE_S = 1.5        # one venue write per slug per this many seconds
 _HAND_LIVE_MAX_HOLD_S = 180.0      # a rejoin that keeps failing stops trying after this (the page shows it)
 LIVE_SNAP: dict = {}               # slug -> the live bet the worker may act on
@@ -24300,11 +24317,34 @@ def _hand_live_plan(rows, ladder, our_c, our_qty, cap_c, tick, now_ts: float,
         elif fresh and base:
             hi = max(max(0.0, qty_at(r[6], our_c) - float(our_qty or 0.0)) for r in base)
             cur = max(0.0, qty_at(cur_lad, our_c) - float(our_qty or 0.0))
+            # THE LIVE BOOK HAS A VOTE: when the socket's own book (Kalshi's
+            # full book, the Poly depth table) reaches our rung and still
+            # shows size there, the tape row is not the last word
+            if ladder is not None and cur_lad is not ladder and _ladder_covers(ladder, our_c):
+                cur = max(cur, max(0.0, qty_at(ladder, our_c) - float(our_qty or 0.0)))
             det.update({"hi_q": round(hi, 1), "cur_q": round(cur, 1),
                         "drop_pct": round(100.0 * (1.0 - cur / hi), 1) if hi > 0 else None})
-            if hi >= max(1.0, float(our_qty or 0.0)) and cur <= hi * (1.0 - drop_pct / 100.0):
-                det["why"] = "collapse"
-                return "cancel", det
+            floor_q = hi * (1.0 - drop_pct / 100.0)
+            if hi >= max(1.0, float(our_qty or 0.0)) and cur <= floor_q:
+                # THE COLLAPSE MUST HOLD (Oct 24 2026): walk back from the
+                # newest frame while every covering frame reads collapsed —
+                # the pull needs `_HAND_LIVE_CONFIRM_S` of it, so a maker's
+                # re-quote (level gone on one frame, back on the next) is not
+                # a hit-and-pull. A quiet book confirms by the frame's AGE.
+                since = rows[-1][0]
+                for r in reversed(rows[:-1]):
+                    if now_ts - r[0] > _HAND_LIVE_BASE_S or not (len(r) > 6 and r[6] and _ladder_covers(r[6], our_c)):
+                        break
+                    if max(0.0, qty_at(r[6], our_c) - float(our_qty or 0.0)) > floor_q:
+                        break
+                    since = r[0]
+                held_s = now_ts - since
+                det["collapse_s"] = round(held_s, 1)
+                if held_s >= _HAND_LIVE_CONFIRM_S:
+                    det["why"] = "collapse"
+                    return "cancel", det
+                det["why"] = "collapse_unconfirmed"
+                return "stay", det
     target, why = _hand_live_target(ladder, ask_c, our_c, our_qty, cap_c, tick)
     det.update({"target_c": target, "target_why": why})
     if target is None:
@@ -24315,6 +24355,24 @@ def _hand_live_plan(rows, ladder, our_c, our_qty, cap_c, tick, now_ts: float,
         return "move", det
     det["why"] = "on_target"
     return "stay", det
+
+
+def _hand_live_frames(rows, our_c, our_qty, now_ts, n: int = 8) -> list:
+    """Pure. The last n our-side tape rows as [age_s, bid_c, bid_q, rung_q
+    (ours excluded), ladder top-4] — what a pull stamp carries so the next
+    false collapse names its own frames."""
+    out = []
+    for r in list(rows or [])[-n:]:
+        try:
+            lad = r[6] if len(r) > 6 and r[6] else []
+            rq = None
+            if our_c is not None and lad:
+                rq = max(0.0, sum(float(q) for p, q in lad if abs(float(p) - float(our_c)) < 0.01) - float(our_qty or 0))
+            out.append([round(now_ts - float(r[0]), 1), r[1], r[2], (round(rq, 1) if rq is not None else None),
+                        [[float(p), float(q)] for p, q in list(lad)[:4]]])
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
 
 
 def _hand_live_frame(slug: str) -> None:
@@ -24481,6 +24539,8 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
     verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop)
     if verdict == "stay":
         _LIVE_STATS["stays"] += 1
+        if det.get("why") == "collapse_unconfirmed":
+            _hand_live_recheck(ticker)
         return
     _LIVE_LAST[ticker] = now_m
     r, blob = _bet_sheet_pick(sb, snap["pick_id"])
@@ -24504,7 +24564,8 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
         except Exception as e:
             det["cancel_error"] = str(e)[:120]
         stamp = {"hand_live_pull": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker, "order_id": oid,
-                 "gone": gone, "detail": det, "at": now.isoformat()}
+                 "gone": gone, "detail": det, "at": now.isoformat(),
+                 "frames": _hand_live_frames(rows, our_c, leaves, now_ts), "book": (ladder or [])[:6]}
         if gone:
             qty = max(1, int(round(leaves)))
             lh = {"at": now.isoformat(), "resume_at": (now + timedelta(seconds=calm)).isoformat(),
@@ -24664,6 +24725,8 @@ def _hand_live_one(sb, client, slug: str) -> None:
     verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop)
     if verdict == "stay":
         _LIVE_STATS["stays"] += 1
+        if det.get("why") == "collapse_unconfirmed":
+            _hand_live_recheck(slug)
         return
     _LIVE_LAST[slug] = now_m
     r, blob = _bet_sheet_pick(sb, snap["pick_id"])
@@ -24677,6 +24740,7 @@ def _hand_live_one(sb, client, slug: str) -> None:
             calm = _HAND_LIVE_CALM_S
         gone, _ords = _bet_sheet_cancel(client, oid, slug)
         stamp = {"hand_live_pull": True, "pick_id": r["id"], "slug": slug, "order_id": oid, "gone": gone,
+                 "frames": _hand_live_frames(rows, our_c, leaves, now_ts), "book": (ladder or [])[:6],
                  "detail": det, "at": now.isoformat()}
         if gone:
             qty = max(1, int(round(leaves)))
@@ -24753,6 +24817,8 @@ def _hand_live_tick(sb, client, now) -> dict:
     k_tried = False
     want: dict = {}
     now_ts = _time.time()
+    for k in list(LIVE_SNAP):
+        _hand_live_frame(k)                            # a quiet book sends no frame: re-judge every live bet once a tick
     for r in rows:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if not blob.get("live_snipe") or blob.get("in_play"):
