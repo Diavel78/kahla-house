@@ -5051,6 +5051,12 @@ def api_bet_sheets_picks():
                     out["complete_switch"] = {"ok": True, "pick_id": int(cs_id), "qty": b.get("contracts")}
         except Exception as e:
             out["complete_switch"] = {"ok": False, "err": str(e)[:160]}
+    if request.args.get("dup_orders"):
+        # A FULL LOT WITH AN ORDER STILL RESTING (Oct 24 2026): dry unless &apply=1
+        try:
+            out["dup_orders"] = _hand_dup_order_sweep(sb, get_client(), apply=bool(request.args.get("apply")))
+        except Exception as e:
+            out["dup_orders"] = {"ok": False, "error": str(e)[:200]}
     re_slug = (request.args.get("readopt") or "").strip()
     if re_slug:                                        # THE MISSOURI RE-ATTACH (Oct 6 2026): book one
         out["readopt"] = _hand_readopt(sb, re_slug)     # held lot as a hand bet, from Vercel, now
@@ -18626,6 +18632,140 @@ def _hand_adopt_held(sb, client, owner, slug: str, pos: dict, now):
     except (TypeError, ValueError):
         return None, "pos_no_start"
     return row, None
+
+
+def _hand_dup_order_sweep(sb, client, apply: bool = False) -> dict:
+    """THE DUPLICATE-ORDER SWEEP (Oct 24 2026 — Troy −13.5 / Ohio −10.5 /
+    EM@Ohio O 48.5: the take window filled each bet in full and the new
+    chase hand-off amended the still-resting order into a live chase without
+    reading positions — 10 held + 10 resting, and two of the three resting
+    duplicates FILLED into 20-lots on 10-contract bets). The invariant: a
+    sheet bet holding its full lot has NO resting order. Every pending sheet
+    pick is checked against FRESH venue reads; a resting order on a full lot
+    is cancelled (verified), the pick drops the order id and any live hold,
+    `dup_order_cancelled` is stamped. Dry unless `apply`. Also lists
+    `over_held` (a lot bigger than the bet — Rob sells the excess in the app)
+    and `hold_on_full` (a live_hold on a fully held pick — the rejoin that
+    would have bought another lot). Stamp `exec_probe_runs hand_dup_order`."""
+    out: dict = {"ok": True, "apply": bool(apply), "dups": [], "over_held": [], "hold_on_full": [],
+                 "cancelled": 0, "errors": []}
+    try:
+        rows = (sb.table("bot_picks").select("id,event_name,market_type,side,entry_line,event_start,sport,"
+                                              "market_id,entry_price,signal_blob")
+                .eq("status", "pending").eq("signal_blob->>bet_sheet", "true").limit(400).execute().data) or []
+    except Exception as e:
+        return {"ok": False, "error": f"picks: {e}"[:160]}
+    ords = _pmm_open_orders_raw(client, fresh=True) if client is not None else None
+    ppos = _pmm_positions_raw(client, fresh=True) if client is not None else None
+    if ords is None or ppos is None:
+        return {"ok": False, "error": "venue unreadable (orders or positions) — nothing judged"}
+    by_id = {o.get("id"): o for o in ords if o.get("id")}
+    k_orders = k_pos = None
+    k_tried = False
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        try:
+            contracts = float(blob.get("contracts") or 0)
+        except (TypeError, ValueError):
+            contracts = 0.0
+        if contracts < 1:
+            continue
+        kalshi = _kalshi_pick(blob)
+        rec = {"id": r["id"], "label": blob.get("label"), "event": r.get("event_name"), "contracts": contracts,
+               "venue": "KALSHI" if kalshi else "POLYMARKET"}
+        if kalshi:
+            import kalshi_venue as _kv
+            if not k_tried:
+                k_orders, k_pos = _kalshi_acct(fresh=True)
+                k_tried = True
+            if k_orders is None or k_pos is None:
+                continue
+            ticker, by = blob.get("kalshi_ticker"), bool(blob.get("kalshi_buy_yes"))
+            held = _kv.held_for(k_pos, ticker, by) if ticker else None
+            if blob.get("pmm_slug"):
+                held = (held or 0.0) + float(_bet_sheet_pick_side_held(ppos.get(blob["pmm_slug"]), bool(blob.get("pmm_synthetic"))))
+            o = _kalshi_pick_order(blob, k_orders)
+            leaves = float(o.get("remaining") or 0) if o else 0.0
+            rec.update({"ticker": ticker, "held": held, "leaves": leaves, "order_id": blob.get("kalshi_order_id"),
+                        "price_c": _kv.our_c(o.get("yes_c"), by) if o else blob.get("price_c")})
+        else:
+            slug, syn, oid = blob.get("pmm_slug"), bool(blob.get("pmm_synthetic")), blob.get("order_id")
+            if not slug:
+                continue
+            held = float(_bet_sheet_pick_side_held(ppos.get(slug), syn))
+            o = by_id.get(oid) if oid else None
+            if o is not None and o.get("state") not in _OPEN_ORDER_STATES:
+                o = None
+            leaves = float(o.get("leaves") or 0) if o else 0.0
+            pc = None
+            if o and o.get("price_yes") is not None:
+                try:
+                    py = float(o["price_yes"]) * 100.0
+                    pc = round((100.0 - py) if syn else py, 2)
+                except (TypeError, ValueError):
+                    pc = None
+            rec.update({"slug": slug, "held": round(held, 2), "leaves": leaves, "order_id": oid, "price_c": pc})
+        if held is None:
+            continue
+        full = held >= contracts - 0.5
+        if held > contracts + 0.5:
+            out["over_held"].append({**rec, "excess": round(held - contracts, 2)})
+        if full and isinstance(blob.get("live_hold"), dict):
+            out["hold_on_full"].append(rec)
+            if apply:
+                try:
+                    nb = {k: v for k, v in blob.items() if k != "live_hold"}
+                    nb["filled_qty"] = round(held, 2)
+                    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                    blob = nb
+                except Exception as e:
+                    out["errors"].append({"id": r["id"], "err": f"hold: {e}"[:120]})
+        if not (full and leaves >= 1):
+            continue
+        out["dups"].append(rec)
+        if not apply:
+            continue
+        gone = False
+        try:
+            if kalshi:
+                _kv.cancel_order(rec["order_id"], rec.get("ticker"))
+                for _i in range(4):
+                    vr = _kv.order_resting(rec["order_id"], rec.get("ticker"))
+                    if vr.get("resting") is False:
+                        gone = True
+                        break
+                    _time.sleep(0.7)
+            else:
+                gone, _ = _bet_sheet_cancel(client, rec["order_id"], rec["slug"])
+        except Exception as e:
+            out["errors"].append({"id": r["id"], "err": f"cancel: {e}"[:120]})
+        rec["cancelled"] = gone
+        stamp = {"hand_dup_order": True, "pick_id": r["id"], "bet": _hand_start_bet(r, blob), "venue": rec["venue"],
+                 "slug": rec.get("slug") or blob.get("pmm_twin_slug"), "ticker": rec.get("ticker"),
+                 "order_id": rec["order_id"], "held": rec["held"], "leaves": leaves, "price_c": rec.get("price_c"),
+                 "cancelled": gone, "at": now.isoformat()}
+        if gone:
+            out["cancelled"] += 1
+            nb = {k: v for k, v in blob.items() if k not in ("live_hold", "start_take_window")}
+            nb.update({"filled_qty": round(held, 2), "filled": True,
+                       "dup_order_cancelled": {"at": now.isoformat(), "order_id": rec["order_id"], "held": rec["held"],
+                                               "leaves": leaves, "price_c": rec.get("price_c"), "venue": rec["venue"]}})
+            if kalshi:
+                nb["kalshi_order_id"] = None
+            else:
+                nb["order_id"] = None
+            try:
+                sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            except Exception as e:
+                out["errors"].append({"id": r["id"], "err": f"blob: {e}"[:120]})
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        app.logger.warning("hand dup order pick %s %s: held %.2f of %s, %s resting @ %s → cancelled=%s",
+                           r["id"], rec.get("slug") or rec.get("ticker"), held, contracts, leaves, rec.get("price_c"), gone)
+    return out
 
 
 def _hand_readopt(sb, slug: str) -> dict:
