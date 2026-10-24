@@ -529,6 +529,7 @@
         if (!p && !mdl) return '';
         let body = mkBody(g, p, 0, p && p.side ? nameOf(g, p.side) + ' ML' : '', p ? (p.price != null ? p.price : L['ml_' + p.side]) : null, 'ml');
         if (p && p.chalky && g._st !== 'final') body = '<div class="mk-note">' + esc(nameOf(g, p.side)) + ' ' + am(p.price) + ' is too chalky to bet — ' + (_sport === 'NHL' ? 'see the puck line' : _sport === 'MLB' ? 'see the run line' : 'see the spread') + '.</div>';
+        else if (p && p.longshot && g._st !== 'final') body = '<div class="mk-note">' + esc(nameOf(g, p.side)) + ' ' + am(p.price) + ' is a longshot — the dog\'s bet is ' + (_sport === 'MLB' ? 'the run line' : 'the spread') + '.</div>';
         return mkRow('ML', p, mdl + edgeTxt(p, false) + srcTag(L.provider) + pinTxt(g, 'ml', p ? p.side : null), body);
     }
     // NBA spread (Hoops IQ: LEAN at most — no backtested edge vs the close)
@@ -560,7 +561,7 @@
         return footballMarkets(g);
     }
     function hasPick(g) {
-        return ['ml', 'spread', 'total', 'puck'].some(k => g[k] && !g[k].chalky && (g[k].verdict === 'play' || g[k].verdict === 'lean'));
+        return ['ml', 'spread', 'total', 'puck'].some(k => g[k] && !(g[k].chalky || g[k].longshot) && (g[k].verdict === 'play' || g[k].verdict === 'lean'));
     }
 
     // LAST / NEXT SHEET RUN, AZ time (same line as Bet Sheets).
@@ -603,7 +604,7 @@
         }
         _meta = _daily() ? d.games.length + ' games' : 'Week of ' + d.week_key + ' · ' + d.games.length + ' games';
         document.getElementById('hint').innerHTML = _sport === 'NBA'
-            ? 'Model = Hoops IQ (pace × efficiency, opponent-adjusted, rest, who is OUT). ML play ≥ 4% over the no-vig line, lean ≥ 2%. Spread and total are LEAN at most — neither has beaten the closing number in backtest. A favorite at −150 or shorter is too chalky to bet on the ML — take the spread. Injuries read at build time — check late scratches.'
+            ? 'Model = Hoops IQ (pace × efficiency, opponent-adjusted, rest, who is OUT). ML play ≥ 4% over the no-vig line, lean ≥ 2%. Spread and total are LEAN at most — neither has beaten the closing number in backtest. A favorite at −140 or shorter is too chalky to bet on the ML, and a dog at +200 or longer is a longshot — either way the spread is the bet. Injuries read at build time — check late scratches.'
             : _sport === 'MLB'
             ? 'Model = Diamond IQ (starter FIP, bullpen + fatigue, lineup wOBA, park). It trails the betting market in backtest, so every pick is LEAN at most — ML and run line need 4% over the no-vig price. The total is our number only, never a pick (the totals model failed its backtest). A favorite at −150 or shorter is too chalky to bet on the ML — see the run line. Starters are ESPN probables; * = no starts on record.'
             : _sport === 'NHL'

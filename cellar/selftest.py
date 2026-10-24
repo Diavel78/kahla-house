@@ -4802,6 +4802,17 @@ def test_sheet_puck_and_chalk() -> None:
     check("a PASS is never chalky", "chalky" not in C({"verdict": "pass", "price": -300}))
     check("a dog is never chalky", "chalky" not in C({"verdict": "play", "price": 130}))
     check("None passes through", C(None) is None)
+    # THE LONGSHOT RULE (Rob, Oct 24 2026: "these fucking dogs instead of spreads on NBA???")
+    LS = _app._sheet_longshot_mark
+    check("+367 lean is a longshot", LS({"verdict": "lean", "price": 367}).get("longshot") is True)
+    check("+200 play is a longshot (at the line)", LS({"verdict": "play", "price": 200}).get("longshot") is True)
+    check("+199 lean is not a longshot", "longshot" not in LS({"verdict": "lean", "price": 199}))
+    check("a PASS is never a longshot", "longshot" not in LS({"verdict": "pass", "price": 500}))
+    check("a favorite is never a longshot", "longshot" not in LS({"verdict": "play", "price": -130}))
+    import inspect as _insp
+    check("the NBA/MLB shaper stamps longshot, the NHL shaper does not (a hockey dog is the ML)",
+          "_sheet_longshot_mark(" in _insp.getsource(_app._sheet_game_nba)
+          and "_sheet_longshot_mark(" not in _insp.getsource(_app._sheet_game_nhl))
 
 
 def test_hand_venue_reset() -> None:

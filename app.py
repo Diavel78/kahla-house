@@ -1188,6 +1188,15 @@ def _sheet_game_football(r: dict) -> dict:
 # PASSes at it. `machine_flags hand_chalk_ml` / `hand_chalk_ou` override.
 _SHEET_CHALK_ML = -140
 _SHEET_CHALK_OU = -120
+# THE LONGSHOT RULE — the chalk rule's mirror (Rob, Oct 24 2026, on NO +367
+# reading LEAN beside NO +11.5 reading PASS: "speaking of too chalky… these
+# fucking dogs instead of spreads on NBA???"): a moneyline DOG priced at or
+# past this is not the bet either — the dog's lean moves to the SPREAD (NBA)
+# / run line (MLB), the same hand-off the chalk rule makes for favorites
+# (`gamePlays` on both pages carries the ML's verdict onto the same side's
+# line pick). Hockey is exempt: Rob never bets a +1.5, a dog he likes is the
+# ML there. Both pages read `ml.longshot` like `ml.chalky`.
+_SHEET_LONGSHOT_ML = 200
 
 
 def _chalk_cents(american) -> float:
@@ -1250,6 +1259,21 @@ def _sheet_chalky(pick: dict | None) -> bool:
         return bool(pick) and pick.get("verdict") != "pass" and float(pick.get("price")) <= _SHEET_CHALK_ML
     except (TypeError, ValueError):
         return False
+
+
+def _sheet_longshot(pick: dict | None) -> bool:
+    try:
+        return bool(pick) and pick.get("verdict") != "pass" and float(pick.get("price")) >= _SHEET_LONGSHOT_ML
+    except (TypeError, ValueError):
+        return False
+
+
+def _sheet_longshot_mark(pick: dict | None) -> dict | None:
+    """A copy of the ML pick stamped `longshot` when the dog is past the
+    longshot line (NBA/MLB — the line pick is the bet instead)."""
+    if not isinstance(pick, dict):
+        return pick
+    return {**pick, "longshot": True} if _sheet_longshot(pick) else pick
 
 
 def _american_from_p(p: float) -> int | None:
@@ -1365,7 +1389,7 @@ def _sheet_game_nba(r: dict) -> dict:
             "market_id": r.get("market_id"),
             "away": g.get("away"), "home": g.get("home"),
             "away_short": g.get("away_abbr"), "home_short": g.get("home_abbr"),
-            "line": line, "model": mdl, "ml": _sheet_chalk_mark(picks.get("ml")),
+            "line": line, "model": mdl, "ml": _sheet_longshot_mark(_sheet_chalk_mark(picks.get("ml"))),
             "pin": _sheet_pin_block(ln),
             "spread": picks.get("spread"), "total": picks.get("total"),
             "unrated": model is None, "grade": blob.get("grade"),
@@ -1636,7 +1660,7 @@ def _sheet_items(g: dict, sport: str) -> list:
     if ml and ml.get("side"):
         items.append({**base, "market_type": "ml", "side": ml["side"], "line": 0,
                       "label": f"{ml['side']} ML", "verdict": ml.get("verdict"),
-                      "chalky": bool(ml.get("chalky"))})
+                      "chalky": bool(ml.get("chalky")), "longshot": bool(ml.get("longshot"))})
     sp = g.get("puck") if sport == "NHL" else g.get("spread")
     if sp and sp.get("side"):
         ln = sp.get("line")
@@ -1705,7 +1729,8 @@ def api_kalshi_coverage():
                 out["truncated"] = "function budget"
                 break
             row = {"game": f"{gm.get('away')} @ {gm.get('home')}", "start": gm.get("event_start"),
-                   "pick": it["label"], "verdict": it.get("verdict"), "chalky": it.get("chalky")}
+                   "pick": it["label"], "verdict": it.get("verdict"), "chalky": it.get("chalky"),
+                   "longshot": it.get("longshot")}
             # Polymarket — the slip's own resolver (venue read, paced)
             poly = None
             if client is not None:

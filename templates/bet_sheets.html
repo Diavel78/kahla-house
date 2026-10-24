@@ -1671,6 +1671,8 @@
         if (!p && !mdl) return '';
         let body = mkBody(g, up, 'ml', p, 0, p && p.side ? nameOf(g, p.side) + ' ML' : '', 'ml', p ? (p.price != null ? p.price : L['ml_' + p.side]) : null);
         if (p && p.chalky && up) body = '<div class="mk-note">Too chalky to bet at ' + am(p.price) + ' — ' + (_sport === 'NHL' ? 'see the puck line' : _sport === 'MLB' ? 'see the run line' : 'see the spread') + '.</div>';
+        // THE LONGSHOT RULE (Rob, Oct 24 2026: "these fucking dogs instead of spreads on NBA???"): a dog at +200 or longer is not the bet — the line pick carries the lean
+        else if (p && p.longshot && up) body = '<div class="mk-note">' + am(p.price) + ' is a longshot — the dog\'s bet is ' + (_sport === 'MLB' ? 'the run line' : 'the spread') + '.</div>';
         return mkRow('ML', p, mdl + edgeTxt(p, false) + pinTxt(g, 'ml', p ? p.side : null), body);
     }
     // NBA spread (Hoops IQ: lean-capped, like the total)
@@ -1704,7 +1706,7 @@
         return footballMarkets(g, up);
     }
     function hasPick(g) {
-        return ['ml', 'spread', 'total', 'puck'].some(k => g[k] && !g[k].chalky && (g[k].verdict === 'play' || g[k].verdict === 'lean'));
+        return ['ml', 'spread', 'total', 'puck'].some(k => g[k] && !(g[k].chalky || g[k].longshot) && (g[k].verdict === 'play' || g[k].verdict === 'lean'));
     }
 
     async function load() {
@@ -1788,7 +1790,7 @@
     function pickSpec(g, k, force) {
         const L = g.line || {}, p = g[k];
         if (!p || !p.side) return null;
-        if (!force && ((p.verdict !== 'play' && p.verdict !== 'lean') || p.chalky)) return null;
+        if (!force && ((p.verdict !== 'play' && p.verdict !== 'lean') || p.chalky || p.longshot)) return null;
         let mt = k, line = null, label = null, price = p.price;
         if (k === 'ml') {
             line = 0; label = nameOf(g, p.side) + ' ML';
@@ -1820,7 +1822,7 @@
         const lineK = _sport === 'NHL' ? 'puck' : (_sport === 'NBA' || _sport === 'MLB') ? 'spread' : null;
         if (lineK) {
             const ml = g.ml, isPick = ml && ml.side && (ml.verdict === 'play' || ml.verdict === 'lean');
-            if (isPick && !ml.chalky) push(pickSpec(g, 'ml'));
+            if (isPick && !ml.chalky && !ml.longshot) push(pickSpec(g, 'ml'));
             else if (isPick) {
                 const s = g[lineK];
                 if (s && s.side === ml.side) {
