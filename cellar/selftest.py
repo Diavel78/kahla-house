@@ -3330,6 +3330,34 @@ def test_hand_live_chase() -> None:
     check("the tape keeps recording a pulled bet's slug", "want |= set(LIVE_SNAP)" in inspect.getsource(_app._touch_tape_publish))
     check("a pulled bet is never retired as an app cancel", 'b.get("line_hold") or b.get("live_hold")' in inspect.getsource(_app._hand_app_adopt_tick))
     check("a pulled bet is never red", 'isinstance(blob.get("live_hold"), dict)' in inspect.getsource(_app._hand_red_state))
+    # THE RUNG MUST BE INSIDE THE SNAPSHOT (Oct 24 2026, Boston College @ Georgia
+    # Tech O 49.5: 23 pulls, every one "−100%" — our 49¢ bid sat 7-20¢ under a
+    # 56-70¢ touch and fell off the end of the 6-level tape ladder).
+    C = _app._ladder_covers
+    check("ladder covers: a level at or below our rung reaches it; one whose lowest level is above does not; empty never",
+          C(lad((56, 300), (49, 10)), 49.0) and C(lad((49, 10),), 49.0) and not C(lad((56, 300), (55, 900)), 49.0)
+          and not C(None, 49.0) and not C([], 49.0))
+    deep = [row(50, 56.0, 300.0, 57.0, lad((56, 300), (52, 600), (49, 610))), row(30, 56.0, 300.0, 57.0, lad((56, 300), (52, 600), (49, 610)))]
+    v, d = P(deep + [row(0.5, 70.0, 300.0, 71.0, lad((70, 300), (69, 900), (68, 800), (67, 700), (66, 600), (65, 500)))],
+             lad((70, 300), (69, 900), (68, 800), (67, 700), (66, 600), (65, 500)), 49.0, 10, 49.5, 0.5, now)
+    check("our rung beyond the snapshot's depth is NOT a collapse (the BC@GT loop)", v != "cancel" and d.get("rung") == "beyond_snapshot", str(d))
+    v, d = P(deep + [row(0.5, 56.0, 300.0, 57.0, lad((56, 300), (52, 600), (49, 10)))], lad((56, 300), (52, 600), (49, 10)), 49.0, 10, 49.5, 0.5, now)
+    check("…while a real emptying of a covered rung still pulls", v == "cancel" and d["why"] == "collapse", str(d))
+    # THE REJOIN SIZES OFF THE VENUE (same game: 23 rejoins of 10 on a lot already held in full)
+    check("the rejoin reads the venue's held lot before it rests anything", "_hand_poly_side_held(client, slug, syn)" in src_w
+          and "lot_held_no_rejoin" in src_w and "min(qty, int(round(contracts - held)))" in src_w)
+    check("the tick drops a hold on a bet whose lot is held in full", "holds_dropped" in inspect.getsource(_app._hand_live_tick))
+    # THE KALSHI ORDER THAT LEFT MID-WINDOW goes to the chase, not the missed list (Sacramento State O 50.5)
+    src_k = inspect.getsource(_app._hand_start_chase_kalshi)
+    check("the Kalshi chase hand-off works on an order that is already gone (unfilled size = contracts − the Kalshi lot)",
+          "gone = o is None" in src_k and "held_k = _kv.held_for(_p, ticker, by)" in src_k and "if not gone:" in src_k)
+    check("the window's order-gone branch and the orphan path both hand the bet to the chase",
+          "_hand_kalshi_gone_chase(" in inspect.getsource(_app._hand_take_window_kalshi)
+          and "_hand_kalshi_gone_chase(" in inspect.getsource(_app._hand_start_kalshi))
+    check("a take attempt whose cancel read unverified marks the pick (kalshi_cancel_sent) so the gone sweep stands down",
+          inspect.getsource(_app._hand_take_attempt_kalshi).count('take["cancel_sent"] = now.isoformat()') == 2
+          and '"kalshi_cancel_sent": {"at": take["cancel_sent"], "why": "start_take"}' in inspect.getsource(_app._hand_take_window_kalshi)
+          and '"kalshi_cancel_sent": {"at": take["cancel_sent"], "why": "start_take"}' in inspect.getsource(_app._hand_start_kalshi))
 
 
 def test_touch_tape_seed() -> None:
