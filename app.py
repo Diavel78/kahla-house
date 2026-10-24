@@ -4463,6 +4463,43 @@ def api_bet_sheets_picks():
                             .in_("id", ids_q).execute().data) or []
         except Exception as e:
             out["by_id_err"] = str(e)[:160]
+    if request.args.get("started"):
+        # ?started=1 → every pending sheet pick whose LISTED start has passed
+        # (≤8h), with the box's view of it: resting / held / which start-rule
+        # state it is in. The read for "is a bet sitting in limbo past its
+        # start?" (Rob, Oct 24 2026: "they are just in limbo").
+        try:
+            sb_ = get_supabase()
+            now_ = datetime.now(timezone.utc)
+            rows_ = (sb_.table("bot_picks").select("id,sport,event_name,event_start,market_type,side,entry_line,signal_blob")
+                     .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                     .gte("event_start", (now_ - timedelta(hours=8)).isoformat()).lte("event_start", now_.isoformat())
+                     .order("event_start").limit(300).execute().data) or []
+            strip_ = _hand_status_read(sb_) or {}
+            srows_ = strip_.get("rows") or {}
+            lim = []
+            for r_ in rows_:
+                b_ = r_.get("signal_blob") if isinstance(r_.get("signal_blob"), dict) else {}
+                bx_ = srows_.get(str(r_["id"])) if isinstance(srows_, dict) else None
+                tw_ = b_.get("start_take_window") if isinstance(b_.get("start_take_window"), dict) else None
+                ls_ = b_.get("live_snipe") if isinstance(b_.get("live_snipe"), dict) else None
+                lim.append({
+                    "id": r_["id"], "sport": r_.get("sport"), "game": r_.get("event_name"), "start": r_.get("event_start"),
+                    "bet": b_.get("label") or f"{r_.get('market_type')} {r_.get('side')} {r_.get('entry_line')}",
+                    "venue": "KALSHI" if _kalshi_pick(b_) else "POLYMARKET",
+                    "price_c": b_.get("price_c"), "contracts": b_.get("contracts"),
+                    "order_id": b_.get("kalshi_order_id") if _kalshi_pick(b_) else b_.get("order_id"),
+                    "box": ({"resting": bool((bx_.get("order") or {}).get("resting")), "leaves": (bx_.get("order") or {}).get("leaves"),
+                             "held": bx_.get("held"), "cur_c": bx_.get("cur_c"), "touch_c": bx_.get("touch_c")} if bx_ else None),
+                    "filled_qty": b_.get("filled_qty"), "live_snipe": ({k: ls_.get(k) for k in ("auto", "until", "ended", "at")} if ls_ else None),
+                    "in_play": bool(b_.get("in_play")), "game_started": bool(b_.get("game_started")), "start_blind": bool(b_.get("start_blind")),
+                    "take_window": ({k: tw_.get(k) for k in ("until", "tries", "closed", "why")} if tw_ else None),
+                    "take_window_done": bool(b_.get("start_take_window_done")),
+                    "line_hold": bool(isinstance(b_.get("line_hold"), dict)), "live_hold": bool(isinstance(b_.get("live_hold"), dict)),
+                })
+            out["started"] = {"strip_age_s": strip_.get("age_s"), "n": len(lim), "rows": lim}
+        except Exception as e:
+            out["started_err"] = str(e)[:200]
     kinds = [k.strip() for k in (request.args.get("stamps") or "").split(",") if k.strip()]
     if kinds:                                          # e.g. stamps=hand_move_cancel,hand_move_rejoin
         try:
