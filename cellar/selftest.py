@@ -3651,6 +3651,9 @@ def test_hand_red_alert() -> None:
           and "NOT FILLED" in ct[1] and "7 take tries" in ct[1], str(ct))
     ct = T({"bet": bet, "result": {"ok": True, "deleted": False, "held": 2.0}})
     check("start cancel: partial → PARTIAL 2 of 5", ct and ct[0] == "start_partial" and "2 of 5" in ct[1], str(ct))
+    ct = T({"bet": bet, "result": {"ok": True, "deleted": False, "held": 0.08}, "window": {"tries": 16}})
+    check("start cancel: dust → NOT FILLED, on the missed list", ct and ct[0] == "start_dust"
+          and "NOT FILLED" in ct[1] and "0.08 of 5" in ct[1] and "missed list" in ct[1], str(ct))
     check("start cancel: filled in full → no alert", T({"bet": bet, "result": {"ok": True, "deleted": False, "held": 5.0}}) is None)
     ct = T({"bet": bet, "result": {"ok": False, "error": "venue did not cancel it — check the app"}})
     check("start cancel: a failed cancel → CANCEL FAILED, still on the book",
@@ -4300,9 +4303,11 @@ def test_bet_sheet_missed() -> None:
             R.data = self.d
             return R()
 
-    def stamp(pid, slug, deleted, bet=None):
+    def stamp(pid, slug, deleted, bet=None, held=None):
         r = {"hand_start_cancel": True, "pick_id": pid, "slug": slug, "start": start,
              "at": now.isoformat(), "result": {"ok": True, "deleted": deleted}}
+        if held is not None:
+            r["result"]["held"] = held
         if bet:
             r["bet"] = bet
         return {"at": now.isoformat(), "result": r}
@@ -4312,7 +4317,11 @@ def test_bet_sheet_missed() -> None:
             stamp(1, army, True, {"sport": "NCAAF", "event_name": "Tulane Green Wave @ Army Black Knights",
                                   "market_type": "spread", "side": "home", "line": -3.5,
                                   "price_c": 49.5, "contracts": 5, "synthetic": True}),
-            stamp(2, "tsc-cfb-wake-ncst-2026-10-10-total-57pt5", False),          # partial: stays a live bet
+            stamp(2, "tsc-cfb-wake-ncst-2026-10-10-total-57pt5", False, held=2.0),  # partial: stays a live bet
+            stamp(6, "tsc-cfb-akron-kentst-2026-10-10-total-47pt5", False, held=0.08,  # DUST: the bet did not happen
+                  bet={"sport": "NCAAF", "event_name": "Akron Zips @ Kent State Golden Flashes",
+                       "market_type": "total", "side": "over", "line": 47.5, "price_c": 50.0,
+                       "contracts": 10, "synthetic": False}),
             stamp(3, "tsc-cfb-ucf-okst-2026-10-10-total-53pt5", True),           # old stamp → the queue
             stamp(5, "asc-cfb-tulane-army-2026-10-10-1h-pos-1pt5", True),       # an APP bet, first half
             {"at": now.isoformat(), "result": {"hand_app_adopt": True, "pick_id": 5, "label": "Army Black Knights -1.5",
@@ -4353,6 +4362,12 @@ def test_bet_sheet_missed() -> None:
         check("missed: an unfilled kickoff cancel is listed with the bet it wanted",
               1 in ids and next(m for m in got if m["pick_id"] == 1)["price_c"] == 49.5, f"got {got}")
         check("missed: a partial fill is NOT listed (it stays a live bet)", 2 not in ids)
+        check("missed: a DUST fill (0.08 of 10) IS listed — the bet did not happen (Akron O47.5, Oct 24 2026)",
+              6 in ids and next(m for m in got if m["pick_id"] == 6)["price_c"] == 50.0, f"got {ids}")
+        dustbet = [{"id": 6, "slug": "tsc-cfb-akron-kentst-2026-10-10-total-47pt5", "market_type": "total",
+                    "side": "over", "held": 0.08, "filled_qty": 0.08, "status": "pending"}]
+        check("missed: …and its own 0.08 lot in the bet list does not take it off",
+              6 in [m["pick_id"] for m in _app._bet_sheet_missed(SB(), now, dustbet)])
         check("missed: a final game drops off", 4 not in ids)
         m3 = next((m for m in got if m["pick_id"] == 3), {})
         check("missed: an older stamp recovers its bet through the queue (rerung → its create)",

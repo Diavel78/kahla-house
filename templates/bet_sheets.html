@@ -1379,7 +1379,9 @@
         }).sort((x, y) => String(x.b.event_start).localeCompare(String(y.b.event_start)));
         return { rows, val, cost, nq, pl: val - cost };
     }
-    function _liveBets(d) { return (d.bets || []).filter(b => b.status === 'pending' && (b.held || 0) > 0 && b.live); }
+    // a lot under one share is DUST, not a live bet (Oct 24 2026: Akron O47.5
+    // filled 0.08 of 10 at the drop — the Missed row carries the bet)
+    function _liveBets(d) { return (d.bets || []).filter(b => b.status === 'pending' && (b.held || 0) >= 1 && b.live); }
     // THE MONEY STRIP: settled today (venue-graded dollars, today's AZ slate),
     // live (filled lots in progress, marked at the live win %), resting
     // (dollars sitting in open orders). Every sport, not just this tab.

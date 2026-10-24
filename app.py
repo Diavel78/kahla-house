@@ -16345,6 +16345,9 @@ def _hand_start_cancel_text(stamp: dict):
         held_f = float(held)
     except (TypeError, ValueError):
         return "start_held_unknown", "GAME STARTED · rest cancelled · held size UNREADABLE, check the app"
+    if held_f < 1.0:
+        # a dust fill is NOT the bet (Akron O47.5, Oct 24 2026: 0.08 of 10)
+        return "start_dust", f"NOT FILLED · dust {held_f:g} of {want:g} · rest cancelled at game start{took} · on the missed list"
     if want > 0 and held_f + 1e-6 < want:
         return "start_partial", f"PARTIAL · {held_f:g} of {want:g} filled · rest cancelled at game start{took}"
     return None
@@ -22610,6 +22613,7 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
 
 
 _BS_MISSED_MAX_H = 6.0         # a missed bet stays on the list until its game is final, at most this long
+_BS_DUST_Q = 1.0               # a fill under one share is DUST, not the bet (the Akron O47.5 0.08-of-10, Oct 24 2026)
 _BS_MISSED_READS = 6           # live book reads per poll for the missed list
 
 
@@ -22737,10 +22741,15 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
         # whose positions read failed (held None) kept the pick instead of
         # deleting it — that is still an unfilled bet he wanted; the pick's
         # own filled_qty (below) decides, never the missing read.
-        if outr.get("deleted") or (outr.get("ok") and not (outr.get("held") or 0) > 0):
+        # DUST IS NOT A FILL (Oct 24 2026, Akron @ Kent State O 47.5: 0.08 of
+        # 10 filled before the cancel, the pick stayed at 0.08, and "held >
+        # 0" kept a bet Rob wanted off this list — "shoulda gone to live").
+        # Under one share the bet did not happen; the row shows, Get it
+        # live works, the dust lot rides to settlement on its own.
+        if outr.get("deleted") or (outr.get("ok") and (outr.get("held") or 0) < _BS_DUST_Q):
             by_pick[int(pid)] = (row.get("at"), res)
         elif outr.get("ok"):
-            by_pick.pop(int(pid), None)       # a partial fill: the pick stayed, it is a live bet
+            by_pick.pop(int(pid), None)       # a real partial fill: the pick stayed, it is a live bet
     if not by_pick:
         return []
     # ✕ IS SERVER-SIDE (Oct 10 2026, Rob: "I deleted these on my iPad,
@@ -22765,7 +22774,8 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
     taken, names, chasing = set(), {}, {}
     for b in bets or []:
         ek = _bs_event_key(b.get("slug") or "")
-        _got = (b.get("held") or 0) > 0 or (b.get("filled_qty") or 0) > 0 or b.get("status") == "sold"
+        _got = ((b.get("held") or 0) >= _BS_DUST_Q or (b.get("filled_qty") or 0) >= _BS_DUST_Q
+                or b.get("status") == "sold")
         if b.get("id") in by_pick and _got:
             by_pick.pop(b["id"], None)                    # the kept pick filled after all
         if b.get("getlive_from") in by_pick and b.get("status", "pending") == "pending":
