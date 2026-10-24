@@ -1127,7 +1127,7 @@
         [_betsByGame['m|' + (g.market_id || '')], _betsByGame['e|' + _sport + '|' + g.event_name]].forEach(l => {
             (l || []).forEach(b => { if (!seen[b.id]) { seen[b.id] = 1; out.push(b); } });
         });
-        return out.filter(b => b.status === 'pending' && !b.live);
+        return out.filter(b => b.status === 'pending' && (!b.live || g._limbo));
     }
     // A bet that isn't on a sheet button (the other side, another rung, an
     // app bet): a compact strip in its game card; tap → the action sheet.
@@ -1261,7 +1261,7 @@
                     + (b.take_window.bump && b.take_window.bump.verdict === 'amended' ? ', bid moved up to ' + b.take_window.bump.to_c + '¢ as the maker' : '') + '), then cancels.'
                 : b.start_seen ? 'Game started and the cancel didn\'t take — this order is still resting at its pre-game price.'
                 : b.start_blind ? 'The box has no pre-start book for this game, so it can\'t see game start — cancel or move it yourself.'
-                : 'Past the listed time — the box cancels it at game start (the 95% drop in the bids).') + '</div>';
+                : 'Past the listed time, but the makers are still quoting, so the game has not started for the box. At the drop (95% of the touch leaves) it takes inside your 1¢ for 5 minutes, then chases live under the cap for an hour.') + '</div>';
             if (!b.live_snipe) acts.push('<button class="abtn' + (lv ? ' on' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : 'Move to Live · 49.5¢') + '</button>');
             acts.push('<button class="abtn dng' + (cn ? ' on' : ' pri') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : 'Cancel order') + '</button>');
         }
@@ -1457,16 +1457,11 @@
     // its clock; at the hour it ends and lists below as CHASE ENDED.
     // Returns {html, n, bad} — the Chasing card composes it with the ended rows.
     function renderStartedResting(d) {
-        // WAITING FOR THE DROP (Rob, Oct 24 2026: "games disappear at start
-        // time, but haven't filled, or started, and they are just in limbo"):
-        // a resting order whose LISTED start has passed while the box still
-        // waits for the makers to leave has a row here too — grey, not red, not
-        // counted as needing him — so a bet is never invisible between the
-        // listed clock and the 95% drop. Same bet, same tap (cancel / move to live).
-        const limbo = b => b.started && !b.live_snipe && !b.in_play && !b.start_seen && !b.start_blind && !b.take_window
-                           && !(b.live_hold) && !b.line_hold;
+        // A bet waiting for the drop is NOT here — it stays on its game card
+        // (gameStatus keeps the game on the main list, WAITING FOR THE DROP).
+        const limbo = () => false;
         const rows = (d.bets || []).filter(b => b.status === 'pending' && ((b.order || {}).resting || (b.live_snipe && b.live_hold))
-                && ((b.started && (b.live_snipe || b.in_play)) || b.start_seen || b.start_blind || b.take_window || limbo(b)))
+                && ((b.started && (b.live_snipe || b.in_play)) || b.start_seen || b.start_blind || b.take_window))
             .sort((x, y) => String(x.event_start).localeCompare(String(y.event_start)));
         if (!rows.length) return { html: '', n: 0, bad: 0 };
         // A LIVE SNIPE IS HIS, WHATEVER THE START FLAGS SAY (Oct 24 2026,
@@ -1792,12 +1787,36 @@
     // 'up' = not started; 'final' = graded final or started > FINAL_AFTER_H
     // ago (a grade lands within ~5 min of the final); 'live' = in between.
     const FINAL_AFTER_H = { NHL: 3.5, NBA: 3.0, MLB: 3.5, NFL: 4.5, NCAAF: 4.5 };
+    // GAME START IS THE DROP, NOT THE LISTED CLOCK — ON THE GAME CARD TOO
+    // (Rob, Oct 24 2026: "it disappears on 'start time' instead of start, so
+    // they are invisible to me"). A game with an order of mine still resting
+    // stays on the main list past its listed time, tagged WAITING FOR THE
+    // DROP, until the box reports the start (the 95% drop → take window /
+    // auto chase / cancel), ESPN shows the game underway, or DROP_WAIT_MIN
+    // has passed. The bet never leaves the page between the clock and the drop.
+    const DROP_WAIT_MIN = 60;
+    function allBetsOnGame(g) {
+        const out = [], seen = {};
+        [_betsByGame['m|' + (g.market_id || '')], _betsByGame['e|' + _sport + '|' + g.event_name]].forEach(l => {
+            (l || []).forEach(b => { if (!seen[b.id]) { seen[b.id] = 1; out.push(b); } });
+        });
+        return out.filter(b => b.status === 'pending');
+    }
+    function startSeen(bets) {
+        return bets.some(b => b.start_seen || b.start_blind || b.take_window || (b.chase && b.chase.auto)
+                           || (b.score && (b.score.state === 'in' || b.score.state === 'post')));
+    }
     function gameStatus(g) {
         const t = g.event_start ? new Date(g.event_start).getTime() : null;
+        g._limbo = false;
         if (t === null || t > Date.now()) return 'up';
         if (g.grade && g.grade.final) return 'final';
         const h = (Date.now() - t) / 3600000;
-        return h > (FINAL_AFTER_H[_sport] || 4) ? 'final' : 'live';
+        if (h > (FINAL_AFTER_H[_sport] || 4)) return 'final';
+        const bets = allBetsOnGame(g);
+        const resting = bets.some(b => (b.order || {}).resting && !b.in_play);
+        if (resting && !startSeen(bets) && (Date.now() - t) < DROP_WAIT_MIN * 60000) { g._limbo = true; return 'up'; }
+        return 'live';
     }
     // FILTER CHIPS: all games / games I have a bet on / plays & leans only.
     let _filter = 'all';
@@ -1988,7 +2007,8 @@
                  : '<span class="gs">' + [n.fill ? n.fill + ' filled' : '', n.rest ? n.rest + ' resting' : ''].filter(Boolean).join(' · ') + '</span>';
         }
         const subs = [];
-        if (isLive) subs.push('<span class="final">IN PROGRESS</span>');
+        if (g._limbo) subs.push('<span class="final">LISTED ' + esc(clk(g.event_start)) + ' · WAITING FOR THE DROP</span>');
+        else if (isLive) subs.push('<span class="final">IN PROGRESS</span>');
         else if (!isUp && finalChip(g)) subs.push(finalChip(g));
         if (_sport === 'NHL' && g.goalies) {
             const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
