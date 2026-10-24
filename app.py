@@ -16207,7 +16207,7 @@ def _hand_red_state(blob: dict, s: dict, started: bool = False):
     nothing is red — a lot that vanishes is a settlement or a sale, an
     in-play app bet is his to move — and a FILLED bet whose lot is gone
     pre-game is the sold tick's job, never a red."""
-    if started or blob.get("in_play"):
+    if started or blob.get("in_play") or isinstance(blob.get("live_hold"), dict):
         return None
     o = s.get("order") if isinstance(s.get("order"), dict) else {}
     resting = bool(o.get("resting"))
@@ -16880,6 +16880,7 @@ def _touch_tape_publish(sb) -> dict:
         want |= set(HAND_LIVE_SLUGS)                   # every resting hand bet is on the tape
         want |= set(HAND_HELD_SLUGS)                   # and every held lot (live quotes for the strip)
         want |= _hand_pre_slugs()                      # and every slug a slip is about to bet (pre-subscribed)
+        want |= set(LIVE_SNAP)                         # and every live bet, through its pull-and-rejoin
         now_t = _time.time()
         for s_ in TOUCH_WATCH_SLUGS - want:            # just left: linger, keep recording
             _TOUCH_LINGER.setdefault(s_, now_t + _TOUCH_TAPE_LINGER_S)
@@ -18754,7 +18755,7 @@ def _hand_app_adopt_tick(sb, client, now) -> dict:
     # ── retire (two strikes, fresh read on the second) ──
     positions = None
     for r, b in adopted_rows:
-        if b.get("line_hold"):
+        if b.get("line_hold") or b.get("live_hold"):
             continue                                   # sitting out by design — no order is expected
         started = False
         try:                                           # a started game is the RESOLVER's — a position
@@ -21723,6 +21724,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
         if client is None:
             client = get_client()
         try:
+            stats["live"] = _hand_live_tick(sb, client, now)     # live bets: the frame-fed worker's snapshot
+        except Exception as e:
+            stats["live"] = {"err": str(e)[:80]}
+        try:
             stats["reset"] = _hand_reset_tick(sb, client, now)   # venue wiped our orders → re-seat
         except Exception as e:
             stats["reset"] = {"err": str(e)[:80]}
@@ -22151,6 +22156,8 @@ def api_bet_sheets_mine():
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
             "live_snipe": bool(blob.get("live_snipe")),
             "getlive_from": blob.get("getlive_from"),
+            "live_hold": (blob.get("live_hold") if isinstance(blob.get("live_hold"), dict) else None),
+            "live_chase": (blob.get("live_chase") if isinstance(blob.get("live_chase"), dict) else None),
             "start_seen": bool(blob.get("game_started")), "start_blind": bool(blob.get("start_blind")),
             "take_window": (blob.get("start_take_window")
                             if isinstance(blob.get("start_take_window"), dict) and not blob.get("live_snipe") else None),
@@ -23217,6 +23224,375 @@ def _hand_getlive_price(book: dict, synthetic: bool, cap_c: float, tick: float):
     if target < 1.0:
         return None, "no room under the ask"
     return target, why
+
+
+# ── THE LIVE CHASE (Oct 24 2026, Rob: "I disagree with the no chase part on
+# the live units… chase down if the book collapses. We want to stay at the
+# maker… the 70% drop… that order should instantly cancel and wait 20, 30
+# seconds… The only guardrail is you wouldn't chase it up over the 49 and a
+# half cents at the current rung… I want to get it as cheap as possible…
+# This is live. It's going to be fucking fast… this has to be done on the
+# WebSocket"). The sell sniper's shape for live bets: the handbets tick
+# publishes a per-slug snapshot (LIVE_SNAP) for every live-snipe bet; every
+# depth frame for a snapshotted slug goes to LIVE_Q; ONE worker thread reads
+# the frame's ladder + the touch tape and acts in the same second —
+#   · the bid is JOINED either way: down when the market bid falls under us
+#     (never pay more than the market), up when it climbs — never above the
+#     cap (`hand_live_snipe_c`, 49.5¢), never on or across the ask;
+#   · OUR RUNG COLLAPSES ≥ `hand_live_drop_pct` (70) off its 60s high (ours
+#     excluded) → the order is cancelled at once (verified), the pick holds
+#     `live_hold`, and after `hand_live_calm_s` (25s) it rejoins at the same
+#     rule's price with the unfilled size — a hit-and-pull leaves us alone
+#     on top otherwise.
+# The amend sizes off the socket-fed mirror (leaves + cum) so a partial fill
+# is never shrunk; an order the mirror no longer shows pops the snapshot
+# until the next tick re-vouches it (the sell sniper's size safety). Pure
+# planner `_hand_live_plan`, selftest `test_hand_live_chase`. Kill switch
+# `machine_flags hand_live_chase`.
+_HAND_LIVE_DROP_PCT = 70.0
+_HAND_LIVE_CALM_S = 25.0
+_HAND_LIVE_BASE_S = 60.0           # the rung's high is read over [now-60s, now-2s]
+_HAND_LIVE_RECENT_S = 2.0
+_HAND_LIVE_STALE_S = 20.0          # the newest frame must be this fresh to call a collapse
+_HAND_LIVE_DEBOUNCE_S = 1.5        # one venue write per slug per this many seconds
+_HAND_LIVE_MAX_HOLD_S = 180.0      # a rejoin that keeps failing stops trying after this (the page shows it)
+LIVE_SNAP: dict = {}               # slug -> the live bet the worker may act on
+LIVE_Q = None                      # queue.Queue of slugs with a fresh depth frame
+_LIVE_THREAD = None
+_LIVE_LAST: dict = {}              # slug -> monotonic of the last venue write
+_LIVE_STATS = {"frames": 0, "moves": 0, "pulls": 0, "rejoins": 0, "stays": 0, "skips": 0, "errors": 0}
+
+
+def _hand_live_target(ladder, ask_c, our_c, our_qty, cap_c, tick):
+    """Pure. Where a live bid belongs right now: the market's best bid with
+    our own size taken out of our rung, capped at `cap_c`, never on or across
+    the ask; no other bid → the cap (under the ask). (price_c, why)."""
+    mkt = None
+    for p, q in (ladder or []):
+        try:
+            p, q = float(p), float(q)
+        except (TypeError, ValueError):
+            continue
+        if our_c is not None and abs(p - float(our_c)) < 0.01:
+            q -= float(our_qty or 0.0)
+        if q > 0.01:
+            mkt = p
+            break
+    target, why = float(cap_c), "cap"
+    if mkt is not None and mkt < target:
+        target, why = mkt, "join"
+    if ask_c is not None and target >= float(ask_c) - 1e-9:
+        target, why = float(ask_c) - float(tick), "under_ask"
+    target = round(_grid_dn(target, tick), 2)
+    if target < 1.0:
+        return None, "no_room"
+    return target, why
+
+
+def _hand_live_plan(rows, ladder, our_c, our_qty, cap_c, tick, now_ts: float,
+                    drop_pct: float = _HAND_LIVE_DROP_PCT):
+    """Pure. rows = our-side tape rows (ts, bid_c, bid_q, ask_c, ask_q, d3,
+    ladder) oldest first; ladder = our-side (price, qty) best-first NOW;
+    our_c/our_qty = the resting bid. -> (verdict, detail):
+      'cancel' — OUR rung's size (ours excluded) fell ≥ drop_pct off its
+                 60s high, and the others held at least our size up there:
+                 a pull. Pull the order, sit out the calm.
+      'move'   — the live target differs from our price (join down, join
+                 up under the cap, step under an ask that came down).
+      'stay'   — on the target, or no readable book."""
+    def qty_at(lad, p):
+        tot = 0.0
+        for pp, q in (lad or []):
+            try:
+                if abs(float(pp) - float(p)) < 0.01:
+                    tot += float(q or 0.0)
+            except (TypeError, ValueError):
+                continue
+        return tot
+    ask_c = None
+    if rows:
+        ask_c = rows[-1][3]
+    if ask_c is None and ladder is None:
+        return "stay", {"why": "no_book"}
+    det = {"our_c": our_c, "our_qty": our_qty, "cap_c": cap_c, "ask_c": ask_c}
+    if our_c is not None and rows:
+        fresh = now_ts - rows[-1][0] <= _HAND_LIVE_STALE_S
+        base = [r for r in rows if now_ts - _HAND_LIVE_BASE_S <= r[0] < now_ts - _HAND_LIVE_RECENT_S
+                and len(r) > 6 and r[6]]
+        if fresh and base:
+            hi = max(max(0.0, qty_at(r[6], our_c) - float(our_qty or 0.0)) for r in base)
+            cur_lad = ladder if ladder is not None else (rows[-1][6] if len(rows[-1]) > 6 else None)
+            cur = max(0.0, qty_at(cur_lad, our_c) - float(our_qty or 0.0))
+            det.update({"hi_q": round(hi, 1), "cur_q": round(cur, 1),
+                        "drop_pct": round(100.0 * (1.0 - cur / hi), 1) if hi > 0 else None})
+            if hi >= max(1.0, float(our_qty or 0.0)) and cur <= hi * (1.0 - drop_pct / 100.0):
+                det["why"] = "collapse"
+                return "cancel", det
+    target, why = _hand_live_target(ladder, ask_c, our_c, our_qty, cap_c, tick)
+    det.update({"target_c": target, "target_why": why})
+    if target is None:
+        det["why"] = why
+        return "stay", det
+    if our_c is None or abs(float(our_c) - target) >= float(tick) - 1e-9:
+        det["why"] = "move"
+        return "move", det
+    det["why"] = "on_target"
+    return "stay", det
+
+
+def _hand_live_frame(slug: str) -> None:
+    """Called by wsfeed._write_depth for every depth frame. Never raises."""
+    try:
+        if LIVE_Q is not None and slug in LIVE_SNAP:
+            LIVE_Q.put_nowait(slug)
+    except Exception:
+        pass
+
+
+def _ensure_live_worker() -> None:
+    global LIVE_Q, _LIVE_THREAD
+    if _LIVE_THREAD is not None and _LIVE_THREAD.is_alive():
+        return
+    try:
+        import queue as _queue
+        if LIVE_Q is None:
+            LIVE_Q = _queue.Queue(maxsize=5000)
+        _LIVE_THREAD = threading.Thread(target=_hand_live_worker, name="hand-live", daemon=True)
+        _LIVE_THREAD.start()
+    except Exception:
+        pass
+
+
+def _hand_live_worker() -> None:
+    sb = get_supabase()
+    client = get_client()
+    import queue as _queue
+    while True:
+        try:
+            try:
+                slug = LIVE_Q.get(timeout=1.0)
+            except _queue.Empty:
+                slug = None
+            if slug is not None:
+                _LIVE_STATS["frames"] += 1
+                _hand_live_one(sb, client, slug)
+            else:
+                for s_ in list(LIVE_SNAP):               # a quiet book still has rejoins to run
+                    if (LIVE_SNAP.get(s_) or {}).get("hold"):
+                        _hand_live_one(sb, client, s_)
+        except Exception as e:
+            _LIVE_STATS["errors"] += 1
+            app.logger.warning("hand live worker: %s", str(e)[:120])
+            _time.sleep(0.2)
+
+
+def _hand_live_one(sb, client, slug: str) -> None:
+    snap = LIVE_SNAP.get(slug)
+    if not snap:
+        return
+    now_m = _time.monotonic()
+    if now_m - _LIVE_LAST.get(slug, 0.0) < _HAND_LIVE_DEBOUNCE_S:
+        return
+    now = datetime.now(timezone.utc)
+    now_ts = _time.time()
+    syn, tick, cap = bool(snap.get("synth")), float(snap.get("tick") or 0.5), float(snap.get("cap_c"))
+    rows = _hand_side_rows(TOUCH_TAPE.get(slug), syn)
+    ladder = _hand_side_ladder(slug, syn)
+    hold = snap.get("hold")
+    if hold:
+        # SITTING OUT → REJOIN after the calm, at the rule's price, unfilled size
+        if now_ts < float(hold.get("resume_ts") or 0):
+            return
+        if now_ts - float(hold.get("at_ts") or now_ts) > _HAND_LIVE_MAX_HOLD_S and hold.get("err"):
+            return                                     # kept failing — the page shows it, Rob decides
+        ask_c = rows[-1][3] if rows else None
+        target, why = _hand_live_target(ladder, ask_c, None, 0, cap, tick)
+        if target is None:
+            return
+        r, blob = _bet_sheet_pick(sb, snap["pick_id"])
+        if not r or r.get("status") != "pending" or not isinstance(blob.get("live_hold"), dict):
+            LIVE_SNAP.pop(slug, None)                  # cancelled or graded while we sat out
+            return
+        _LIVE_LAST[slug] = now_m
+        qty = int(hold.get("qty") or snap.get("qty") or 1)
+        try:
+            out, code = _manual_order_place(client, slug, syn, target, qty, r.get("event_start"),
+                                            allow_started=True)
+        except Exception as e:
+            out, code = {"ok": False, "error": str(e)[:160]}, 500
+        stamp = {"hand_live_rejoin": True, "pick_id": r["id"], "slug": slug, "target_c": target, "why": why,
+                 "contracts": qty, "sat_out_s": round(now_ts - float(hold.get("at_ts") or now_ts), 1),
+                 "result": out, "http": code, "at": now.isoformat()}
+        if out.get("ok") and out.get("order_id") and out.get("resting", True):
+            nb = {k: v for k, v in blob.items() if k != "live_hold"}
+            lc = dict(blob.get("live_chase") or {})
+            lc.update({"rejoins": int(lc.get("rejoins") or 0) + 1, "last_c": target, "at": now.isoformat()})
+            nb.update({"order_id": out["order_id"], "price_c": target, "anchor_c": target, "amended": False,
+                       "live_chase": lc})
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            snap.update({"order_id": out["order_id"], "our_c": target, "qty": qty, "hold": None})
+            _LIVE_STATS["rejoins"] += 1
+        else:
+            _LIVE_STATS["errors"] += 1
+            err = str(out.get("error") or out.get("state") or "create failed")[:120]
+            hold["err"], hold["err_at"] = err, now.isoformat()
+            hold["resume_ts"] = now_ts + 5.0
+            sb.table("bot_picks").update({"signal_blob": {**blob, "live_hold": {
+                **{k: v for k, v in blob["live_hold"].items()}, "err": err, "err_at": now.isoformat()}}}).eq("id", r["id"]).execute()
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        app.logger.warning("hand live rejoin %s pick %s at %s¢ → %s", slug, r["id"], target, out.get("ok"))
+        return
+    oid = snap.get("order_id")
+    o = next((x for x in (_pmm_open_orders_raw(client, fresh=False) or []) if x.get("id") == oid), None)
+    if o is None or o.get("state") not in _OPEN_ORDER_STATES:
+        LIVE_SNAP.pop(slug, None)                      # filled / gone — the tick re-vouches from the venue
+        _LIVE_STATS["skips"] += 1
+        return
+    try:
+        leaves = float(o.get("leaves") or 0.0)
+        py = float(o["price_yes"]) * 100.0
+        our_c = round((100.0 - py) if syn else py, 2)
+    except (TypeError, ValueError, KeyError):
+        _LIVE_STATS["skips"] += 1
+        return
+    try:
+        drop = float(_machine_flag_val("hand_live_drop_pct", _HAND_LIVE_DROP_PCT))
+    except (TypeError, ValueError):
+        drop = _HAND_LIVE_DROP_PCT
+    verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop)
+    if verdict == "stay":
+        _LIVE_STATS["stays"] += 1
+        return
+    _LIVE_LAST[slug] = now_m
+    r, blob = _bet_sheet_pick(sb, snap["pick_id"])
+    if not r or r.get("status") != "pending" or blob.get("order_id") != oid:
+        LIVE_SNAP.pop(slug, None)
+        return
+    if verdict == "cancel":
+        try:
+            calm = float(_machine_flag_val("hand_live_calm_s", _HAND_LIVE_CALM_S))
+        except (TypeError, ValueError):
+            calm = _HAND_LIVE_CALM_S
+        gone, _ords = _bet_sheet_cancel(client, oid, slug)
+        stamp = {"hand_live_pull": True, "pick_id": r["id"], "slug": slug, "order_id": oid, "gone": gone,
+                 "detail": det, "at": now.isoformat()}
+        if gone:
+            qty = max(1, int(round(leaves)))
+            lh = {"at": now.isoformat(), "resume_at": (now + timedelta(seconds=calm)).isoformat(),
+                  "from_c": our_c, "qty": qty, "detail": {k: det.get(k) for k in ("hi_q", "cur_q", "drop_pct")}}
+            nb = {**blob, "order_id": None, "live_hold": lh}
+            lc = dict(blob.get("live_chase") or {})
+            lc.update({"pulls": int(lc.get("pulls") or 0) + 1, "at": now.isoformat()})
+            nb["live_chase"] = lc
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            snap.update({"order_id": None, "hold": {"at_ts": now_ts, "resume_ts": now_ts + calm, "qty": qty}})
+            _LIVE_STATS["pulls"] += 1
+        else:
+            _LIVE_STATS["errors"] += 1
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        app.logger.warning("hand live pull %s pick %s: %s%% off (%s→%s) gone=%s", slug, r["id"],
+                           det.get("drop_pct"), det.get("hi_q"), det.get("cur_q"), gone)
+        return
+    # move — join the market (down, or up under the cap), the mirror's size
+    target = float(det["target_c"])
+    qty_total = _amend_total(o.get("leaves"), o.get("cum"))
+    if qty_total < 1:
+        LIVE_SNAP.pop(slug, None)
+        return
+    canon = (100.0 - target) / 100.0 if syn else target / 100.0
+    v = _repeg_amend(client, oid, slug, canon, qty_total, None)
+    if v == "amended":
+        lc = dict(blob.get("live_chase") or {})
+        lc.update({"moves": int(lc.get("moves") or 0) + 1, "last_c": target, "from_c": our_c,
+                   "why": det.get("target_why"), "at": now.isoformat()})
+        nb = {**blob, "price_c": target, "anchor_c": target, "amended": True, "repegged_from_c": our_c,
+              "repeg_at": now.isoformat(), "live_chase": lc}
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+        snap["our_c"] = target
+        _LIVE_STATS["moves"] += 1
+        app.logger.info("hand live chase %s %s→%s (%s)", slug, our_c, target, det.get("target_why"))
+    elif v == "gone":
+        LIVE_SNAP.pop(slug, None)
+        _LIVE_STATS["skips"] += 1
+    else:
+        _LIVE_STATS["errors"] += 1
+        sb.table("bot_picks").update({"signal_blob": {**blob, "chase_err": {
+            "verdict": v, "at": now.isoformat(), "target_c": target, "live": True}}}).eq("id", r["id"]).execute()
+
+
+def _hand_live_tick(sb, client, now) -> dict:
+    """Every handbets tick: re-vouch LIVE_SNAP from the picks + the mirror
+    (every live-snipe Polymarket bet with a resting order or a live hold),
+    start the worker, report its counters."""
+    st = {"snaps": 0, "holds": 0}
+    if not _machine_flag("hand_live_chase", True):
+        LIVE_SNAP.clear()
+        st["gate"] = "off"
+        return st
+    try:
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .not_.is_("signal_blob->>live_snipe", "null").limit(200).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    try:
+        cap = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
+    except (TypeError, ValueError):
+        cap = _HAND_LIVE_SNIPE_C
+    orders = _pmm_open_orders_raw(client, fresh=False) or []
+    by_id = {o["id"]: o for o in orders if o.get("id")}
+    want: dict = {}
+    for r in rows:
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        slug, oid, syn = blob.get("pmm_slug"), blob.get("order_id"), bool(blob.get("pmm_synthetic"))
+        if not slug or not blob.get("live_snipe") or _kalshi_pick(blob) or blob.get("in_play"):
+            continue
+        lh = blob.get("live_hold") if isinstance(blob.get("live_hold"), dict) else None
+        o = by_id.get(oid) if oid else None
+        if o is not None and o.get("state") in _OPEN_ORDER_STATES:
+            try:
+                py = float(o["price_yes"]) * 100.0
+                our_c = round((100.0 - py) if syn else py, 2)
+            except (TypeError, ValueError, KeyError):
+                our_c = blob.get("price_c")
+            want[slug] = {"pick_id": r["id"], "order_id": oid, "our_c": our_c, "qty": o.get("leaves"),
+                          "synth": syn, "cap_c": cap, "tick": _pmm_tick_c(client, slug),
+                          "event_start": r.get("event_start"), "hold": None}
+        elif lh and not oid:
+            prev = (LIVE_SNAP.get(slug) or {}).get("hold")
+            try:
+                at_ts = datetime.fromisoformat(str(lh.get("at")).replace("Z", "+00:00")).timestamp()
+                resume_ts = datetime.fromisoformat(str(lh.get("resume_at")).replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError):
+                at_ts, resume_ts = _time.time(), _time.time()
+            hold = prev or {"at_ts": at_ts, "resume_ts": resume_ts, "qty": int(lh.get("qty") or 1)}
+            if lh.get("err"):
+                hold["err"] = lh["err"]
+            want[slug] = {"pick_id": r["id"], "order_id": None, "our_c": None, "qty": hold["qty"],
+                          "synth": syn, "cap_c": cap, "tick": _pmm_tick_c(client, slug),
+                          "event_start": r.get("event_start"), "hold": hold}
+            st["holds"] += 1
+    for s_ in list(LIVE_SNAP):
+        if s_ not in want:
+            LIVE_SNAP.pop(s_, None)
+    for s_, snap in want.items():
+        cur = LIVE_SNAP.get(s_)
+        if cur and cur.get("order_id") == snap["order_id"] and cur.get("hold") is snap.get("hold"):
+            cur.update({k: v for k, v in snap.items() if k != "hold"})
+        else:
+            LIVE_SNAP[s_] = snap
+    st["snaps"] = len(LIVE_SNAP)
+    if LIVE_SNAP:
+        _ensure_live_worker()
+    st.update(dict(_LIVE_STATS))
+    return st
 
 
 def _bet_sheet_live_exec(sb, client, pick_id):

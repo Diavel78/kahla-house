@@ -3275,6 +3275,63 @@ def test_live_snipe_hands_off() -> None:
     check("live move never moves up", "<= target + 1e-9" in src)
 
 
+def test_hand_live_chase() -> None:
+    """THE LIVE CHASE (Oct 24 2026, Rob: "chase down if the book collapses…
+    the 70% drop… instantly cancel and wait 20, 30 seconds… never over the
+    49.5 at the current rung… as cheap as possible… on the WebSocket"). The
+    pure planner: join down, join up under the cap, step under an ask that
+    came down, pull on a collapse of OUR rung; the worker is frame-fed."""
+    print("bet sheets: the live chase")
+    import inspect, time as _t
+    import app as _app
+    P, T = _app._hand_live_plan, _app._hand_live_target
+    now = _t.time()
+    lad = lambda *pq: [(float(p), float(q)) for p, q in pq]
+    # the target rule
+    check("live target: join the market bid under us", T(lad((45, 300), (44, 900)), 52.0, 49.5, 10, 49.5, 0.5) == (45.0, "join"))
+    check("live target: the bid above us but under the cap is joined", T(lad((48, 300), (47, 900)), 55.0, 45.0, 10, 49.5, 0.5) == (48.0, "join"))
+    check("live target: never over the cap", T(lad((56, 300), (55, 900)), 60.0, 49.5, 10, 49.5, 0.5) == (49.5, "cap"))
+    check("live target: our own size is not the market", T(lad((49.5, 10), (46, 900)), 52.0, 49.5, 10, 49.5, 0.5) == (46.0, "join"))
+    check("live target: a tick under an ask that fell below the cap", T(lad((45, 300),), 47.0, 49.5, 10, 49.5, 0.5) == (45.0, "join")
+          and T(None, 47.0, None, 0, 49.5, 0.5) == (46.5, "under_ask"))
+    check("live target: no book at all → the cap", T(None, None, None, 0, 49.5, 0.5) == (49.5, "cap"))
+    # the planner: rows are (ts, bid_c, bid_q, ask_c, ask_q, d3, ladder)
+    def row(age, bid, bq, ask, ladr):
+        return (now - age, bid, bq, ask, 100.0, bq, ladr)
+    quiet = [row(50, 49.5, 1010.0, 51.0, lad((49.5, 1010), (49, 400))), row(30, 49.5, 1005.0, 51.0, lad((49.5, 1005), (49, 400)))]
+    v, d = P(quiet + [row(0.5, 49.5, 1000.0, 51.0, lad((49.5, 1000), (49, 400)))], lad((49.5, 1000), (49, 400)), 49.5, 10, 49.5, 0.5, now)
+    check("on the target with the rung intact → stay", v == "stay" and d["why"] == "on_target", str(d))
+    v, d = P(quiet + [row(0.5, 49.5, 210.0, 51.0, lad((49.5, 210), (49, 400)))], lad((49.5, 210), (49, 400)), 49.5, 10, 49.5, 0.5, now)
+    check("1000 → 200 at our rung = a pull (cancel)", v == "cancel" and d["why"] == "collapse" and d["drop_pct"] >= 70, str(d))
+    v, d = P(quiet + [row(0.5, 49.5, 610.0, 51.0, lad((49.5, 610), (49, 400)))], lad((49.5, 610), (49, 400)), 49.5, 10, 49.5, 0.5, now)
+    check("a 40% drop is not a pull", v == "stay", str(d))
+    v, d = P(quiet + [row(0.5, 46.0, 300.0, 47.0, lad((46, 300), (45, 900)))], lad((46, 300), (45, 900)), 49.5, 10, 49.5, 0.5, now)
+    check("our rung emptied AND the market re-posted lower = the pull, not a chase", v == "cancel", str(d))
+    alone = [row(50, 49.5, 15.0, 51.0, lad((49.5, 15), (47, 400))), row(30, 49.5, 14.0, 51.0, lad((49.5, 14), (47, 400)))]
+    v, d = P(alone + [row(0.5, 46.0, 300.0, 47.0, lad((46, 300), (45, 900)))], lad((46, 300), (45, 900)), 49.5, 10, 49.5, 0.5, now)
+    check("we were the rung; the market sits under us → move down to its bid", v == "move" and d["target_c"] == 46.0, str(d))
+    v, d = P([row(0.5, 56.0, 300.0, 57.0, lad((56, 300), (55, 900)))], lad((56, 300), (55, 900)), 45.0, 10, 49.5, 0.5, now)
+    check("the market ran up → move up, capped at 49.5", v == "move" and d["target_c"] == 49.5, str(d))
+    v, d = P([row(0.5, 49.5, 12.0, 51.0, lad((49.5, 12), (49, 40)))] , lad((49.5, 12), (49, 40)), 49.5, 10, 49.5, 0.5, now)
+    check("a rung that was mostly us can't 'collapse' (no base window) → stay", v == "stay", str(d))
+    stale = [row(50, 49.5, 1010.0, 51.0, lad((49.5, 1010),)), row(25, 49.5, 200.0, 51.0, lad((49.5, 200),))]
+    v, d = P(stale, lad((49.5, 200),), 49.5, 10, 49.5, 0.5, now)
+    check("a stale tape (newest frame 25s old) never calls a collapse", v != "cancel", str(d))
+    check("no book → stay", P([], None, 49.5, 10, 49.5, 0.5, now)[0] == "stay")
+    # the wiring
+    src_w = inspect.getsource(_app._hand_live_one)
+    check("the worker sizes the amend off the mirror (leaves + cum)", "_amend_total(o.get(\"leaves\"), o.get(\"cum\"))" in src_w)
+    check("…pops the snapshot when the mirror no longer shows the order", "LIVE_SNAP.pop(slug, None)" in src_w)
+    check("…pulls through the verified cancel", "_bet_sheet_cancel(client, oid, slug)" in src_w)
+    check("…rejoins with the started-game rail lifted", "allow_started=True" in src_w)
+    check("…re-reads the pick before a rejoin (a cancelled pick never gets an order)", 'r.get("status") != "pending" or not isinstance(blob.get("live_hold"), dict)' in src_w)
+    check("wsfeed feeds every depth frame to the live worker", "_app._hand_live_frame(slug)" in open(__import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(_app.__file__)), "cellar", "wsfeed.py")).read())
+    check("the handbets tick publishes the live snapshot first", "_hand_live_tick(sb, client, now)" in inspect.getsource(_app._hand_orders_tick))
+    check("the tape keeps recording a pulled bet's slug", "want |= set(LIVE_SNAP)" in inspect.getsource(_app._touch_tape_publish))
+    check("a pulled bet is never retired as an app cancel", 'b.get("line_hold") or b.get("live_hold")' in inspect.getsource(_app._hand_app_adopt_tick))
+    check("a pulled bet is never red", 'isinstance(blob.get("live_hold"), dict)' in inspect.getsource(_app._hand_red_state))
+
+
 def test_touch_tape_seed() -> None:
     """A RESTART KEEPS THE PRE-START BOOK (Oct 17 2026): the saved tape fills
     a watched slug's empty tape, never one already recording, and the start
@@ -5244,7 +5301,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

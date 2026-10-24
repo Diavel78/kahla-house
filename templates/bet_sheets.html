@@ -1064,6 +1064,12 @@
             return lh.err ? { cls: 'warn', short: 'SITTING OUT', detail: txt + ' · ' + lh.err }
                           : { cls: 'rest', short: 'SITTING OUT', detail: txt + ' — the box rejoins when it calms' };
         }
+        if (b.live_hold) {
+            const lh = b.live_hold, dd = lh.detail || {};
+            const txt = 'live chase pulled the order' + (lh.from_c != null ? ' off ' + lh.from_c + '¢' : '') + (dd.drop_pct != null ? ' · the rung fell ' + dd.drop_pct + '% (' + dd.hi_q + '→' + dd.cur_q + ')' : '') + (lh.resume_at ? ' · back ~' + fmtClock(lh.resume_at) : '');
+            return lh.err ? { cls: 'warn', short: 'PULLED', detail: txt + ' · ' + lh.err }
+                          : { cls: 'rest', short: 'PULLED', detail: txt + ' — rejoins at the bid, under the live cap' };
+        }
         if (b.poly_cancel_sent)
             return { cls: 'rest', short: 'SWITCHING', detail: 'Polymarket cancel sent · the box is completing the move to Kalshi' };
         if (b.kalshi_cancel_sent)
@@ -1240,6 +1246,10 @@
             acts.push('<button class="abtn' + (rp ? ' on' : rec === 'repeg' ? ' pri' : '') + '" onclick="sheetOp(\'repeg\')">' + (rp ? '✓ On the slip: re-peg to touch' : star('repeg') + 'Re-peg to touch') + '</button>');
             if (!b.live_snipe) acts.push('<button class="abtn' + (lv ? ' on' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : 'Move to Live · 49.5¢, no game-start cancel') + '</button>');
             acts.push('<button class="abtn dng' + (cn ? ' on' : rec === 'cancel' ? ' pri' : '') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : star('cancel') + 'Cancel order') + '</button>');
+        } else if (b.status === 'pending' && b.live_snipe && b.live_hold && !o.resting) {
+            const cn = inSlip(opKey('cancel', b.id));
+            h += '<div class="note">The live chase pulled this order (the rung collapsed) and rejoins at the bid, under the live cap, at ~' + fmtClock(b.live_hold.resume_at) + '. Cancel here to drop the bet instead.</div>';
+            acts.push('<button class="abtn dng' + (cn ? ' on' : ' pri') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: drop the bet' : 'Drop the bet (no rejoin)') + '</button>');
         } else if (b.status === 'pending' && o.resting && b.started) {
             // STILL RESTING ON A STARTED GAME (Oct 17 2026: a box restart at
             // 9:00:55 left seven bets resting into their games, and the page
@@ -1434,7 +1444,7 @@
     // (start_blind — a restart at the start). Everything else waits for the
     // drop, then lands in Missed at game start.
     function renderStartedResting(d) {
-        const rows = (d.bets || []).filter(b => b.status === 'pending' && (b.order || {}).resting
+        const rows = (d.bets || []).filter(b => b.status === 'pending' && ((b.order || {}).resting || (b.live_snipe && b.live_hold))
                 && ((b.started && (b.live_snipe || b.in_play)) || b.start_seen || b.start_blind || b.take_window))
             .sort((x, y) => String(x.event_start).localeCompare(String(y.event_start)));
         document.getElementById('srSec').classList.toggle('hide', !rows.length);
@@ -1452,11 +1462,15 @@
             const tw = mine ? null : b.take_window;
             // THE TAKE WINDOW (Rob, Oct 18 2026: "I would say 2 minutes"): the drop fired,
             // the box is re-trying the take inside the 1¢ cap until the window ends
-            const tag = mine ? '<span class="tag amb">LIVE · YOURS' + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
+            const tag = (mine && b.live_hold) ? '<span class="tag ' + (b.live_hold.err ? 'red' : 'amb') + '">LIVE · PULLED · back ~' + esc(fmtClock(b.live_hold.resume_at)) + '</span>'
+                      : mine ? '<span class="tag amb">LIVE · YOURS' + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
                       : tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
                       : '<span class="tag red">BOX CAN\'T SEE GAME START</span>';
-            const n = Math.round(o.leaves || 0) + ' @ ' + (o.price_c != null ? cA(o.price_c) : '?') + ' resting'
+            const lc = b.live_chase || {};
+            const chased = mine ? ((lc.moves ? ' · chased ' + lc.moves + '×' : '') + (lc.pulls ? ' · pulled ' + lc.pulls + '×' : '')) : '';
+            const n = (b.live_hold ? (b.live_hold.qty || '?') + ' pulled' + (b.live_hold.detail && b.live_hold.detail.drop_pct != null ? ' (rung −' + b.live_hold.detail.drop_pct + '%)' : '') + (b.live_hold.err ? ' · ' + esc(b.live_hold.err) : '')
+                                   : Math.round(o.leaves || 0) + ' @ ' + (o.price_c != null ? cA(o.price_c) : '?') + ' resting') + chased
                     + (held > 0 ? ' · ' + fmtQ(held) + ' filled' : '')
                     + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '')
                     + (b.cur_c != null ? ' · now ' + b.cur_c + '¢' : '');
@@ -1466,7 +1480,7 @@
                  + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + n + '</div>'
                  + '<div class="c-n">' + (tw ? ((tw.tries || 0) + ' tries · last ask ' + (tw.last && tw.last.ask_c != null ? tw.last.ask_c + '¢' : '—')
                         + (tw.bump && tw.bump.verdict === 'amended' ? ' · bid moved up to ' + tw.bump.to_c + '¢ (maker, top of book)' : '')
-                        + ' · tap to cancel now') : mine ? 'yours to watch · tap to cancel' : 'tap to cancel or move to live') + '</div></div>';
+                        + ' · tap to cancel now') : mine ? 'live chase on — joins the bid, never over the cap · tap to cancel' : 'tap to cancel or move to live') + '</div></div>';
         }).join('');
     }
     function renderBets(d) {

@@ -237,6 +237,10 @@ def _write_depth(slug: str, pv: dict, conn: int = 0) -> None:
             _app._touch_tape_record(slug, bids, asks)
         except Exception:
             pass
+        try:
+            _app._hand_live_frame(slug)          # the live chase worker (Oct 24 2026) — a no-op off its snapshot
+        except Exception:
+            pass
         ep = _app._mkts_state(conn)["epoch"]
         _app.WS_DEPTH_EPOCH[slug] = ep
         _app.WS_DEPTH_CONN[slug] = conn
