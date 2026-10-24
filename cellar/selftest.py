@@ -3677,31 +3677,20 @@ def test_bet_sheet_live_section() -> None:
     check("a LIVE item on a game hours over is refused", C({**over, "live": True}) is not None and "over" in C({**over, "live": True}))
     check("a LIVE item still needs a side and a line", C({**started, "live": True, "side": "over"}) == "bad side"
           and C({**started, "live": True, "line": None}) == "sheet has no line")
-    # the venue question, asked once, by the live price: cheaper all-in wins, a tie stays on Polymarket
-    V = _app._hand_venue_pick
-    p = {"ok": True, "price_c": 49.5, "rung_line": 3.5, "rung_why": "exact"}
-    k = {"ok": True, "price_c": 47, "rung_line": 3.5, "rung_why": "exact", "fee": {"type": "quadratic"}}
-    check("a cheaper Kalshi live seat wins", V("auto", p, k, 10, 0.0)[0] == "KALSHI")
-    check("a dearer Kalshi live seat loses", V("auto", p, {**k, "price_c": 52}, 10, 0.0)[0] == "POLYMARKET")
-    check("a tie stays on Polymarket", V("auto", p, {**k, "price_c": 49.5}, 10, 0.0)[0] == "POLYMARKET")
-    check("Kalshi alone when Polymarket has no rung", V("auto", {"ok": False, "reason": "x"}, k, 10, 0.0)[0] == "KALSHI")
-    check("neither → None", V("auto", {"ok": False}, {"ok": False}, 10, 0.0)[0] is None)
     src_r = inspect.getsource(_app._bet_sheet_resolve_live)
     check("the Polymarket live resolve prices by the live rule, never the pre-game seat",
           "_hand_getlive_price(book, synthetic, float(cap_c), tick)" in src_r
           and "_hand_seat_price" not in src_r and "chalk, not betting it" not in src_r)
-    src_k = inspect.getsource(_app._bet_sheet_resolve_live_kalshi)
-    check("the Kalshi live resolve prices off the Kalshi book, whole cents, the same rule",
-          "_hand_getlive_price(book, not buy_yes, cap_k, _KALSHI_TICK_C)" in src_k and "fresh=True" in src_k)
     src_q = inspect.getsource(_app._bet_sheet_live_quote)
-    check("the live quote asks the venue question with no gain floor", "_hand_venue_pick(want if k_on else \"poly\", rs, k_rs, contracts, 0.0)" in src_q)
+    check("POLYMARKET ONLY (Rob, Oct 24 2026): the live quote asks no venue question",
+          "_bet_sheet_resolve_live(client, item, cap_c)" in src_q and "kalshi" not in src_q.lower().split('"""')[2])
     src_p = inspect.getsource(_app._hand_live_place)
     check("the live placer is the quote (what the slip shows is what the box places)", "_bet_sheet_live_quote(client, item, contracts)" in src_p)
-    check("…Polymarket: the started-game rail is lifted", "allow_started=True" in src_p and "_manual_order_place(client, slug, syn, price_c, contracts" in src_p)
-    check("…Kalshi: the lane's own verified GTC create, never a Polymarket write for a Kalshi seat",
-          "_kalshi_live_create(ticker, by, price_c, contracts)" in src_p)
+    check("…Polymarket, the started-game rail lifted, never a Kalshi write",
+          "allow_started=True" in src_p and "_manual_order_place(client, slug, syn, price_c, contracts" in src_p
+          and "_kalshi_live_create" not in src_p)
     check("…the pick is stamped live_snipe (sheet_live) + placed_live with NO clock",
-          src_p.count('"sheet_live": True') >= 2 and '"placed_live": True' in src_p and '"until"' not in src_p)
+          '"sheet_live": True' in src_p and '"placed_live": True' in src_p and '"until"' not in src_p)
     check("…and stamps hand_live_place", '"hand_live_place": True' in src_p)
     src_x = inspect.getsource(_app._hand_order_execute)
     check("the executor routes a live item before the raw-slip resolve (and after the Kalshi getlive)",

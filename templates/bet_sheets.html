@@ -729,11 +729,9 @@
                      + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
             }
             const liveCap = (_lastBetsPayload && _lastBetsPayload.live_snipe_c) || 49.5;
-            if (i.live && !i.q) q = '<div class="q">rests at ' + liveCap + '¢ or the bid, whichever is cheaper · the live chase owns it, no clock</div>';
+            if (i.live && !i.q) q = '<div class="q">rests on Polymarket at ' + liveCap + '¢ or the bid, whichever is cheaper · the live chase owns it, no clock</div>';
             if (i.q && i.q.ok && i.live) {
-                const vp = i.q.venue_pick || {}, ai = vp.all_in || {};
-                q = '<div class="q ok"><b>' + (i.q.venue === 'KALSHI' ? 'KALSHI' : 'Polymarket') + '</b>'
-                  + (ai.POLYMARKET != null && ai.KALSHI != null ? ' · all-in Poly ' + Number(ai.POLYMARKET).toFixed(2) + '¢ vs Kalshi ' + Number(ai.KALSHI).toFixed(2) + '¢' : '')
+                q = '<div class="q ok"><b>Polymarket</b>'                      // live bets rest on Polymarket only (Rob, Oct 24 2026)
                   + (i.q.rung_why === 'favorable' ? ' · rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet)' : '')
                   + ' · live ' + i.q.price_c + '¢' + (i.q.priced === 'bid' ? ' (the bid, under the cap)' : i.q.priced === 'under_ask' ? ' (a tick under the ask)' : ' (the cap)')
                   + (i.q.touch_c != null ? ' · bid ' + i.q.touch_c + '¢' : '') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '')

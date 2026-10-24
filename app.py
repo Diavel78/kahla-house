@@ -15625,18 +15625,12 @@ def api_bet_sheets_place():
                     results.append({"key": key, "ok": False, "reason": bad, "live": True})
                     continue
                 lq = _bet_sheet_live_quote(client, it or {}, contracts)
-                for _v in ("poly", "kalshi"):
-                    if isinstance(lq.get(_v), dict):
-                        lq[_v].pop("_book", None)
                 if lq.get("ok"):
-                    seat = lq["kalshi"] if lq["venue"] == "KALSHI" else lq["poly"]
-                    res = {"key": key, "ok": True, "live": True, "venue": lq["venue"], "venue_pick": lq.get("venue_pick"),
+                    seat = lq["poly"]
+                    res = {"key": key, "ok": True, "live": True, "venue": "POLYMARKET",
                            "price_c": seat.get("price_c"), "priced": seat.get("priced"), "cap_c": lq.get("cap_c"),
                            "touch_c": seat.get("touch_c"), "ask_c": seat.get("ask_c"),
-                           "rung_line": seat.get("rung_line"), "rung_why": seat.get("rung_why"),
-                           "ticker": seat.get("ticker"), "slug": (lq["poly"] or {}).get("slug"),
-                           "kalshi": {kk: (lq["kalshi"] or {}).get(kk) for kk in ("ok", "reason", "ticker", "price_c", "priced", "rung_line")} if lq.get("kalshi") else None,
-                           "poly": {kk: (lq["poly"] or {}).get(kk) for kk in ("ok", "reason", "slug", "price_c", "priced", "rung_line")} if lq.get("poly") else None}
+                           "rung_line": seat.get("rung_line"), "rung_why": seat.get("rung_why"), "slug": seat.get("slug")}
                 else:
                     res = {"key": key, **lq}
                 res["pin"] = _bet_sheet_pin_quote(sb, it or {}, datetime.now(timezone.utc), pin_slates)
@@ -16053,143 +16047,65 @@ def _bet_sheet_resolve_live(client, item: dict, cap_c: float) -> dict:
             "event_slug": pmm.get("event_slug"), "event_title": pmm.get("event_title"), "_book": book}
 
 
-def _bet_sheet_resolve_live_kalshi(item: dict, cap_c: float) -> dict:
-    """The Kalshi twin of `_bet_sheet_resolve_live`: the item's Kalshi
-    contract (full-game series, the slip's rung rule on Kalshi's ladder) and
-    the live rule's price off the Kalshi book, whole cents."""
-    import kalshi_venue as _kv
-    sport = str(item.get("sport") or "").upper()
-    try:
-        rs = _kv.resolve(sport, item.get("away"), item.get("home"), item.get("event_start"), item)
-    except Exception as e:
-        return {"ok": False, "reason": f"Kalshi lookup failed: {e}"[:120]}
-    if not rs.get("ok"):
-        return {"ok": False, "reason": f"Kalshi: {rs.get('why') or 'no market'}"[:160], "tried": rs.get("tried")}
-    ticker, buy_yes = rs["ticker"], bool(rs["buy_yes"])
-    book, _ob = _kalshi_hand_book(ticker, fresh=True)
-    if book is None:
-        return {"ok": False, "reason": "Kalshi book unreadable — try again", "ticker": ticker}
-    cap_k = round(_grid_dn(float(cap_c), _KALSHI_TICK_C), 2)
-    price_c, why = _hand_getlive_price(book, not buy_yes, cap_k, _KALSHI_TICK_C)
-    if price_c is None:
-        return {"ok": False, "reason": f"can't rest live on Kalshi: {why}", "ticker": ticker, "rung_line": rs.get("line")}
-    s_bid, s_ask = _manual_side_book(book, not buy_yes)
-    return {"ok": True, "venue": "KALSHI", "live": True, "ticker": ticker, "buy_yes": buy_yes,
-            "rung_line": rs.get("line"), "rung_why": rs.get("why"),
-            "price_c": int(round(price_c)), "priced": why, "cap_c": cap_k,
-            "touch_c": s_bid, "ask_c": s_ask, "fee": rs.get("fee"),
-            "series": rs.get("series"), "event_ticker": rs.get("event_ticker"), "_book": book}
-
-
 def _bet_sheet_live_quote(client, item: dict, contracts: int) -> dict:
-    """Both venues priced by the live rule; the cheaper all-in is the seat
-    (a tie stays on Polymarket, different rungs → the sheet's exact line,
-    `_hand_venue_pick`). The slip's Quote and the executor share it, so
-    what the quote says is what the box places."""
+    """POLYMARKET ONLY (Rob, Oct 24 2026: "just for simplicity standpoint,
+    you could just do the live only on Polymarket only"): one venue, one
+    read, the live rule's price. The slip's Quote and the executor share it,
+    so what the quote says is what the box places."""
     cap_c = _hand_live_cap_c()
-    want = str(item.get("venue") or "auto").lower()
-    k_on = _hand_kalshi_on()
-    if want == "kalshi" and not k_on:
-        return {"ok": False, "reason": "Kalshi is switched off (machine_flags hand_kalshi_enabled)", "live": True}
-    rs = _bet_sheet_resolve_live(client, item, cap_c) if want != "kalshi" else {"ok": False, "reason": "Kalshi only"}
-    k_rs = None
-    if k_on and want != "poly":
-        try:
-            k_rs = _bet_sheet_resolve_live_kalshi(item, cap_c)
-        except Exception as e:
-            k_rs = {"ok": False, "reason": f"Kalshi: {type(e).__name__}: {e}"[:120]}
-    venue, vdet = _hand_venue_pick(want if k_on else "poly", rs, k_rs, contracts, 0.0)
-    if venue is None:
-        errs = [x.get("reason") for x in (rs, k_rs) if x and not x.get("ok") and x.get("reason")]
-        return {"ok": False, "reason": " · ".join(errs)[:220] or "could not resolve the rung", "live": True,
-                "poly": {k: rs.get(k) for k in ("ok", "reason", "slug", "rung_line")} if rs else None,
-                "kalshi": {k: k_rs.get(k) for k in ("ok", "reason", "ticker", "rung_line")} if k_rs else None}
-    return {"ok": True, "live": True, "venue": venue, "cap_c": cap_c, "poly": rs, "kalshi": k_rs,
-            "venue_pick": {k: v for k, v in (vdet or {}).items() if k in ("why", "all_in", "best")}}
+    rs = _bet_sheet_resolve_live(client, item, cap_c)
+    if not rs.get("ok"):
+        return {"ok": False, "reason": rs.get("reason") or "could not resolve the rung", "live": True,
+                "slug": rs.get("slug"), "rung_line": rs.get("rung_line")}
+    return {"ok": True, "live": True, "venue": "POLYMARKET", "cap_c": cap_c, "poly": rs}
 
 
 def _hand_live_place(sb, client, row: dict, pl: dict, item: dict, worker: str) -> dict:
     """THE LIVE SECTION's create (Oct 24 2026). The slip item was tapped on a
-    game IN PROGRESS: both venues priced by the live rule (`_bet_sheet_live_quote`),
-    the cheaper all-in rests the bet — Polymarket via `_manual_order_place`
-    with the started-game rail lifted, Kalshi via `_kalshi_live_create` —
-    and the pick is logged stamped `live_snipe {sheet_live}` + `placed_live`
-    with NO clock, so the live chase owns it (join the bid, 70% drop → pull,
-    20s, rejoin, never over the cap) until it fills or Rob ends it. THE
-    CHASE NEVER CHANGES VENUE: the venue question is asked ONCE, here."""
+    game IN PROGRESS: priced by the live rule (`_bet_sheet_live_quote`),
+    rested on POLYMARKET via `_manual_order_place` with the started-game
+    rail lifted — Polymarket only, by Rob's call, no venue question — and
+    the pick logged stamped `live_snipe {sheet_live}` + `placed_live` with
+    NO clock, so the live chase owns it (join the bid, 70% drop → pull, 20s,
+    rejoin, never over the cap) until it fills or Rob ends it."""
     contracts = int(row.get("contracts") or pl.get("contracts") or 0)
     if not (1 <= contracts <= 250):
         return {"ok": False, "error": "contracts must be 1-250"}
     q = _bet_sheet_live_quote(client, item, contracts)
     if not q.get("ok"):
         return {"ok": False, "error": q.get("reason") or "could not price the live bet", "live": True}
-    rs, k_rs, venue = q["poly"], q["kalshi"], q["venue"]
+    rs = q["poly"]
     now_iso = datetime.now(timezone.utc).isoformat()
-    vp = q.get("venue_pick")
-    if venue == "KALSHI":
-        ticker, by, price_c, why = k_rs["ticker"], bool(k_rs["buy_yes"]), int(k_rs["price_c"]), k_rs.get("priced")
-        k_rs.pop("_book", None)
-        oid, det = _kalshi_live_create(ticker, by, price_c, contracts)
-        if not oid:
-            return {"ok": False, "venue": "KALSHI", "live": True, "detail": det,
-                    "error": f"Kalshi: {det.get('error') or det.get('status') or 'create failed'}"[:200]}
-        res = {"ok": True, "via": worker, "venue": "KALSHI", "order_id": oid, "resting": not det.get("unverified"),
-               "state": det.get("order_status"), "price_c": price_c, "cost": round(price_c * contracts / 100.0, 2),
-               "ticker": ticker, "live": True, "sheet_live": True, "priced": why, "contracts": contracts,
-               "rung_line": k_rs.get("rung_line"), "venue_pick": vp}
-        if det.get("unverified"):
-            res["warning"] = "order sent but not verified on the Kalshi orders list — check the Kalshi app"
-        twin_ok = bool(rs and rs.get("ok"))
-        rs_log = {"venue": "KALSHI", "kalshi_ticker": ticker, "kalshi_buy_yes": by,
-                  "kalshi_series": k_rs.get("series"), "kalshi_fee": k_rs.get("fee"),
-                  "rung_line": k_rs.get("rung_line"), "rung_why": k_rs.get("rung_why"), "price_c": price_c,
-                  "event_title": (rs or {}).get("event_title"),
-                  "pmm_twin_slug": rs.get("slug") if twin_ok else None,
-                  "pmm_twin_synthetic": bool(rs.get("synthetic")) if twin_ok else None,
-                  "poly_quote_c": rs.get("price_c") if twin_ok else None, "venue_pick": vp}
-        extra = {"live_snipe": {"at": now_iso, "price_c": price_c, "sheet_live": True, "priced": why,
-                                "cap_c": k_rs.get("cap_c"), "venue": "KALSHI"},
-                 "placed_live": True}
-        pl["resolve"] = {k: k_rs.get(k) for k in ("ticker", "buy_yes", "rung_line", "rung_why", "price_c", "priced")}
-        pl["resolve"]["venue"] = "KALSHI"
-    else:
-        slug, syn, price_c, why = rs["slug"], bool(rs.get("synthetic")), rs["price_c"], rs.get("priced")
-        book = rs.pop("_book", None)
-        out, _st = _manual_order_place(client, slug, syn, price_c, contracts, row.get("event_start"),
-                                       book=book, verify="fresh", allow_started=True)
-        if not out.get("ok"):
-            return {"ok": False, "error": out.get("error") or "order failed", "live": True}
-        res = {"ok": True, "via": worker, "venue": "POLYMARKET", "order_id": out.get("order_id"),
-               "state": out.get("state"), "resting": out.get("resting"), "cost": out.get("cost"),
-               "price_c": out.get("price_c"), "slug": slug, "rung_line": rs.get("rung_line"),
-               "live": True, "sheet_live": True, "priced": why, "contracts": contracts, "venue_pick": vp}
-        if not out.get("resting"):
-            res["warning"] = (f"order sent but not resting (state {out.get('state') or 'unknown'})"
-                              " — check the app")
-        rs_log = {k: rs.get(k) for k in ("slug", "synthetic", "rung_line", "rung_why", "price_c",
-                                         "event_title", "chalk_skipped")}
-        if vp:
-            rs_log["venue_pick"] = vp
-        if k_rs and k_rs.get("ok"):
-            # the Kalshi twin rides the pick so the socket watches it (the chase never switches)
-            rs_log.update({"kalshi_twin_ticker": k_rs.get("ticker"), "kalshi_twin_buy_yes": bool(k_rs.get("buy_yes")),
-                           "kalshi_twin_line": k_rs.get("rung_line"), "kalshi_fee": k_rs.get("fee")})
-        extra = {"live_snipe": {"at": now_iso, "price_c": price_c, "sheet_live": True, "priced": why,
-                                "cap_c": rs.get("cap_c")},
-                 "placed_live": True}
-        pl["resolve"] = {k: rs.get(k) for k in ("slug", "synthetic", "rung_line", "rung_why", "price_c",
-                                                "priced", "event_title")}
-        pl["resolve"]["venue"] = "POLYMARKET"
+    slug, syn, price_c, why = rs["slug"], bool(rs.get("synthetic")), rs["price_c"], rs.get("priced")
+    book = rs.pop("_book", None)
+    out, _st = _manual_order_place(client, slug, syn, price_c, contracts, row.get("event_start"),
+                                   book=book, verify="fresh", allow_started=True)
+    if not out.get("ok"):
+        return {"ok": False, "error": out.get("error") or "order failed", "live": True}
+    res = {"ok": True, "via": worker, "venue": "POLYMARKET", "order_id": out.get("order_id"),
+           "state": out.get("state"), "resting": out.get("resting"), "cost": out.get("cost"),
+           "price_c": out.get("price_c"), "slug": slug, "rung_line": rs.get("rung_line"),
+           "live": True, "sheet_live": True, "priced": why, "contracts": contracts}
+    if not out.get("resting"):
+        res["warning"] = (f"order sent but not resting (state {out.get('state') or 'unknown'})"
+                          " — check the app")
+    rs_log = {k: rs.get(k) for k in ("slug", "synthetic", "rung_line", "rung_why", "price_c",
+                                     "event_title", "chalk_skipped")}
+    extra = {"live_snipe": {"at": now_iso, "price_c": price_c, "sheet_live": True, "priced": why,
+                            "cap_c": rs.get("cap_c")},
+             "placed_live": True}
+    pl["resolve"] = {k: rs.get(k) for k in ("slug", "synthetic", "rung_line", "rung_why", "price_c",
+                                            "priced", "event_title")}
+    pl["resolve"]["venue"] = "POLYMARKET"
     pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), item, rs_log, res, contracts, extra=extra)
     res["pick_id"] = pick_id
     if warn:
         res["warning"] = ((res.get("warning") or "") + " · " + warn).strip(" ·")
     try:
-        _probe_log({"hand_live_place": True, "venue": venue, "pick_id": pick_id, "order_id": res.get("order_id"),
-                    "price_c": res.get("price_c"), "contracts": contracts, "priced": why,
-                    "slug": rs.get("slug") if rs else None, "ticker": (k_rs or {}).get("ticker"),
-                    "venue_pick": vp, "item": {k: item.get(k) for k in ("sport", "away", "home", "event_start",
-                                                                        "market_type", "side", "line", "label")},
+        _probe_log({"hand_live_place": True, "venue": "POLYMARKET", "pick_id": pick_id, "order_id": res.get("order_id"),
+                    "price_c": res.get("price_c"), "contracts": contracts, "priced": why, "slug": slug,
+                    "item": {k: item.get(k) for k in ("sport", "away", "home", "event_start",
+                                                      "market_type", "side", "line", "label")},
                     "resting": res.get("resting"), "warning": res.get("warning")})
     except Exception:
         pass
