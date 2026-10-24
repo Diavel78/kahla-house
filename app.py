@@ -4548,8 +4548,14 @@ def api_bet_sheets_picks():
             pl = ((r.data or [None])[0] or {}).get("payload") or {}
             if isinstance(pl, str):
                 pl = json.loads(pl)
+            _rows_l = (list((pl.get("rows") or {}).items()) if isinstance(pl.get("rows"), dict)
+                       else [(None, x) for x in (pl.get("rows") or [])])
             out["strip"] = {"at": pl.get("at"), "n": pl.get("n"), "orders": pl.get("orders"),
                             "positions": pl.get("positions"), "kalshi": pl.get("kalshi"),
+                            # which rows carry a quote — the read for "no live quote" on the Live box
+                            "quotes": [{"id": k, "venue": x.get("venue") or "POLYMARKET", "held": x.get("held"),
+                                        "cur_c": x.get("cur_c"), "touch_c": x.get("touch_c")}
+                                       for k, x in _rows_l if isinstance(x, dict)],
                             "venues": sorted({str(x.get("venue") or "POLYMARKET") for x in
                                               (list((pl.get("rows") or {}).values()) if isinstance(pl.get("rows"), dict)
                                                else (pl.get("rows") or [])) if isinstance(x, dict)})}
