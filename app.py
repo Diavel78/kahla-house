@@ -15947,6 +15947,11 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
             t = _time.monotonic()
             ms[name] = ms.get(name, 0) + int((t - _t_ph) * 1000)
             _t_ph = t
+        gl0 = pl.get("getlive") if isinstance(pl.get("getlive"), dict) else None
+        if gl0 and str(gl0.get("venue") or "").upper() == "KALSHI":
+            # a Kalshi row's Chase-it-again rests on KALSHI (the row's slug is
+            # only the Polymarket twin — never resolve or place on it)
+            return _hand_getlive_kalshi(sb, row, pl, gl0, worker)
         if not slug:
             # THE FAST SLIP (Oct 5 2026, Rob after a 19-bet submit: "we need a
             # MUCH faster process… took forever… and took 2 submits"): Vercel
@@ -19793,6 +19798,64 @@ def _hand_order_execute_kalshi(sb, row: dict, pl: dict, item: dict, k_rs: dict,
     return res
 
 
+def _hand_getlive_kalshi(sb, row: dict, pl: dict, gl: dict, worker: str) -> dict:
+    """GET IT LIVE on KALSHI (Oct 24 2026, Rob on a Kalshi bet's missed row
+    pointing at Polymarket: "Why in the hell would it go to Polymarket if it
+    was a Kalshi bet?" — "If it didn't fill on Kalshi, it stays on Kalshi").
+    The Kalshi twin of the getlive create: price = the live rule off the
+    KALSHI book (the lower of the cap and our bid, a tick under an ask under
+    the cap, whole cents), one GTC post-only order verified on the orders
+    list (`_kalshi_live_create`, shard funded), the pick logged as a Kalshi
+    pick with `live_snipe` + `getlive_from`, so the Kalshi live chase owns
+    it and the row leaves the missed list. Never a Polymarket write."""
+    ticker, by = str(gl.get("ticker") or "").upper(), bool(gl.get("buy_yes"))
+    item = pl.get("item") or {}
+    contracts = int(row.get("contracts") or pl.get("contracts") or 0)
+    if not ticker or not (1 <= contracts <= 250):
+        return {"ok": False, "error": "no Kalshi ticker on this row", "venue": "KALSHI"}
+    try:
+        cap_c = float(gl.get("cap_c") or _machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
+    except (TypeError, ValueError):
+        cap_c = _HAND_LIVE_SNIPE_C
+    cap_k = round(_grid_dn(cap_c, _KALSHI_TICK_C), 2)
+    book, _raw = _kalshi_hand_book(ticker, fresh=True)
+    if book is None:
+        return {"ok": False, "error": "Kalshi book unreadable — try again", "venue": "KALSHI"}
+    price_c, why = _hand_getlive_price(book, not by, cap_k, _KALSHI_TICK_C)
+    if price_c is None:
+        return {"ok": False, "error": f"can't rest live on Kalshi: {why}", "venue": "KALSHI"}
+    price_c = int(round(price_c))
+    oid, det = _kalshi_live_create(ticker, by, price_c, contracts)
+    if not oid:
+        return {"ok": False, "error": f"Kalshi: {det.get('error') or det.get('status') or 'create failed'}"[:200],
+                "venue": "KALSHI", "detail": det}
+    res = {"ok": True, "via": worker, "venue": "KALSHI", "order_id": oid, "resting": not det.get("unverified"),
+           "state": det.get("order_status"), "price_c": price_c, "cost": round(price_c * contracts / 100.0, 2),
+           "ticker": ticker, "live": True, "getlive": True, "priced": why, "contracts": contracts}
+    if det.get("unverified"):
+        res["warning"] = "order sent but not verified on the Kalshi orders list — check the Kalshi app"
+    rs_log = {"venue": "KALSHI", "kalshi_ticker": ticker, "kalshi_buy_yes": by,
+              "rung_line": item.get("line"), "rung_why": "getlive", "price_c": price_c,
+              "pmm_twin_slug": row.get("slug"), "pmm_twin_synthetic": bool(row.get("synthetic")) if row.get("slug") else None}
+    now_iso = datetime.now(timezone.utc).isoformat()
+    extra = {"live_snipe": {"at": now_iso, "from_c": gl.get("want_c"), "price_c": price_c,
+                            "getlive": True, "priced": why, "venue": "KALSHI"},
+             "getlive_from": gl.get("from"), "placed_live": True}
+    pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), item, rs_log, res, contracts, extra=extra)
+    res["pick_id"] = pick_id
+    if pick_id and gl.get("from"):
+        try:
+            res["dust_folded"] = _hand_dust_fold_from(sb, gl.get("from"), pick_id, None, not by, ticker=ticker)
+        except Exception as e:
+            app.logger.warning("getlive kalshi dust fold %s: %s", gl.get("from"), str(e)[:80])
+    if warn:
+        res["warning"] = ((res.get("warning") or "") + " · " + warn).strip(" ·")
+    _probe_log({"hand_getlive": True, "venue": "KALSHI", "ticker": ticker, "buy_yes": by, "price_c": price_c,
+                "contracts": contracts, "order_id": oid, "pick_id": pick_id, "from": gl.get("from"),
+                "priced": why, "create": det})
+    return res
+
+
 def _kalshi_pick_order(blob: dict, orders):
     """The pick's resting Kalshi order (parsed) or None."""
     import kalshi_venue as _kv
@@ -22344,11 +22407,12 @@ def _hand_dust_fold_apply(sb, folds: list, src: str, rows_by_id: dict | None = N
     return n
 
 
-def _hand_dust_fold_from(sb, from_id, new_id, slug: str, syn: bool) -> int:
+def _hand_dust_fold_from(sb, from_id, new_id, slug, syn: bool, ticker: str | None = None) -> int:
     """At a Get-it-live create: the Missed row's own pick (`from_id`), still
     pending on the same slug + side with NO order, is the dust the new pick
-    replaces — fold it now rather than a tick later."""
-    if not from_id or not new_id or not slug:
+    replaces — fold it now rather than a tick later. `ticker` = the Kalshi
+    row's case (same ticker + side, no Kalshi order id)."""
+    if not from_id or not new_id or not (slug or ticker):
         return 0
     try:
         got = sb.table("bot_picks").select("id,status,signal_blob").eq("id", int(from_id)).limit(1).execute().data or []
@@ -22357,7 +22421,13 @@ def _hand_dust_fold_from(sb, from_id, new_id, slug: str, syn: bool) -> int:
     if not got or got[0].get("status") != "pending":
         return 0
     b = got[0].get("signal_blob") if isinstance(got[0].get("signal_blob"), dict) else {}
-    if not b.get("bet_sheet") or b.get("pmm_slug") != slug or bool(b.get("pmm_synthetic")) != bool(syn) or b.get("order_id"):
+    if not b.get("bet_sheet"):
+        return 0
+    if ticker:
+        if (not _kalshi_pick(b) or b.get("kalshi_ticker") != ticker
+                or bool(b.get("kalshi_buy_yes")) != (not bool(syn)) or b.get("kalshi_order_id")):
+            return 0
+    elif b.get("pmm_slug") != slug or bool(b.get("pmm_synthetic")) != bool(syn) or b.get("order_id"):
         return 0
     return _hand_dust_fold_apply(sb, [{"id": int(from_id), "into": new_id}], "getlive", {int(from_id): got[0]})
 
@@ -23238,10 +23308,16 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
         bdt = _parse_iso(st_iso or "")
         if not bdt or (now - bdt) > timedelta(hours=_BS_MISSED_MAX_H):
             continue
+        venue = str(res.get("venue") or bet.get("venue") or "POLYMARKET").upper()
+        ticker = res.get("ticker") or bet.get("ticker")
         item = {"id": f"m{pid}", "pick_id": pid, "sport": bet.get("sport") or _slug_sport(slug),
                 "event_name": bet.get("event_name"), "event_start": st_iso,
                 "market_type": bet.get("market_type"), "side": bet.get("side"),
                 "line": bet.get("line"), "label": bet.get("label"),
+                # the venue the bet rested on: Chase it again rests THERE (a
+                # Kalshi row's slug is only its Polymarket twin)
+                "venue": venue, "ticker": ticker if venue == "KALSHI" else None,
+                "tick_c": _KALSHI_TICK_C if venue == "KALSHI" else None,
                 "price_c": bet.get("price_c") if bet.get("price_c") is not None else bet.get("anchor_c"),
                 "contracts": bet.get("contracts"), "slug": slug, "synthetic": bool(syn),
                 "chase_expired": bool(res.get("chase_expired")),
@@ -23264,7 +23340,11 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
                     continue                              # final — nothing left to chase
                 item["score"] = {k: m.get(k) for k in ("state", "completed", "display_status", "period",
                                                         "clock", "away_score", "home_score")}
-        if reads < _BS_MISSED_READS and not _venue_rl_active():
+        if item["venue"] == "KALSHI" and item["ticker"]:
+            bq = _live_kalshi_quote(item["ticker"], bool(syn))
+            if bq is not None:
+                item["bid_c"], item["ask_c"], item["cur_c"] = bq
+        elif reads < _BS_MISSED_READS and not _venue_rl_active():
             if client is None:
                 try:
                     client = get_client()
@@ -23307,6 +23387,26 @@ def _live_book_quote(client, slug: str, synthetic: bool):
     out = (s_bid, s_ask, mid)
     _LIVE_BOOK_Q_CACHE[key] = (_time.monotonic(), out)
     return out
+
+
+def _live_kalshi_quote(ticker: str, synthetic: bool):
+    """(bid_c, ask_c, mid_c) for our side of ONE Kalshi market — the Missed
+    row's "now" line for a bet that rested on Kalshi (socket book when it
+    vouches, else one REST read, 3s cached inside `_kalshi_hand_book`)."""
+    if not ticker:
+        return None
+    try:
+        book, _raw = _kalshi_hand_book(ticker)
+    except Exception:
+        book = None
+    if not book:
+        return None
+    s_bid, s_ask = _manual_side_book(book, bool(synthetic))
+    if s_bid is None and s_ask is None:
+        return None
+    mid = (round((float(s_bid) + float(s_ask)) / 2.0, 2) if s_bid is not None and s_ask is not None
+           else (float(s_bid) if s_bid is not None else float(s_ask)))
+    return (s_bid, s_ask, mid)
 
 
 def _bet_sheet_cancel(client, oid: str, slug: str):
@@ -25456,7 +25556,19 @@ def _bet_sheet_getlive_row(it: dict, uid, cid=None):
     Missed row's own fields: slug, synthetic, contracts, market, side,
     line, label, game, start). Returns (row, None) or (None, reason)."""
     slug = str(it.get("slug") or "").strip()
-    if not re.match(r"^[a-z0-9][a-z0-9-]{8,}$", slug):
+    # A KALSHI ROW CHASES AGAIN ON KALSHI (Oct 24 2026, Rob on Sac State O
+    # 50.5: "Why in the hell would it go to Polymarket if it was a Kalshi
+    # bet?"): the missed row's `slug` is the Polymarket TWIN the cancel stamp
+    # carries, never the seat — the venue + ticker ride the row and the
+    # executor places on Kalshi. The twin stays on the row as the record.
+    venue = str(it.get("venue") or "POLYMARKET").upper()
+    ticker = str(it.get("ticker") or "").strip().upper()
+    if venue == "KALSHI":
+        if not re.match(r"^KX[A-Z0-9]+-[A-Z0-9-]+$", ticker):
+            return None, "no Kalshi ticker on this row"
+        if not re.match(r"^[a-z0-9][a-z0-9-]{8,}$", slug):
+            slug = None
+    elif not re.match(r"^[a-z0-9][a-z0-9-]{8,}$", slug):
         return None, "no market slug on this row"
     try:
         contracts = int(it.get("contracts") or 0)
@@ -25489,10 +25601,15 @@ def _bet_sheet_getlive_row(it: dict, uid, cid=None):
     item = {"sport": str(it.get("sport") or "").upper(), "away": away, "home": home,
             "event_start": it.get("event_start"), "market_type": mt, "side": side,
             "line": line, "label": it.get("label"), "market_id": it.get("market_id")}
+    gl = {"from": int(pid_raw) if pid_raw.isdigit() else None, "want_c": want_c}
+    if venue == "KALSHI":
+        by = it.get("buy_yes")
+        gl.update({"venue": "KALSHI", "ticker": ticker,
+                   "buy_yes": (not bool(it.get("synthetic"))) if by is None else bool(by)})
     row = {"op": "create", "slug": slug, "synthetic": bool(it.get("synthetic")), "price_c": None,
            "contracts": contracts, "event_start": it.get("event_start"),
            "payload": {"item": item, "asked_by": uid, "contracts": contracts,
-                       "getlive": {"from": int(pid_raw) if pid_raw.isdigit() else None, "want_c": want_c},
+                       "getlive": gl,
                        **({"cid": cid} if cid and _HAND_CID_RE.match(str(cid)) else {})}}
     return row, None
 

@@ -3587,6 +3587,32 @@ def test_hand_getlive() -> None:
     check("…a row with no slug is refused", _app._bet_sheet_getlive_row({**it, "slug": ""}, "u")[1] is not None)
     check("…a bad side is refused", _app._bet_sheet_getlive_row({**it, "side": "sideways"}, "u")[1] is not None)
     check("…a bad size is refused", _app._bet_sheet_getlive_row({**it, "contracts": 0}, "u")[1] is not None)
+    # A KALSHI ROW CHASES AGAIN ON KALSHI (Oct 24 2026, Rob: "Why in the hell
+    # would it go to Polymarket if it was a Kalshi bet?")
+    kit = {**it, "venue": "KALSHI", "ticker": "KXNCAAFTOTAL-26OCT24WMUTOL-50", "synthetic": False}
+    krow, kbad = _app._bet_sheet_getlive_row(kit, "uid1", None)
+    check("a Kalshi missed row builds a Kalshi getlive (venue + ticker + buy_yes on the payload, twin slug kept)",
+          kbad is None and krow["payload"]["getlive"]["venue"] == "KALSHI"
+          and krow["payload"]["getlive"]["ticker"] == kit["ticker"] and krow["payload"]["getlive"]["buy_yes"] is True
+          and krow["slug"] == it["slug"])
+    check("…a synthetic (NO) Kalshi row buys NO", _app._bet_sheet_getlive_row({**kit, "synthetic": True}, "u")[0]["payload"]["getlive"]["buy_yes"] is False)
+    check("…a Kalshi row with no ticker is refused", _app._bet_sheet_getlive_row({**kit, "ticker": ""}, "u")[1] is not None)
+    check("…a Kalshi row needs no Polymarket slug", _app._bet_sheet_getlive_row({**kit, "slug": ""}, "u")[1] is None)
+    check("…a Polymarket row's getlive payload is unchanged", "venue" not in pl["getlive"])
+    src_k = inspect.getsource(_app._hand_getlive_kalshi)
+    check("the Kalshi getlive creates on Kalshi, never Polymarket",
+          "_kalshi_live_create(ticker, by, price_c, contracts)" in src_k and "_hand_getlive_price(book, not by, cap_k, _KALSHI_TICK_C)" in src_k
+          and "_manual_order_place" not in src_k and "client" not in src_k.split("def _hand_getlive_kalshi")[1].split('"""')[0])
+    check("…and logs a Kalshi pick stamped live_snipe + getlive_from",
+          '"venue": "KALSHI", "kalshi_ticker": ticker' in src_k and '"getlive_from": gl.get("from")' in src_k
+          and '"venue": "KALSHI"}' in src_k)
+    src_x = inspect.getsource(_app._hand_order_execute)
+    check("the executor routes a Kalshi getlive before touching the row's slug",
+          "return _hand_getlive_kalshi(sb, row, pl, gl0, worker)" in src_x
+          and src_x.index("_hand_getlive_kalshi(") < src_x.index("if not slug:"))
+    src_m = inspect.getsource(_app._bet_sheet_missed)
+    check("the missed row carries the venue it rested on + the Kalshi ticker and quotes the Kalshi book",
+          '"venue": venue, "ticker": ticker if venue == "KALSHI" else None' in src_m and "_live_kalshi_quote(item[\"ticker\"]" in src_m)
     src = inspect.getsource(_app._hand_order_execute)
     check("the executor prices a getlive row with _hand_getlive_price", "_hand_getlive_price(book, syn, cap_c" in src)
     check("…places it with the started-game rail lifted", "allow_started=bool(gl)" in src)

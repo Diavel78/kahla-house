@@ -818,7 +818,8 @@
                 try {
                     r = await postTicketed('/api/bet-sheets/ops', { items: opItems.map(i => ({ key: i.key, cid: i.cid, op: i.op, pick_id: i.pick_id, rerung_slug: i.rerung_slug,
                         ...(i.op === 'getlive' ? { slug: i.slug, synthetic: i.synthetic, contracts: i.contracts, market_type: i.market_type, side: i.side, line: i.line,
-                                                   label: i.label, sport: i.sport, event_name: i.event_name, event_start: i.event_start, market_id: i.market_id, want_c: i.want_c } : {}) })) });
+                                                   label: i.label, sport: i.sport, event_name: i.event_name, event_start: i.event_start, market_id: i.market_id, want_c: i.want_c,
+                                                   venue: i.venue || 'POLYMARKET', ticker: i.ticker || null, buy_yes: i.buy_yes } : {}) })) });
                     d = r ? await r.json().catch(() => null) : null;
                 } catch (e) { r = null; d = null; }
                 if (!r) opItems.forEach(i => { byKey[i.key] = { ok: false, reason: DROPPED }; });
@@ -866,7 +867,7 @@
     }
     function opNote(i, x) {
         if (i.op === 'cancel') return 'Cancelled ' + i.label + (x.deleted ? '' : ' (' + x.held + ' filled stays)');
-        if (i.op === 'getlive') return x.ok === false ? (i.label + ': ' + (x.reason || x.error || 'not placed')) : ('Live: ' + (x.contracts || i.contracts || '') + ' ' + i.label + ' resting @ ' + x.price_c + '¢' + (x.priced === 'bid' ? ' (the bid, cheaper than the live price)' : x.priced === 'under_ask' ? ' (a tick under the ask)' : '') + ' · yours to watch');
+        if (i.op === 'getlive') return x.ok === false ? (i.label + ': ' + (x.reason || x.error || 'not placed')) : ('Live: ' + (x.contracts || i.contracts || '') + ' ' + i.label + ' resting @ ' + x.price_c + '¢' + (x.venue === 'KALSHI' ? ' on Kalshi' : '') + (x.priced === 'bid' ? ' (the bid, cheaper than the live price)' : x.priced === 'under_ask' ? ' (a tick under the ask)' : '') + ' · yours to watch');
         if (i.op === 'live') return x.ok === false ? (i.label + ': ' + (x.note || 'not moved')) : ((x.moved ? 'Moved ' + i.label + ' ' + (x.from_c != null ? x.from_c + '¢ → ' : 'to ') + x.price_c + '¢' : i.label + ' @ ' + x.price_c + '¢') + ' · live, no game-start cancel');
         if (i.op === 'rerung') return x.rerung ? ('Moved ' + i.label + ' → ' + (x.label || i.rerung_label) + ' @ ' + x.price_c + '¢' + (x.held ? ' (' + x.held + ' filled stays on the old line)' : '') + (x.warning ? ' · ' + x.warning : '')) : (i.label + ': ' + (x.note || 'not moved'));
         if (x.moved) return 'Moved ' + i.label + ' ' + (x.from_c != null ? x.from_c + '¢ → ' : 'to ') + x.price_c + '¢';
@@ -1184,7 +1185,9 @@
         const bid = m.bid_c != null ? Number(m.bid_c) : null, ask = m.ask_c != null ? Number(m.ask_c) : null;
         let target = cap, why = 'the ' + cap + '¢ live price';
         if (bid != null && bid < cap) { target = bid; why = 'the bid (' + bid + '¢), cheaper than ' + cap + '¢'; }
-        if (ask != null && target >= ask) { target = ask - 0.5; why = 'a tick under the ' + ask + '¢ ask'; }
+        const tick = m.tick_c || 0.5, kal = m.venue === 'KALSHI';
+        if (ask != null && target >= ask) { target = ask - tick; why = 'a tick under the ' + ask + '¢ ask'; }
+        if (kal) target = Math.floor(target);
         const on = inSlip(opKey('getlive', m.id));
         const cells = [
             ['Wanted', (m.contracts ? m.contracts + ' @ ' : '') + (want != null ? cA(want) : '?')],
@@ -1193,7 +1196,7 @@
             ['Rests at', target >= 1 ? cA(target) : 'no room'],
         ];
         let h = '<div class="grab"></div>'
-              + '<div><div class="at">' + esc(betLabel(m)) + ' <span class="tag red">NO FILL · CANCELLED</span>' + (m.app ? '<span class="tag gry">APP</span>' : '') + '</div>'
+              + '<div><div class="at">' + esc(betLabel(m)) + ' <span class="tag red">NO FILL · CANCELLED</span>' + (kal ? '<span class="tag kal">KALSHI</span>' : '') + (m.app ? '<span class="tag gry">APP</span>' : '') + '</div>'
               + '<div class="ag">' + esc(gameShort(m)) + ' · ' + fmtTime(m.event_start) + ' ' + clk(m.event_start) + (_scoreLine(m) ? ' · ' + esc(_scoreLine(m)) : '') + '</div></div>'
               + '<div class="grid">' + cells.map(c => '<div class="cell"><span class="k">' + c[0] + '</span><span class="v">' + esc(c[1]) + '</span></div>').join('') + '</div>';
         const warn = [];
@@ -1201,7 +1204,7 @@
         if (want != null && bid != null && bid <= want - 5) warn.push('⚠ The bid is ' + bid + '¢ now, ' + (want - bid).toFixed(1) + '¢ UNDER the ' + want + '¢ you wanted — your side is losing out there. Don\'t click this, dumbass… unless you want it anyway at ' + target + '¢.');
         else if (want != null && bid != null && bid >= want + 5) warn.push('The bid is ' + bid + '¢ now, ' + (bid - want).toFixed(1) + '¢ OVER what you wanted — your side is winning; ' + target + '¢ sits behind the market and may never fill.');
         if (ask != null && ask <= cap) warn.push('The ask (' + ask + '¢) is already under ' + cap + '¢ — this rests a tick under it, it does not take.');
-        h += '<div class="note">Rests ' + (m.contracts || '?') + ' on ' + esc(betLabel(m)) + ' at ' + why + ', GTC, in-play. The box leaves it to you — no chase, no game-start cancel; cancel it in the app or here.</div>';
+        h += '<div class="note">Rests ' + (m.contracts || '?') + ' on ' + esc(betLabel(m)) + ' at ' + why + ', GTC, in-play, on ' + (kal ? 'KALSHI (where it rested — the chase never changes venue)' : 'Polymarket') + '. The box leaves it to you — no chase, no game-start cancel; cancel it in the app or here.</div>';
         warn.forEach(w => { h += '<div class="note" style="color:var(--r-bd)">' + esc(w) + '</div>'; });
         const acts = [];
         acts.push('<button class="abtn' + (on ? ' on' : ' pri') + '" onclick="sheetOp(\'getlive\')">' + (on ? '✓ On the slip: chase it again' : 'Chase it again · ' + (m.contracts || '?') + ' @ ' + (target >= 1 ? target + '¢' : '?')) + '</button>');
@@ -1582,7 +1585,8 @@
                          ...(op === 'rerung' ? { rerung_slug: rr.slug, rerung_label: rungLabel(b, rr.line), rerung_c: rr.bid_c } : {}),
                          ...(op === 'getlive' ? { slug: b.slug, synthetic: !!b.synthetic, contracts: b.contracts, market_type: b.market_type, side: b.side,
                                                   line: b.line, event_name: b.event_name, market_id: b.market_id, want_c: b.price_c,
-                                                  bid_c: b.bid_c, ask_c: b.ask_c } : {}) });
+                                                  bid_c: b.bid_c, ask_c: b.ask_c, venue: b.venue || 'POLYMARKET', ticker: b.ticker || null,
+                                                  buy_yes: b.venue === 'KALSHI' ? !b.synthetic : null } : {}) });
             autoOpenSlip();
         }
         saveSlip(); renderSlip(); loadBetsRender();
