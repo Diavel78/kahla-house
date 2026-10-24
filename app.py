@@ -16131,6 +16131,11 @@ def _hand_status_publish(sb, client) -> dict:
     k_tried = False
     k_reads: dict = {"n": 0}
     k_watch: set = set()
+    # STARTED GAMES FIRST (Oct 24 2026, Rob: "No live quote… ON THE SCREEN… from
+    # Kalshi?"): the Kalshi book budget is per tick, and the held lots in play —
+    # the Live P/L box — sat behind a dozen resting bets on tonight's games.
+    _now_iso = datetime.now(timezone.utc).isoformat()
+    rows = sorted(rows, key=lambda x: (str(x.get("event_start") or "") > _now_iso, str(x.get("event_start") or "")))
     for r in rows:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if blob.get("kalshi_twin_ticker") and not _kalshi_pick(blob):
@@ -19890,8 +19895,10 @@ def _hand_status_kalshi(sb, r: dict, blob: dict, k_orders, k_pos, poly_positions
         held = (held or 0.0) + ph
     touch_c = cur_c = None
     book = None
-    if ticker and reads.get("n", 0) < _KALSHI_BOOK_READS_TICK:
-        reads["n"] = reads.get("n", 0) + 1
+    if ticker and (_kalshi_ws_fresh(ticker) or reads.get("n", 0) < _KALSHI_BOOK_READS_TICK):
+        # a socket-vouched book is a cache hit — it costs the REST budget nothing
+        if not _kalshi_ws_fresh(ticker):
+            reads["n"] = reads.get("n", 0) + 1
         book, _ = _kalshi_hand_book(ticker)
     if book:
         b, a = _manual_side_book(book, not by)
@@ -22632,6 +22639,7 @@ def api_bet_sheets_mine():
             "order_id": oid if not kalshi else blob.get("kalshi_order_id"),
             "venue": "KALSHI" if kalshi else "POLYMARKET",
             "kalshi_ticker": blob.get("kalshi_ticker") if kalshi else None,
+            "kalshi_buy_yes": bool(blob.get("kalshi_buy_yes")) if kalshi else None,
             "held_unknown": bool((bx or {}).get("held_unknown")) if kalshi else False,
             "venue_pick": blob.get("venue_pick"),
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
@@ -23050,7 +23058,7 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
     order, so the box never subscribed its market: that is why every
     in-play row read 'no live quote'. Stamps live/score/win_prob/prob_src."""
     client = None
-    reads = 0
+    reads = k_reads = 0
     espn: dict = {}
     for b in out:
         if b.get("status") != "pending":
@@ -23081,6 +23089,15 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
                 src = "decided"
         if wp is None and b.get("cur_c") is not None:
             wp, src = round(float(b["cur_c"]) / 100.0, 4), "box"
+        if wp is None and b.get("venue") == "KALSHI" and b.get("kalshi_ticker") and k_reads < _BS_LIVE_READS:
+            # A KALSHI LOT HAS NO POLYMARKET SLUG (Oct 24 2026 — every Kalshi-held
+            # bet in the Live box read 'no live quote'): mid of OUR side off the
+            # Kalshi book (socket when it vouches, else one REST read).
+            k_reads += 1
+            kq = _live_kalshi_quote(b["kalshi_ticker"], not bool(b.get("kalshi_buy_yes")))
+            if kq and kq[2] is not None:
+                wp, src = round(float(kq[2]) / 100.0, 4), "kalshi"
+                b["cur_c"], b["touch_c"] = round(float(kq[2]), 2), kq[0]
         if wp is None and b.get("slug") and reads < _BS_LIVE_READS and not _venue_rl_active():
             if client is None:
                 try:
