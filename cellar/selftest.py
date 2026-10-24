@@ -3652,6 +3652,76 @@ def test_hand_getlive() -> None:
     check("a getlive pick takes its missed row off", 'b.get("getlive_from") in by_pick' in inspect.getsource(_app._bet_sheet_missed))
 
 
+def test_bet_sheet_live_section() -> None:
+    """THE LIVE SECTION (Oct 24 2026, Rob: "Now I need a live section… put it
+    next to plays & leans. Live games, where I can bet a game live, and it
+    follows the live chase… new function, same rules"): a slip item tapped on
+    a game in progress rests at the live rule's price (the lower of the cap
+    and our bid, a tick under an ask under the cap) on the cheaper venue,
+    in-play, stamped live_snipe so the live chase owns it — no clock."""
+    print("bet sheets: the live section")
+    import inspect
+    import app as _app
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    now = _dt.now(_tz.utc)
+    base = {"sport": "NFL", "market_type": "spread", "side": "away", "line": 3.5,
+            "away": "Kansas City Chiefs", "home": "Buffalo Bills"}
+    up = {**base, "event_start": (now + _td(hours=2)).isoformat()}
+    started = {**base, "event_start": (now - _td(minutes=40)).isoformat()}
+    over = {**base, "event_start": (now - _td(hours=9)).isoformat()}
+    C = _app._bet_sheet_item_check
+    check("a pre-game item on an upcoming game passes", C(up) is None)
+    check("a pre-game item on a started game is refused (unchanged)", C(started) is not None and "pre-game" in C(started))
+    check("a LIVE item on a started game passes", C({**started, "live": True}) is None)
+    check("a LIVE item on an upcoming game is refused", C({**up, "live": True}) is not None and "hasn't started" in C({**up, "live": True}))
+    check("a LIVE item on a game hours over is refused", C({**over, "live": True}) is not None and "over" in C({**over, "live": True}))
+    check("a LIVE item still needs a side and a line", C({**started, "live": True, "side": "over"}) == "bad side"
+          and C({**started, "live": True, "line": None}) == "sheet has no line")
+    # the venue question, asked once, by the live price: cheaper all-in wins, a tie stays on Polymarket
+    V = _app._hand_venue_pick
+    p = {"ok": True, "price_c": 49.5, "rung_line": 3.5, "rung_why": "exact"}
+    k = {"ok": True, "price_c": 47, "rung_line": 3.5, "rung_why": "exact", "fee": {"type": "quadratic"}}
+    check("a cheaper Kalshi live seat wins", V("auto", p, k, 10, 0.0)[0] == "KALSHI")
+    check("a dearer Kalshi live seat loses", V("auto", p, {**k, "price_c": 52}, 10, 0.0)[0] == "POLYMARKET")
+    check("a tie stays on Polymarket", V("auto", p, {**k, "price_c": 49.5}, 10, 0.0)[0] == "POLYMARKET")
+    check("Kalshi alone when Polymarket has no rung", V("auto", {"ok": False, "reason": "x"}, k, 10, 0.0)[0] == "KALSHI")
+    check("neither → None", V("auto", {"ok": False}, {"ok": False}, 10, 0.0)[0] is None)
+    src_r = inspect.getsource(_app._bet_sheet_resolve_live)
+    check("the Polymarket live resolve prices by the live rule, never the pre-game seat",
+          "_hand_getlive_price(book, synthetic, float(cap_c), tick)" in src_r
+          and "_hand_seat_price" not in src_r and "chalk, not betting it" not in src_r)
+    src_k = inspect.getsource(_app._bet_sheet_resolve_live_kalshi)
+    check("the Kalshi live resolve prices off the Kalshi book, whole cents, the same rule",
+          "_hand_getlive_price(book, not buy_yes, cap_k, _KALSHI_TICK_C)" in src_k and "fresh=True" in src_k)
+    src_q = inspect.getsource(_app._bet_sheet_live_quote)
+    check("the live quote asks the venue question with no gain floor", "_hand_venue_pick(want if k_on else \"poly\", rs, k_rs, contracts, 0.0)" in src_q)
+    src_p = inspect.getsource(_app._hand_live_place)
+    check("the live placer is the quote (what the slip shows is what the box places)", "_bet_sheet_live_quote(client, item, contracts)" in src_p)
+    check("…Polymarket: the started-game rail is lifted", "allow_started=True" in src_p and "_manual_order_place(client, slug, syn, price_c, contracts" in src_p)
+    check("…Kalshi: the lane's own verified GTC create, never a Polymarket write for a Kalshi seat",
+          "_kalshi_live_create(ticker, by, price_c, contracts)" in src_p)
+    check("…the pick is stamped live_snipe (sheet_live) + placed_live with NO clock",
+          src_p.count('"sheet_live": True') >= 2 and '"placed_live": True' in src_p and '"until"' not in src_p)
+    check("…and stamps hand_live_place", '"hand_live_place": True' in src_p)
+    src_x = inspect.getsource(_app._hand_order_execute)
+    check("the executor routes a live item before the raw-slip resolve (and after the Kalshi getlive)",
+          '(pl.get("item") or {}).get("live")' in src_x
+          and src_x.index('(pl.get("item") or {}).get("live")') < src_x.index("if not slug:")
+          and src_x.index("_hand_getlive_kalshi(") < src_x.index('(pl.get("item") or {}).get("live")'))
+    src_pl = inspect.getsource(_app.api_bet_sheets_place)
+    check("the quote prices a live item by the live rule", "_bet_sheet_live_quote(client, it or {}, contracts)" in src_pl
+          and "_bet_sheet_item_check(it or {})" in src_pl)
+    src_t = inspect.getsource(_app._hand_live_tick)
+    check("the live chase picks up every live_snipe pick (a sheet live bet included)",
+          '.not_.is_("signal_blob->>live_snipe", "null")' in src_t)
+    html = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "bet_sheets.html")).read()
+    check("the page has the Live chip beside Plays & leans", "c('live', 'Live ' + (nLive || 0))" in html
+          and html.index("c('plays', 'Plays & leans '") < html.index("c('live', 'Live '"))
+    check("…a tap on a game in progress is a LIVE slip item", "const live = g._st === 'live';" in html and "...(live ? { live: true } : {})" in html)
+    check("…the Live section renders the in-progress games with buttons", "if (_filter === 'live') {" in html and "lv.map(g => gameCard(g, true))" in html)
+    check("…and the payload carries the flag", "live: !!i.live }))" in html)
+
+
 def test_hand_red_alert() -> None:
     """THE RED ALERT (Oct 20 2026, Rob: "If something goes Red on any of my
     bets, I need an alert. That's it, no other alerts"): the box mirrors the
@@ -5522,7 +5592,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

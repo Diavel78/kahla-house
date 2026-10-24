@@ -658,9 +658,17 @@
         const idx = _slip.findIndex(i => i.key === key);
         if (idx >= 0) { _slip.splice(idx, 1); }
         else {
-            if (g.event_start && new Date(g.event_start).getTime() <= Date.now()) { toast('Game already started — pre-game only', true); return; }
+            // THE LIVE SECTION (Rob, Oct 24 2026: "Live games, where I can bet a game live, and it
+            // follows the live chase… new function, same rules"): a tap on a game IN PROGRESS goes on
+            // the slip as a LIVE bet — the box rests it at the live cap or the bid, whichever is
+            // cheaper, and the live chase owns it. A game past its listed time that the box is still
+            // waiting on (my order resting, no drop yet) is not live yet.
+            const live = g._st === 'live';
+            if (!live && g.event_start && new Date(g.event_start).getTime() <= Date.now()) {
+                toast(g._limbo ? 'Past the listed time, but the makers are still quoting — the box is waiting for the drop. Bet it from Live once it starts.' : 'Game is over', true); return;
+            }
             _slip.push({ key, sport: _sport, away: g.away, home: g.home, event_start: g.event_start,
-                         market_type: mt, side, line, label, game: shortTeam(g.away) + ' @ ' + shortTeam(g.home) });
+                         market_type: mt, side, line, label, game: shortTeam(g.away) + ' @ ' + shortTeam(g.home), ...(live ? { live: true } : {}) });
             autoOpenSlip();
         }
         saveSlip(); renderSlip();
@@ -720,7 +728,18 @@
                 return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : i.op === 'live' ? 'LIVE' : i.op === 'getlive' ? 'CHASE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                      + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
             }
-            if (i.q) {
+            const liveCap = (_lastBetsPayload && _lastBetsPayload.live_snipe_c) || 49.5;
+            if (i.live && !i.q) q = '<div class="q">rests at ' + liveCap + '¢ or the bid, whichever is cheaper · the live chase owns it, no clock</div>';
+            if (i.q && i.q.ok && i.live) {
+                const vp = i.q.venue_pick || {}, ai = vp.all_in || {};
+                q = '<div class="q ok"><b>' + (i.q.venue === 'KALSHI' ? 'KALSHI' : 'Polymarket') + '</b>'
+                  + (ai.POLYMARKET != null && ai.KALSHI != null ? ' · all-in Poly ' + Number(ai.POLYMARKET).toFixed(2) + '¢ vs Kalshi ' + Number(ai.KALSHI).toFixed(2) + '¢' : '')
+                  + (i.q.rung_why === 'favorable' ? ' · rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet)' : '')
+                  + ' · live ' + i.q.price_c + '¢' + (i.q.priced === 'bid' ? ' (the bid, under the cap)' : i.q.priced === 'under_ask' ? ' (a tick under the ask)' : ' (the cap)')
+                  + (i.q.touch_c != null ? ' · bid ' + i.q.touch_c + '¢' : '') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '')
+                  + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + pinQuoteTxt(i) + '</div>';
+                cost += n * i.q.price_c / 100; known++;
+            } else if (i.q) {
                 if (i.q.ok) {
                     const vp = i.q.venue_pick || {}, ai = vp.all_in || {};
                     const vtxt = i.q.venue ? ('<b>' + (i.q.venue === 'KALSHI' ? 'KALSHI' : 'Polymarket') + '</b>'
@@ -731,7 +750,7 @@
                     cost += n * i.q.price_c / 100; known++;
                 } else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + pinQuoteTxt(i) + '</div>';
             }
-            return '<div class="si"><div class="lab"><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport) + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
+            return '<div class="si"><div class="lab">' + (i.live ? '<span class="tag live">LIVE</span>' : '') + '<b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport) + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                  + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
         }).join('');
         const nb = _slip.filter(i => !i.op).length, no = _slip.length - nb;
@@ -803,7 +822,7 @@
                 let r = null, d = null;
                 try {
                     r = await postTicketed('/api/bet-sheets/place', { preview, contracts: contractsN(), items: betItems.map(i => ({ key: i.key, cid: preview ? undefined : i.cid,
-                        sport: i.sport, away: i.away, home: i.home, event_start: i.event_start, market_type: i.market_type, side: i.side, line: i.line, label: i.label, venue: venueSel() })) });
+                        sport: i.sport, away: i.away, home: i.home, event_start: i.event_start, market_type: i.market_type, side: i.side, line: i.line, label: i.label, venue: venueSel(), live: !!i.live })) });
                     d = r ? await r.json().catch(() => null) : null;
                 } catch (e) {
                     if (preview) throw e;
@@ -1122,12 +1141,12 @@
         return '<button class="' + cls + '" data-k="' + esc(key) + '" onclick=\'' + click.replace(/'/g, '&#39;') + '\'><span class="bl">' + esc(label) + pr + '</span>' + sub + '</button>';
     }
     // The pending pre-game bets on a game (both lookups: market id, event name).
-    function betsOnGame(g) {
+    function betsOnGame(g, incLive) {
         const out = [], seen = {};
         [_betsByGame['m|' + (g.market_id || '')], _betsByGame['e|' + _sport + '|' + g.event_name]].forEach(l => {
             (l || []).forEach(b => { if (!seen[b.id]) { seen[b.id] = 1; out.push(b); } });
         });
-        return out.filter(b => b.status === 'pending' && (!b.live || g._limbo));
+        return out.filter(b => b.status === 'pending' && (incLive || !b.live || g._limbo));
     }
     // A bet that isn't on a sheet button (the other side, another rung, an
     // app bet): a compact strip in its game card; tap → the action sheet.
@@ -1826,9 +1845,9 @@
         try { localStorage.setItem('kh_bs_filter_v1', f); } catch (e) {}
         renderGames();
     }
-    function renderFilters(nMine, nPick) {
+    function renderFilters(nMine, nPick, nLive) {
         const c = (f, t) => '<button class="fchip' + (_filter === f ? ' on' : '') + '" onclick="setFilter(\'' + f + '\')">' + t + '</button>';
-        document.getElementById('fchips').innerHTML = c('all', 'All games') + c('mine', 'My bets ' + nMine) + c('plays', 'Plays & leans ' + nPick)
+        document.getElementById('fchips').innerHTML = c('all', 'All games') + c('mine', 'My bets ' + nMine) + c('plays', 'Plays & leans ' + nPick) + c('live', 'Live ' + (nLive || 0))
             + '<button class="fchip" onclick="addTodaysPlays()">➕ Today\'s plays</button>'
             + '<button class="fchip" onclick="copyPicks()">📋 Copy picks</button>';
     }
@@ -1991,11 +2010,12 @@
     }
     let _fold = { started: false };   // default collapsed, every visit
     function toggleFold(k) { _fold[k] = !_fold[k]; renderGames(); }
-    function gameCard(g) {
+    function gameCard(g, liveMode) {
         const isUp = g._st === 'up', isLive = g._st === 'live';
         _btnSides = {};
-        const mk = marketsFor(g, isUp);                       // fills _btnIds + _btnSides
-        const bs = isUp ? betsOnGame(g) : [];
+        // THE LIVE SECTION: a card under the Live chip keeps its buttons — a tap is a live bet
+        const mk = marketsFor(g, isUp || !!liveMode);          // fills _btnIds + _btnSides
+        const bs = isUp ? betsOnGame(g) : (liveMode ? betsOnGame(g, true) : []);
         const extra = bs.filter(b => !_btnIds[b.id]);
         const flips = {};
         extra.forEach(b => { const f = flipOf(b); if (f) flips[b.id] = f; });
@@ -2008,7 +2028,10 @@
         }
         const subs = [];
         if (g._limbo) subs.push('<span class="final">LISTED ' + esc(clk(g.event_start)) + ' · WAITING FOR THE DROP</span>');
-        else if (isLive) subs.push('<span class="final">IN PROGRESS</span>');
+        else if (isLive && liveMode) {
+            const sb = bs.find(b => b.score && b.score.away_score != null);
+            subs.push('<span class="final">' + (sb ? esc(_scoreLine(sb)) : 'IN PROGRESS') + '</span>');
+        } else if (isLive) subs.push('<span class="final">IN PROGRESS</span>');
         else if (!isUp && finalChip(g)) subs.push(finalChip(g));
         if (_sport === 'NHL' && g.goalies) {
             const ga = (g.goalies.away || {}).name, gh = (g.goalies.home || {}).name;
@@ -2021,7 +2044,7 @@
             if (g.series) subs.push('<span>' + esc(g.series) + '</span>');
         }
         if (modelScore(g)) subs.push(modelScore(g));
-        return '<div class="gc' + (isUp ? '' : ' done') + '"><div class="gh"><div><div class="gt">'
+        return '<div class="gc' + ((isUp || liveMode) ? '' : ' done') + '"><div class="gh"><div><div class="gt">'
              + (isUp ? '' : fmtTime(g.event_start).split(',')[0] + ' ') + clk(g.event_start) + '</div>'
              + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + tvChip(g) + '</div></div>' + summ + '</div>'
              + (subs.length ? '<div class="gsub">' + subs.join('') + '</div>' : '')
@@ -2041,7 +2064,20 @@
             if (bs.length) mineGames[g._gi] = 1;
             bs.forEach(b => { _shownIds[b.id] = 1; });
         });
-        renderFilters(Object.keys(mineGames).length, _games.filter(g => g._st === 'up' && hasPick(g)).length);
+        const liveGames = _games.filter(g => g._st === 'live');
+        renderFilters(Object.keys(mineGames).length, _games.filter(g => g._st === 'up' && hasPick(g)).length, liveGames.length);
+        if (_filter === 'live') {
+            // THE LIVE SECTION (Rob, Oct 24 2026): the games in progress, with the model's buttons —
+            // a tap puts a LIVE bet on the slip; the box rests it at the live cap or the bid and the
+            // live chase owns it (no clock). The buttons read my live bets like any other.
+            const liveCap = (_lastBetsPayload && _lastBetsPayload.live_snipe_c) || 49.5;
+            const lv = liveGames.filter(g => gameMatches(g, words));
+            _btnIds = {};
+            document.getElementById('games').innerHTML = lv.length
+                ? '<div class="day-hdr">Live · in progress · a tap rests the bet at ' + liveCap + '¢ or the bid, whichever is cheaper, and the live chase owns it</div>' + lv.map(g => gameCard(g, true)).join('')
+                : '<div class="empty">' + (words.length ? 'No games in progress match "' + esc(q) + '".' : 'No games in progress.') + '</div>';
+            return;
+        }
         let games = _games.filter(g => gameMatches(g, words));
         if (_filter === 'mine') games = games.filter(g => mineGames[g._gi]);
         else if (_filter === 'plays') games = games.filter(g => hasPick(g));
