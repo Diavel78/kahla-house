@@ -3269,7 +3269,7 @@ def test_live_snipe_hands_off() -> None:
     for fn in (_app._hand_chase_tick, _app._hand_move_tick, _app._hand_start_tick,
                _app._hand_reset_tick):
         check(f"{fn.__name__} skips a live snipe", "live_snipe" in inspect.getsource(fn))
-    check("the ops route accepts 'live'", '"live")' in inspect.getsource(_app.api_bet_sheets_ops))
+    check("the ops route accepts 'live'", '"live", "getlive")' in inspect.getsource(_app.api_bet_sheets_ops))
     src = inspect.getsource(_app._bet_sheet_live_exec)
     check("live move is GTC (gtt None)", "qty_total, None)" in src)
     check("live move never moves up", "<= target + 1e-9" in src)
@@ -3427,6 +3427,64 @@ def test_hand_start_complete() -> None:
     src_f = inspect.getsource(_app._hand_start_complete_poly)
     check("the completion reads the venue fresh", "fresh=True" in src_f)
     check("…stamps hand_start_cancel completed for the missed list", '"completed": True' in src_f and '"hand_start_cancel": True' in src_f)
+
+
+def test_hand_getlive() -> None:
+    """THE FROZEN CARD + GET IT LIVE (Oct 24 2026). A Move to Live inside the
+    take window (WMU@Toledo O 46.5, minute 4 of 5) left `start_take_window`
+    on the pick: the start rule skips live snipes, nothing closed it, the
+    strip kept publishing it, the card read TAKING · until 9:08 all game.
+    And a Missed row gets a button: re-rest the same rung in-play at the
+    lower of the live cap and the bid, never on or across the ask."""
+    print("bet sheets: the frozen card + get it live")
+    import inspect
+    import app as _app
+    # the window closes with the live move, on every path that stamps live_snipe
+    b0 = {"a": 1, "start_take_window": {"until": "x", "tries": 3}}
+    nb = _app._hand_blob_close_window(b0, "2026-10-24T16:08:00+00:00")
+    check("a live move moves the take window to done", "start_take_window" not in nb
+          and nb["start_take_window_done"]["closed"] == "live_snipe" and nb["start_take_window_done"]["tries"] == 3)
+    check("…and leaves a pick with no window alone", _app._hand_blob_close_window({"a": 1}, "t") == {"a": 1})
+    for fn in (_app._bet_sheet_live_exec, _app._kalshi_live_exec):
+        check(f"{fn.__name__} closes the take window", "_hand_blob_close_window(nb, now_iso)" in inspect.getsource(fn))
+    check("the start tick closes a window a mid-window live move left behind",
+          "_hand_live_close_window(sb, r, blob, now)" in inspect.getsource(_app._hand_start_tick)
+          and "_hand_live_close_window(sb, r, blob, now)" in inspect.getsource(_app._hand_start_kalshi))
+    check("the strip never publishes a take window on a live snipe",
+          'and not blob.get("live_snipe") else None' in inspect.getsource(_app.api_bet_sheets_mine))
+    # the get-it-live price: lower of cap and bid, never on/across the ask, on the grid
+    P = _app._hand_getlive_price
+    bk = lambda bid, ask: {"best_bid": bid, "best_ask": ask}
+    check("cap when the bid is above it", P(bk(53.0, 54.0), False, 49.5, 0.5) == (49.5, "cap"))
+    check("the bid when it is cheaper than the cap", P(bk(45.0, 46.5), False, 49.5, 0.5) == (45.0, "bid"))
+    check("a tick under the ask when the ask is under the cap", P(bk(None, 48.0), False, 49.5, 0.5) == (47.5, "under_ask"))
+    check("the bid wins when it sits under an ask that is under the cap", P(bk(47.0, 48.0), False, 49.5, 0.5) == (47.0, "bid"))
+    check("whole-cent grid snaps down", P(bk(53.0, 54.0), False, 49.5, 1.0) == (49.0, "cap"))
+    check("a synthetic NO reads the inverted ladder", P(bk(49.0, 52.0), True, 49.5, 0.5) == (48.0, "bid"))
+    check("no bids at all still rests at the cap", P(bk(None, 60.0), False, 49.5, 0.5) == (49.5, "cap"))
+    check("no room under a 1¢ ask", P(bk(None, 1.0), False, 49.5, 0.5)[0] is None)
+    # the slip row: a CREATE on the missed row's own slug, in-play allowed, stamped live
+    it = {"slug": "tsc-cfb-wmu-tol-2026-10-24-total-46pt5", "synthetic": False, "contracts": 10, "market_type": "total",
+          "side": "over", "line": 46.5, "label": "O 46.5", "sport": "NCAAF", "event_name": "Western Michigan @ Toledo",
+          "event_start": "2026-10-24T16:00:00+00:00", "market_id": "m1", "want_c": 49.0, "pick_id": "m123"}
+    row, bad = _app._bet_sheet_getlive_row(it, "uid1", None)
+    check("getlive builds a create row on the row's slug", bad is None and row["op"] == "create"
+          and row["slug"] == it["slug"] and row["price_c"] is None and row["contracts"] == 10)
+    pl = row["payload"]
+    check("…the executor prices it (getlive) and the pick logger gets away/home",
+          pl["getlive"] == {"from": 123, "want_c": 49.0} and pl["item"]["away"] == "Western Michigan"
+          and pl["item"]["home"] == "Toledo" and pl["item"]["market_type"] == "total" and pl["asked_by"] == "uid1")
+    check("…a row with no slug is refused", _app._bet_sheet_getlive_row({**it, "slug": ""}, "u")[1] is not None)
+    check("…a bad side is refused", _app._bet_sheet_getlive_row({**it, "side": "sideways"}, "u")[1] is not None)
+    check("…a bad size is refused", _app._bet_sheet_getlive_row({**it, "contracts": 0}, "u")[1] is not None)
+    src = inspect.getsource(_app._hand_order_execute)
+    check("the executor prices a getlive row with _hand_getlive_price", "_hand_getlive_price(book, syn, cap_c" in src)
+    check("…places it with the started-game rail lifted", "allow_started=bool(gl)" in src)
+    check("…and stamps the pick live_snipe + getlive_from", '"getlive_from": gl.get("from")' in src and '"live_snipe": {"at": _now_iso' in src)
+    src_p = inspect.getsource(_app._manual_order_place)
+    check("the placer keeps its pre-game rail unless told otherwise", "and not allow_started:" in src_p)
+    check("the ops route takes getlive", 'if op == "getlive":' in inspect.getsource(_app.api_bet_sheets_ops))
+    check("a getlive pick takes its missed row off", 'b.get("getlive_from") in by_pick' in inspect.getsource(_app._bet_sheet_missed))
 
 
 def test_hand_red_alert() -> None:
@@ -4223,14 +4281,14 @@ def test_bet_sheet_missed() -> None:
 
     class SB:
         def table(self, name): return Q(tables.get(name, []))
-    saved = (_app._bs_espn_events, _app._live_match_espn, _app._live_book_mid, _app.get_client,
+    saved = (_app._bs_espn_events, _app._live_match_espn, _app._live_book_quote, _app.get_client,
              _app._venue_rl_active)
     try:
         _app._bs_espn_events = lambda sp, dk: [{}]
         _app._live_match_espn = lambda ev, a, h, st: ({"state": "post", "completed": True}
                                                        if "Pittsburgh" in h else
                                                        {"state": "in", "away_score": 7, "home_score": 3})
-        _app._live_book_mid = lambda c, slug, syn: 0.41
+        _app._live_book_quote = lambda c, slug, syn: (40.0, 42.0, 41.0)
         _app.get_client = lambda: object()
         _app._venue_rl_active = lambda: False
         got = _app._bet_sheet_missed(SB(), now, [])
@@ -4276,7 +4334,7 @@ def test_bet_sheet_missed() -> None:
         check("missed: a ✕ on any device (server stamp) hides the row everywhere — the rest stay",
               1 not in _g and 5 in _g, f"got {_g}")
     finally:
-        (_app._bs_espn_events, _app._live_match_espn, _app._live_book_mid, _app.get_client,
+        (_app._bs_espn_events, _app._live_match_espn, _app._live_book_quote, _app.get_client,
          _app._venue_rl_active) = saved
 
 
@@ -5186,7 +5244,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

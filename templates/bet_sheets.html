@@ -286,6 +286,7 @@
         .si .tag.cancel { background: var(--r-bd); color: #fff; }
         .si .tag.rerung { background: var(--a-bd); color: var(--bg); }
         .si .tag.live { background: #8b5cf6; color: #fff; }
+        .si .tag.getlive { background: #8b5cf6; color: #fff; }
         .slip-cost { color: var(--text2); font-size: 14px; font-family: var(--mono); }
         /* TAP AND GO (Oct 24 2026, Rob: "I tap my credit card, I take my shit and I leave… to me it looks instant"):
            a sent bet leaves the slip at once; its card button reads "sending…" until the box has it resting. */
@@ -712,10 +713,12 @@
                     ? ('move ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + ' → 49.5¢ · no game-start cancel · the box leaves it to you')
                     : i.op === 'rerung'
                     ? ('cancel ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + ' → rest them on ' + i.rerung_label + (i.rerung_c != null ? ' (bid ' + i.rerung_c + '¢ now)' : '') + ' · priced at the touch when it runs')
+                    : i.op === 'getlive'
+                    ? ('rest ' + (i.contracts || '?') + ' live at ' + ((_lastBetsPayload && _lastBetsPayload.live_snipe_c) || 49.5) + '¢ or the bid, whichever is cheaper' + (i.bid_c != null ? ' (bid ' + i.bid_c + '¢ now)' : '') + ' · GTC, the box leaves it to you')
                     : ('pull the resting order' + (o.leaves != null ? ' · ' + Math.round(o.leaves) + ' unfilled' : ''));
                 if (i.q && i.q.ok === false) q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
                 else q = '<div class="q">' + esc(line) + '</div>';
-                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : i.op === 'live' ? 'LIVE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
+                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : i.op === 'live' ? 'LIVE' : i.op === 'getlive' ? 'GET IT LIVE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                      + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
             }
             if (i.q) {
@@ -814,7 +817,9 @@
                 bp.textContent = 'Running ' + opItems.length + ' action' + (opItems.length === 1 ? '' : 's') + '…';
                 let r = null, d = null;
                 try {
-                    r = await postTicketed('/api/bet-sheets/ops', { items: opItems.map(i => ({ key: i.key, cid: i.cid, op: i.op, pick_id: i.pick_id, rerung_slug: i.rerung_slug })) });
+                    r = await postTicketed('/api/bet-sheets/ops', { items: opItems.map(i => ({ key: i.key, cid: i.cid, op: i.op, pick_id: i.pick_id, rerung_slug: i.rerung_slug,
+                        ...(i.op === 'getlive' ? { slug: i.slug, synthetic: i.synthetic, contracts: i.contracts, market_type: i.market_type, side: i.side, line: i.line,
+                                                   label: i.label, sport: i.sport, event_name: i.event_name, event_start: i.event_start, market_id: i.market_id, want_c: i.want_c } : {}) })) });
                     d = r ? await r.json().catch(() => null) : null;
                 } catch (e) { r = null; d = null; }
                 if (!r) opItems.forEach(i => { byKey[i.key] = { ok: false, reason: DROPPED }; });
@@ -862,6 +867,7 @@
     }
     function opNote(i, x) {
         if (i.op === 'cancel') return 'Cancelled ' + i.label + (x.deleted ? '' : ' (' + x.held + ' filled stays)');
+        if (i.op === 'getlive') return x.ok === false ? (i.label + ': ' + (x.reason || x.error || 'not placed')) : ('Live: ' + (x.contracts || i.contracts || '') + ' ' + i.label + ' resting @ ' + x.price_c + '¢' + (x.priced === 'bid' ? ' (the bid, cheaper than the live price)' : x.priced === 'under_ask' ? ' (a tick under the ask)' : '') + ' · yours to watch');
         if (i.op === 'live') return x.ok === false ? (i.label + ': ' + (x.note || 'not moved')) : ((x.moved ? 'Moved ' + i.label + ' ' + (x.from_c != null ? x.from_c + '¢ → ' : 'to ') + x.price_c + '¢' : i.label + ' @ ' + x.price_c + '¢') + ' · live, no game-start cancel');
         if (i.op === 'rerung') return x.rerung ? ('Moved ' + i.label + ' → ' + (x.label || i.rerung_label) + ' @ ' + x.price_c + '¢' + (x.held ? ' (' + x.held + ' filled stays on the old line)' : '') + (x.warning ? ' · ' + x.warning : '')) : (i.label + ': ' + (x.note || 'not moved'));
         if (x.moved) return 'Moved ' + i.label + ' ' + (x.from_c != null ? x.from_c + '¢ → ' : 'to ') + x.price_c + '¢';
@@ -949,12 +955,13 @@
             return;
         }
         const n = contractsN(), fr = freshItems();
-        const nb = fr.filter(i => !i.op).length, nr = fr.filter(i => i.op === 'repeg').length, nc = fr.filter(i => i.op === 'cancel').length, nx = fr.filter(i => i.op === 'rerung').length, nl = fr.filter(i => i.op === 'live').length;
+        const nb = fr.filter(i => !i.op).length, nr = fr.filter(i => i.op === 'repeg').length, nc = fr.filter(i => i.op === 'cancel').length, nx = fr.filter(i => i.op === 'rerung').length, nl = fr.filter(i => i.op === 'live').length, ng = fr.filter(i => i.op === 'getlive').length;
         const parts = [];
         if (nb) parts.push(nb + ' bet' + (nb === 1 ? '' : 's') + ' × ' + n + ' at the touch');
         if (nr) parts.push('re-peg ' + nr);
         if (nc) parts.push('cancel ' + nc);
         if (nl) parts.push(nl + ' to live 49.5¢');
+        if (ng) parts.push(ng + ' live again (49.5¢ or the bid)');
         if (nx) parts.push(nx + ' to the new line');
         bp.classList.add('arm');
         bp.textContent = 'Tap again → ' + parts.join(' · ');
@@ -1155,10 +1162,51 @@
     document.addEventListener('keydown', e => { if (e.key === 'Escape' && _sheetId != null) closeSheet(); });
     function sheetOp(op) { const b = _betsById[_sheetId]; if (b) toggleOp(op, b.id); renderSheet(); }
     function sheetAddMore() { if (_sheetAdd) toggleSide.apply(null, _sheetAdd); renderSheet(); }
+    // GET IT LIVE (Rob, Oct 24 2026: "I don't like just canceling them and
+    // then not getting a button to click… put in that same line, the 49 and
+    // a half… pull the current make and automatically put the bet there, as
+    // long as it is more favorable… give me a warning if it's way cheaper
+    // than that right now"). A Missed row's sheet: what he wanted, the book
+    // now, the price the box will rest at (the lower of the live cap and the
+    // bid, never on the ask), and the dumbass warning when the market has
+    // run away from the price he wanted.
+    function renderMissedSheet(m) {
+        const cap = Number((_lastBetsPayload && _lastBetsPayload.live_snipe_c) || 49.5);
+        const want = m.price_c != null ? Number(m.price_c) : null;
+        const bid = m.bid_c != null ? Number(m.bid_c) : null, ask = m.ask_c != null ? Number(m.ask_c) : null;
+        let target = cap, why = 'the ' + cap + '¢ live price';
+        if (bid != null && bid < cap) { target = bid; why = 'the bid (' + bid + '¢), cheaper than ' + cap + '¢'; }
+        if (ask != null && target >= ask) { target = ask - 0.5; why = 'a tick under the ' + ask + '¢ ask'; }
+        const on = inSlip(opKey('getlive', m.id));
+        const cells = [
+            ['Wanted', (m.contracts ? m.contracts + ' @ ' : '') + (want != null ? cA(want) : '?')],
+            ['Bid / ask now', (bid != null ? bid + '¢' : '—') + ' / ' + (ask != null ? ask + '¢' : '—')],
+            ['Now (mid)', m.cur_c != null ? cA(m.cur_c) : '—'],
+            ['Rests at', target >= 1 ? cA(target) : 'no room'],
+        ];
+        let h = '<div class="grab"></div>'
+              + '<div><div class="at">' + esc(betLabel(m)) + ' <span class="tag red">NO FILL · CANCELLED</span>' + (m.app ? '<span class="tag gry">APP</span>' : '') + '</div>'
+              + '<div class="ag">' + esc(gameShort(m)) + ' · ' + fmtTime(m.event_start) + ' ' + clk(m.event_start) + (_scoreLine(m) ? ' · ' + esc(_scoreLine(m)) : '') + '</div></div>'
+              + '<div class="grid">' + cells.map(c => '<div class="cell"><span class="k">' + c[0] + '</span><span class="v">' + esc(c[1]) + '</span></div>').join('') + '</div>';
+        const warn = [];
+        if (bid == null && ask == null) warn.push('No live book read yet — the box prices it when it runs.');
+        if (want != null && bid != null && bid <= want - 5) warn.push('⚠ The bid is ' + bid + '¢ now, ' + (want - bid).toFixed(1) + '¢ UNDER the ' + want + '¢ you wanted — your side is losing out there. Don\'t click this, dumbass… unless you want it anyway at ' + target + '¢.');
+        else if (want != null && bid != null && bid >= want + 5) warn.push('The bid is ' + bid + '¢ now, ' + (bid - want).toFixed(1) + '¢ OVER what you wanted — your side is winning; ' + target + '¢ sits behind the market and may never fill.');
+        if (ask != null && ask <= cap) warn.push('The ask (' + ask + '¢) is already under ' + cap + '¢ — this rests a tick under it, it does not take.');
+        h += '<div class="note">Rests ' + (m.contracts || '?') + ' on ' + esc(betLabel(m)) + ' at ' + why + ', GTC, in-play. The box leaves it to you — no chase, no game-start cancel; cancel it in the app or here.</div>';
+        warn.forEach(w => { h += '<div class="note" style="color:var(--r-bd)">' + esc(w) + '</div>'; });
+        const acts = [];
+        acts.push('<button class="abtn' + (on ? ' on' : ' pri') + '" onclick="sheetOp(\'getlive\')">' + (on ? '✓ On the slip: get it live' : 'Get it live · ' + (m.contracts || '?') + ' @ ' + (target >= 1 ? target + '¢' : '?')) + '</button>');
+        acts.push('<button class="abtn" onclick="dismissMissed(\'' + esc(m.id) + '\');closeSheet()">Hide this row</button>');
+        acts.push('<button class="abtn" onclick="closeSheet()">Close</button>');
+        h += '<div class="acts">' + acts.join('') + '</div>';
+        document.getElementById('as').innerHTML = h;
+    }
     function renderSheet() {
         if (_sheetId == null) return;
         const b = _betsById[_sheetId];
         if (!b) { closeSheet(); return; }
+        if (b._missed) { renderMissedSheet(b); return; }
         const st = betState(b), o = b.order || {}, held = Number(b.held || 0);
         const tagCls = st.cls === 'fill' ? 'grn' : st.cls === 'warn' ? 'red' : 'amb';
         let touch = b.touch_c != null ? b.touch_c + '¢' : '—';
@@ -1372,16 +1420,21 @@
             .sort((x, y) => String(x.event_start).localeCompare(String(y.event_start)));
         document.getElementById('srSec').classList.toggle('hide', !rows.length);
         if (!rows.length) { document.getElementById('srBody').innerHTML = ''; return; }
-        const bad = rows.filter(b => !b.take_window && !((b.live_snipe || b.in_play) && !b.start_seen && !b.start_blind)).length;
+        // A LIVE SNIPE IS HIS, WHATEVER THE START FLAGS SAY (Oct 24 2026,
+        // WMU@Toledo O 46.5: Move to Live at minute 4 of the take window —
+        // the start flags stayed on the pick and the card read TAKING · until
+        // 9:08, frozen, for the rest of the game).
+        const isMine = b => b.live_snipe || (b.in_play && !b.start_seen && !b.start_blind);
+        const bad = rows.filter(b => !isMine(b) && !b.take_window).length;
         document.getElementById('srMeta').textContent = rows.length + (bad ? ' · ' + bad + ' need you' : '');
         document.getElementById('srBody').innerHTML = rows.map(b => {
             const o = b.order || {}, sl = _scoreLine(b), held = Number(b.held || 0);
-            const mine = (b.live_snipe || b.in_play) && !b.start_seen && !b.start_blind;
-            const tw = b.take_window;
+            const mine = isMine(b);
+            const tw = mine ? null : b.take_window;
             // THE TAKE WINDOW (Rob, Oct 18 2026: "I would say 2 minutes"): the drop fired,
             // the box is re-trying the take inside the 1¢ cap until the window ends
-            const tag = tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
-                      : mine ? '<span class="tag amb">LIVE · YOURS</span>'
+            const tag = mine ? '<span class="tag amb">LIVE · YOURS' + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
+                      : tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
                       : '<span class="tag red">BOX CAN\'T SEE GAME START</span>';
             const n = Math.round(o.leaves || 0) + ' @ ' + (o.price_c != null ? cA(o.price_c) : '?') + ' resting'
@@ -1394,7 +1447,7 @@
                  + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + n + '</div>'
                  + '<div class="c-n">' + (tw ? ((tw.tries || 0) + ' tries · last ask ' + (tw.last && tw.last.ask_c != null ? tw.last.ask_c + '¢' : '—')
                         + (tw.bump && tw.bump.verdict === 'amended' ? ' · bid moved up to ' + tw.bump.to_c + '¢ (maker, top of book)' : '')
-                        + ' · tap to cancel now') : 'tap to cancel or move to live') + '</div></div>';
+                        + ' · tap to cancel now') : mine ? 'yours to watch · tap to cancel' : 'tap to cancel or move to live') + '</div></div>';
         }).join('');
     }
     function renderBets(d) {
@@ -1435,22 +1488,26 @@
             document.getElementById('bets').innerHTML = missedOther ? '<div class="c-n">' + missedOther + ' on other tabs.</div>' : '';
         } else {
             document.getElementById('bets').innerHTML = missed.map(m => {
+                _betsById[m.id] = Object.assign({ _missed: true, status: 'missed', started: true }, m);   // tap → the action sheet (Get it live)
                 const sl = _scoreLine(m);
                 const want = m.price_c != null ? Number(m.price_c) : null;
                 const now = m.cur_c != null ? Number(m.cur_c) : null;
                 const cheaper = want != null && now != null && now <= want;
                 const l2 = (want != null ? 'wanted ' + (m.contracts ? m.contracts + ' @ ' : '') + want + '¢' : 'wanted ' + (m.contracts || '?'))
-                         + (now != null ? ' · <b' + (cheaper ? ' class="pos"' : '') + '>now ' + now + '¢ (' + am(_probToAmer(Math.min(0.99, Math.max(0.01, now / 100)))) + ')' + (cheaper ? ', cheaper' : '') + '</b>' : ' · no live price');
+                         + (now != null ? ' · <b' + (cheaper ? ' class="pos"' : '') + '>now ' + now + '¢ (' + am(_probToAmer(Math.min(0.99, Math.max(0.01, now / 100)))) + ')' + (cheaper ? ', cheaper' : '') + '</b>'
+                            + (m.bid_c != null || m.ask_c != null ? ' <span class="g">bid ' + (m.bid_c != null ? m.bid_c : '—') + ' / ask ' + (m.ask_c != null ? m.ask_c : '—') + '</span>' : '') : ' · no live price');
                 const ch = m.chasing;
                 const tags = ch ? '<span class="tag amb">RESTING · NOT FILLED</span>' + (ch.outbid ? '<span class="tag red">OUTBID</span>' : '')
                                 : '<span class="tag red">NO FILL · CANCELLED</span>';
                 const l3 = ch ? '<div class="c-n">your order ' + esc(betLabel(Object.assign({}, m, { line: ch.line != null ? ch.line : m.line, label: ch.label || null })))
                     + ' · ' + (ch.leaves != null ? fmtQ(ch.leaves) + ' @ ' : '') + (ch.price_c != null ? cA(ch.price_c) : '?') + ' resting'
                     + (ch.outbid ? ' · <b class="neg">outbid — re-peg in the app</b>' : '') + '</div>' : '';
-                return '<div class="card miss' + (ch ? ' rest' : '') + '"><div class="c-top"><span class="tags">' + tags + (m.app ? '<span class="tag gry">APP</span>' : '') + '</span>'
-                     + '<button class="hidebtn" title="hide on every device" onclick="dismissMissed(\'' + esc(m.id) + '\')">Hide</button></div>'
+                const gl = inSlip(opKey('getlive', m.id));
+                const l4 = ch ? '' : '<div class="c-n">' + (gl ? '✓ on the slip: get it live' : 'tap → get it live at ' + (d.live_snipe_c || 49.5) + '¢ or the bid, whichever is cheaper') + '</div>';
+                return '<div class="card miss' + (ch || gl ? ' rest' : '') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(m.id)).replace(/"/g, '&quot;') + ')"><div class="c-top"><span class="tags">' + tags + (m.app ? '<span class="tag gry">APP</span>' : '') + '</span>'
+                     + '<button class="hidebtn" title="hide on every device" onclick="event.stopPropagation();dismissMissed(\'' + esc(m.id) + '\')">Hide</button></div>'
                      + '<div class="c-t">' + esc((m.period ? String(m.period).toUpperCase() + ' ' : '') + betLabel(m)) + ' <span class="g">· ' + esc(gameShort(m)) + '</span></div>'
-                     + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + l2 + '</div>' + l3 + '</div>';
+                     + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + l2 + '</div>' + l3 + l4 + '</div>';
             }).join('');
         }
         renderSheet();
@@ -1473,7 +1530,10 @@
             _slip.push({ key, op, pick_id: id, sport: b.sport, event_start: b.event_start,
                          label: betLabel(b), game: gameShort(b),
                          resting_c: o.price_c, touch_c: b.touch_c, leaves: o.leaves,
-                         ...(op === 'rerung' ? { rerung_slug: rr.slug, rerung_label: rungLabel(b, rr.line), rerung_c: rr.bid_c } : {}) });
+                         ...(op === 'rerung' ? { rerung_slug: rr.slug, rerung_label: rungLabel(b, rr.line), rerung_c: rr.bid_c } : {}),
+                         ...(op === 'getlive' ? { slug: b.slug, synthetic: !!b.synthetic, contracts: b.contracts, market_type: b.market_type, side: b.side,
+                                                  line: b.line, event_name: b.event_name, market_id: b.market_id, want_c: b.price_c,
+                                                  bid_c: b.bid_c, ask_c: b.ask_c } : {}) });
             autoOpenSlip();
         }
         saveSlip(); renderSlip(); loadBetsRender();

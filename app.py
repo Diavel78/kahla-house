@@ -14865,7 +14865,8 @@ def _kalshi_dup_from_orders(orders, ticker: str, buy_yes: bool):
 
 def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
                         event_start, book: dict | None = None, verify: str = "fresh",
-                        expect: dict | None = None, allow_dup: bool = False):
+                        expect: dict | None = None, allow_dup: bool = False,
+                        allow_started: bool = False):
     """THE HAND BET — one post-only MANUAL order (Aug 22 2026 rails, lifted
     out of the route Oct 3 2026 so the Bet Sheets slip can place a list of
     them). Returns (payload, http_status); payload['ok'] False carries
@@ -14904,7 +14905,7 @@ def _manual_order_place(client, slug: str, synthetic: bool, price_c, contracts,
     except (TypeError, ValueError):
         return {"ok": False, "error": "event_start (ISO) required — pre-game "
                 "bets only"}, 400
-    if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+    if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc) and not allow_started:
         return {"ok": False, "error": "game already started — pre-game bets only"}, 400
     guard = _hand_create_guard(client, slug, synthetic, expect, allow_dup=allow_dup)
     if guard is not None:
@@ -15829,9 +15830,10 @@ def _hand_order_read(sb, ids: list) -> dict:
     return {r["id"]: r for r in rows}
 
 
-def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int):
+def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int, extra: dict | None = None):
     """The placed hand bet → a bot_picks row (so the resolver grades it and
-    the My bets strip shows it). Returns (pick_id, warning)."""
+    the My bets strip shows it). `extra` = blob keys the caller adds (a Get
+    it live bet stamps `live_snipe` + `getlive_from`). Returns (pick_id, warning)."""
     try:
         mt = it.get("market_type")
         sport = str(it.get("sport") or "").upper()
@@ -15872,6 +15874,8 @@ def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int):
                          "pmm_twin_slug": rs.get("pmm_twin_slug"),
                          "pmm_twin_synthetic": rs.get("pmm_twin_synthetic"),
                          "poly_quote_c": rs.get("poly_quote_c")})
+        if extra:
+            blob.update(extra)
         row = {"asked_by": uid, "query_text": "bet sheet",
                "market_id": mid, "sport": sport,
                "event_name": f"{it.get('away')} @ {it.get('home')}",
@@ -15972,7 +15976,19 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
         if book is None:
             return {"ok": False, "error": "book unreadable — try again"}
         seat_det = None
-        if price_c is None:
+        gl = pl.get("getlive") if isinstance(pl.get("getlive"), dict) else None
+        if gl:
+            # GET IT LIVE (Oct 24 2026): a Missed row re-rested on its own rung,
+            # in-play, at the lower of the live-snipe cap and the bid.
+            try:
+                cap_c = float(gl.get("cap_c") or _machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
+            except (TypeError, ValueError):
+                cap_c = _HAND_LIVE_SNIPE_C
+            price_c, gl_why = _hand_getlive_price(book, syn, cap_c, _pmm_tick_c(client, slug))
+            if price_c is None:
+                return {"ok": False, "error": f"can't rest live: {gl_why}", "ms": ms}
+            gl = {**gl, "cap_c": cap_c, "priced": gl_why}
+        elif price_c is None:
             s_bid, _s_ask = _manual_side_book(book, syn)
             if s_bid is None:
                 return {"ok": False, "error": "no bids on this market yet"}
@@ -15981,7 +15997,8 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
             price_c = seat if seat is not None else s_bid
         out, _st = _manual_order_place(client, slug, syn, price_c, row.get("contracts"),
                                        row.get("event_start"), book=book,
-                                       verify=("socket" if deferred is not None else "fresh"))
+                                       verify=("socket" if deferred is not None else "fresh"),
+                                       allow_started=bool(gl))
         _lap("place")
         if not out.get("ok"):
             return {"ok": False, "error": out.get("error") or "order failed", "ms": ms}
@@ -15998,8 +16015,18 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
             res["warning"] = (f"order sent but not resting (state {out.get('state') or 'unknown'})"
                               " — check the app")
         contracts = int(row.get("contracts") or pl.get("contracts") or 0)
+        extra = None
+        if gl:
+            _now_iso = datetime.now(timezone.utc).isoformat()
+            extra = {"live_snipe": {"at": _now_iso, "from_c": gl.get("want_c"), "price_c": price_c,
+                                    "getlive": True, "priced": gl.get("priced")},
+                     "getlive_from": gl.get("from"), "placed_live": True}
+            res.update({"live": True, "getlive": True, "priced": gl.get("priced")})
+            if not pl.get("resolve"):
+                pl["resolve"] = {"slug": slug, "synthetic": syn, "rung_line": (pl.get("item") or {}).get("line"),
+                                 "rung_why": "getlive", "price_c": price_c}
         pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), pl.get("item") or {},
-                                            pl.get("resolve") or {}, res, contracts)
+                                            pl.get("resolve") or {}, res, contracts, extra=extra)
         res["pick_id"] = pick_id
         _lap("log")
         res["ms"] = ms
@@ -17538,6 +17565,8 @@ def _hand_start_tick(sb, client, now) -> dict:
             continue
         slug, oid = blob.get("pmm_slug"), blob.get("order_id")
         if blob.get("in_play") or blob.get("live_snipe"):
+            if blob.get("live_snipe"):
+                _hand_live_close_window(sb, r, blob, now)   # a window a mid-window Move to Live left behind
             continue                                      # placed live in the app / moved to live — not ours to cancel
         # SAT OUT THROUGH THE START (Oct 11 2026): a bet the box took off the
         # book (line move / venue reset) and never put back is a box cancel
@@ -20050,6 +20079,7 @@ def _kalshi_live_exec(sb, pick_id):
               "price_c": price_c, "anchor_c": price_c}
         for k in ("chase_hold", "thin_hold", "rejoin_hold", "line_hold"):
             nb.pop(k, None)
+        nb = _hand_blob_close_window(nb, now_iso)      # a live move ends the take window
         if moved:
             nb.update({"amended": True, "contracts": total, "repegged_from_c": from_c, "repeg_at": now_iso})
         if new_id:
@@ -20092,6 +20122,8 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
     import kalshi_venue as _kv
     ticker, by = blob.get("kalshi_ticker"), bool(blob.get("kalshi_buy_yes"))
     koid = blob.get("kalshi_order_id")
+    if blob.get("live_snipe"):
+        _hand_live_close_window(sb, r, blob, now)         # a window a mid-window Move to Live left behind
     if blob.get("in_play") or blob.get("live_snipe") or not ticker:
         return
     if not koid and not isinstance(blob.get("line_hold"), dict):
@@ -22118,8 +22150,10 @@ def api_bet_sheets_mine():
             "venue_pick": blob.get("venue_pick"),
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
             "live_snipe": bool(blob.get("live_snipe")),
+            "getlive_from": blob.get("getlive_from"),
             "start_seen": bool(blob.get("game_started")), "start_blind": bool(blob.get("start_blind")),
-            "take_window": (blob.get("start_take_window") if isinstance(blob.get("start_take_window"), dict) else None),
+            "take_window": (blob.get("start_take_window")
+                            if isinstance(blob.get("start_take_window"), dict) and not blob.get("live_snipe") else None),
             "poly_cancel_sent": (blob.get("poly_cancel_sent") if isinstance(blob.get("poly_cancel_sent"), dict) else None),
             "kalshi_cancel_sent": bool(isinstance(blob.get("kalshi_cancel_sent"), dict)
                                        or isinstance(blob.get("kalshi_move_cancel_sent"), dict)),
@@ -22166,7 +22200,12 @@ def api_bet_sheets_mine():
         tape_dark = _touch_tape_dark(sb)
     except Exception:
         tape_dark = None
+    try:
+        _live_c = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
+    except (TypeError, ValueError):
+        _live_c = _HAND_LIVE_SNIPE_C
     return jsonify({"ok": True, "bets": out, "missed": missed, "venue_ok": venue_ok, "tape_dark": tape_dark,
+                    "live_snipe_c": _live_c,
                     "src": ("box" if box is not None else "vercel"),
                     "box_age_s": (box or {}).get("age_s"), "at": now.isoformat()})
 
@@ -22697,6 +22736,8 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
         _got = (b.get("held") or 0) > 0 or (b.get("filled_qty") or 0) > 0 or b.get("status") == "sold"
         if b.get("id") in by_pick and _got:
             by_pick.pop(b["id"], None)                    # the kept pick filled after all
+        if b.get("getlive_from") in by_pick and b.get("status", "pending") == "pending":
+            by_pick.pop(b["getlive_from"], None)          # he got it live from this row — the Live card has it
         # only a bet that actually FILLED on the same game + side takes the
         # row off (he got it live); a resting app order he is still chasing
         # does not
@@ -22781,11 +22822,40 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
                     client = None
             if client is not None:
                 reads += 1
-                v = _live_book_mid(client, slug, bool(syn))
-                if v is not None:
-                    item["cur_c"] = round(v * 100.0, 2)
+                bq = _live_book_quote(client, slug, bool(syn))
+                if bq is not None:
+                    item["bid_c"], item["ask_c"], item["cur_c"] = bq
         out.append(item)
     out.sort(key=lambda x: (x.get("event_start") or "", x.get("label") or ""))
+    return out
+
+
+_LIVE_BOOK_Q_CACHE: dict = {}
+
+
+def _live_book_quote(client, slug: str, synthetic: bool):
+    """(bid_c, ask_c, mid_c) for our side of ONE market off a single book
+    read, ~20s cached — the Missed row's "now" line and the Get-it-live
+    warning (is the market way under the price he wanted?)."""
+    if not slug or client is None:
+        return None
+    key = (slug, bool(synthetic))
+    hit = _LIVE_BOOK_Q_CACHE.get(key)
+    if hit and _time.monotonic() - hit[0] < 20.0:
+        return hit[1]
+    try:
+        book = _pmm_book(client, slug)
+    except Exception:
+        book = None
+    if not book:
+        return None
+    s_bid, s_ask = _manual_side_book(book, bool(synthetic))
+    if s_bid is None and s_ask is None:
+        return None
+    mid = (round((float(s_bid) + float(s_ask)) / 2.0, 2) if s_bid is not None and s_ask is not None
+           else (float(s_bid) if s_bid is not None else float(s_ask)))
+    out = (s_bid, s_ask, mid)
+    _LIVE_BOOK_Q_CACHE[key] = (_time.monotonic(), out)
     return out
 
 
@@ -23100,6 +23170,55 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
 _HAND_LIVE_SNIPE_C = 49.5
 
 
+def _hand_blob_close_window(blob: dict, now_iso: str, closed: str = "live_snipe") -> dict:
+    """Pure. A Move to Live INSIDE the take window (Oct 24 2026, WMU@Toledo
+    O 46.5: Rob pressed it at minute 4 of 5) left `start_take_window` on the
+    pick — the start rule skips live-snipe picks, so nothing ever closed it,
+    the strip kept publishing it, and the card read TAKING · until 9:08 all
+    game. The window moves to `start_take_window_done` with `closed`."""
+    tw = blob.get("start_take_window")
+    if not isinstance(tw, dict):
+        return blob
+    nb = {k: v for k, v in blob.items() if k != "start_take_window"}
+    nb["start_take_window_done"] = {**tw, "closed": closed, "at": now_iso}
+    return nb
+
+
+def _hand_live_close_window(sb, r: dict, blob: dict, now) -> dict:
+    """The write half: a live-snipe pick still carrying a take window gets
+    it closed (one update); returns the blob the pick now holds."""
+    if not isinstance(blob.get("start_take_window"), dict):
+        return blob
+    nb = _hand_blob_close_window(blob, now.isoformat(), "live_snipe")
+    try:
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+    except Exception as e:
+        app.logger.warning("hand live close window pick %s: %s", r["id"], str(e)[:120])
+        return blob
+    return nb
+
+
+def _hand_getlive_price(book: dict, synthetic: bool, cap_c: float, tick: float):
+    """Pure. GET IT LIVE (Rob, Oct 24 2026, on the Missed rows: "give me the
+    option to put in that same line, the 49 and a half… pull the current
+    make and automatically put the bet there, as long as it is more
+    favorable"): the resting price is the LOWER of the live-snipe cap and
+    our side's best bid — join the bid when the market got cheaper, never
+    pay the cap into a cheaper book — and never on or across the ask (a
+    post-only bid there rejects): one tick under it. Returns
+    (price_c, why) or (None, why)."""
+    s_bid, s_ask = _manual_side_book(book, synthetic)
+    target, why = float(cap_c), "cap"
+    if s_bid is not None and float(s_bid) < target:
+        target, why = float(s_bid), "bid"
+    if s_ask is not None and target >= float(s_ask) - 1e-9:
+        target, why = float(s_ask) - float(tick), "under_ask"
+    target = round(_grid_dn(target, tick), 2)
+    if target < 1.0:
+        return None, "no room under the ask"
+    return target, why
+
+
 def _bet_sheet_live_exec(sb, client, pick_id):
     r, blob = _bet_sheet_pick(sb, pick_id)
     if not r:
@@ -23141,6 +23260,7 @@ def _bet_sheet_live_exec(sb, client, pick_id):
               "price_c": price_c, "anchor_c": price_c}
         for k in ("chase_hold", "thin_hold", "rejoin_hold", "line_hold"):
             nb.pop(k, None)
+        nb = _hand_blob_close_window(nb, now_iso)      # a live move ends the take window
         if moved:
             nb.update({"amended": True, "contracts": qty_total, "repegged_from_c": from_c,
                        "repeg_at": now_iso})
@@ -23757,6 +23877,55 @@ def api_bet_sheets_cancel():
     return _bet_sheet_queue_op("cancel")
 
 
+_GETLIVE_SIDES = {"home", "away", "over", "under", "yes", "no"}
+
+
+def _bet_sheet_getlive_row(it: dict, uid, cid=None):
+    """Pure. The hand_orders CREATE row for a Get-it-live slip item (the
+    Missed row's own fields: slug, synthetic, contracts, market, side,
+    line, label, game, start). Returns (row, None) or (None, reason)."""
+    slug = str(it.get("slug") or "").strip()
+    if not re.match(r"^[a-z0-9][a-z0-9-]{8,}$", slug):
+        return None, "no market slug on this row"
+    try:
+        contracts = int(it.get("contracts") or 0)
+    except (TypeError, ValueError):
+        contracts = 0
+    if not (1 <= contracts <= 250):
+        return None, "contracts must be 1-250"
+    mt = str(it.get("market_type") or "").lower()
+    if mt == "moneyline":
+        mt = "ml"
+    if mt not in ("ml", "spread", "total"):
+        return None, "unknown market type"
+    side = str(it.get("side") or "").lower()
+    if side not in _GETLIVE_SIDES:
+        return None, "unknown side"
+    ev_name = str(it.get("event_name") or "")
+    away, home = (ev_name.split(" @ ", 1) + [None])[:2] if " @ " in ev_name else (None, None)
+    if not (away and home and it.get("event_start")):
+        return None, "row is missing the game or its start"
+    line = it.get("line")
+    try:
+        line = float(line) if line is not None and mt != "ml" else None
+    except (TypeError, ValueError):
+        line = None
+    try:
+        want_c = float(it.get("want_c")) if it.get("want_c") is not None else None
+    except (TypeError, ValueError):
+        want_c = None
+    pid_raw = str(it.get("pick_id") or it.get("missed_id") or "").lstrip("m")
+    item = {"sport": str(it.get("sport") or "").upper(), "away": away, "home": home,
+            "event_start": it.get("event_start"), "market_type": mt, "side": side,
+            "line": line, "label": it.get("label"), "market_id": it.get("market_id")}
+    row = {"op": "create", "slug": slug, "synthetic": bool(it.get("synthetic")), "price_c": None,
+           "contracts": contracts, "event_start": it.get("event_start"),
+           "payload": {"item": item, "asked_by": uid, "contracts": contracts,
+                       "getlive": {"from": int(pid_raw) if pid_raw.isdigit() else None, "want_c": want_c},
+                       **({"cid": cid} if cid and _HAND_CID_RE.match(str(cid)) else {})}}
+    return row, None
+
+
 @app.route("/api/bet-sheets/ops", methods=["POST"])
 @admin_required
 def api_bet_sheets_ops():
@@ -23784,12 +23953,28 @@ def api_bet_sheets_ops():
         key = (it or {}).get("key") or f"op|{(it or {}).get('op')}|{(it or {}).get('pick_id')}"
         op = str((it or {}).get("op") or "").lower()
         res = {"key": key, "op": op, "pick_id": (it or {}).get("pick_id")}
-        if op not in ("cancel", "repeg", "rerung", "live"):
+        if op not in ("cancel", "repeg", "rerung", "live", "getlive"):
             res.update({"ok": False, "reason": "unknown action"}); results.append(res); continue
         cid = (it or {}).get("cid")
         if cid in seen:                           # a repeat of a ticket already queued
             res.update({"queue_id": seen[cid][0], "repeat": True})
             queued.append((seen[cid][0], res))
+            continue
+        if op == "getlive":
+            # GET IT LIVE (Rob, Oct 24 2026: "I don't like just canceling them
+            # and then not getting a button to click"): a Missed row becomes a
+            # NEW create row on its own slug — the executor prices it at the
+            # lower of the live-snipe cap and the bid and stamps the pick
+            # live_snipe, so the box leaves it to Rob.
+            row, bad = _bet_sheet_getlive_row(it or {}, g.uid, cid)
+            if bad:
+                res.update({"ok": False, "reason": bad}); results.append(res); continue
+            try:
+                rid = _hand_order_enqueue(sb, row)
+            except Exception as e:
+                res.update({"ok": False, "reason": f"queue write failed: {e}"[:160]}); results.append(res); continue
+            res["queue_id"] = rid
+            queued.append((rid, res))
             continue
         r, blob = _bet_sheet_pick(sb, (it or {}).get("pick_id"))
         if not r:
@@ -23815,7 +24000,8 @@ def api_bet_sheets_ops():
             res.update({"ok": False, "reason": out.get("error") or f"{res['op']} failed"})
         else:
             res.update({k: out.get(k) for k in ("moved", "live", "from_c", "price_c", "note", "deleted", "held", "via", "order_lost",
-                                                "rerung", "label", "to_line", "contracts", "warning")
+                                                "rerung", "label", "to_line", "contracts", "warning",
+                                                "getlive", "priced", "resting", "order_id", "pick_id")
                         if out.get(k) is not None})
             res["ok"] = True
             n_ok += 1
