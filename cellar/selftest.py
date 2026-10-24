@@ -4309,6 +4309,50 @@ def test_hand_sold_plan() -> None:
     print("  ok")
 
 
+def test_hand_dust_fold() -> None:
+    """ONE PICK OWNS A SLUG'S LOT (Oct 24 2026, Akron @ Kent State O 47.5:
+    the 0.08 dust pick + the Get-it-live 10-lot both read the venue's 10.08
+    and the Live P/L box counted it twice). The orderless twin on a started
+    slug+side folds into the owner; a resting pick is never folded; pre-game
+    pairs and lone picks are left alone."""
+    import app as _app, inspect as _ins
+    P = _app._hand_dust_fold_plan
+    # the Akron shape: dust pick 199768 (no order), getlive pick 199802 (live, held)
+    plan = P([{"id": 199768, "slug": "s", "syn": False, "resting": False, "started": True, "live": False},
+              {"id": 199802, "slug": "s", "syn": False, "resting": False, "started": True, "live": True}])
+    assert plan == [{"id": 199768, "into": 199802}], plan
+    # the owner is whichever rests; the newest when neither does
+    plan = P([{"id": 1, "slug": "s", "syn": False, "resting": True, "started": True, "live": False},
+              {"id": 2, "slug": "s", "syn": False, "resting": False, "started": True, "live": True}])
+    assert plan == [{"id": 2, "into": 1}], plan
+    plan = P([{"id": 1, "slug": "s", "syn": False, "resting": False, "started": True, "live": False},
+              {"id": 2, "slug": "s", "syn": False, "resting": False, "started": True, "live": False}])
+    assert plan == [{"id": 1, "into": 2}], plan
+    # two resting orders = the reconcile's dup_order, nothing folded
+    assert P([{"id": 1, "slug": "s", "syn": False, "resting": True, "started": True},
+              {"id": 2, "slug": "s", "syn": False, "resting": True, "started": True}]) == []
+    # different sides of one slug are different bets; pre-game pairs wait; lone picks untouched
+    assert P([{"id": 1, "slug": "s", "syn": False, "resting": False, "started": True},
+              {"id": 2, "slug": "s", "syn": True, "resting": False, "started": True}]) == []
+    assert P([{"id": 1, "slug": "s", "syn": False, "resting": False, "started": False},
+              {"id": 2, "slug": "s", "syn": False, "resting": False, "started": False}]) == []
+    assert P([{"id": 1, "slug": "s", "syn": False, "resting": False, "started": True}]) == []
+    assert P([]) == []
+    # wiring: the box publisher, the Vercel feed and the Get-it-live create all fold
+    assert "_hand_dust_fold_plan(" in _ins.getsource(_app._hand_status_publish)
+    assert "_hand_dust_fold_plan(" in _ins.getsource(_app.api_bet_sheets_mine)
+    assert "_hand_dust_fold_from(" in _ins.getsource(_app._hand_order_execute)
+    src = _ins.getsource(_app._hand_dust_fold_apply)
+    assert '"result_score": "dust"' in src and '.eq("status", "pending")' in src and "hand_dust_fold" in src
+    # the applier honours its kill switch without touching the DB
+    import unittest.mock as _m
+    with _m.patch.object(_app, "_machine_flag", lambda k, d=True: False):
+        assert _app._hand_dust_fold_apply(None, [{"id": 1, "into": 2}], "test") == 0
+    check("dust fold: the orderless twin on a started slug+side folds into the owner (Akron O47.5, Oct 24 2026)", True)
+    check("dust fold: a resting pick is never folded; pre-game pairs and lone picks are left alone", True)
+    check("dust fold: publisher, /mine and the Get-it-live create all fold; kill switch honoured", True)
+
+
 def test_bet_sheet_missed() -> None:
     """NOT FILLED, STARTED (Oct 10 2026): the kickoff cancel deletes an
     unfilled pick, so the Bet Sheets list is read off its stamps; a bet Rob
@@ -5357,7 +5401,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

@@ -16053,6 +16053,13 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
         pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), pl.get("item") or {},
                                             pl.get("resolve") or {}, res, contracts, extra=extra)
         res["pick_id"] = pick_id
+        if gl and pick_id and gl.get("from"):
+            # the Missed row's dust pick (an orderless pending pick on this
+            # slug) is what this bet replaces — fold it, never two picks on one lot
+            try:
+                res["dust_folded"] = _hand_dust_fold_from(sb, gl.get("from"), pick_id, slug, syn)
+            except Exception as e:
+                app.logger.warning("getlive dust fold %s: %s", gl.get("from"), str(e)[:80])
         _lap("log")
         res["ms"] = ms
         if warn:
@@ -16091,7 +16098,7 @@ def _hand_status_publish(sb, client) -> dict:
     bets included), OUTBID = our bid under the touch. One `lookup_cache`
     row, key bet_sheet_status; no REST read on either side."""
     try:
-        rows = (sb.table("bot_picks").select("id,signal_blob")
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
                 .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                 .limit(300).execute().data or [])
     except Exception as e:
@@ -16174,6 +16181,32 @@ def _hand_status_publish(sb, client) -> dict:
                       "moves": blob.get("chase_moves") or 0, "rejoin_hold": blob.get("rejoin_hold"),
                       "thin_hold": blob.get("thin_hold")},
             "line_hold": blob.get("line_hold")}
+    # ONE PICK OWNS A SLUG'S LOT (Oct 24 2026, the Akron double row): two
+    # pending picks on one started slug+side → the orderless one is dust,
+    # folded into the owner (void, result_score dust) and dropped from the strip.
+    try:
+        _fp = []
+        _now_ts = datetime.now(timezone.utc)
+        for r in rows:
+            b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+            if _kalshi_pick(b) or not b.get("pmm_slug"):
+                continue
+            try:
+                _started = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00")) <= _now_ts
+            except (TypeError, ValueError):
+                _started = False
+            _e = out.get(str(r["id"])) or {}
+            _fp.append({"id": r["id"], "slug": b["pmm_slug"], "syn": bool(b.get("pmm_synthetic")),
+                        "resting": bool((_e.get("order") or {}).get("resting")), "started": _started,
+                        "live": bool(b.get("live_snipe") or b.get("placed_live"))})
+        _folds = _hand_dust_fold_plan(_fp)
+        if _folds:
+            _nf = _hand_dust_fold_apply(sb, _folds, "publish", {r["id"]: r for r in rows})
+            if _nf:
+                for f in _folds:
+                    out.pop(str(f["id"]), None)
+    except Exception as e:
+        app.logger.warning("hand dust fold (publish): %s", str(e)[:120])
     # A FILLED hand bet has no resting order, so nothing subscribed its
     # market and the live strip read 'no live quote' (Oct 8 2026). Held lots
     # join the socket watch set (the touch tape publishes it each tick).
@@ -22059,6 +22092,97 @@ def _bet_sheet_pick_side_held(pos: dict | None, synthetic: bool) -> float:
     return net if net > 0 else 0.0
 
 
+def _hand_dust_fold_plan(picks: list) -> list:
+    """Pure. ONE PICK OWNS A SLUG'S LOT (Oct 24 2026 — Akron @ Kent State
+    O 47.5: the 0.08-share dust pick survived the game-start cancel, Rob
+    tapped Get it live, the new 10-lot filled, and BOTH picks were handed
+    the venue's whole 10.08 position — the Live P/L box counted it twice).
+    `picks` = [{id, slug, syn, resting, started, live}] for the pending
+    Polymarket sheet picks. Among started picks sharing (slug, syn) the
+    owner is the one with a resting order (newest if several), else the
+    newest live/placed-live one, else the newest; every OTHER pick with no
+    resting order is folded into the owner. A pick that still rests is never
+    folded (two resting orders on one side is the reconcile's dup_order).
+    The fold is a MERGE: the venue holds ONE lot per side and the owner
+    carries all of it (its held re-prices off the slug's fills), so a folded
+    pick that held real size is not lost money, it is counted once.
+    Returns [{"id", "into"}]."""
+    groups: dict = {}
+    for p in picks or []:
+        if not p.get("slug") or not p.get("started"):
+            continue
+        groups.setdefault((p["slug"], bool(p.get("syn"))), []).append(p)
+    out = []
+    for _k, ps in groups.items():
+        if len(ps) < 2:
+            continue
+        def _rank(x):
+            return (1 if x.get("resting") else 0, 1 if x.get("live") else 0, int(x.get("id") or 0))
+        owner = max(ps, key=_rank)
+        for p in ps:
+            if p is owner or p.get("resting"):
+                continue
+            out.append({"id": p["id"], "into": owner["id"]})
+    return out
+
+
+def _hand_dust_fold_apply(sb, folds: list, src: str, rows_by_id: dict | None = None) -> int:
+    """Void each folded pick (`status void`, `result_score dust`, blob
+    `dust_fold {into, at, src}`), pending rows only; stamp
+    `exec_probe_runs hand_dust_fold`. Kill switch `machine_flags
+    hand_dust_fold`. Returns the count folded."""
+    if not folds or not _machine_flag("hand_dust_fold", True):
+        return 0
+    n = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for f in folds:
+        r = (rows_by_id or {}).get(f["id"]) or {}
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else None
+        if blob is None:
+            try:
+                got = sb.table("bot_picks").select("signal_blob").eq("id", f["id"]).limit(1).execute().data or []
+                blob = (got[0].get("signal_blob") if got and isinstance(got[0].get("signal_blob"), dict) else {}) or {}
+            except Exception:
+                continue
+        fold = {"into": f["into"], "at": now_iso, "src": src, "own_fill": blob.get("filled_qty")}
+        try:
+            res = (sb.table("bot_picks").update({
+                "status": "void", "pnl_units": 0, "settled_at": now_iso, "result_score": "dust",
+                "signal_blob": {**blob, "dust_fold": fold}})
+                .eq("id", f["id"]).eq("status", "pending").execute())
+            if not (res.data or []):
+                continue
+        except Exception as e:
+            app.logger.warning("hand dust fold %s failed: %s", f["id"], str(e)[:120])
+            continue
+        n += 1
+        try:
+            _probe_log({"hand_dust_fold": True, "pick_id": f["id"], "into": f["into"], "src": src,
+                        "slug": blob.get("pmm_slug"), "label": blob.get("label"), "own_fill": blob.get("filled_qty")})
+        except Exception:
+            pass
+        app.logger.warning("hand dust fold: pick %s → %s (%s)", f["id"], f["into"], src)
+    return n
+
+
+def _hand_dust_fold_from(sb, from_id, new_id, slug: str, syn: bool) -> int:
+    """At a Get-it-live create: the Missed row's own pick (`from_id`), still
+    pending on the same slug + side with NO order, is the dust the new pick
+    replaces — fold it now rather than a tick later."""
+    if not from_id or not new_id or not slug:
+        return 0
+    try:
+        got = sb.table("bot_picks").select("id,status,signal_blob").eq("id", int(from_id)).limit(1).execute().data or []
+    except Exception:
+        return 0
+    if not got or got[0].get("status") != "pending":
+        return 0
+    b = got[0].get("signal_blob") if isinstance(got[0].get("signal_blob"), dict) else {}
+    if not b.get("bet_sheet") or b.get("pmm_slug") != slug or bool(b.get("pmm_synthetic")) != bool(syn) or b.get("order_id"):
+        return 0
+    return _hand_dust_fold_apply(sb, [{"id": int(from_id), "into": new_id}], "getlive", {int(from_id): got[0]})
+
+
 @app.route("/api/bet-sheets/mine")
 @admin_required
 def api_bet_sheets_mine():
@@ -22116,8 +22240,45 @@ def api_bet_sheets_mine():
     out, reads, lot_reads = [], 0, 0
     k_acct = None                      # (orders, positions) — read once, only when a Kalshi pick needs the Vercel fallback
     k_reads: dict = {"n": 0}
+    # ONE PICK OWNS A SLUG'S LOT (Oct 24 2026, the Akron double row): a
+    # second pending pick on a started slug+side with no order is dust —
+    # folded into the owner here too, so the page heals before the box ticks.
+    dust_folded = 0
+    try:
+        _fp = []
+        for r in rows.values():
+            if (r.get("status") or "pending") != "pending":
+                continue
+            b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+            if _kalshi_pick(b) or not b.get("pmm_slug"):
+                continue
+            try:
+                _started = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00")) <= now
+            except (TypeError, ValueError):
+                _started = False
+            _bx = box_rows.get(str(r["id"])) if box is not None else None
+            if _bx is not None:
+                _resting = bool((_bx.get("order") or {}).get("resting"))
+            elif venue_ok:
+                _o = orders_by_id.get(b.get("order_id")) if b.get("order_id") else None
+                _resting = bool(_o and _o.get("state") in _OPEN_ORDER_STATES)
+            else:
+                continue                      # no truthful order read: fold nothing
+            _fp.append({"id": r["id"], "slug": b["pmm_slug"], "syn": bool(b.get("pmm_synthetic")),
+                        "resting": _resting, "started": _started,
+                        "live": bool(b.get("live_snipe") or b.get("placed_live"))})
+        _folds = _hand_dust_fold_plan(_fp)
+        if _folds:
+            dust_folded = _hand_dust_fold_apply(sb, _folds, "mine", rows)
+            if dust_folded:
+                for f in _folds:
+                    rows.pop(f["id"], None)
+    except Exception as e:
+        app.logger.warning("bet sheets: dust fold: %s", str(e)[:120])
     for r in sorted(rows.values(), key=lambda x: x.get("event_start") or ""):
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if r.get("status") == "void" and isinstance(blob.get("dust_fold"), dict):
+            continue                          # a folded dust pick is not a bet on the page
         slug = blob.get("pmm_slug")
         syn = bool(blob.get("pmm_synthetic"))
         oid = blob.get("order_id")
@@ -22278,6 +22439,7 @@ def api_bet_sheets_mine():
     except (TypeError, ValueError):
         _live_c = _HAND_LIVE_SNIPE_C
     return jsonify({"ok": True, "bets": out, "missed": missed, "venue_ok": venue_ok, "tape_dark": tape_dark,
+                    "dust_folded": dust_folded,
                     "live_snipe_c": _live_c,
                     "src": ("box" if box is not None else "vercel"),
                     "box_age_s": (box or {}).get("age_s"), "at": now.isoformat()})
