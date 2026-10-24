@@ -4761,6 +4761,19 @@ def test_bet_sheet_reads() -> None:
     check("negative value at the price is not playable", R({**a, "value_c": -1.0}, {**m, "verdict": "pass"}) == "cancel")
     check("neither priced → no recommendation", R(None, None) is None)
     check("no rung found → re-peg or cancel only", R(a, None) == "repeg" and R({**a, "verdict": "pass"}, None) == "cancel")
+    # THE LIVE OPTION (Oct 24 2026, Texas −2.5: PASS at the 55¢ touch on the
+    # chalk rule, a play at the 49.5¢ live cap): live is the rec only when
+    # neither stay nor move plays; a playable stay still wins.
+    lv = {"verdict": "lean", "value_c": 3.0, "price_c": 49.5, "live": True}
+    check("stay and move both PASS, live a LEAN → move to live",
+          R({**a, "verdict": "pass"}, {**m, "verdict": "pass"}, lv) == "live")
+    check("a playable stay beats the live option (it fills pre-game)", R(a, None, lv) == "repeg")
+    check("live a PASS too → cancel", R({**a, "verdict": "pass"}, None, {**lv, "verdict": "pass"}) == "cancel")
+    check("live priced alone → live", R(None, None, lv) == "live" and R(None, None, None) is None)
+    import inspect as _ins
+    _src = _ins.getsource(_app._bet_sheet_reads)
+    check("the read prices the live option at hand_live_snipe_c and passes it to the recommender",
+          "hand_live_snipe_c" in _src and "_bs_recommend(stay, move if rr else None, live)" in _src)
     # MONEYLINES (Oct 20 2026, the Atlanta ML past its leash with no star):
     # priced off the sheet's win prob; the chalk rule caps the read at 60¢.
     o = _app._bs_option_read(None, "NBA", {"model": {"win_home": 0.42}}, "moneyline", "away", None, 45.5)

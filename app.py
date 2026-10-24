@@ -22677,9 +22677,13 @@ def _bs_opt_label(mt, side, x) -> str:
     return f"{ln:+g}"
 
 
-def _bs_recommend(stay, move):
-    """'move' / 'repeg' / 'cancel' (None = the model could price neither)."""
-    if stay is None and move is None:
+def _bs_recommend(stay, move, live=None):
+    """'move' / 'repeg' / 'live' / 'cancel' (None = the model could price
+    nothing). Stay and move are judged first — they fill pre-game, which is
+    the bet Rob placed; `live` (the same bet at the live cap, an in-play
+    fill) is the recommendation only when neither of those is a play but
+    the cap price is."""
+    if stay is None and move is None and live is None:
         return None
     rank = {"play": 2, "lean": 1}
 
@@ -22692,7 +22696,9 @@ def _bs_recommend(stay, move):
     for name, x in (("repeg", stay), ("move", move)):
         if _ok(x) and (best is None or _roi(x) > _roi(best[1])):
             best = (name, x)
-    return best[0] if best else "cancel"
+    if best:
+        return best[0]
+    return "live" if _ok(live) else "cancel"
 
 
 def _bet_sheet_reads(sb, out: list) -> None:
@@ -22723,10 +22729,25 @@ def _bet_sheet_reads(sb, out: list) -> None:
                 if rr and rr.get("slug") and rr.get("line") is not None else None)
         if rr and move:
             _bs_dominance_lift(mt, side, stay, move)
-        rec = _bs_recommend(stay, move if rr else None)
+        # THE LIVE OPTION (Oct 24 2026, Rob on Texas −2.5 reading PASS at the
+        # 55¢ touch: "−2.5 at 49.5 I bet fits the model"): the same bet
+        # rested at the live cap is a third option — priced here so the read
+        # never says "cancel, no longer a play" about a bet that is a play
+        # at 49.5¢. It recommends live only when neither the stay nor the
+        # move is playable (those fill pre-game, as he wanted).
+        live = None
+        if not b.get("live_snipe"):
+            try:
+                live_c = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
+            except (TypeError, ValueError):
+                live_c = _HAND_LIVE_SNIPE_C
+            live = _bs_option_read(sb, sport, blob, mt, side, b.get("line"), live_c)
+            if live:
+                live["live"] = True
+        rec = _bs_recommend(stay, move if rr else None, live)
         if rec is None:
             continue
-        b["read"] = {"stay": stay, "move": move, "rec": rec}
+        b["read"] = {"stay": stay, "move": move, "live": live, "rec": rec}
 
 
 _BS_LIVE_MAX_H = 6.0          # a pending bet this long past its start is the resolver's, not "live"

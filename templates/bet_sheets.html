@@ -1002,6 +1002,7 @@
         const r = b.read.rec;
         return r === 'move' ? '★ model says move to ' + rungLabel(b, rr && rr.line)
              : r === 'repeg' ? '★ model says ' + (rr ? 'stay and ' : '') + 're-peg — still a play'
+             : r === 'live' ? '★ model says move to live — a play at ' + ((b.read.live || {}).price_c != null ? b.read.live.price_c + '¢' : 'the live cap') + ', not at the touch'
              : '★ model says cancel — no longer a play';
     }
     function betState(b) {
@@ -1241,7 +1242,7 @@
             const star = k => (rd && rd.rec === k ? '★ ' : '');
             if (rr) acts.push('<button class="abtn' + (rx ? ' on' : rec === 'move' ? ' pri' : '') + '" onclick="sheetOp(\'rerung\')">' + (rx ? '✓ On the slip: move to ' : star('move') + 'Move to ') + esc(rungLabel(b, rr.line)) + (rr.bid_c != null ? ' @ ' + rr.bid_c + '¢' : '') + '</button>');
             acts.push('<button class="abtn' + (rp ? ' on' : rec === 'repeg' ? ' pri' : '') + '" onclick="sheetOp(\'repeg\')">' + (rp ? '✓ On the slip: re-peg to touch' : star('repeg') + 'Re-peg to touch') + '</button>');
-            if (!b.live_snipe) acts.push('<button class="abtn' + (lv ? ' on' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : 'Move to Live · 49.5¢, no game-start cancel') + '</button>');
+            if (!b.live_snipe) acts.push('<button class="abtn' + (lv ? ' on' : rec === 'live' ? ' pri' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : star('live') + 'Move to Live · 49.5¢, no game-start cancel') + '</button>');
             acts.push('<button class="abtn dng' + (cn ? ' on' : rec === 'cancel' ? ' pri' : '') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : star('cancel') + 'Cancel order') + '</button>');
         } else if (b.status === 'pending' && b.live_snipe && b.live_hold && !o.resting) {
             const cn = inSlip(opKey('cancel', b.id));
@@ -1285,14 +1286,19 @@
                  + (x.verdict ? verdictBadge(x.verdict) : '') + ' ' + bits.join(' · ')
                  + (x.why ? '<div class="dim" style="font-size:12px;margin-top:2px">' + esc(x.why) + '</div>' : '') + '</div>';
         };
+        const lvc = rd.live && rd.live.price_c != null ? rd.live.price_c + '¢' : 'the live cap';
         const recTxt = rd.rec === 'move' ? 'Move to ' + rungLabel(b, rr && rr.line)
                      : rd.rec === 'repeg' ? 'Stay on ' + betLabel(b) + ' — re-peg to the touch'
-                     : 'Cancel — no longer a play at either line';
-        const why = rd.rec === 'cancel' ? '' : ' <span class="g" style="font-weight:500;font-size:13px;color:var(--text2)">· ' + ((rd.move && rd.stay && rd.move.verdict !== 'pass' && rd.stay.verdict !== 'pass') ? 'more value per dollar' : 'the only option the model trusts') + '</span>';
+                     : rd.rec === 'live' ? 'Move to Live — ' + betLabel(b) + ' @ ' + lvc
+                     : 'Cancel — no longer a play at any price';
+        const why = rd.rec === 'cancel' ? ''
+                  : ' <span class="g" style="font-weight:500;font-size:13px;color:var(--text2)">· ' + (rd.rec === 'live' ? 'not a play at the touch, a play at the live cap'
+                  : (rd.move && rd.stay && rd.move.verdict !== 'pass' && rd.stay.verdict !== 'pass') ? 'more value per dollar' : 'the only option the model trusts') + '</span>';
         let h = '<div class="rd"><div class="rh">THE MODEL\'S READ</div>'
               + '<div class="rec ' + (rd.rec === 'cancel' ? 'no' : 'go') + '">★ ' + esc(recTxt) + why + '</div>';
         if (rr) h += opt('Move', rd.move, rungLabel(b, rr.line));
         h += opt(rr ? 'Stay' : 'Re-peg', rd.stay, betLabel(b));
+        if (rd.live) h += opt('Live', rd.live, betLabel(b));
         return h + '</div>';
     }
 
