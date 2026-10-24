@@ -1697,19 +1697,17 @@
         if (n + rec.push) out.push('\nRecord: ' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + (n ? ' (' + Math.round(100 * rec.win / n) + '%)' : ''));
         return out.join('\n');
     }
-    // TODAY'S WHOLE SLATE (Rob, Oct 23 2026: "I thought copy picks showed
-    // the games again, and the ones that finished" — then, handed yesterday's
-    // finals too: "Showing Thursday…"): on a daily sport, every game dated
-    // today (AZ) — upcoming, live and today's finals, never last night's; on
-    // football, the whole week. The "My bets" chip never narrows it — the
-    // copy is the sheet's picks, not Rob's bets; only the search and the
-    // "Plays & leans" chip do.
+    // TODAY'S WHOLE SLATE, EVERY SPORT (Rob, Oct 23 2026: "ALL SPORTS JUST
+    // TODAY"): every game dated today (AZ) — upcoming, live and today's
+    // finals — never last night's and never the rest of a football week.
+    // The "My bets" chip never narrows it — the copy is the sheet's picks,
+    // not Rob's bets; only the search and the "Plays & leans" chip do.
     async function copyPicks() {
         const q = (document.getElementById('search').value || '').trim().toLowerCase();
         const words = q.split(/\s+/).filter(Boolean);
         const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
         let games = _games.filter(g => g.event_start && gameMatches(g, words));
-        if (_daily()) games = games.filter(g => new Date(g.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today);
+        games = games.filter(g => new Date(g.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today);
         if (_filter === 'plays') games = games.filter(g => gamePlays(g).length);
         if (!games.length) {
             toast(!_games.length ? 'Nothing on this sheet to copy' : words.length ? 'No games match the search' : _filter === 'plays' ? 'No plays or leans to copy' : 'No games today to copy', true);
