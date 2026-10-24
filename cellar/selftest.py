@@ -1284,7 +1284,7 @@ def test_pair_plan() -> None:
         _app.PAIR_LIVE_SLUGS = {"astatc-nfl-x-y-2026-09-28-ryd-abc-gte20", "astatc-nfl-x-y-2026-09-28-ryd-abc-gte30"}
         class _FakeMk:
             def __init__(self): self.got = None
-            def set_slugs(self, s, replace=True): self.got = set(s)
+            def set_slugs(self, s, replace=True, urgent=False): self.got = set(s)
         _wf = _wsf.WsFeed.__new__(_wsf.WsFeed)
         _wf._watch_full = set(); _wf.mkts = _FakeMk(); _wf.depth_feed = _FakeMk()
         _wf.push_watch({"asc-nfl-order-1"}, replace=True)
@@ -2588,11 +2588,10 @@ def test_bet_sheet_rung() -> None:
     check("bettable half: O 50 → 49.5, U 50 → 50.5, −12 → −11.5, +12 → +12.5, a half stays",
           B(50, "total", "over") == 49.5 and B(50, "total", "under") == 50.5 and B(-12, "spread", "home") == -11.5
           and B(12, "spread", "away") == 12.5 and B(49.5, "total", "over") == 49.5)
-    src_rs = _insp.getsource(_app._bet_sheet_resolve) if False else open(_app.__file__).read()
-    i = src_rs.index("def _bet_sheet_resolve(")
-    body = src_rs[i:i + 9000]
     check("the slip's resolve passes the chalk cap to the rung walk and guards the fresh seat",
-          "cap_c=chalk_c" in body and "chalk, not betting it" in body)
+          "cap_c=chalk_c" in _insp.getsource(_app._bet_sheet_slug)
+          and "chalk, not betting it" in _insp.getsource(_app._bet_sheet_resolve)
+          and "_bet_sheet_slug(client, item)" in _insp.getsource(_app._bet_sheet_resolve))
 
 
 def test_rejoin_hold_until() -> None:
@@ -3406,7 +3405,8 @@ def test_pmm_unsigned_cover_questions() -> None:
           and bool(f({"side": "away", "slug": "aec-nhl-fla-ana-2026-10-04", "synthetic": True}, "ml")))
     check("an unreadable slug is no evidence — passes", f({"side": "away", "line": 3.5, "slug": "weird-slug"}, "spread") is None)
     import inspect
-    check("_bet_sheet_resolve runs the slug guard", "_bet_sheet_slug_disagrees(entry, mt)" in inspect.getsource(_app._bet_sheet_resolve))
+    check("_bet_sheet_resolve runs the slug guard", "_bet_sheet_slug_disagrees(entry, mt)" in inspect.getsource(_app._bet_sheet_slug)
+          and "_bet_sheet_slug(client, item)" in inspect.getsource(_app._bet_sheet_resolve))
 
 
 def test_hand_start_complete() -> None:
@@ -3800,7 +3800,7 @@ def test_pmm_day_list_prefetch() -> None:
           "prefetch_day_events" in inspect.getsource(_app._hand_queue_drain)
           and "_hand_queue_drain(" in inspect.getsource(_app._hand_orders_tick))
     check("resolve remembers a venue miss so the second leg of a game does not re-search",
-          "_BET_SHEET_MISS[miss_key]" in inspect.getsource(_app._bet_sheet_resolve))
+          "_BET_SHEET_MISS[miss_key]" in inspect.getsource(_app._bet_sheet_slug))
 
 
 def test_hand_orders_queue() -> None:
@@ -3938,6 +3938,34 @@ def test_hand_orders_queue() -> None:
             _t.sleep(0.3)
             check("the warmer ran alongside a 4-row slip and reported itself", isinstance(stw.get("warm"), dict) and stw.get("done") == 4)
             check("the warmer only warms rows the placer had not reached (never the first)", ids_w[0] not in warmed and set(warmed) <= set(ids_w))
+            # ON THE SOCKET BEFORE THE BET (Oct 24 2026): phase A resolves the
+            # rung and pre-subscribes it; the urgent push carries it to the feed
+            saved_slug, saved_kon, saved_cb, saved_tw = _app._bet_sheet_slug, _app._hand_kalshi_on, _app._WS_WATCHLIST_URGENT_CB, _app.TOUCH_WATCH_SLUGS
+            pushed = []
+            try:
+                _app.HAND_PRE_SLUGS.clear(); _app.KALSHI_PRE_TICKERS.clear()
+                _app._bet_sheet_slug = lambda client, item: {"ok": True, "slug": "asc-cfb-x-y-2099-01-01-pos-3pt5", "synthetic": False}
+                _app._hand_kalshi_on = lambda: False
+                _app._WS_WATCHLIST_URGENT_CB = lambda slugs: pushed.append(set(slugs))
+                _app.TOUCH_WATCH_SLUGS = {"already-watched"}
+                stp = {}
+                _app._hand_pre_row(object(), {"op": "create", "payload": {"item": {"sport": "NCAAF", "away": "X", "home": "Y", "event_start": "2099-01-01T00:00:00+00:00"}}}, stp)
+                check("phase A puts the rung's slug on the pre-subscribe set", "asc-cfb-x-y-2099-01-01-pos-3pt5" in _app._hand_pre_slugs() and stp.get("pre_slugs") == 1)
+                check("the urgent push carries the pre-subscribed slugs MERGED with the watch set",
+                      _app._hand_pre_push() == "ok" and pushed and pushed[-1] == {"already-watched", "asc-cfb-x-y-2099-01-01-pos-3pt5"})
+                _app.HAND_PRE_SLUGS["asc-cfb-x-y-2099-01-01-pos-3pt5"] = _t.monotonic() - 10_000
+                check("a pre-subscribed slug expires", "asc-cfb-x-y-2099-01-01-pos-3pt5" not in _app._hand_pre_slugs())
+                from cellar import wsfeed as _wsf
+                check("the urgent rebuild clock is shorter than the 2-minute clock", 0 < _wsf.CORE_REBUILD_URGENT_S < _wsf.CORE_REBUILD_MIN_S)
+                import inspect as _ii
+                check("set_slugs(urgent=True) arms the shorter clock and _apply_ops reads it",
+                      "_urgent_until" in _ii.getsource(_wsf.MarketsFeed.set_slugs) and "_urgent_until" in _ii.getsource(_wsf.MarketsFeed._apply_ops)
+                      and "urgent" in _ii.getsource(_wsf.WsFeed.push_watch))
+                check("the publishers fold the pre-subscribed sets into the watch sets",
+                      "_hand_pre_slugs()" in _ii.getsource(_app._touch_tape_publish) and "_hand_pre_tickers()" in _ii.getsource(_app._hand_status_publish))
+            finally:
+                _app._bet_sheet_slug, _app._hand_kalshi_on, _app._WS_WATCHLIST_URGENT_CB, _app.TOUCH_WATCH_SLUGS = saved_slug, saved_kon, saved_cb, saved_tw
+                _app.HAND_PRE_SLUGS.clear(); _app.KALSHI_PRE_TICKERS.clear()
         finally:
             _app._hand_warm_row = saved_warm
         # a batch insert that answers short falls back row by row, never re-inserting

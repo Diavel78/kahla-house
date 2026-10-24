@@ -15252,9 +15252,58 @@ def _bet_sheet_pin_quote(sb, item: dict, now, slates: dict) -> dict | None:
         return None
 
 
-def _bet_sheet_resolve(client, item: dict) -> dict:
-    """One slip item → the Polymarket slug + the touch on our side. Reads
-    the venue twice (event lookup, cached 120s across items; one book)."""
+# ON THE SOCKET BEFORE THE BET (Oct 24 2026, Rob: "GET ON WEBSOCKET, off
+# REST… do it!"): a fresh bet's slug is on no socket until the strip
+# publisher adds it AFTER placement, so the first book read of every new
+# bet was REST. The warmer resolves the slip's rungs the moment the rows
+# are claimed and PRE-SUBSCRIBES them — Polymarket slugs through the
+# urgent watch-list push (depth socket, `_WS_WATCHLIST_URGENT_CB`), Kalshi
+# tickers through `KALSHI_WATCH_TICKERS` (the feed resubscribes within
+# seconds) — so the placer's `_hand_poly_book` / `_kalshi_hand_book` read
+# the socket. Entries live _HAND_PRE_TTL_S; the strip publisher and the
+# tape publisher fold the live ones into their watch sets so a rebuild
+# never evicts them before the bet rests.
+HAND_PRE_SLUGS: dict = {}            # slug -> added (monotonic)
+KALSHI_PRE_TICKERS: dict = {}        # ticker -> added (monotonic)
+_HAND_PRE_TTL_S = 600.0
+
+
+def _hand_pre_live(d: dict) -> set:
+    now = _time.monotonic()
+    for k in [k for k, t in d.items() if now - t > _HAND_PRE_TTL_S]:
+        d.pop(k, None)
+    return set(d)
+
+
+def _hand_pre_slugs() -> set:
+    return _hand_pre_live(HAND_PRE_SLUGS)
+
+
+def _hand_pre_tickers() -> set:
+    return _hand_pre_live(KALSHI_PRE_TICKERS)
+
+
+def _hand_pre_push() -> str | None:
+    """Hand the pre-subscribed slugs to the sockets now (urgent merge; the
+    plain merge when the box has no urgent hook)."""
+    cb = _WS_WATCHLIST_URGENT_CB or _WS_WATCHLIST_MERGE_CB
+    pre = _hand_pre_slugs()
+    if cb is None or not pre:
+        return None
+    try:
+        cb(set(TOUCH_WATCH_SLUGS) | pre)
+        return "ok"
+    except Exception as e:
+        return f"err: {e}"[:80]
+
+
+def _bet_sheet_slug(client, item: dict) -> dict:
+    """One slip item → its Polymarket RUNG (slug + side), no book read: the
+    venue event (cached 120s across items, one day-list per sport), the
+    half-point rung walk under the chalk cap, the slug-agrees-with-the-bet
+    guard, the tick off the event download. {ok, slug, synthetic, entry,
+    pmm, why, chalk_c} or {ok: False, reason, slug?, rung_line?}. The
+    resolve builds on it; the warmer calls it to pre-subscribe."""
     sport = str(item.get("sport") or "").upper()
     away, home = item.get("away"), item.get("home")
     es = item.get("event_start")
@@ -15309,6 +15358,22 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
             _TICK_CACHE_AT[slug] = _time.monotonic()
     except (TypeError, ValueError):
         pass
+    return {"ok": True, "slug": slug, "synthetic": synthetic, "entry": entry, "pmm": pmm,
+            "why": why, "chalk_c": chalk_c}
+
+
+def _bet_sheet_resolve(client, item: dict) -> dict:
+    """One slip item → the Polymarket slug + the touch on our side. The
+    rung from `_bet_sheet_slug` (event lookup cached 120s across items),
+    then ONE book — the depth socket's when the slug is subscribed
+    (`_hand_poly_book`), else REST — and the seat on it."""
+    mt = str(item.get("market_type") or "")
+    es = item.get("event_start")
+    sl = _bet_sheet_slug(client, item)
+    if not sl.get("ok"):
+        return {k: v for k, v in sl.items() if k in ("ok", "reason", "slug", "rung_line")}
+    slug, synthetic, entry, pmm = sl["slug"], sl["synthetic"], sl["entry"], sl["pmm"]
+    why, chalk_c = sl["why"], sl["chalk_c"]
     book = _hand_poly_book(client, slug)
     if book is None:
         return {"ok": False, "reason": ("Polymarket is rate-limiting us — wait 20s and submit again"
@@ -16062,7 +16127,7 @@ def _hand_status_publish(sb, client) -> dict:
     # join the socket watch set (the touch tape publishes it each tick).
     global HAND_HELD_SLUGS, KALSHI_WATCH_TICKERS
     HAND_HELD_SLUGS = held_slugs
-    KALSHI_WATCH_TICKERS = k_watch                  # cellar/kalshifeed.py subscribes this set
+    KALSHI_WATCH_TICKERS = k_watch | _hand_pre_tickers()   # cellar/kalshifeed.py subscribes this set (+ the slip's pre-subscribed tickers)
     _HAND_STATUS_LAST.update({"at": _time.time(), "rows": out})   # the red alert reads this tick's strip
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
@@ -16787,6 +16852,7 @@ def _touch_tape_publish(sb) -> dict:
         want = set(str(x) for x in (cfg.get("slugs") or []) if x)
         want |= set(HAND_LIVE_SLUGS)                   # every resting hand bet is on the tape
         want |= set(HAND_HELD_SLUGS)                   # and every held lot (live quotes for the strip)
+        want |= _hand_pre_slugs()                      # and every slug a slip is about to bet (pre-subscribed)
         now_t = _time.time()
         for s_ in TOUCH_WATCH_SLUGS - want:            # just left: linger, keep recording
             _TOUCH_LINGER.setdefault(s_, now_t + _TOUCH_TAPE_LINGER_S)
@@ -21479,7 +21545,8 @@ def _hand_queue_drain(sb, now, worker: str, stats: dict, client=None, max_n: int
             _time.sleep(0.2)
         if warm is not None:
             warm["placing"] = len(todo)
-            stats["warm"] = {k: warm.get(k) for k in ("warmed", "errors")}
+            stats["warm"] = {k: warm.get(k) for k in ("warmed", "errors", "pre_slugs", "pre_tickers", "pushes")}
+            stats["books"] = dict(_HAND_BOOK_SRC)       # socket vs REST, the read for "is the slip on the socket"
         if deferred:
             v = _hand_verify_batch(sb, client, deferred)
             pv = stats.get("verify") or {}
@@ -21492,14 +21559,40 @@ def _hand_queue_drain(sb, now, worker: str, stats: dict, client=None, max_n: int
 
 
 _HAND_WARM_AHEAD = 2
+_HAND_PRE_PUSH_EVERY = 4            # push the pre-subscribe after this many new slugs (and at the end)
+
+
+def _hand_pre_row(client, row: dict, st: dict) -> None:
+    """Phase A of the warmer, one row: resolve the Polymarket rung (cached
+    lookups) and put its slug on the pre-subscribe set; resolve the Kalshi
+    ticker (when the lane is on) and put it on the Kalshi watch set."""
+    item = (row.get("payload") or {}).get("item") or {}
+    if not (item.get("away") and item.get("home") and item.get("event_start")):
+        return
+    sl = _bet_sheet_slug(client, item)
+    if sl.get("ok") and sl.get("slug") and sl["slug"] not in HAND_PRE_SLUGS:
+        HAND_PRE_SLUGS[sl["slug"]] = _time.monotonic()
+        st["pre_slugs"] = st.get("pre_slugs", 0) + 1
+        st["_since_push"] = st.get("_since_push", 0) + 1
+    if _hand_kalshi_on() and str(item.get("venue") or "auto").lower() != "poly":
+        import kalshi_venue as _kv
+        rs = _kv.resolve(str(item.get("sport") or "").upper(), item.get("away"), item.get("home"),
+                         item.get("event_start"), item)
+        tk = rs.get("ticker") if rs.get("ok") else None
+        if tk and tk not in KALSHI_PRE_TICKERS:
+            KALSHI_PRE_TICKERS[tk] = _time.monotonic()
+            st["pre_tickers"] = st.get("pre_tickers", 0) + 1
+            global KALSHI_WATCH_TICKERS
+            KALSHI_WATCH_TICKERS = set(KALSHI_WATCH_TICKERS) | {tk}    # the feed polls this set every 2s
 
 
 def _hand_warm_row(client, row: dict) -> None:
-    """Fill the venue CACHES a raw create row's resolve will read — the
-    Polymarket event+markets (`pmm_markets.lookup`, 120s) and the Kalshi
-    series/event ladder + fee (`kalshi_venue.resolve`'s sub-reads, 30-60s).
-    Nothing here decides or prices anything: the executor reads its OWN book
-    fresh at placement and runs the same resolve, which now hits the cache."""
+    """Phase B, one row: re-warm the venue CACHES the row's resolve will read
+    — the Polymarket event+markets (`pmm_markets.lookup`, 120s) and the
+    Kalshi series/event ladder + fee (`kalshi_venue.resolve`'s sub-reads,
+    30-60s). Nothing here decides or prices anything: the executor reads
+    its OWN book fresh at placement (off the socket once the pre-subscribe
+    has landed) and runs the same resolve, which now hits the cache."""
     item = (row.get("payload") or {}).get("item") or {}
     sport = str(item.get("sport") or "").upper()
     if not (item.get("away") and item.get("home") and item.get("event_start")):
@@ -21514,24 +21607,42 @@ def _hand_warm_row(client, row: dict) -> None:
 
 def _hand_warm_start(client, rows: list):
     """THE WARMER (Oct 24 2026, Rob: "if you can figure out a way… make them
-    actually be a lot faster"): a daemon thread that walks the claimed rows in
-    order, warming the next `_HAND_WARM_AHEAD` rows' venue lookups while the
-    placer is busy with the current one — the lookups overlap the create
-    instead of queuing behind it. Reads only (the same paced venue reads the
-    executor would make a moment later); the placer sets `placing` so the
-    warmer never runs away from it. Kill switch `machine_flags hand_prewarm`."""
+    actually be a lot faster" / "GET ON WEBSOCKET, off REST"): a daemon
+    thread beside the placer. PHASE A walks every claimed row once, fast
+    (cached lookups): resolves its rung and PRE-SUBSCRIBES the slug on the
+    depth socket (urgent push every few slugs, so the first rebuild lands
+    while the placer is on bet two or three) and the Kalshi ticker on the
+    Kalshi feed — from then on the placer's book reads come off the
+    sockets. PHASE B re-warms the venue caches for the rows the placer has
+    not reached yet. Reads only, the same paced venue reads the executor
+    would make a moment later; `placing` is where the placer is. Kill
+    switch `machine_flags hand_prewarm`."""
     if not _machine_flag("hand_prewarm", True):
         return None
-    st = {"placing": 0, "warmed": 0, "errors": 0}
+    st = {"placing": 0, "warmed": 0, "errors": 0, "pre_slugs": 0, "pre_tickers": 0, "pushes": 0}
     raw = [r for r in rows if r.get("op") == "create" and not r.get("slug")]
     if len(raw) < 2:
         return None
 
     def _run():
+        # phase A: every row, in order — the slugs go to the socket first
+        for row in raw:
+            if st["placing"] >= len(rows):
+                return
+            try:
+                _hand_pre_row(client, row, st)
+            except Exception:
+                st["errors"] += 1
+            if st.get("_since_push", 0) >= _HAND_PRE_PUSH_EVERY:
+                st["_since_push"] = 0
+                if _hand_pre_push() == "ok":
+                    st["pushes"] += 1
+        if st.get("_since_push", 0):
+            st["_since_push"] = 0
+            if _hand_pre_push() == "ok":
+                st["pushes"] += 1
+        # phase B: the rows the placer has not reached, caches re-warmed
         for k, row in enumerate(rows):
-            # wait until the placer is within reach
-            while st["placing"] < k - _HAND_WARM_AHEAD and st["placing"] < len(rows):
-                _time.sleep(0.05)
             if st["placing"] >= len(rows):
                 return
             if st["placing"] >= k:
@@ -40581,6 +40692,7 @@ _REPEG_BUDGET_S = 20.0    # hard wall clock for the chase loop. Stops mid-pass
 # lap's list is authoritative and refreshes every ~2 min regardless.
 _WS_WATCHLIST_CB = None
 _WS_WATCHLIST_MERGE_CB = None     # push_watch(replace=False) — the pair lane's push
+_WS_WATCHLIST_URGENT_CB = None    # push_watch(replace=False, urgent=True) — the slip's pre-subscribe
 # TARGETED LAPS (Aug 31 2026, user: "if the websocket is telling you what
 # just moved, why the hell are you reading 130 slugs"): drain_dirty hands
 # the lap the set of markets the socket saw move since last lap; the

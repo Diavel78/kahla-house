@@ -480,6 +480,13 @@ class Runner:
                         _app._WS_WATCHLIST_MERGE_CB = (
                             lambda slugs: _wsf0.push_watch(set(slugs),
                                                            replace=False))
+                        # the slip's pre-subscribe: merge + a faster core
+                        # rebuild, so the bets about to be placed read
+                        # their books off the depth socket, not REST
+                        _app._WS_WATCHLIST_URGENT_CB = (
+                            lambda slugs: _wsf0.push_watch(set(slugs),
+                                                           replace=False,
+                                                           urgent=True))
                         # Targeted laps: the repeg reads books only for
                         # markets the socket named (None = socket can't
                         # vouch → full sweep, today's behavior).

@@ -78,6 +78,11 @@ MKTS_MAX_SLUGS = 4000
 MKTS_MAX_RIDS = 10
 CORE_REBUILD_RIDS = 2
 CORE_REBUILD_MIN_S = 120.0
+# THE SLIP IS URGENT (Oct 24 2026, Rob: "GET ON WEBSOCKET, off REST"): a push
+# carrying the slugs a slip is about to bet may rebuild core after this
+# much instead of the 2-min clock — one rebuild per slip, not one per slug.
+CORE_REBUILD_URGENT_S = 15.0
+URGENT_WINDOW_S = 30.0
 CAP_HOLD_S = 60.0            # no new subscribes for this long after the venue says the connection is full
 PACK_FLUSH_MIN_S = 2.0       # pack layer runs at most this often (it rode every frame)
 AUDIT_GRACE_S = 180.0        # no baseline audits this long after a (re)connect
@@ -482,7 +487,7 @@ class WsFeed:
         if pf is not None:
             pf.add_group(str(gid), set(slugs), exp)
 
-    def push_watch(self, slugs: set, replace: bool) -> None:
+    def push_watch(self, slugs: set, replace: bool, urgent: bool = False) -> None:
         """The quoted set → the LITE core group AND the depth connection.
 
         A partial push (replace=False: one order event's slug) is MERGED
@@ -513,10 +518,10 @@ class WsFeed:
             pass
         self._watch_full = full
         if getattr(self, "mkts", None) is not None:
-            self.mkts.set_slugs(set(full), replace=True)
+            self.mkts.set_slugs(set(full), replace=True, urgent=urgent)
         d = getattr(self, "depth_feed", None)
         if d is not None:
-            d.set_slugs(set(full), replace=True)
+            d.set_slugs(set(full), replace=True, urgent=urgent)
 
     @staticmethod
     def _pair_slugs() -> set:
@@ -968,10 +973,14 @@ class MarketsFeed:
         self.audit_stats = {"packs": 0, "silent": 0, "missing": 0}
 
     # ── public API (lane threads queue; the feed thread executes) ──
-    def set_slugs(self, slugs: set, replace: bool) -> None:
+    def set_slugs(self, slugs: set, replace: bool, urgent: bool = False) -> None:
         """Back-compat entry for the repeg lap's watch-list push: the
         whole set lands as the reserved 'core' group (replace = re-add;
-        dedup against ladder groups happens at execution)."""
+        dedup against ladder groups happens at execution). `urgent` (the
+        slip's pre-subscribe) lets the next core rebuild fire after
+        CORE_REBUILD_URGENT_S instead of the 2-minute clock."""
+        if urgent:
+            self._urgent_until = time.time() + URGENT_WINDOW_S
         self.add_group("core", set(slugs), None)
 
     def add_group(self, gid: str, slugs: set, expire_ts=None) -> None:
@@ -1218,9 +1227,11 @@ class MarketsFeed:
                 # evicted a 350-rung pack to get it — 125 evictions in 20
                 # minutes, coverage 1051 of 2640 rungs, ladders priced over
                 # REST. New slugs now wait for the next whole-set rebuild.
+                _min_s = (CORE_REBUILD_URGENT_S if nowt < getattr(self, "_urgent_until", 0.0)
+                          else CORE_REBUILD_MIN_S)
                 _rebuild = ((len(stale) > 20 or len(c_rids) >= CORE_REBUILD_RIDS
                              or bool(_new_d))
-                            and nowt - self._core_rebuilt_at >= CORE_REBUILD_MIN_S)
+                            and nowt - self._core_rebuilt_at >= _min_s)
                 if _rebuild:
                     self._core_rebuilt_at = nowt
                     for r in c_rids:
