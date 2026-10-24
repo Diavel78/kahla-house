@@ -287,6 +287,15 @@
         .si .tag.rerung { background: var(--a-bd); color: var(--bg); }
         .si .tag.live { background: #8b5cf6; color: #fff; }
         .slip-cost { color: var(--text2); font-size: 14px; font-family: var(--mono); }
+        /* THE PLACING VIEW (Oct 24 2026, Rob: "make your process of putting those in look seamless… even if it's not instant") */
+        .slip-prog { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin: 0 16px; display: none; }
+        .slip.placing .slip-prog { display: block; }
+        .slip-prog i { display: block; height: 100%; width: 0; background: var(--g-bd); transition: width .6s ease; }
+        .si .q.now { color: var(--a-tx); animation: khpulse 1.2s ease-in-out infinite; }
+        .si .q.done { color: var(--g-tx); }
+        .si.done { opacity: .55; transition: opacity .8s; }
+        @keyframes khpulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+        .btn.go.arm { background: var(--a-bd); border-color: var(--a-bd); color: var(--bg); }
         .toast { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 99; background: var(--card2); border: 1px solid var(--line2);
                  color: var(--text); padding: 12px 16px; border-radius: 12px; font-size: 15px; opacity: 0; transition: opacity .2s;
                  pointer-events: none; max-width: calc(100vw - 32px); }
@@ -366,6 +375,7 @@
                 <span class="slip-cost" id="slipCost"></span>
                 <span class="chev" id="slipChev">Open</span>
             </div>
+            <div class="slip-prog"><i id="slipProgBar"></i></div>
             <div class="slip-b">
                 <div id="slipItems"></div>
                 <div class="slip-f">
@@ -614,7 +624,8 @@
     function autoOpenSlip() { if (!_slipUserHid) toggleSlip(true); }
     try { const s = JSON.parse(localStorage.getItem(SLIP_KEY) || '{}'); _slip = s.items || []; if (s.contracts) document.getElementById('contracts').value = s.contracts; } catch (e) {}
     function saveSlip() {
-        try { localStorage.setItem(SLIP_KEY, JSON.stringify({ items: _slip.map(i => ({ ...i, q: (i.q && i.q.queued) ? i.q : undefined })), contracts: document.getElementById('contracts').value, venue: venueSel() })); } catch (e) {}
+        disarmPlace();
+        try { localStorage.setItem(SLIP_KEY, JSON.stringify({ items: _slip.filter(i => !(i.q && i.q.done)).map(i => ({ ...i, q: (i.q && i.q.queued) ? i.q : undefined })), contracts: document.getElementById('contracts').value, venue: venueSel() })); } catch (e) {}
     }
     // THE VENUE (Oct 18 2026): auto = the box quotes both venues, adds each
     // one's maker fee and rests on the cheaper seat (Polymarket is home;
@@ -641,22 +652,56 @@
                          market_type: mt, side, line, label, game: shortTeam(g.away) + ' @ ' + shortTeam(g.home) });
             autoOpenSlip();
         }
-        saveSlip(); renderSlip(); renderGames();
+        saveSlip(); renderSlip();
+        if (!refreshSideBtn(key)) renderGames();
+    }
+    // ONE BUTTON, NOT THE WHOLE SHEET (Oct 24 2026, Rob: "slow and clunky"):
+    // a tap used to rebuild every game card's HTML. Flip the tapped button's
+    // slip state in place; fall back to the full render only when the button
+    // isn't on screen or already carries a bet (its state is the bet's).
+    function refreshSideBtn(key) {
+        const sel = (window.CSS && CSS.escape) ? CSS.escape(key) : key.replace(/(["\\])/g, '\\$1');
+        const btn = document.querySelector('.bb[data-k="' + sel + '"]');
+        if (!btn || /\bst-/.test(btn.className)) return false;
+        const on = inSlip(key);
+        btn.classList.toggle('in', on);
+        let sub = btn.querySelector('.bs');
+        if (on) { if (!sub) { sub = document.createElement('span'); sub.className = 'bs'; btn.appendChild(sub); } sub.textContent = '✓ on the slip'; }
+        else if (sub) sub.remove();
+        return true;
     }
     function removeSlip(key) { _slip = _slip.filter(i => i.key !== key); saveSlip(); renderSlip(); renderGames(); loadBetsRender(); }
     function clearSlip() { _slip = []; saveSlip(); renderSlip(); renderGames(); loadBetsRender(); }
+    // The items a submit would send: not the ones already queued on the box
+    // or just placed (those are the poller's).
+    function freshItems() { return _slip.filter(i => !(i.q && (i.q.queued || i.q.done))); }
     function submitLabel() {
-        const nb = _slip.filter(i => !i.op).length, no = _slip.length - nb;
+        const fr = freshItems();
+        const nb = fr.filter(i => !i.op).length, no = fr.length - nb;
         if (nb && no) return 'Place ' + nb + ' · run ' + no;
         if (no) return 'Run ' + no + ' action' + (no === 1 ? '' : 's');
         return 'Place bets';
     }
     function contractsN() { const n = parseInt(document.getElementById('contracts').value, 10); return (n >= 1 && n <= 250) ? n : 10; }
+    // Queue position of each queued item: the box runs rows oldest-first, so
+    // the lowest queue id is the one being placed right now.
+    function _queuePos() {
+        const qi = _slip.filter(i => i.q && i.q.queued && i.q.queue_id).sort((a, b) => a.q.queue_id - b.q.queue_id);
+        const pos = {}; qi.forEach((i, k) => { pos[i.key] = k; });
+        return pos;
+    }
+    function _queueLine(i, pos) {
+        const k = pos[i.key];
+        if (k === 0) return '<div class="q now">⏳ placing now on the box…</div>';
+        if (k > 0) return '<div class="q wait">· in line · ' + (k + 1) + ' of ' + Object.keys(pos).length + '</div>';
+        return '<div class="q wait">⏳ ' + esc(i.q.reason || 'queued on the box…') + '</div>';
+    }
     function renderSlip() {
-        document.getElementById('slipCnt').textContent = _slip.length;
+        document.getElementById('slipCnt').textContent = _slip.filter(i => !(i.q && i.q.done)).length;
         if (!_slip.length) _slipUserHid = false;
         const n = contractsN();
         let cost = 0, known = 0;
+        const pos = _queuePos();
         const el = document.getElementById('slipItems');
         if (!_slip.length) { el.innerHTML = '<div class="empty" style="padding:18px 0">Nothing on the slip. Tap a side on a game below.</div>'; }
         else el.innerHTML = _slip.map(i => {
@@ -672,13 +717,16 @@
                     : i.op === 'rerung'
                     ? ('cancel ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + ' → rest them on ' + i.rerung_label + (i.rerung_c != null ? ' (bid ' + i.rerung_c + '¢ now)' : '') + ' · priced at the touch when it runs')
                     : ('pull the resting order' + (o.leaves != null ? ' · ' + Math.round(o.leaves) + ' unfilled' : ''));
-                if (i.q && i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'queued on the box…') + '</div>';
+                if (i.q && i.q.done) q = '<div class="q done">✓ ' + esc(i.q.note || 'done') + '</div>';
+                else if (i.q && i.q.queued) q = _queueLine(i, pos);
                 else if (i.q && i.q.ok === false) q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
                 else q = '<div class="q">' + esc(line) + '</div>';
-                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : i.op === 'live' ? 'LIVE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
+                return '<div class="si' + (i.q && i.q.done ? ' done' : '') + '"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : i.op === 'live' ? 'LIVE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                      + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
             }
-            if (i.q) {
+            if (i.q && i.q.done) {
+                q = '<div class="q done">✓ placed' + (i.q.price_c != null ? ' @ ' + i.q.price_c + '¢' : '') + ' · ' + (i.q.venue === 'KALSHI' ? 'Kalshi' : 'Polymarket') + '</div>';
+            } else if (i.q) {
                 if (i.q.ok) {
                     const vp = i.q.venue_pick || {}, ai = vp.all_in || {};
                     const vtxt = i.q.venue ? ('<b>' + (i.q.venue === 'KALSHI' ? 'KALSHI' : 'Polymarket') + '</b>'
@@ -687,17 +735,34 @@
                     q = '<div class="q ok">' + vtxt + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
                       + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.stack_q || i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + pinQuoteTxt(i) + '</div>';
                     cost += n * i.q.price_c / 100; known++;
-                } else if (i.q.queued) q = '<div class="q wait">⏳ ' + esc(i.q.reason || 'placing on the box…') + '</div>';
+                } else if (i.q.queued) q = _queueLine(i, pos);
                 else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + pinQuoteTxt(i) + '</div>';
             }
-            return '<div class="si"><div class="lab"><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport) + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
+            return '<div class="si' + (i.q && i.q.done ? ' done' : '') + '"><div class="lab"><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport) + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                  + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
         }).join('');
-        const nb = _slip.filter(i => !i.op).length, no = _slip.length - nb;
-        document.getElementById('slipCost').textContent = nb ? (known ? '$' + cost.toFixed(2) + (known < nb ? ' (' + known + '/' + nb + ' quoted)' : '') : n + ' contracts each (new bets only)') : (no ? no + ' action' + (no === 1 ? '' : 's') + ' · own sizes' : '');
-        document.getElementById('btnPlace').disabled = !_slip.length;
-        document.getElementById('btnQuote').disabled = !nb;
-        if (!_busy) document.getElementById('btnPlace').textContent = submitLabel();
+        const live = _slip.filter(i => !(i.q && i.q.done));
+        const nb = live.filter(i => !i.op).length, no = live.length - nb;
+        const nq = Object.keys(pos).length;
+        const slipEl = document.getElementById('slip');
+        if (nq && _batch) {
+            // THE PLACING VIEW: count + a bar + an honest ETA off the measured pace
+            const done = _batch.done, total = Math.max(_batch.total, done + nq);
+            const el_s = (Date.now() - _batch.t0) / 1000;
+            let eta = done ? Math.round((total - done) * (el_s / done)) : null;
+            const etaTxt = eta == null ? 'starting on the box…' : eta < 60 ? '~' + eta + 's left' : '~' + Math.floor(eta / 60) + 'm ' + String(eta % 60).padStart(2, '0') + 's left';
+            document.getElementById('slipCost').textContent = 'Placing ' + done + '/' + total + ' · ' + etaTxt;
+            document.getElementById('slipProgBar').style.width = Math.round(100 * done / total) + '%';
+            slipEl.classList.add('placing');
+        } else {
+            slipEl.classList.remove('placing');
+            document.getElementById('slipCost').textContent = nb ? (known ? '$' + cost.toFixed(2) + (known < nb ? ' (' + known + '/' + nb + ' quoted)' : '') : n + ' contracts each (new bets only)') : (no ? no + ' action' + (no === 1 ? '' : 's') + ' · own sizes' : '');
+        }
+        const bp = document.getElementById('btnPlace');
+        const fr = freshItems();
+        bp.disabled = !fr.length;
+        document.getElementById('btnQuote').disabled = !fr.some(i => !i.op);
+        if (!_busy && !bp.classList.contains('arm')) bp.textContent = (!fr.length && nq) ? 'Placing…' : submitLabel();
     }
     // The slip's third quote (Rob, Oct 19 2026: "poly, Kalshi, and pin"):
     // Pinnacle's price for the same bet = Bet105's. `cents` = implied with
@@ -737,8 +802,8 @@
         throw err;
     }
     async function postSlip(preview) {
-        if (_busy || !_slip.length) return;
-        const betItems = _slip.filter(i => !i.op), opItems = _slip.filter(i => i.op);
+        if (_busy || !freshItems().length) return;
+        const betItems = freshItems().filter(i => !i.op), opItems = freshItems().filter(i => i.op);
         if (preview && !betItems.length) return;
         _busy = true;
         const bq = document.getElementById('btnQuote'), bp = document.getElementById('btnPlace');
@@ -780,6 +845,7 @@
             const notes = [];
             _slip = _slip.filter(i => {
                 if (preview && i.op) return true;                       // quotes don't touch actions
+                if (i.q && (i.q.queued || i.q.done)) return true;       // the box's — a second submit never touches them
                 const x = byKey[i.key];
                 if (!x) { i.q = { ok: false, reason: 'no result' }; return true; }
                 if (!preview && x.ok) {
@@ -795,13 +861,17 @@
                 const bits = [];
                 if (placed) bits.push('Placed ' + placed + ' bet' + (placed === 1 ? '' : 's'));
                 if (ran) bits.push(notes.join(' · '));
-                if (qn) bits.push(qn + ' placing on the box…');
+                if (qn) {
+                    if (_batch) _batch.total += qn;                      // a second slip joins the running batch
+                    else _batch = { t0: Date.now(), total: qn, done: 0, fail: 0, notes: [] };
+                    bits.push('Placing ' + qn + ' on the box…');
+                }
                 const dropped = _slip.filter(i => i.q && i.q.reason === DROPPED).length;
                 if (dropped) bits.push(dropped + ' lost the connection — check My bets, then Place again (no double bet)');
                 else if (stayed) bits.push(stayed + ' stayed on the slip');
                 toast(bits.length ? bits.join(' · ') : 'Nothing done — see the slip', !(placed || ran || qn));
-                loadBets();
-                if (qn) pollQueue();
+                if (placed || ran) loadBets();
+                if (qn) { renderSlip(); pollQueue(); }
             }
         } catch (e) { toast('Failed: ' + e, true); }
         finally { _busy = false; bp.textContent = submitLabel(); renderSlip(); }
@@ -814,42 +884,102 @@
         return i.label + ': ' + (x.note || 'no move');
     }
     // Queued items (the box is placing them): poll until done/failed.
-    let _pollT = null;
+    // THE PLACING VIEW (Oct 24 2026): the slip narrates the batch — the item
+    // being placed pulses, the rest show their place in line, a placed item
+    // turns ✓ and fades off, the header carries count + ETA — and the sheet
+    // and My bets refresh on a throttle (a full re-render every 1.5s poll was
+    // the "clunky"), with ONE summary toast when the box is done.
+    let _pollT = null, _batch = null, _gamesT = 0, _betsT = 0, _sweepT = null;
+    function throttledGames() { const t = Date.now(); if (t - _gamesT > 6000) { _gamesT = t; renderGames(); } }
+    function throttledBets() { const t = Date.now(); if (t - _betsT > 8000) { _betsT = t; loadBets(); } }
+    function sweepDone() {
+        clearTimeout(_sweepT);
+        const t = Date.now();
+        const before = _slip.length;
+        _slip = _slip.filter(i => !(i.q && i.q.done && t - (i.doneAt || 0) > 1800));
+        if (_slip.length !== before) renderSlip();
+        if (_slip.some(i => i.q && i.q.done)) _sweepT = setTimeout(sweepDone, 700);
+    }
+    function finishBatch() {
+        if (!_batch) return;
+        const b = _batch; _batch = null;
+        const secs = Math.round((Date.now() - b.t0) / 1000);
+        const dur = secs < 60 ? secs + 's' : Math.floor(secs / 60) + 'm ' + String(secs % 60).padStart(2, '0') + 's';
+        const bits = [];
+        if (b.done) bits.push(b.done + (b.done === 1 ? ' bet' : ' bets') + ' placed by the box in ' + dur);
+        if (b.notes.length) bits.push(b.notes.join(' · '));
+        if (b.fail) bits.push(b.fail + ' stayed on the slip — see the reason');
+        if (bits.length) toast(bits.join(' · '), !b.done && b.fail > 0);
+        renderSlip(); renderGames(); loadBets();
+    }
     async function pollQueue() {
         clearTimeout(_pollT);
         const qi = _slip.filter(i => i.q && i.q.queued && i.q.queue_id);
-        if (!qi.length) return;
+        if (!qi.length) { finishBatch(); return; }
+        if (!_batch) _batch = { t0: Date.now(), total: qi.length, done: 0, fail: 0, notes: [] };   // a reload mid-batch
         try {
             const r = await authFetch('/api/bet-sheets/queue?ids=' + qi.map(i => i.q.queue_id).join(','));
             const d = r ? await r.json().catch(() => null) : null;
             if (d && d.ok) {
-                let placed = 0; const ran = [];
-                _slip = _slip.filter(i => {
-                    if (!(i.q && i.q.queued)) return true;
+                let placed = 0; const ran = []; const now = Date.now();
+                _slip.forEach(i => {
+                    if (!(i.q && i.q.queued)) return;
                     const row = d.rows[String(i.q.queue_id)];
-                    if (!row) return true;
-                    if (row.state === 'done' && (row.result || {}).ok !== false) { if (i.op) ran.push(opNote(i, row.result || {})); else placed++; return false; }
-                    if (row.state === 'failed') { i.q = { ok: false, reason: row.error || 'failed' }; }
-                    return true;
+                    if (!row) return;
+                    const res = row.result || {};
+                    if (row.state === 'done' && res.ok !== false) {
+                        if (i.op) ran.push(opNote(i, res)); else placed++;
+                        i.q = { ok: true, done: true, price_c: res.price_c, venue: res.venue, note: i.op ? opNote(i, res) : null };
+                        i.doneAt = now;
+                    } else if (row.state === 'failed') { i.q = { ok: false, reason: row.error || 'failed' }; _batch.fail++; }
                 });
-                if (placed || ran.length) { toast([placed ? 'Placed ' + placed + ' bet' + (placed === 1 ? '' : 's') + ' from the box' : ''].concat(ran).filter(Boolean).join(' · ')); loadBets(); }
-                saveSlip(); renderSlip(); renderGames();
+                if (placed || ran.length) {
+                    _batch.done += placed + ran.length;
+                    ran.forEach(x => _batch.notes.push(x));
+                    saveSlip(); renderSlip();
+                    throttledGames(); throttledBets();
+                    sweepDone();
+                } else if (_slip.some(i => i.q && i.q.ok === false && !i.q.queued)) { saveSlip(); renderSlip(); }
+                else renderSlip();                                   // the ETA ticks
             }
         } catch (e) {}
         if (_slip.some(i => i.q && i.q.queued)) _pollT = setTimeout(pollQueue, 1500);
+        else { sweepDone(); finishBatch(); }
     }
     function quoteSlip() { postSlip(true); }
+    // TWO TAPS, NO MODAL (Oct 24 2026): the first tap arms the button with
+    // what it will do, the second (within 7s, not a double-tap) sends it.
+    // Touching the slip disarms it (saveSlip).
+    let _armT = null, _armAt = 0;
+    function disarmPlace() {
+        clearTimeout(_armT); _armT = null;
+        const bp = document.getElementById('btnPlace');
+        if (!bp || !bp.classList.contains('arm')) return;
+        bp.classList.remove('arm');
+        if (!_busy) bp.textContent = submitLabel();
+    }
     function placeSlip() {
-        const n = contractsN();
-        const nb = _slip.filter(i => !i.op).length, nr = _slip.filter(i => i.op === 'repeg').length, nc = _slip.filter(i => i.op === 'cancel').length, nx = _slip.filter(i => i.op === 'rerung').length, nl = _slip.filter(i => i.op === 'live').length;
+        if (_busy || !freshItems().length) return;
+        const bp = document.getElementById('btnPlace');
+        if (bp.classList.contains('arm')) {
+            if (Date.now() - _armAt < 600) return;              // a double-tap is not a confirm
+            disarmPlace();
+            postSlip(false);
+            return;
+        }
+        const n = contractsN(), fr = freshItems();
+        const nb = fr.filter(i => !i.op).length, nr = fr.filter(i => i.op === 'repeg').length, nc = fr.filter(i => i.op === 'cancel').length, nx = fr.filter(i => i.op === 'rerung').length, nl = fr.filter(i => i.op === 'live').length;
         const parts = [];
-        if (nb) parts.push('place ' + nb + ' resting bet' + (nb === 1 ? '' : 's') + ' at the touch, ' + n + ' contracts each');
-        if (nr) parts.push('re-peg ' + nr + ' order' + (nr === 1 ? '' : 's') + ' to the touch');
-        if (nc) parts.push('cancel ' + nc + ' resting order' + (nc === 1 ? '' : 's'));
-        if (nl) parts.push('move ' + nl + ' bet' + (nl === 1 ? '' : 's') + ' to live at 49.5¢ (no game-start cancel — yours to watch)');
-        if (nx) parts.push('move ' + nx + ' bet' + (nx === 1 ? '' : 's') + ' to the current line (cancel + new order)');
-        if (!confirm(parts.join('; ').replace(/^./, c => c.toUpperCase()) + '?')) return;
-        postSlip(false);
+        if (nb) parts.push(nb + ' bet' + (nb === 1 ? '' : 's') + ' × ' + n + ' at the touch');
+        if (nr) parts.push('re-peg ' + nr);
+        if (nc) parts.push('cancel ' + nc);
+        if (nl) parts.push(nl + ' to live 49.5¢');
+        if (nx) parts.push(nx + ' to the new line');
+        bp.classList.add('arm');
+        bp.textContent = 'Tap again → ' + parts.join(' · ');
+        _armAt = Date.now();
+        clearTimeout(_armT);
+        _armT = setTimeout(disarmPlace, 7000);
     }
     let _toastT = null;
     function toast(msg, bad) {
@@ -985,7 +1115,7 @@
             click = 'toggleSide(' + args + ')';
         }
         const pr = price != null ? ' <span class="pr">' + amPct(price) + '</span>' : '';   // the sheet's book price, American / %
-        return '<button class="' + cls + '" onclick=\'' + click.replace(/'/g, '&#39;') + '\'><span class="bl">' + esc(label) + pr + '</span>' + sub + '</button>';
+        return '<button class="' + cls + '" data-k="' + esc(key) + '" onclick=\'' + click.replace(/'/g, '&#39;') + '\'><span class="bl">' + esc(label) + pr + '</span>' + sub + '</button>';
     }
     // The pending pre-game bets on a game (both lookups: market id, event name).
     function betsOnGame(g) {

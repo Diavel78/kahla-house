@@ -15338,11 +15338,27 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
             "_book": book}
 
 
+_BS_MID_CACHE: dict = {}       # (sport, away, home, start) -> (mono_ts, market id) — a slip carries a game twice
+_BS_MID_TTL_S = 120.0
+
+
 def _bet_sheet_market_id(sb, sport: str, away: str, home: str, event_start: str):
     """The markets row the pick joins on (the resolver grades by it). Exact
     event_name in a ±12h window, else a same-window row naming both teams'
     last tokens, else MINT one (notes.src='bet_sheet') — a sheet game the
-    spine never carried must still be gradeable."""
+    spine never carried must still be gradeable. Cached 2 min per game: the
+    slip's spread and total share one read (Oct 24 2026)."""
+    ck = (str(sport), str(away), str(home), str(event_start))
+    hit = _BS_MID_CACHE.get(ck)
+    if hit and _time.monotonic() - hit[0] < _BS_MID_TTL_S and hit[1] is not None:
+        return hit[1]
+    mid = _bet_sheet_market_id_read(sb, sport, away, home, event_start)
+    if mid is not None:
+        _BS_MID_CACHE[ck] = (_time.monotonic(), mid)
+    return mid
+
+
+def _bet_sheet_market_id_read(sb, sport: str, away: str, home: str, event_start: str):
     name = f"{away} @ {home}"
     try:
         dt = datetime.fromisoformat(str(event_start).replace("Z", "+00:00"))
@@ -15420,8 +15436,11 @@ def api_bet_sheets_place():
         return jsonify({"ok": False, "error": "contracts must be a number"}), 400
     if not isinstance(items, list) or not items:
         return jsonify({"ok": False, "error": "no items"}), 400
-    if len(items) > 40:
-        return jsonify({"ok": False, "error": "40 items per submit"}), 400
+    if len(items) > _HAND_SLIP_MAX:
+        # Oct 24 2026, Rob betting a whole CFB Saturday: "betting all the games
+        # at once errored out (max 40)". The queue write is ONE insert for the
+        # slip now, so the cap is a fat-finger fence, not a budget.
+        return jsonify({"ok": False, "error": f"{_HAND_SLIP_MAX} items per submit"}), 400
     try:
         client = get_client()
     except Exception as e:
@@ -15481,6 +15500,7 @@ def api_bet_sheets_place():
     if seen is None:
         return jsonify({"ok": False, "error": "couldn't check the queue for a repeat "
                                               "submit — nothing placed, try again"}), 503
+    fresh_rows, fresh_keys = [], []
     for it in items:
         it = it or {}
         key = it.get("key")
@@ -15493,19 +15513,27 @@ def api_bet_sheets_place():
             queued.append((seen[cid][0], {"key": key, "ok": True, "queue_id": seen[cid][0],
                                           "repeat": True}))
             continue
-        row = {"op": "create", "slug": None,      # resolved by the executor
-               "synthetic": False, "price_c": None,  # joins the touch at placement time
-               "contracts": contracts, "event_start": it.get("event_start"),
-               "payload": {"item": it, "asked_by": g.uid, "contracts": contracts,
-                           **({"cid": cid} if cid and _HAND_CID_RE.match(str(cid)) else {})}}
-        try:
-            rid = _hand_order_enqueue(sb, row)
-        except Exception as e:
-            results.append({"key": key, "ok": False, "reason": f"queue write failed: {e}"[:160]})
-            continue
-        queued.append((rid, {"key": key, "ok": True, "queue_id": rid}))
-    done = (_hand_orders_wait(sb, [rid for rid, _ in queued], t_end, until_claimed=True)
-            if queued else {})
+        fresh_rows.append({"op": "create", "slug": None,      # resolved by the executor
+                           "synthetic": False, "price_c": None,  # joins the touch at placement time
+                           "contracts": contracts, "event_start": it.get("event_start"),
+                           "payload": {"item": it, "asked_by": g.uid, "contracts": contracts,
+                                       **({"cid": cid} if cid and _HAND_CID_RE.match(str(cid)) else {})}})
+        fresh_keys.append(key)
+    # ONE INSERT FOR THE WHOLE SLIP (Oct 24 2026): a row per round trip through
+    # the tunnel was ~0.3s each — a 60-bet slip spent 18s just writing rows.
+    for key, rid in zip(fresh_keys, _hand_orders_enqueue_many(sb, fresh_rows)):
+        if rid is None:
+            results.append({"key": key, "ok": False, "reason": "queue write failed — try again"})
+        else:
+            queued.append((rid, {"key": key, "ok": True, "queue_id": rid}))
+    # A LIVE BOX MEANS DON'T WAIT (Oct 24 2026): this request used to hold the
+    # page ~12s ("Placing…", buttons dead) until the box CLAIMED the rows,
+    # then hand everything back as `queued` anyway. The queue watcher wakes
+    # the lane within a second of the insert; the page polls. The wait (and
+    # the Vercel fallback inside it) runs only when no box is alive.
+    done = {}
+    if queued and not _handbets_box_alive(sb):
+        done = _hand_orders_wait(sb, [rid for rid, _ in queued], t_end, until_claimed=True)
     placed = 0
     for rid, res in queued:
         out = done.get(rid)
@@ -15541,6 +15569,7 @@ def api_bet_sheets_place():
 # hand bet, cancels one, or re-pegs one, whichever side runs it.
 # ══════════════════════════════════════════════════════════════════════
 _HAND_CLAIM_WAIT_S = 12.0     # the box lane polls every 10s
+_HAND_SLIP_MAX = 150          # items per submit — a full CFB Saturday is ~60 games × 2 markets
 _HAND_EXPIRE_S = 900.0        # a pending row nobody ran in 15 min fails, never places late
 _HAND_ENSURED = {"ok": False, "at": 0.0}
 
@@ -15631,6 +15660,37 @@ def _hand_order_enqueue(sb, row: dict) -> int:
          "payload": row.get("payload") or {}}
     ins = sb.table("hand_orders").insert(r).execute()
     return (ins.data or [{}])[0].get("id")
+
+
+def _hand_orders_enqueue_many(sb, rows: list) -> list:
+    """Insert a whole slip in ONE write; returns the new ids in order (None
+    where a row could not be written). Falls back to one insert per row when
+    the batch answer does not line up — a row is never written twice."""
+    if not rows:
+        return []
+    shaped = [{"op": r["op"], "state": "pending", "slug": r.get("slug"),
+               "synthetic": bool(r.get("synthetic")), "price_c": r.get("price_c"),
+               "contracts": r.get("contracts"), "event_start": r.get("event_start"),
+               "order_id": r.get("order_id"), "pick_id": r.get("pick_id"),
+               "payload": r.get("payload") or {}} for r in rows]
+    try:
+        ins = sb.table("hand_orders").insert(shaped).execute()
+        ids = [(x or {}).get("id") for x in (ins.data or [])]
+        if len(ids) == len(shaped) and all(i is not None for i in ids):
+            return ids
+        if ids:                                   # a partial answer: trust nothing, but never re-insert
+            app.logger.warning("hand_orders: batch insert answered %s of %s ids", len(ids), len(shaped))
+            return ids + [None] * (len(shaped) - len(ids))
+    except Exception as e:
+        app.logger.warning("hand_orders: batch insert failed (%s) — one at a time", str(e)[:120])
+    out = []
+    for r in rows:
+        try:
+            out.append(_hand_order_enqueue(sb, r))
+        except Exception as e:
+            app.logger.warning("hand_orders: enqueue failed: %s", str(e)[:120])
+            out.append(None)
+    return out
 
 
 def _hand_order_claim(sb, row_id, worker: str) -> bool:
@@ -15776,6 +15836,17 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
         slug, syn = row.get("slug"), bool(row.get("synthetic"))
         price_c = row.get("price_c")
         book = None
+        # WHERE THE SECONDS GO (Oct 24 2026): every create records its phase
+        # times on the result (`ms`), so a slow slip names its slow phase —
+        # /api/bet-sheets/picks?queue=N reads them back.
+        ms: dict = {}
+        _t_ph = _time.monotonic()
+
+        def _lap(name):
+            nonlocal _t_ph
+            t = _time.monotonic()
+            ms[name] = ms.get(name, 0) + int((t - _t_ph) * 1000)
+            _t_ph = t
         if not slug:
             # THE FAST SLIP (Oct 5 2026, Rob after a 19-bet submit: "we need a
             # MUCH faster process… took forever… and took 2 submits"): Vercel
@@ -15789,6 +15860,7 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
             if want == "kalshi" and not k_on:
                 return {"ok": False, "error": "Kalshi is switched off (machine_flags hand_kalshi_enabled)"}
             rs = _bet_sheet_resolve(client, item)
+            _lap("resolve")
             k_rs = None
             if k_on and want != "poly":
                 # THE VENUE QUESTION (Oct 18 2026): both seats priced, fees
@@ -15798,6 +15870,7 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                     k_rs = _bet_sheet_resolve_kalshi(item)
                 except Exception as e:
                     k_rs = {"ok": False, "reason": f"Kalshi: {type(e).__name__}: {e}"[:120]}
+                _lap("kalshi")
             venue, vdet = _hand_venue_pick(want if k_on else "poly", rs, k_rs, row.get("contracts"),
                                            _hand_venue_min_gain_c())
             if venue is None:
@@ -15805,7 +15878,11 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                 return {"ok": False, "error": " · ".join(errs)[:220] or "could not resolve the rung"}
             if venue == "KALSHI":
                 rs.pop("_book", None) if isinstance(rs, dict) else None
-                return _hand_order_execute_kalshi(sb, row, pl, item, k_rs, rs, worker, vdet)
+                k_out = _hand_order_execute_kalshi(sb, row, pl, item, k_rs, rs, worker, vdet)
+                _lap("place_log")
+                if isinstance(k_out, dict):
+                    k_out["ms"] = ms
+                return k_out
             if not rs.get("ok"):
                 return {"ok": False, "error": rs.get("reason") or "could not resolve the rung"}
             slug, syn = rs["slug"], bool(rs.get("synthetic"))
@@ -15826,6 +15903,7 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
             row = dict(row, slug=slug, synthetic=syn, payload=pl)
         if book is None:
             book = _hand_poly_book(client, slug)
+            _lap("book")
         if book is None:
             return {"ok": False, "error": "book unreadable — try again"}
         seat_det = None
@@ -15839,8 +15917,9 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
         out, _st = _manual_order_place(client, slug, syn, price_c, row.get("contracts"),
                                        row.get("event_start"), book=book,
                                        verify=("socket" if deferred is not None else "fresh"))
+        _lap("place")
         if not out.get("ok"):
-            return {"ok": False, "error": out.get("error") or "order failed"}
+            return {"ok": False, "error": out.get("error") or "order failed", "ms": ms}
         res = {"ok": True, "via": worker, "order_id": out.get("order_id"),
                "state": out.get("state"), "resting": out.get("resting"),
                "cost": out.get("cost"), "price_c": out.get("price_c")}
@@ -15857,6 +15936,8 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
         pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), pl.get("item") or {},
                                             pl.get("resolve") or {}, res, contracts)
         res["pick_id"] = pick_id
+        _lap("log")
+        res["ms"] = ms
         if warn:
             res["warning"] = ((res.get("warning") or "") + " · " + warn).strip(" ·")
         return res
@@ -21331,12 +21412,90 @@ def _kalshi_probe_tick(sb) -> dict | None:
     return {"verdict": out.get("verdict"), "schema": (out.get("create") or {}).get("schema")}
 
 
-def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
-    """THE BOX LANE: claim every pending row in ONE update (oldest-first,
-    ≤max_n) and run them serially, BEFORE the strip/chase maintenance —
-    Oct 5 2026: 8 rows a tick behind a 5-10s maintenance pass made a
-    19-bet slip a multi-minute wait. Rows older than _HAND_EXPIRE_S are
-    failed, never placed late."""
+def _hand_queue_drain(sb, now, worker: str, stats: dict, client=None, max_n: int = 150,
+                      max_passes: int = 4):
+    """Claim + run every pending hand order, oldest first, in passes of
+    ≤max_n until a pass comes up short (nothing left) or max_passes. Returns
+    the venue client (made lazily). Folds counts into `stats`. Safe to call
+    from anywhere inside the lane's tick — claim-first, so a row never runs
+    twice whichever call reaches it."""
+    for _pass in range(max_passes):
+        try:
+            rows = (sb.table("hand_orders").select("*").eq("state", "pending")
+                    .order("created_at").limit(max_n).execute().data or [])
+        except Exception as e:
+            stats["gate"] = f"read_failed: {e}"[:120]
+            return client
+        if not rows:
+            return client
+        live, expired = [], []
+        for row in rows:
+            try:
+                age = (now - datetime.fromisoformat(
+                    str(row.get("created_at")).replace("Z", "+00:00"))).total_seconds()
+            except Exception:
+                age = 0.0
+            (expired if age > _HAND_EXPIRE_S else live).append(row)
+        for row in expired:
+            if _hand_order_claim(sb, row["id"], worker):
+                _hand_order_finish(sb, row["id"], {"ok": False, "error": "expired — nobody ran it in 15 min"})
+                stats["expired"] = stats.get("expired", 0) + 1
+        won = _hand_orders_claim_many(sb, [r["id"] for r in live], worker) if live else set()
+        raw = [r for r in live if r["id"] in won and r.get("op") == "create" and not r.get("slug")]
+        if raw:
+            # one events fetch per (sport, ET day) for the whole slip, not up
+            # to nine per game (pmm_markets.prefetch_day_events, Oct 7 2026)
+            try:
+                if client is None:
+                    client = get_client()
+                import pmm_markets as _pm
+                by_sport: dict = {}
+                for r in raw:
+                    it = (r.get("payload") or {}).get("item") or {}
+                    sp = str(it.get("sport") or "").upper()
+                    if sp:
+                        by_sport.setdefault(sp, []).append(it.get("event_start"))
+                stats["prefetch"] = {sp: _pm.prefetch_day_events(client, sp, st)
+                                     for sp, st in by_sport.items()}
+            except Exception as e:
+                stats["prefetch"] = {"err": f"{type(e).__name__}: {e}"[:80]}
+        deferred: list = []
+        n_won = 0
+        for row in live:
+            if row["id"] not in won:
+                continue
+            n_won += 1
+            stats["claimed"] = stats.get("claimed", 0) + 1
+            try:
+                if client is None:
+                    client = get_client()
+                res = _hand_order_execute(sb, client, row, worker, deferred=deferred)
+            except Exception as e:
+                res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
+            _hand_order_finish(sb, row["id"], res)
+            stats["done" if res.get("ok") else "failed"] = stats.get("done" if res.get("ok") else "failed", 0) + 1
+            _time.sleep(0.2)
+        if deferred:
+            v = _hand_verify_batch(sb, client, deferred)
+            pv = stats.get("verify") or {}
+            stats["verify"] = {k: (pv.get(k, 0) + v.get(k, 0)) for k in set(pv) | set(v)}
+        if n_won:
+            stats["passes"] = stats.get("passes", 0) + 1
+        if len(rows) < max_n:
+            return client                         # that was everything pending
+    return client
+
+
+def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
+    """THE BOX LANE: run the hand-order queue FIRST (batch claim, serial
+    venue writes), then the strip/chase/start/move maintenance — and DRAIN
+    THE QUEUE AGAIN BETWEEN THE MAINTENANCE PHASES. Oct 24 2026, a CFB
+    Saturday: Rob's 17-bet slip waited 54s and his 34-bet slip 39s for a
+    CLAIM, because the lane was mid-maintenance (strip publish, start/move
+    rules, recon, chase — 40-60s with ~90 bets on the board) and the
+    sticky wake only re-runs the lane after the tick ends. A slip submitted
+    mid-tick now starts within one phase. Rows older than _HAND_EXPIRE_S
+    are failed, never placed late."""
     stats = {"claimed": 0, "done": 0, "failed": 0, "expired": 0}
     if not _hand_orders_ensure(sb):
         stats["gate"] = "no_table"
@@ -21345,59 +21504,16 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
         stats["kalshi_probe"] = _kalshi_probe_tick(sb)      # one-shot, flag-driven, box IP
     except Exception as e:
         stats["kalshi_probe"] = {"err": f"{type(e).__name__}: {e}"[:120]}
-    try:
-        rows = (sb.table("hand_orders").select("*").eq("state", "pending")
-                .order("created_at").limit(max_n).execute().data or [])
-    except Exception as e:
-        stats["gate"] = f"read_failed: {e}"[:120]
+    client = _hand_queue_drain(sb, now, worker, stats, None, max_n=max_n)
+    if stats.get("gate"):
         return stats
-    client = None
-    live, expired = [], []
-    for row in rows:
+
+    def _drain():
+        nonlocal client
         try:
-            age = (now - datetime.fromisoformat(
-                str(row.get("created_at")).replace("Z", "+00:00"))).total_seconds()
-        except Exception:
-            age = 0.0
-        (expired if age > _HAND_EXPIRE_S else live).append(row)
-    for row in expired:
-        if _hand_order_claim(sb, row["id"], worker):
-            _hand_order_finish(sb, row["id"], {"ok": False, "error": "expired — nobody ran it in 15 min"})
-            stats["expired"] += 1
-    won = _hand_orders_claim_many(sb, [r["id"] for r in live], worker) if live else set()
-    raw = [r for r in live if r["id"] in won and r.get("op") == "create" and not r.get("slug")]
-    if raw:
-        # one events fetch per (sport, ET day) for the whole slip, not up
-        # to nine per game (pmm_markets.prefetch_day_events, Oct 7 2026)
-        try:
-            client = get_client()
-            import pmm_markets as _pm
-            by_sport: dict = {}
-            for r in raw:
-                it = (r.get("payload") or {}).get("item") or {}
-                sp = str(it.get("sport") or "").upper()
-                if sp:
-                    by_sport.setdefault(sp, []).append(it.get("event_start"))
-            stats["prefetch"] = {sp: _pm.prefetch_day_events(client, sp, st)
-                                 for sp, st in by_sport.items()}
+            client = _hand_queue_drain(sb, datetime.now(timezone.utc), worker, stats, client, max_n=max_n)
         except Exception as e:
-            stats["prefetch"] = {"err": f"{type(e).__name__}: {e}"[:80]}
-    deferred: list = []
-    for row in live:
-        if row["id"] not in won:
-            continue
-        stats["claimed"] += 1
-        try:
-            if client is None:
-                client = get_client()
-            res = _hand_order_execute(sb, client, row, worker, deferred=deferred)
-        except Exception as e:
-            res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
-        _hand_order_finish(sb, row["id"], res)
-        stats["done" if res.get("ok") else "failed"] += 1
-        _time.sleep(0.2)
-    if deferred:
-        stats["verify"] = _hand_verify_batch(sb, client, deferred)
+            stats["drain_err"] = f"{type(e).__name__}: {e}"[:120]
     try:
         if client is None:
             client = get_client()
@@ -21418,11 +21534,13 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
             stats["twins"] = _hand_twin_backfill(sb, now)        # Kalshi twins for pre-lane bets → watch set + switch
         except Exception as e:
             stats["twins"] = {"err": str(e)[:80]}
+        _drain()
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
         try:
             stats["tape"] = _touch_tape_publish(sb)
         except Exception as e:
             stats["tape"] = {"err": str(e)[:80]}
+        _drain()
         try:
             stats["start"] = _hand_start_tick(sb, client, now)
         except Exception as e:
@@ -21431,6 +21549,7 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
             stats["move"] = _hand_move_tick(sb, client, now)
         except Exception as e:
             stats["move"] = {"err": str(e)[:80]}
+        _drain()
         try:
             stats["recon"] = _hand_reconcile_tick(sb, client, now)   # every claim on a pick vs the venue, once a minute
         except Exception as e:
@@ -21441,12 +21560,14 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 40) -> dict:
             stats["red"] = {"err": str(e)[:80]}
     except Exception as e:
         stats["status"] = {"err": f"{type(e).__name__}: {e}"[:120]}
+    _drain()
     try:
         if client is None:
             client = get_client()
         stats["chase"] = _hand_chase_tick(sb, client, now)
     except Exception as e:
         stats["chase"] = {"err": f"{type(e).__name__}: {e}"[:120]}
+    _drain()
     return stats
 
 
@@ -21557,7 +21678,7 @@ def api_bet_sheets_queue():
         ids = [int(x) for x in (request.args.get("ids") or "").split(",") if x.strip()]
     except ValueError:
         return jsonify({"ok": False, "error": "bad ids"}), 400
-    rows = _hand_order_read(sb, ids[:50])
+    rows = _hand_order_read(sb, ids[:200])
     out = {}
     for rid, r in rows.items():
         if r.get("state") in ("pending", "claimed"):
@@ -23482,11 +23603,11 @@ def api_bet_sheets_ops():
     if sb is None:
         return jsonify({"ok": False, "error": "database unavailable"}), 503
     results, queued = [], []
-    seen = _hand_orders_by_cid(sb, [(it or {}).get("cid") for it in items[:40]])
+    seen = _hand_orders_by_cid(sb, [(it or {}).get("cid") for it in items[:_HAND_SLIP_MAX]])
     if seen is None:
         return jsonify({"ok": False, "error": "couldn't check the queue for a repeat "
                                               "submit — nothing run, try again"}), 503
-    for it in items[:40]:
+    for it in items[:_HAND_SLIP_MAX]:
         key = (it or {}).get("key") or f"op|{(it or {}).get('op')}|{(it or {}).get('pick_id')}"
         op = str((it or {}).get("op") or "").lower()
         res = {"key": key, "op": op, "pick_id": (it or {}).get("pick_id")}

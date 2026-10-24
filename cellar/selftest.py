@@ -3797,7 +3797,8 @@ def test_pmm_day_list_prefetch() -> None:
     pm._DAY_EVENTS.clear()
     import app as _app, inspect
     check("the hand-order batch prefetches before it runs creates",
-          "prefetch_day_events" in inspect.getsource(_app._hand_orders_tick))
+          "prefetch_day_events" in inspect.getsource(_app._hand_queue_drain)
+          and "_hand_queue_drain(" in inspect.getsource(_app._hand_orders_tick))
     check("resolve remembers a venue miss so the second leg of a game does not re-search",
           "_BET_SHEET_MISS[miss_key]" in inspect.getsource(_app._bet_sheet_resolve))
 
@@ -3809,14 +3810,14 @@ def test_hand_orders_queue() -> None:
     import app as _app
 
     class _Q:
-        def __init__(self, db, table): self.db, self.t, self.f, self.op, self.payload = db, table, [], None, None
+        def __init__(self, db, table): self.db, self.t, self.f, self.op, self.payload, self.lim = db, table, [], None, None, None
         def select(self, *a): self.op = "select"; return self
         def insert(self, row): self.op, self.payload = "insert", row; return self
         def update(self, row): self.op, self.payload = "update", row; return self
         def eq(self, k, v): self.f.append((k, v)); return self
         def in_(self, k, vs): self.f.append((k, set(vs))); return self
         def order(self, *a, **k): return self
-        def limit(self, n): return self
+        def limit(self, n): self.lim = n; return self
         def _match(self, r):
             return all((r.get(k) in v) if isinstance(v, set) else (r.get(k) == v) for k, v in self.f)
         def execute(self):
@@ -3824,13 +3825,18 @@ def test_hand_orders_queue() -> None:
             class R: pass
             out = R()
             if self.op == "insert":
-                row = dict(self.payload); row["id"] = len(rows) + 1; rows.append(row); out.data = [row]
+                many = isinstance(self.payload, list)
+                out.data = []
+                for pl in (self.payload if many else [self.payload]):
+                    row = dict(pl); row["id"] = len(rows) + 1; rows.append(row); out.data.append(row)
             elif self.op == "update":
                 hit = [r for r in rows if self._match(r)]
                 for r in hit: r.update(self.payload)
                 out.data = [dict(r) for r in hit]
             else:
                 out.data = [dict(r) for r in rows if self._match(r)]
+                if self.lim:
+                    out.data = out.data[:self.lim]
             return out
 
     class _SB:
@@ -3898,6 +3904,41 @@ def test_hand_orders_queue() -> None:
             _app._hand_order_enqueue(sb, {"op": "create", "slug": None, "contracts": 1, "payload": {"item": {}}, "created_at": "2099-01-01T00:00:00+00:00"})
         st2 = _app._hand_orders_tick(sb, _dt.now(_tz.utc), worker="box")
         check("box tick claims + runs a whole 12-row slip in one tick", st2.get("claimed") == 12 and st2.get("done") == 12)
+        # THE WHOLE SLIP IN ONE WRITE + ONE TICK (Oct 24 2026, a CFB Saturday:
+        # "betting all the games at once errored out (max 40)")
+        ids = _app._hand_orders_enqueue_many(sb, [{"op": "create", "slug": None, "contracts": 1,
+                                                   "payload": {"item": {}}, "created_at": "2099-01-01T00:00:00+00:00"}
+                                                  for _ in range(7)])
+        check("batch enqueue returns one id per row, in order", len(ids) == 7 and ids == sorted(ids) and all(ids))
+        check("the slip cap is a fence, not a budget", _app._HAND_SLIP_MAX >= 100)
+        n0 = len(ran)
+        st3 = _app._hand_orders_tick(sb, _dt.now(_tz.utc), worker="box", max_n=3)
+        check("a drain pass smaller than the slip keeps going until the queue is empty",
+              st3.get("claimed") == 7 and st3.get("done") == 7 and len(ran) == n0 + 7
+              and not [r for r in sb.db["hand_orders"] if r["state"] == "pending"])
+        check("…and says how many passes it took", st3.get("passes") == 3)
+        # a slip submitted while the lane is mid-maintenance is picked up by the
+        # next drain, not the next tick
+        stats = {}
+        _app._hand_orders_enqueue_many(sb, [{"op": "create", "slug": None, "contracts": 1,
+                                             "payload": {"item": {}}, "created_at": "2099-01-01T00:00:00+00:00"}])
+        _app._hand_queue_drain(sb, _dt.now(_tz.utc), "box", stats, object(), max_n=50)
+        check("the drain helper runs a row on its own (between maintenance phases)",
+              stats.get("claimed") == 1 and stats.get("done") == 1)
+        # a batch insert that answers short falls back row by row, never re-inserting
+        class _ShortSB(_SB):
+            def table(self, t):
+                q = _Q(self.db, t)
+                orig = q.execute
+                def ex():
+                    if q.op == "insert" and isinstance(q.payload, list):
+                        raise RuntimeError("batch refused")
+                    return orig()
+                q.execute = ex
+                return q
+        sb2 = _ShortSB(); sb2.db["hand_orders"] = []
+        ids2 = _app._hand_orders_enqueue_many(sb2, [{"op": "create", "contracts": 1, "payload": {}} for _ in range(3)])
+        check("a refused batch insert falls back to one row at a time", ids2 == [1, 2, 3])
         check("the slip's item shape check is pure and names the fault",
               _app._bet_sheet_item_check({"sport": "NFL", "market_type": "spread", "side": "home", "away": "a", "home": "b",
                                           "event_start": "2099-01-01T00:00:00+00:00"}) == "sheet has no line"
@@ -4557,14 +4598,17 @@ def test_bet_sheet_market_id_prefers_active() -> None:
     live = {"id": "live", "event_name": name, "status": "active",
             "event_start": "2026-10-11T17:00:00+00:00"}
     sb = _SB([dead, live])
+    A._BS_MID_CACHE.clear()
     got = A._bet_sheet_market_id(sb, "NFL", "Chicago Bears", "Green Bay Packers",
                                  "2026-10-11T17:00:00Z")
     check("bet-sheet market id: the active row wins over a dead duplicate", got == "live", got)
+    A._BS_MID_CACHE.clear()
     got2 = A._bet_sheet_market_id(sb, "NFL", "Chicago Bears", "Green Bay Packers",
                                   "2026-10-11T20:25:00Z")
     check("bet-sheet market id: active wins even when the dead row is nearer", got2 == "live", got2)
     twin = {"id": "late", "event_name": name, "status": "active",
             "event_start": "2026-10-11T23:00:00+00:00"}
+    A._BS_MID_CACHE.clear()
     got3 = A._bet_sheet_market_id(_SB([twin, live]), "NFL", "Chicago Bears",
                                   "Green Bay Packers", "2026-10-11T17:05:00Z")
     check("bet-sheet market id: among live rows the nearest start wins", got3 == "live", got3)
