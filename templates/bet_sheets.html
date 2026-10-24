@@ -1672,8 +1672,12 @@
     // day… ✅ and ❌ next to games over, and the record at the bottom").
     function picksText(games) {
         const out = [], rec = { win: 0, loss: 0, push: 0 };
-        out.push(_sport + ' · ' + fmtTime(games[0].event_start));
-        games.forEach(g => {
+        const days = games.map(g => fmtTime(g.event_start));
+        const multi = new Set(days).size > 1;        // the finals kept on the page + today, or a football week
+        out.push(_sport + ' · ' + (multi ? days[0] + ' – ' + days[days.length - 1] : days[0]));
+        let lastDay = null;
+        games.forEach((g, i) => {
+            if (multi && days[i] !== lastDay) { out.push((lastDay ? '\n' : '') + '— ' + days[i] + ' —'); lastDay = days[i]; }
             const st = gameStatus(g), f = g.grade && g.grade.final;
             const L = g.line || {};
             const plays = gamePlays(g);
@@ -1693,15 +1697,24 @@
         if (n + rec.push) out.push('\nRecord: ' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + (n ? ' (' + Math.round(100 * rec.win / n) + '%)' : ''));
         return out.join('\n');
     }
+    // THE WHOLE SHEET ON SCREEN (Rob, Oct 23 2026: "I thought copy picks
+    // showed the games again, and the ones that finished"): on a daily sport,
+    // today's games (AZ) plus every finished game the page still carries
+    // (last night's grades); on football, the whole week. The "My bets" chip
+    // never narrows it — the copy is the sheet's picks, not Rob's bets; only
+    // the search and the "Plays & leans" chip do.
     async function copyPicks() {
         const q = (document.getElementById('search').value || '').trim().toLowerCase();
         const words = q.split(/\s+/).filter(Boolean);
         const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
-        let games = _games.filter(g => g.event_start && gameMatches(g, words)
-                                    && new Date(g.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today);
+        let games = _games.filter(g => g.event_start && gameMatches(g, words));
+        if (_daily()) games = games.filter(g => gameStatus(g) !== 'up'
+                                    || new Date(g.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today);
         if (_filter === 'plays') games = games.filter(g => gamePlays(g).length);
-        else if (_filter === 'mine') games = games.filter(g => betsOnGame(g).length);
-        if (!games.length) { toast('No games today to copy', true); return; }
+        if (!games.length) {
+            toast(!_games.length ? 'Nothing on this sheet to copy' : words.length ? 'No games match the search' : _filter === 'plays' ? 'No plays or leans to copy' : 'No games today to copy', true);
+            return;
+        }
         const txt = picksText(games);
         let ok = false;
         try { await navigator.clipboard.writeText(txt); ok = true; } catch (e) {}
@@ -1712,7 +1725,7 @@
             try { ok = document.execCommand('copy'); } catch (e) {}
             document.body.removeChild(ta);
         }
-        toast(ok ? 'Copied today\'s picks · ' + games.length + ' game' + (games.length === 1 ? '' : 's') : 'Copy failed', !ok);
+        toast(ok ? 'Copied the picks · ' + games.length + ' game' + (games.length === 1 ? '' : 's') : 'Copy failed', !ok);
     }
     let _fold = { started: false };   // default collapsed, every visit
     function toggleFold(k) { _fold[k] = !_fold[k]; renderGames(); }
