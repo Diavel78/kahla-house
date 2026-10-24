@@ -3654,6 +3654,36 @@ def test_hand_red_alert() -> None:
     ct = T({"bet": bet, "result": {"ok": True, "deleted": False, "held": 0.08}, "window": {"tries": 16}})
     check("start cancel: dust → NOT FILLED, on the missed list", ct and ct[0] == "start_dust"
           and "NOT FILLED" in ct[1] and "0.08 of 5" in ct[1] and "missed list" in ct[1], str(ct))
+    # THE AUTO CHASE (Oct 24 2026): the window's end hands the bet to the live
+    # chase — one ping then; the chase's own end an hour later is another
+    ct = T({"bet": bet, "hand_start_chase": True, "result": {"ok": True, "chasing": True}, "window": {"tries": 9},
+            "chase": {"minutes": 60, "leaves": 5, "price_c": 48.0, "cap_c": 49.5}})
+    check("start chase: the hand-off → NOT FILLED AT THE START · chasing live 60 min", ct and ct[0] == "start_chase"
+          and "chasing live 60 min" in ct[1] and "5 @ 48.0¢" in ct[1] and "9 take tries" in ct[1], str(ct))
+    ct = T({"bet": bet, "result": {"ok": True, "deleted": True}, "chase_expired": True,
+            "chase": {"minutes": 60, "pulls": 2}})
+    check("start chase: the hour up, unfilled → NOT FILLED · chased live 60 min", ct and ct[0] == "start_not_filled"
+          and "chased live 60 min" in ct[1] and "2 pulls" in ct[1] and "chase ended" in ct[1], str(ct))
+    from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2
+    _n = _dt2(2026, 10, 24, 17, 7, tzinfo=_tz2.utc)
+    nb = _app._hand_chase_blob({"bet_sheet": True, "price_c": 50.0, "anchor_c": 50.0, "chase_hold": {"x": 1},
+                                "start_take_window": {"tries": 3}}, _n, 48.0, 50.0, 10, "window_end",
+                               tw={"tries": 3, "filled": 0.5, "cost_c": 25.0})
+    check("chase blob: live_snipe auto with a one-hour clock, holds + window gone, price/anchor at the seat",
+          nb["live_snipe"].get("auto") is True and nb["live_snipe"]["until"] == (_n + _td2(seconds=3600)).isoformat()
+          and "chase_hold" not in nb and "start_take_window" not in nb and isinstance(nb.get("start_take_window_done"), dict)
+          and nb["price_c"] == 48.0 and nb["anchor_c"] == 48.0 and nb["contracts"] == 10
+          and nb["start_take"]["qty"] == 0.5 and nb["start_take"]["take_c"] == 50.0, str(nb))
+    check("chase clock: expired only past until; a manual live snipe (no until) never expires",
+          _app._hand_chase_expired(nb, (_n + _td2(seconds=3601)).timestamp()) is True
+          and _app._hand_chase_expired(nb, (_n + _td2(seconds=3599)).timestamp()) is False
+          and _app._hand_chase_expired({"live_snipe": {"at": "x"}}, 1e12) is False
+          and _app._hand_chase_expired({"live_snipe": True}, 1e12) is False)
+    check("live chase: the calm is 20s (Rob: 'wait 20 seconds')", _app._HAND_LIVE_CALM_S == 20.0)
+    check("start finish: the chase runs before the cancel on both venues",
+          _app._hand_start_finish_poly.__code__.co_names.count("_hand_start_chase_poly") == 1
+          and "_hand_start_chase_kalshi" in _app._hand_start_finish_kalshi.__code__.co_names
+          and "_hand_live_expire" in _app._hand_live_tick.__code__.co_names)
     check("start cancel: filled in full → no alert", T({"bet": bet, "result": {"ok": True, "deleted": False, "held": 5.0}}) is None)
     ct = T({"bet": bet, "result": {"ok": False, "error": "venue did not cancel it — check the app"}})
     check("start cancel: a failed cancel → CANCEL FAILED, still on the book",

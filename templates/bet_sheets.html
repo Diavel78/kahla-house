@@ -338,13 +338,8 @@
             <div class="alerts" id="alerts"></div>
 
             <div class="sec hide" id="betsSec">
-                <div class="sh" onclick="toggleBets()" title="Show / hide"><h2>Missed at game start</h2><span class="sub" id="betsMeta"></span><span class="chev">▼</span></div>
+                <div class="sh" onclick="toggleBets()" title="Show / hide"><h2>Chasing</h2><span class="sub" id="betsMeta"></span><span class="chev">▼</span></div>
                 <div class="sb-body" id="bets"></div>
-            </div>
-
-            <div class="sec hide" id="srSec">
-                <div class="sh"><h2>Still resting · game started</h2><span class="sub" id="srMeta"></span></div>
-                <div class="sb-body" id="srBody"></div>
             </div>
 
             <div class="sec hide" id="plSec">
@@ -722,7 +717,7 @@
                     : ('pull the resting order' + (o.leaves != null ? ' · ' + Math.round(o.leaves) + ' unfilled' : ''));
                 if (i.q && i.q.ok === false) q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
                 else q = '<div class="q">' + esc(line) + '</div>';
-                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : i.op === 'live' ? 'LIVE' : i.op === 'getlive' ? 'GET IT LIVE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
+                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : i.op === 'live' ? 'LIVE' : i.op === 'getlive' ? 'CHASE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                      + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
             }
             if (i.q) {
@@ -1040,7 +1035,9 @@
             if (hold && hold.touch_c != null)
                 return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing — ' + (b.read ? recShort(b, null) : 'no model read on this game — re-peg it or cancel') };
             if (b.live_snipe)
-                return { cls: 'rest', short: 'LIVE', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · no game-start cancel · yours to watch' };
+                return (b.chase && b.chase.until)
+                    ? { cls: 'rest', short: 'CHASING', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · live chase under the cap · ends ~' + fmtClock(b.chase.until) }
+                    : { cls: 'rest', short: 'LIVE', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · no game-start cancel · yours to watch' };
             if (b.outbid && b.in_play)
                 return { cls: 'warn', short: 'OUTBID', detail: pre + rest + ' · touch ' + b.touch_c + '¢ · in play — re-peg in the app' };
             let why = '';
@@ -1206,7 +1203,7 @@
         h += '<div class="note">Rests ' + (m.contracts || '?') + ' on ' + esc(betLabel(m)) + ' at ' + why + ', GTC, in-play. The box leaves it to you — no chase, no game-start cancel; cancel it in the app or here.</div>';
         warn.forEach(w => { h += '<div class="note" style="color:var(--r-bd)">' + esc(w) + '</div>'; });
         const acts = [];
-        acts.push('<button class="abtn' + (on ? ' on' : ' pri') + '" onclick="sheetOp(\'getlive\')">' + (on ? '✓ On the slip: get it live' : 'Get it live · ' + (m.contracts || '?') + ' @ ' + (target >= 1 ? target + '¢' : '?')) + '</button>');
+        acts.push('<button class="abtn' + (on ? ' on' : ' pri') + '" onclick="sheetOp(\'getlive\')">' + (on ? '✓ On the slip: chase it again' : 'Chase it again · ' + (m.contracts || '?') + ' @ ' + (target >= 1 ? target + '¢' : '?')) + '</button>');
         acts.push('<button class="abtn" onclick="dismissMissed(\'' + esc(m.id) + '\');closeSheet()">Hide this row</button>');
         acts.push('<button class="abtn" onclick="closeSheet()">Close</button>');
         h += '<div class="acts">' + acts.join('') + '</div>';
@@ -1444,28 +1441,32 @@
     // in the app (amber, his), the drop fired but the order still rests (the
     // cancel failed), or the box has no pre-start book to see the drop
     // (start_blind — a restart at the start). Everything else waits for the
-    // drop, then lands in Missed at game start.
+    // drop, the 5-minute take window, and then THE AUTO CHASE (Rob, Oct 24
+    // 2026: "5 minute after market collapse, done making. No more cancel.
+    // Now it goes into your hands automatically, same rung, cap 49.5. Run
+    // the live chase. You have 1 hour"): the bet stays here as CHASING with
+    // its clock; at the hour it ends and lists below as CHASE ENDED.
+    // Returns {html, n, bad} — the Chasing card composes it with the ended rows.
     function renderStartedResting(d) {
         const rows = (d.bets || []).filter(b => b.status === 'pending' && ((b.order || {}).resting || (b.live_snipe && b.live_hold))
                 && ((b.started && (b.live_snipe || b.in_play)) || b.start_seen || b.start_blind || b.take_window))
             .sort((x, y) => String(x.event_start).localeCompare(String(y.event_start)));
-        document.getElementById('srSec').classList.toggle('hide', !rows.length);
-        if (!rows.length) { document.getElementById('srBody').innerHTML = ''; return; }
+        if (!rows.length) return { html: '', n: 0, bad: 0 };
         // A LIVE SNIPE IS HIS, WHATEVER THE START FLAGS SAY (Oct 24 2026,
         // WMU@Toledo O 46.5: Move to Live at minute 4 of the take window —
         // the start flags stayed on the pick and the card read TAKING · until
         // 9:08, frozen, for the rest of the game).
         const isMine = b => b.live_snipe || (b.in_play && !b.start_seen && !b.start_blind);
         const bad = rows.filter(b => !isMine(b) && !b.take_window).length;
-        document.getElementById('srMeta').textContent = rows.length + (bad ? ' · ' + bad + ' need you' : '');
-        document.getElementById('srBody').innerHTML = rows.map(b => {
+        const html = rows.map(b => {
             const o = b.order || {}, sl = _scoreLine(b), held = Number(b.held || 0);
             const mine = isMine(b);
             const tw = mine ? null : b.take_window;
             // THE TAKE WINDOW (Rob, Oct 18 2026: "I would say 2 minutes"): the drop fired,
             // the box is re-trying the take inside the 1¢ cap until the window ends
-            const tag = (mine && b.live_hold) ? '<span class="tag ' + (b.live_hold.err ? 'red' : 'amb') + '">LIVE · PULLED · back ~' + esc(fmtClock(b.live_hold.resume_at)) + '</span>'
-                      : mine ? '<span class="tag amb">LIVE · YOURS' + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
+            const chz = b.chase && b.chase.until ? ' · ends ~' + esc(fmtClock(b.chase.until)) : '';
+            const tag = (mine && b.live_hold) ? '<span class="tag ' + (b.live_hold.err ? 'red' : 'amb') + '">PULLED · back ~' + esc(fmtClock(b.live_hold.resume_at)) + chz + '</span>'
+                      : mine ? '<span class="tag amb">' + (b.chase && b.chase.until ? 'CHASING' + chz : 'LIVE · YOURS') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
                       : tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
                       : '<span class="tag red">BOX CAN\'T SEE GAME START</span>';
@@ -1482,12 +1483,12 @@
                  + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + n + '</div>'
                  + '<div class="c-n">' + (tw ? ((tw.tries || 0) + ' tries · last ask ' + (tw.last && tw.last.ask_c != null ? tw.last.ask_c + '¢' : '—')
                         + (tw.bump && tw.bump.verdict === 'amended' ? ' · bid moved up to ' + tw.bump.to_c + '¢ (maker, top of book)' : '')
-                        + ' · tap to cancel now') : mine ? 'live chase on — joins the bid, never over the cap · tap to cancel' : 'tap to cancel or move to live') + '</div></div>';
+                        + ' · tap to cancel now') : mine ? 'live chase on — joins the bid, 70% drop → pull, 20s, back at the touch, never over the cap · tap to cancel' : 'tap to cancel or move to live') + '</div></div>';
         }).join('');
+        return { html, n: rows.length, bad };
     }
     function renderBets(d) {
         try { renderMoney(d); } catch (e) {}
-        try { renderStartedResting(d); } catch (e) {}
         try { renderPnl(d); } catch (e) { document.getElementById('plMeta').textContent = 'render failed'; }
         const bets = d.bets || [];
         _betsById = {}; bets.forEach(b => { _betsById[b.id] = b; });
@@ -1509,20 +1510,25 @@
         if (!d.venue_ok) al.push(['⚠ Polymarket unreadable — bet status may be stale', 'amb']);
         if (warn) al.push([warn + ' ' + _sport + ' bet' + (warn === 1 ? ' needs' : 's need') + ' you — tap to jump to ' + (warn === 1 ? 'it' : 'the next one'), '', 'jumpRed()']);
         setAlerts(al);
-        // MISSED AT KICKOFF = WHAT THE BOX CANCELLED AT KICKOFF, NOTHING ELSE
-        // (Rob, Oct 10 2026: "If you cancel a bet that I have resting at
-        // kickoff, I want it on the list. That's it."). Server-built off the
-        // box's kickoff-cancel stamps. A resting order on it (usually his app
-        // order) turns the card amber (Oct 11 2026); a fill moves it to Live.
+        // THE CHASING CARD (Rob, Oct 24 2026: "no more 'make live, or missed,
+        // or whatever' — now these go into Chasing"): the bets the box is
+        // chasing live (and the game-started rows that need him) on top, then
+        // what the box cancelled — a chase that ran out its hour (CHASE ENDED),
+        // or the old game-start cancel — built off the box's stamps, each one
+        // tappable to chase it again. A resting order on an ended row (usually
+        // his app order) turns it amber (Oct 11 2026); a fill moves it to Live.
+        let sr = { html: '', n: 0, bad: 0 };
+        try { sr = renderStartedResting(d); } catch (e) {}
         const dis = _missedDismissed();
         const missed = (d.missed || []).filter(m => String(m.sport || '').toUpperCase() === String(_sport || '').toUpperCase() && !dis[m.id]);
         const missedOther = (d.missed || []).filter(m => String(m.sport || '').toUpperCase() !== String(_sport || '').toUpperCase() && !dis[m.id]).length;
-        document.getElementById('betsSec').classList.toggle('hide', !missed.length && !missedOther);
-        document.getElementById('betsMeta').textContent = missed.length ? missed.length + ' · get them live' : '';
+        document.getElementById('betsSec').classList.toggle('hide', !sr.n && !missed.length && !missedOther);
+        document.getElementById('betsMeta').textContent = [sr.n ? sr.n + ' chasing' : null, sr.bad ? sr.bad + ' need you' : null,
+                                                            missed.length ? missed.length + ' ended' : null].filter(Boolean).join(' · ');
         if (!missed.length) {
-            document.getElementById('bets').innerHTML = missedOther ? '<div class="c-n">' + missedOther + ' on other tabs.</div>' : '';
+            document.getElementById('bets').innerHTML = sr.html + (missedOther ? '<div class="c-n">' + missedOther + ' ended on other tabs.</div>' : '');
         } else {
-            document.getElementById('bets').innerHTML = missed.map(m => {
+            document.getElementById('bets').innerHTML = sr.html + missed.map(m => {
                 _betsById[m.id] = Object.assign({ _missed: true, status: 'missed', started: true }, m);   // tap → the action sheet (Get it live)
                 const sl = _scoreLine(m);
                 const want = m.price_c != null ? Number(m.price_c) : null;
@@ -1533,12 +1539,14 @@
                             + (m.bid_c != null || m.ask_c != null ? ' <span class="g">bid ' + (m.bid_c != null ? m.bid_c : '—') + ' / ask ' + (m.ask_c != null ? m.ask_c : '—') + '</span>' : '') : ' · no live price');
                 const ch = m.chasing;
                 const tags = ch ? '<span class="tag amb">RESTING · NOT FILLED</span>' + (ch.outbid ? '<span class="tag red">OUTBID</span>' : '')
+                                : m.chase_expired ? '<span class="tag red">CHASE ENDED · NOT FILLED</span>'
                                 : '<span class="tag red">NO FILL · CANCELLED</span>';
                 const l3 = ch ? '<div class="c-n">your order ' + esc(betLabel(Object.assign({}, m, { line: ch.line != null ? ch.line : m.line, label: ch.label || null })))
                     + ' · ' + (ch.leaves != null ? fmtQ(ch.leaves) + ' @ ' : '') + (ch.price_c != null ? cA(ch.price_c) : '?') + ' resting'
                     + (ch.outbid ? ' · <b class="neg">outbid — re-peg in the app</b>' : '') + '</div>' : '';
                 const gl = inSlip(opKey('getlive', m.id));
-                const l4 = ch ? '' : '<div class="c-n">' + (gl ? '✓ on the slip: get it live' : 'tap → get it live at ' + (d.live_snipe_c || 49.5) + '¢ or the bid, whichever is cheaper') + '</div>';
+                const l4 = ch ? '' : '<div class="c-n">' + (m.chase_expired && m.chase ? 'chased ' + (m.chase.minutes || 60) + ' min under the cap' + (m.chase.pulls ? ', ' + m.chase.pulls + ' pulls' : '') + ' · ' : '')
+                              + (gl ? '✓ on the slip: chase it again' : 'tap → chase it again at ' + (d.live_snipe_c || 49.5) + '¢ or the bid, whichever is cheaper') + '</div>';
                 return '<div class="card miss' + (ch || gl ? ' rest' : '') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(m.id)).replace(/"/g, '&quot;') + ')"><div class="c-top"><span class="tags">' + tags + (m.app ? '<span class="tag gry">APP</span>' : '') + '</span>'
                      + '<button class="hidebtn" title="hide on every device" onclick="event.stopPropagation();dismissMissed(\'' + esc(m.id) + '\')">Hide</button></div>'
                      + '<div class="c-t">' + esc((m.period ? String(m.period).toUpperCase() + ' ' : '') + betLabel(m)) + ' <span class="g">· ' + esc(gameShort(m)) + '</span></div>'
