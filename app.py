@@ -21461,10 +21461,12 @@ def _hand_queue_drain(sb, now, worker: str, stats: dict, client=None, max_n: int
                 stats["prefetch"] = {"err": f"{type(e).__name__}: {e}"[:80]}
         deferred: list = []
         n_won = 0
-        for row in live:
-            if row["id"] not in won:
-                continue
+        todo = [r for r in live if r["id"] in won]
+        warm = _hand_warm_start(client, todo) if (len(todo) > 1 and client is not None) else None
+        for k, row in enumerate(todo):
             n_won += 1
+            if warm is not None:
+                warm["placing"] = k                    # the warmer stays a bet or two ahead of this
             stats["claimed"] = stats.get("claimed", 0) + 1
             try:
                 if client is None:
@@ -21475,6 +21477,9 @@ def _hand_queue_drain(sb, now, worker: str, stats: dict, client=None, max_n: int
             _hand_order_finish(sb, row["id"], res)
             stats["done" if res.get("ok") else "failed"] = stats.get("done" if res.get("ok") else "failed", 0) + 1
             _time.sleep(0.2)
+        if warm is not None:
+            warm["placing"] = len(todo)
+            stats["warm"] = {k: warm.get(k) for k in ("warmed", "errors")}
         if deferred:
             v = _hand_verify_batch(sb, client, deferred)
             pv = stats.get("verify") or {}
@@ -21484,6 +21489,63 @@ def _hand_queue_drain(sb, now, worker: str, stats: dict, client=None, max_n: int
         if len(rows) < max_n:
             return client                         # that was everything pending
     return client
+
+
+_HAND_WARM_AHEAD = 2
+
+
+def _hand_warm_row(client, row: dict) -> None:
+    """Fill the venue CACHES a raw create row's resolve will read — the
+    Polymarket event+markets (`pmm_markets.lookup`, 120s) and the Kalshi
+    series/event ladder + fee (`kalshi_venue.resolve`'s sub-reads, 30-60s).
+    Nothing here decides or prices anything: the executor reads its OWN book
+    fresh at placement and runs the same resolve, which now hits the cache."""
+    item = (row.get("payload") or {}).get("item") or {}
+    sport = str(item.get("sport") or "").upper()
+    if not (item.get("away") and item.get("home") and item.get("event_start")):
+        return
+    import pmm_markets as _pm
+    _pm.lookup(client, sport, item.get("away"), item.get("home"), item.get("event_start"),
+               want_props=False, max_age_s=120)
+    if _hand_kalshi_on() and str(item.get("venue") or "auto").lower() != "poly":
+        import kalshi_venue as _kv
+        _kv.resolve(sport, item.get("away"), item.get("home"), item.get("event_start"), item)
+
+
+def _hand_warm_start(client, rows: list):
+    """THE WARMER (Oct 24 2026, Rob: "if you can figure out a way… make them
+    actually be a lot faster"): a daemon thread that walks the claimed rows in
+    order, warming the next `_HAND_WARM_AHEAD` rows' venue lookups while the
+    placer is busy with the current one — the lookups overlap the create
+    instead of queuing behind it. Reads only (the same paced venue reads the
+    executor would make a moment later); the placer sets `placing` so the
+    warmer never runs away from it. Kill switch `machine_flags hand_prewarm`."""
+    if not _machine_flag("hand_prewarm", True):
+        return None
+    st = {"placing": 0, "warmed": 0, "errors": 0}
+    raw = [r for r in rows if r.get("op") == "create" and not r.get("slug")]
+    if len(raw) < 2:
+        return None
+
+    def _run():
+        for k, row in enumerate(rows):
+            # wait until the placer is within reach
+            while st["placing"] < k - _HAND_WARM_AHEAD and st["placing"] < len(rows):
+                _time.sleep(0.05)
+            if st["placing"] >= len(rows):
+                return
+            if st["placing"] >= k:
+                continue                             # the placer already has this one
+            if row.get("op") != "create" or row.get("slug"):
+                continue
+            try:
+                _hand_warm_row(client, row)
+                st["warmed"] += 1
+            except Exception:
+                st["errors"] += 1
+    import threading as _th
+    _th.Thread(target=_run, name="hand-warmer", daemon=True).start()
+    return st
 
 
 def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:

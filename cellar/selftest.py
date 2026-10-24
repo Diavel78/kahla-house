@@ -3925,6 +3925,21 @@ def test_hand_orders_queue() -> None:
         _app._hand_queue_drain(sb, _dt.now(_tz.utc), "box", stats, object(), max_n=50)
         check("the drain helper runs a row on its own (between maintenance phases)",
               stats.get("claimed") == 1 and stats.get("done") == 1)
+        # THE WARMER (Oct 24 2026): runs beside the placer, never past it, reads only
+        warmed = []
+        saved_warm = _app._hand_warm_row
+        try:
+            _app._hand_warm_row = lambda client, row: warmed.append(row.get("id"))
+            _app._hand_order_execute = lambda sb_, c, row, worker, deferred=None: (_t.sleep(0.05), ran.append((row.get("id"), worker)))[1] or {"ok": True, "order_id": "W"}
+            ids_w = _app._hand_orders_enqueue_many(sb, [{"op": "create", "slug": None, "contracts": 1,
+                                                         "payload": {"item": {"sport": "NFL", "away": "A", "home": "B", "event_start": "2099-01-01T00:00:00+00:00"}},
+                                                         "created_at": "2099-01-01T00:00:00+00:00"} for _ in range(4)])
+            stw = _app._hand_orders_tick(sb, _dt.now(_tz.utc), worker="box")
+            _t.sleep(0.3)
+            check("the warmer ran alongside a 4-row slip and reported itself", isinstance(stw.get("warm"), dict) and stw.get("done") == 4)
+            check("the warmer only warms rows the placer had not reached (never the first)", ids_w[0] not in warmed and set(warmed) <= set(ids_w))
+        finally:
+            _app._hand_warm_row = saved_warm
         # a batch insert that answers short falls back row by row, never re-inserting
         class _ShortSB(_SB):
             def table(self, t):
