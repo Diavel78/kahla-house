@@ -1586,8 +1586,8 @@
             if (p.line == null) return null;
             mt = 'spread'; line = Number(p.line); label = nameOf(g, p.side) + ' ' + sgn(p.line, 1);
         } else if (k === 'spread') {
-            // football reads the line the way its card does (off the market home line)
-            const own = (_sport === 'NFL' || _sport === 'NCAAF') ? null : p.line;
+            // the rung Rob bets (p.line = the bettable half point, every sport), else the market home line
+            const own = p.line;
             line = own != null ? Number(own)
                  : (L.spread_home != null ? (p.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home)) : null);
             if (line == null) return null;
