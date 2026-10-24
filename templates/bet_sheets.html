@@ -1457,8 +1457,16 @@
     // its clock; at the hour it ends and lists below as CHASE ENDED.
     // Returns {html, n, bad} — the Chasing card composes it with the ended rows.
     function renderStartedResting(d) {
+        // WAITING FOR THE DROP (Rob, Oct 24 2026: "games disappear at start
+        // time, but haven't filled, or started, and they are just in limbo"):
+        // a resting order whose LISTED start has passed while the box still
+        // waits for the makers to leave has a row here too — grey, not red, not
+        // counted as needing him — so a bet is never invisible between the
+        // listed clock and the 95% drop. Same bet, same tap (cancel / move to live).
+        const limbo = b => b.started && !b.live_snipe && !b.in_play && !b.start_seen && !b.start_blind && !b.take_window
+                           && !(b.live_hold) && !b.line_hold;
         const rows = (d.bets || []).filter(b => b.status === 'pending' && ((b.order || {}).resting || (b.live_snipe && b.live_hold))
-                && ((b.started && (b.live_snipe || b.in_play)) || b.start_seen || b.start_blind || b.take_window))
+                && ((b.started && (b.live_snipe || b.in_play)) || b.start_seen || b.start_blind || b.take_window || limbo(b)))
             .sort((x, y) => String(x.event_start).localeCompare(String(y.event_start)));
         if (!rows.length) return { html: '', n: 0, bad: 0 };
         // A LIVE SNIPE IS HIS, WHATEVER THE START FLAGS SAY (Oct 24 2026,
@@ -1466,7 +1474,7 @@
         // the start flags stayed on the pick and the card read TAKING · until
         // 9:08, frozen, for the rest of the game).
         const isMine = b => b.live_snipe || (b.in_play && !b.start_seen && !b.start_blind);
-        const bad = rows.filter(b => !isMine(b) && !b.take_window).length;
+        const bad = rows.filter(b => !isMine(b) && !b.take_window && !limbo(b)).length;
         const html = rows.map(b => {
             const o = b.order || {}, sl = _scoreLine(b), held = Number(b.held || 0);
             const mine = isMine(b);
@@ -1477,6 +1485,7 @@
             const tag = (mine && b.live_hold) ? '<span class="tag ' + (b.live_hold.err ? 'red' : 'amb') + '">PULLED · back ~' + esc(fmtClock(b.live_hold.resume_at)) + chz + '</span>'
                       : mine ? '<span class="tag amb">CHASING' + ((b.chase && b.chase.chase_venue === 'KALSHI') || b.venue === 'KALSHI' ? ' · KALSHI' : '') + (b.chase && b.chase.until ? chz : ' · no clock') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
                       : tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
+                      : limbo(b) ? '<span class="tag gry">LISTED ' + esc(fmtClock(b.event_start)) + ' · WAITING FOR THE DROP</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
                       : '<span class="tag red">BOX CAN\'T SEE GAME START</span>';
             const lc = b.live_chase || {};
@@ -1486,13 +1495,16 @@
                     + (held > 0 ? ' · ' + fmtQ(held) + ' filled' : '')
                     + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '')
                     + (b.cur_c != null ? ' · now ' + b.cur_c + '¢' : '');
-            return '<div class="card' + ((mine || tw) ? ' rest' : ' miss') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(b.id)).replace(/"/g, '&quot;') + ')">'
+            const lim = limbo(b);
+            return '<div class="card' + ((mine || tw || lim) ? ' rest' : ' miss') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(b.id)).replace(/"/g, '&quot;') + ')">'
                  + '<div class="c-top"><span class="tags">' + tag + (b.app ? '<span class="tag gry">APP</span>' : '') + venueTag(b) + '<span class="tag gry">' + esc(String(b.sport || '')) + '</span></span></div>'
                  + '<div class="c-t">' + esc(betLabel(b)) + ' <span class="g">· ' + esc(gameShort(b)) + '</span></div>'
                  + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + n + '</div>'
                  + '<div class="c-n">' + (tw ? ((tw.tries || 0) + ' tries · last ask ' + (tw.last && tw.last.ask_c != null ? tw.last.ask_c + '¢' : '—')
                         + (tw.bump && tw.bump.verdict === 'amended' ? ' · bid moved up to ' + tw.bump.to_c + '¢ (maker, top of book)' : '')
-                        + ' · tap to cancel now') : mine ? 'live chase on — joins the bid, 70% drop → pull, 20s, back at the touch, never over the cap · tap to cancel' : 'tap to cancel or move to live') + '</div></div>';
+                        + ' · tap to cancel now') : mine ? 'live chase on — joins the bid, 70% drop → pull, 20s, back at the touch, never over the cap · tap to cancel'
+                        : lim ? 'the makers are still quoting, so the game has not started for the box — when 95% of the touch leaves it takes for 5 min, then chases live · tap to cancel or move to live now'
+                        : 'tap to cancel or move to live') + '</div></div>';
         }).join('');
         return { html, n: rows.length, bad };
     }
