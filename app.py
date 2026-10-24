@@ -23829,12 +23829,29 @@ def _hand_chase_until_ts(blob: dict):
     """Pure. The auto chase's clock off the pick: unix ts of `live_snipe.until`,
     None for a manual live snipe (Move to Live / Get it live — Rob's to end)."""
     ls = blob.get("live_snipe") if isinstance(blob.get("live_snipe"), dict) else None
-    if not ls or not ls.get("until"):
+    if not ls or not ls.get("until") or ls.get("ended"):
         return None
     try:
         return datetime.fromisoformat(str(ls["until"]).replace("Z", "+00:00")).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+def _hand_chase_end(blob: dict, now, why: str, detail: dict | None = None) -> dict:
+    """Pure. The live chase is OVER on this pick: `live_snipe.until` moves
+    to `until_was`, `live_snipe.ended {at, why, …}` is written, any hold is
+    dropped — so the clock reads None, the tick skips the pick and the page
+    shows no CHASING. Oct 24 2026: `_hand_live_expire` ran its cancel on BC@GT
+    O 49.5 and NTX@Navy U 61.5 — both lots HELD IN FULL — every tick for 17
+    minutes (60 `chase_expired` stamps), because nothing ever closed the
+    chase on the blob once the hour was up."""
+    nb = {k: v for k, v in (blob or {}).items() if k != "live_hold"}
+    ls = dict(nb.get("live_snipe") or {}) if isinstance(nb.get("live_snipe"), dict) else {}
+    if ls.get("until"):
+        ls["until_was"] = ls.pop("until")
+    ls["ended"] = {"at": now.isoformat(), "why": why, **(detail or {})}
+    nb["live_snipe"] = ls
+    return nb
 
 
 def _hand_chase_expired(blob: dict, now_ts: float) -> bool:
@@ -24170,6 +24187,21 @@ def _hand_live_expire(sb, client, r: dict, blob: dict, now, st: dict) -> None:
         st["expired"] = st.get("expired", 0) + 1
     else:
         st["expire_errors"] = st.get("expire_errors", 0) + 1
+    # CLOSE THE CHASE ON THE PICK (a cancel that kept the pick — a held lot —
+    # must not be re-expired every tick); a failed cancel retries twice more
+    try:
+        r2, b2 = _bet_sheet_pick(sb, r["id"])
+        if r2 and r2.get("status") == "pending" and b2.get("live_snipe"):
+            tries = int((b2.get("live_snipe") or {}).get("expire_tries") or 0) + 1
+            if out.get("ok") or tries >= 3:
+                nb = _hand_chase_end(b2, now, "expired" if out.get("ok") else "expire_failed",
+                                     {"held": out.get("held"), "deleted": bool(out.get("deleted")), "tries": tries})
+            else:
+                nb = {**b2, "live_snipe": {**b2["live_snipe"], "expire_tries": tries, "expire_err": str(out.get("error") or code)[:120]}}
+                stamp["retry"] = tries
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+    except Exception as e:
+        app.logger.warning("hand live expire close pick %s: %s", r["id"], str(e)[:120])
     _hand_start_cancel_alert(stamp)
     try:
         _probe_log(stamp)
@@ -24717,11 +24749,40 @@ def _hand_live_tick(sb, client, now) -> dict:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if not blob.get("live_snipe") or blob.get("in_play"):
             continue
+        if isinstance(blob.get("live_snipe"), dict) and blob["live_snipe"].get("ended"):
+            continue                                   # the chase is over on this pick (filled / expired)
+        try:
+            _ct_full = float(blob.get("contracts") or 0)
+        except (TypeError, ValueError):
+            _ct_full = 0.0
+
+        def _end_filled(held, venue, ident):
+            # A FULL LOT ENDS THE CHASE (Oct 24 2026): the bet is done — no
+            # expiry cancel, no hold, no snapshot; stamped once.
+            nb = _hand_chase_end(blob, now, "filled", {"held": round(float(held), 2)})
+            nb["filled_qty"] = round(float(held), 2)
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            LIVE_SNAP.pop(ident, None)
+            st["ended_filled"] = st.get("ended_filled", 0) + 1
+            _probe_log({"hand_live_done": True, "pick_id": r["id"], "venue": venue, "why": "filled",
+                        "held": round(float(held), 2), "contracts": _ct_full, "bet": _hand_start_bet(r, blob),
+                        "chase": blob.get("live_chase"), "at": now.isoformat()})
         if _kalshi_pick(blob):
             # THE LIVE CHASE ON KALSHI (Oct 24 2026 — the chase never changes venue)
             import kalshi_venue as _kv
             ticker, by, koid = blob.get("kalshi_ticker"), bool(blob.get("kalshi_buy_yes")), blob.get("kalshi_order_id")
             if not ticker:
+                continue
+            if not k_tried:
+                k_orders, k_pos = _kalshi_acct(fresh=False)
+                k_tried = True
+            _held_k0 = _kv.held_for(k_pos, ticker, by) if k_pos is not None else None
+            _o0 = _kalshi_pick_order(blob, k_orders) if (koid and k_orders is not None) else None
+            if _held_k0 is not None and _ct_full > 0 and _held_k0 >= _ct_full - 0.5 and _o0 is None:
+                try:
+                    _end_filled(_held_k0, "KALSHI", ticker)
+                except Exception as e:
+                    app.logger.warning("hand live end KALSHI pick %s: %s", r.get("id"), str(e)[:120])
                 continue
             if _hand_chase_expired(blob, now_ts):
                 try:
@@ -24730,9 +24791,6 @@ def _hand_live_tick(sb, client, now) -> dict:
                     st["expire_errors"] = st.get("expire_errors", 0) + 1
                     app.logger.warning("hand live expire KALSHI pick %s: %s", r.get("id"), str(e)[:160])
                 continue
-            if not k_tried:
-                k_orders, k_pos = _kalshi_acct(fresh=False)
-                k_tried = True
             if k_orders is None:
                 if ticker in LIVE_SNAP:
                     want[ticker] = LIVE_SNAP[ticker]     # unreadable this tick: keep what we have
@@ -24801,6 +24859,20 @@ def _hand_live_tick(sb, client, now) -> dict:
             continue
         slug, oid, syn = blob.get("pmm_slug"), blob.get("order_id"), bool(blob.get("pmm_synthetic"))
         if not slug:
+            continue
+        _o0 = by_id.get(oid) if oid else None
+        _o0 = _o0 if (_o0 is not None and _o0.get("state") in _OPEN_ORDER_STATES) else None
+        _held_p0 = float(_bet_sheet_pick_side_held(ppos.get(slug), syn)) if ppos is not None else None
+        if _held_p0 is None:
+            try:
+                _held_p0 = float(blob.get("filled_qty") or 0.0) or None
+            except (TypeError, ValueError):
+                _held_p0 = None
+        if _held_p0 is not None and _ct_full > 0 and _held_p0 >= _ct_full - 0.5 and _o0 is None:
+            try:
+                _end_filled(_held_p0, "POLYMARKET", slug)
+            except Exception as e:
+                app.logger.warning("hand live end pick %s: %s", r.get("id"), str(e)[:120])
             continue
         if _hand_chase_expired(blob, now_ts):
             # THE HOUR IS UP (Rob, Oct 24 2026: "You have 1 hour"): the old cancel

@@ -3606,6 +3606,24 @@ def test_hand_getlive() -> None:
     check("…and logs a Kalshi pick stamped live_snipe + getlive_from",
           '"venue": "KALSHI", "kalshi_ticker": ticker' in src_k and '"getlive_from": gl.get("from")' in src_k
           and '"venue": "KALSHI"}' in src_k)
+    # A CHASE ENDS ONCE (Oct 24 2026: the expired cancel re-ran on two FILLED lots every tick)
+    from datetime import datetime as _dt, timezone as _tz
+    _n = _dt(2026, 10, 24, 20, 50, tzinfo=_tz.utc)
+    bl = {"live_snipe": {"auto": True, "until": "2026-10-24T20:36:03+00:00", "at": "x"}, "live_hold": {"at": "y"}, "contracts": 10}
+    check("an auto chase with a clock reads expired past it", _app._hand_chase_expired(bl, _n.timestamp()))
+    en = _app._hand_chase_end(bl, _n, "filled", {"held": 10.0})
+    check("…ended: the clock is gone, the hold is dropped, the record stays",
+          _app._hand_chase_until_ts(en) is None and not _app._hand_chase_expired(en, _n.timestamp())
+          and "live_hold" not in en and en["live_snipe"]["ended"]["why"] == "filled"
+          and en["live_snipe"]["until_was"] == "2026-10-24T20:36:03+00:00" and bl["live_snipe"].get("until"))
+    src_e = inspect.getsource(_app._hand_live_expire)
+    check("the expire path closes the chase on the pick (a kept lot is never re-expired)",
+          "_hand_chase_end(b2, now" in src_e and "expire_tries" in src_e)
+    src_t = inspect.getsource(_app._hand_live_tick)
+    check("the tick skips an ended chase and ends one whose lot is held in full, on both venues",
+          'blob["live_snipe"].get("ended")' in src_t and src_t.count("_end_filled(") >= 3
+          and '_end_filled(_held_k0, "KALSHI", ticker)' in src_t and '_end_filled(_held_p0, "POLYMARKET", slug)' in src_t
+          and src_t.index('_end_filled(_held_p0, "POLYMARKET", slug)') < src_t.index("THE HOUR IS UP"))
     src_x = inspect.getsource(_app._hand_order_execute)
     check("the executor routes a Kalshi getlive before touching the row's slug",
           "return _hand_getlive_kalshi(sb, row, pl, gl0, worker)" in src_x
