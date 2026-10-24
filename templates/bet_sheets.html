@@ -1204,7 +1204,7 @@
         if (want != null && bid != null && bid <= want - 5) warn.push('⚠ The bid is ' + bid + '¢ now, ' + (want - bid).toFixed(1) + '¢ UNDER the ' + want + '¢ you wanted — your side is losing out there. Don\'t click this, dumbass… unless you want it anyway at ' + target + '¢.');
         else if (want != null && bid != null && bid >= want + 5) warn.push('The bid is ' + bid + '¢ now, ' + (bid - want).toFixed(1) + '¢ OVER what you wanted — your side is winning; ' + target + '¢ sits behind the market and may never fill.');
         if (ask != null && ask <= cap) warn.push('The ask (' + ask + '¢) is already under ' + cap + '¢ — this rests a tick under it, it does not take.');
-        h += '<div class="note">Rests ' + (m.contracts || '?') + ' on ' + esc(betLabel(m)) + ' at ' + why + ', GTC, in-play, on ' + (kal ? 'KALSHI (where it rested — the chase never changes venue)' : 'Polymarket') + '. The box leaves it to you — no chase, no game-start cancel; cancel it in the app or here.</div>';
+        h += '<div class="note">Rests ' + (m.contracts || '?') + ' on ' + esc(betLabel(m)) + ' at ' + why + ', GTC, in-play, on ' + (kal ? 'KALSHI (where it rested — the chase never changes venue)' : 'Polymarket') + '. The box runs the live chase on it with no clock — no chase, no game-start cancel; cancel it in the app or here.</div>';
         warn.forEach(w => { h += '<div class="note" style="color:var(--r-bd)">' + esc(w) + '</div>'; });
         const acts = [];
         acts.push('<button class="abtn' + (on ? ' on' : ' pri') + '" onclick="sheetOp(\'getlive\')">' + (on ? '✓ On the slip: chase it again' : 'Chase it again · ' + (m.contracts || '?') + ' @ ' + (target >= 1 ? target + '¢' : '?')) + '</button>');
@@ -1475,7 +1475,7 @@
             // the box is re-trying the take inside the 1¢ cap until the window ends
             const chz = b.chase && b.chase.until ? ' · ends ~' + esc(fmtClock(b.chase.until)) : '';
             const tag = (mine && b.live_hold) ? '<span class="tag ' + (b.live_hold.err ? 'red' : 'amb') + '">PULLED · back ~' + esc(fmtClock(b.live_hold.resume_at)) + chz + '</span>'
-                      : mine ? '<span class="tag amb">' + (b.chase && b.chase.until ? 'CHASING' + (b.chase.chase_venue === 'KALSHI' ? ' · KALSHI' : '') + chz : 'LIVE · YOURS') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
+                      : mine ? '<span class="tag amb">CHASING' + ((b.chase && b.chase.chase_venue === 'KALSHI') || b.venue === 'KALSHI' ? ' · KALSHI' : '') + (b.chase && b.chase.until ? chz : ' · no clock') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
                       : tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
                       : '<span class="tag red">BOX CAN\'T SEE GAME START</span>';
