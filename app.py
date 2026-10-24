@@ -4455,6 +4455,14 @@ def api_bet_sheets_picks():
         return jsonify({"ok": False, "error": "forbidden"}), 403
     slug = (request.args.get("slug") or "").strip()
     out: dict = {"ok": True, "slug": slug}
+    ids_q = [int(x) for x in re.findall(r"\d+", request.args.get("ids") or "")][:20]
+    if ids_q:                                          # ?ids=199717 → the picks' FULL blobs (read-only)
+        try:
+            out["by_id"] = (get_supabase().table("bot_picks")
+                            .select("id,status,sport,event_name,event_start,market_type,side,entry_line,entry_price,entry_book,pnl_units,result_score,signal_blob")
+                            .in_("id", ids_q).execute().data) or []
+        except Exception as e:
+            out["by_id_err"] = str(e)[:160]
     kinds = [k.strip() for k in (request.args.get("stamps") or "").split(",") if k.strip()]
     if kinds:                                          # e.g. stamps=hand_move_cancel,hand_move_rejoin
         try:
