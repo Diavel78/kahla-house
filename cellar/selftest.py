@@ -3349,8 +3349,33 @@ def test_hand_live_chase() -> None:
     check("the tick drops a hold on a bet whose lot is held in full", "holds_dropped" in inspect.getsource(_app._hand_live_tick))
     # THE KALSHI ORDER THAT LEFT MID-WINDOW goes to the chase, not the missed list (Sacramento State O 50.5)
     src_k = inspect.getsource(_app._hand_start_chase_kalshi)
-    check("the Kalshi chase hand-off works on an order that is already gone (unfilled size = contracts − the Kalshi lot)",
-          "gone = o is None" in src_k and "held_k = _kv.held_for(_p, ticker, by)" in src_k and "if not gone:" in src_k)
+    check("the Kalshi chase hand-off works on an order that is already gone (a NEW Kalshi order for the unfilled size)",
+          "gone = o is None" in src_k and "held = _kv.held_for(_p, ticker, by)" in src_k and "if not gone:" in src_k
+          and "_kalshi_live_create(" in src_k and "_kalshi_amend_pick(" in src_k)
+    # THE CHASE NEVER CHANGES VENUE (Rob, Oct 24 2026: "if it didn't fill on Kalshi, it stays on Kalshi")
+    check("the Kalshi chase hand-off places nothing on Polymarket and never reshapes the pick's venue",
+          "_manual_order_place(" not in src_k and '"to": "POLYMARKET"' not in src_k and '"venue": "POLYMARKET"' not in src_k
+          and "pmm_twin_slug" not in src_k)
+    check("the live chase has a Kalshi worker fed by Kalshi's socket frames",
+          "_hand_live_one_kalshi(" in inspect.getsource(_app._hand_live_one)
+          and "_hand_live_frame(ticker)" in inspect.getsource(_app._kalshi_tape_record)
+          and "_kalshi_pick(blob)" in inspect.getsource(_app._hand_live_tick)
+          and "_kalshi_cancel_exec(" in inspect.getsource(_app._hand_live_expire))
+    check("a live hold is a box record — the Kalshi gone sweep stands down on it",
+          _app._hand_kalshi_box_cancel({"live_hold": {"at": "x"}}) == "live_hold")
+    # THE TAKE MAY HAVE FILLED THE BET (Troy −13.5 / Ohio −10.5 / EM@Ohio O 48.5: 10 held + 10 resting)
+    src_p = inspect.getsource(_app._hand_start_chase_poly)
+    check("the Polymarket hand-off reads positions first and never chases a full lot",
+          "_hand_poly_side_held(client, slug, syn)" in src_p and '"why": "lot_held"' in src_p
+          and 'closed") == "filled"' in src_p and "qty_total = cum + unfilled" in src_p)
+    check("the Kalshi hand-off reads positions first and never chases a full lot",
+          '"why": "lot_held"' in src_k and 'closed") == "filled"' in src_k)
+    check("both finishes skip the chase when the window closed filled",
+          'closed") != "filled"' in inspect.getsource(_app._hand_start_finish_kalshi))
+    check("a full lot with an order still resting is a duplicate: the live tick cancels it, the sweep lists it",
+          "hand_dup_order" in inspect.getsource(_app._hand_live_tick)
+          and callable(getattr(_app, "_hand_dup_order_sweep", None))
+          and "dead_order_cleared" in inspect.getsource(_app._hand_dup_order_sweep))
     check("the window's order-gone branch and the orphan path both hand the bet to the chase",
           "_hand_kalshi_gone_chase(" in inspect.getsource(_app._hand_take_window_kalshi)
           and "_hand_kalshi_gone_chase(" in inspect.getsource(_app._hand_start_kalshi))

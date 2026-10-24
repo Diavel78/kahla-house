@@ -1472,7 +1472,7 @@
             // the box is re-trying the take inside the 1¢ cap until the window ends
             const chz = b.chase && b.chase.until ? ' · ends ~' + esc(fmtClock(b.chase.until)) : '';
             const tag = (mine && b.live_hold) ? '<span class="tag ' + (b.live_hold.err ? 'red' : 'amb') + '">PULLED · back ~' + esc(fmtClock(b.live_hold.resume_at)) + chz + '</span>'
-                      : mine ? '<span class="tag amb">' + (b.chase && b.chase.until ? 'CHASING' + chz : 'LIVE · YOURS') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
+                      : mine ? '<span class="tag amb">' + (b.chase && b.chase.until ? 'CHASING' + (b.chase.chase_venue === 'KALSHI' ? ' · KALSHI' : '') + chz : 'LIVE · YOURS') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
                       : tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
                       : '<span class="tag red">BOX CAN\'T SEE GAME START</span>';

@@ -18711,6 +18711,17 @@ def _hand_dup_order_sweep(sb, client, apply: bool = False) -> dict:
         full = held >= contracts - 0.5
         if held > contracts + 0.5:
             out["over_held"].append({**rec, "excess": round(held - contracts, 2)})
+        if full and rec.get("order_id") and leaves < 1:
+            out.setdefault("dead_ids", []).append(rec)
+            if apply:
+                try:
+                    nb = {**blob, "filled_qty": round(held, 2), "filled": True,
+                          "dead_order_cleared": {"at": now.isoformat(), "order_id": rec["order_id"], "venue": rec["venue"]}}
+                    nb["kalshi_order_id" if kalshi else "order_id"] = None
+                    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                    blob = nb
+                except Exception as e:
+                    out["errors"].append({"id": r["id"], "err": f"dead_id: {e}"[:120]})
         if full and isinstance(blob.get("live_hold"), dict):
             out["hold_on_full"].append(rec)
             if apply:
@@ -19841,7 +19852,7 @@ def _hand_status_kalshi(sb, r: dict, blob: dict, k_orders, k_pos, poly_positions
         "line_hold": blob.get("line_hold")}
 
 
-def _kalshi_amend_pick(blob: dict, target_c: float, o: dict | None = None):
+def _kalshi_amend_pick(blob: dict, target_c: float, o: dict | None = None, total: int | None = None):
     """Amend the pick's resting Kalshi order to target_c (our side, whole
     cents), total quantity = filled + remaining, verified on the orders
     list. The venue may hand the amended order a NEW id — the verified id
@@ -19858,9 +19869,11 @@ def _kalshi_amend_pick(blob: dict, target_c: float, o: dict | None = None):
         o = _kalshi_pick_order(blob, orders)
         if o is None:
             return "not_on_book", koid, {"why": "not resting"}
-    total = int(round(float(o.get("filled") or 0) + float(o.get("remaining") or 0)))
-    if total < 1 or float(o.get("remaining") or 0) < 1:
-        return "nothing_unfilled", koid, {"filled": o.get("filled"), "remaining": o.get("remaining")}
+    if total is None:
+        total = int(round(float(o.get("filled") or 0) + float(o.get("remaining") or 0)))
+    total = int(total)
+    if total < 1 or float(o.get("remaining") or 0) < 1 or total <= float(o.get("filled") or 0):
+        return "nothing_unfilled", koid, {"filled": o.get("filled"), "remaining": o.get("remaining"), "total": total}
     am = _kv.amend_order(koid, ticker, by, int(round(target_c)), total)
     d = am.get("data") or {}
     newo = d.get("order") if isinstance(d.get("order"), dict) else d
@@ -20622,7 +20635,8 @@ def _hand_start_finish_kalshi(sb, client, r: dict, stamp: dict, take, cum0: floa
     SINCE OCT 24 2026 THE CANCEL IS THE FALLBACK: a still-resting Kalshi
     order with the chase flag on moves to the Polymarket twin and the live
     chase (`_hand_start_chase_kalshi`)."""
-    if not cancelled and _machine_flag("hand_start_chase", True):
+    if (not cancelled and _machine_flag("hand_start_chase", True)
+            and (stamp.get("window") or {}).get("closed") != "filled"):
         try:
             handled, cancelled = _hand_start_chase_kalshi(sb, client, r, stamp, now, st)
             if handled:
@@ -21441,6 +21455,7 @@ def _kalshi_tape_record(ticker: str, ob: dict) -> None:
             if dq is None:
                 dq = KALSHI_TAPE[ticker] = _deque(maxlen=_KALSHI_TAPE_MAX)
             dq.append(row)
+        _hand_live_frame(ticker)                     # the live chase runs on Kalshi's socket too
     except Exception:
         pass
 
@@ -21465,6 +21480,8 @@ def _hand_kalshi_box_cancel(blob: dict) -> str | None:
     record, so the gone sweep may retire it. Pure; selftested."""
     if isinstance(blob.get("line_hold"), dict):
         return "line_hold"
+    if isinstance(blob.get("live_hold"), dict):
+        return "live_hold"
     if isinstance(blob.get("kalshi_move_cancel_sent"), dict):
         return "move_cancel_sent"
     if isinstance(blob.get("kalshi_cancel_sent"), dict):
@@ -22541,11 +22558,11 @@ def api_bet_sheets_mine():
             "venue_pick": blob.get("venue_pick"),
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
             "live_snipe": bool(blob.get("live_snipe")),
-            "chase": ({"auto": bool(blob["live_snipe"].get("auto")), "since": blob["live_snipe"].get("at"),
-                       "until": blob["live_snipe"].get("until"), "from_c": blob["live_snipe"].get("from_c")}
-                      if isinstance(blob.get("live_snipe"), dict) else None),
             "getlive_from": blob.get("getlive_from"),
-            "live_hold": (blob.get("live_hold") if isinstance(blob.get("live_hold"), dict) else None),
+            # NO "PULLED · back ~" ON A FULL LOT (Oct 24 2026, BC@GT O 49.5: the pull's cancel raced
+            # the fill, the hold stayed on the blob, the card promised a rejoin on a bet held 10 of 10)
+            "live_hold": (blob.get("live_hold") if isinstance(blob.get("live_hold"), dict)
+                          and not (contracts and held >= float(contracts) - 0.5) else None),
             "live_chase": (blob.get("live_chase") if isinstance(blob.get("live_chase"), dict) else None),
             "start_seen": bool(blob.get("game_started")), "start_blind": bool(blob.get("start_blind")),
             "take_window": (blob.get("start_take_window")
@@ -22573,10 +22590,16 @@ def api_bet_sheets_mine():
             "pnl_usd": pnl_usd, "result_score": r.get("result_score"),
             "sold": _sold,
             "venue_ok": venue_ok,
-            "chase": (bx.get("chase") if (bx is not None and bx.get("chase") is not None) else
-                      {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
-                       "moves": blob.get("chase_moves") or 0, "rejoin_hold": blob.get("rejoin_hold"),
-                       "thin_hold": blob.get("thin_hold")}),
+            # THE AUTO-CHASE CLOCK RIDES THE CHASE BLOCK WHICHEVER SOURCE BUILT THE ROW (Oct 24 2026:
+            # the box's strip blob carries no `until`, so three chasing bets read LIVE · YOURS)
+            "chase": {**(bx.get("chase") if (bx is not None and bx.get("chase") is not None) else
+                         {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
+                          "moves": blob.get("chase_moves") or 0, "rejoin_hold": blob.get("rejoin_hold"),
+                          "thin_hold": blob.get("thin_hold")}),
+                      **({"auto": bool(blob["live_snipe"].get("auto")), "since": blob["live_snipe"].get("at"),
+                          "until": blob["live_snipe"].get("until"), "from_c": blob["live_snipe"].get("from_c"),
+                          "chase_venue": blob["live_snipe"].get("venue")}
+                         if isinstance(blob.get("live_snipe"), dict) and blob["live_snipe"].get("until") else {})},
             "line_hold": (bx.get("line_hold") if bx is not None else blob.get("line_hold")),
         })
     try:
@@ -23762,11 +23785,35 @@ def _hand_start_chase_poly(sb, client, r: dict, stamp: dict, now, st: dict, tw=N
     cur = next((o for o in ords if o.get("id") == oid and o.get("state") in _OPEN_ORDER_STATES), None)
     if cur is None:
         return False
+    # THE TAKE MAY HAVE FILLED THE BET ALREADY (Oct 24 2026, Troy −13.5 / Ohio
+    # −10.5 / EM@Ohio O 48.5: the window's IOC filled all 10, and this
+    # hand-off amended the still-resting 10 into a chase without reading
+    # positions — 10 held + 10 resting; two of the duplicates filled into
+    # 20-lots). POSITIONS FIRST: a lot covering the bet → False (the cancel
+    # path cancels the order and keeps the lot); a partial → the chase
+    # carries ONLY the unfilled size (total = cum + unfilled).
+    if (stamp.get("window") or {}).get("closed") == "filled":
+        return False
+    held = _hand_poly_side_held(client, slug, syn)
+    if held is None:
+        return False
+    try:
+        contracts = float(blob.get("contracts") or 0)
+    except (TypeError, ValueError):
+        contracts = 0.0
+    unfilled = int(round(contracts - held)) if contracts > 0 else None
+    if unfilled is not None and unfilled < 1:
+        stamp["chase_skipped"] = {"why": "lot_held", "held": round(held, 2), "contracts": contracts}
+        return False
     try:
         leaves = int(round(float(cur.get("leaves") or 0)))
+        cum = int(round(float(cur.get("cum") or 0)))
     except (TypeError, ValueError):
-        leaves = 0
+        leaves, cum = 0, 0
     qty_total = _amend_total(cur.get("leaves"), cur.get("cum"))
+    if unfilled is not None and unfilled < leaves:
+        qty_total = cum + unfilled                   # the order is bigger than what is left to fill
+        leaves = unfilled
     if leaves < 1 or qty_total < 1:
         return False
     cur_c = None
@@ -23790,7 +23837,8 @@ def _hand_start_chase_poly(sb, client, r: dict, stamp: dict, now, st: dict, tw=N
     if target is None:
         return False
     verdict = "stay"
-    if cur_c is None or abs(float(target) - float(cur_c)) > 0.001:
+    size_change = qty_total != _amend_total(cur.get("leaves"), cur.get("cum"))
+    if cur_c is None or abs(float(target) - float(cur_c)) > 0.001 or size_change:
         canon = (100.0 - target) / 100.0 if syn else target / 100.0
         verdict = _repeg_amend(client, oid, slug, canon, qty_total, None)      # None = GTC
         if verdict == "gone":
@@ -23823,8 +23871,9 @@ def _hand_start_chase_poly(sb, client, r: dict, stamp: dict, now, st: dict, tw=N
 
 def _hand_kalshi_gone_chase(sb, client, r: dict, blob: dict, now, st: dict, ticker, koid, twin, tw_done) -> bool:
     """A Kalshi order the BOX cancelled is gone before the chase's turn: hand
-    the bet to the live chase on the Polymarket twin (nothing to cancel,
-    the unfilled size = contracts − the Kalshi lot). True when the chase
+    the bet to the live chase ON KALSHI (a new GTC order on the same ticker
+    for the unfilled size — never the Polymarket twin: Rob, Oct 24 2026,
+    "if it didn't fill on Kalshi, it stays on Kalshi"). True when the chase
     took it; False leaves the bet for the next tick / the retire."""
     if not _machine_flag("hand_start_chase", True):
         return False
@@ -23839,115 +23888,154 @@ def _hand_kalshi_gone_chase(sb, client, r: dict, blob: dict, now, st: dict, tick
     return bool(handled)
 
 
+def _hand_live_target_kalshi(ticker: str, by: bool, cap_c: float, our_c, our_qty):
+    """The live rule's price on KALSHI's own book (socket when it vouches,
+    else REST): the market bid under the cap, a tick under the ask, on the
+    whole-cent grid. Returns (target_c, why, book)."""
+    book, _ = _kalshi_hand_book(ticker)
+    if book is None:
+        return None, "no_book", None
+    syn = not by
+    ladder = _hand_ladder_from_book(book, syn)
+    ask_c = _manual_side_book(book, syn)[1]
+    cap_k = round(_grid_dn(float(cap_c), _KALSHI_TICK_C), 2)
+    target, why = _hand_live_target(ladder, ask_c, our_c, our_qty, cap_k, _KALSHI_TICK_C)
+    return target, why, book
+
+
+def _kalshi_live_create(ticker: str, by: bool, target_c: float, qty: int) -> tuple:
+    """One GTC post-only Kalshi order for the live chase (the lane's own
+    create, verified on the orders list; shard funded first). Returns
+    (order_id or None, detail)."""
+    import kalshi_venue as _kv
+    det: dict = {}
+    try:
+        det["shard"] = _kalshi_shard_fund(ticker, int(qty), float(target_c))
+    except Exception as e:
+        det["shard"] = {"ok": False, "error": str(e)[:120]}
+    try:
+        res = _kv.create_order(ticker, by, int(round(target_c)), int(qty))
+    except Exception as e:
+        return None, {**det, "error": str(e)[:160]}
+    det.update({"status": res.get("status"), "error": res.get("error"), "order_status": res.get("order_status")})
+    oid = res.get("order_id") if res.get("ok") else None
+    if not oid:
+        return None, det
+    for _i in range(4):
+        vr = _kv.order_resting(oid, ticker)
+        if vr.get("resting"):
+            return oid, det
+        if vr.get("resting") is False and _i >= 1:
+            break
+        _time.sleep(0.6)
+    det["unverified"] = True
+    return oid, det
+
+
 def _hand_start_chase_kalshi(sb, client, r: dict, stamp: dict, now, st: dict) -> tuple:
-    """The Kalshi twin of `_hand_start_chase_poly`: the live chase runs on
-    Polymarket's depth socket, so a Kalshi-resting bet at the window's end
-    moves home — verified cancel on Kalshi, a new GTC order on the twin slug
-    at the live rule's price, the pick reshaped to Polymarket with the chase
-    clock. Returns (handled, cancelled): handled=False hands the bet to the
-    old cancel finish, with cancelled=True when the Kalshi order is already
-    gone (the Polymarket leg refused) so that finish skips its own cancel."""
+    """The Kalshi twin of `_hand_start_chase_poly`, ON KALSHI. THE CHASE NEVER
+    CHANGES VENUE (Rob, Oct 24 2026: "if you're going to do the chase,
+    there's absolutely no way you can switch venues… If it didn't fill on
+    Polymarket, it stays on Polymarket. If it didn't fill on Kalshi, it stays
+    on Kalshi" — the venue compare is a PRE-GAME rule, where the lowest bid
+    is the point and speed is not). At the window's end a still-resting
+    Kalshi order is amended in place (GTC) to the live rule's price off the
+    Kalshi book, sized to the UNFILLED remainder off fresh positions; an
+    order the box already cancelled (the take's late cancel) gets a NEW GTC
+    order on the same ticker for that remainder. Returns (handled,
+    cancelled): handled=False hands the bet to the old cancel finish, with
+    cancelled=True when the Kalshi order is already gone so that finish
+    skips its own cancel."""
     import kalshi_venue as _kv
     r2, blob = _bet_sheet_pick(sb, r["id"])
     if not r2 or r2.get("status") != "pending" or not _kalshi_pick(blob):
         return False, False
-    twin, tsyn = blob.get("pmm_twin_slug"), bool(blob.get("pmm_twin_synthetic"))
+    if (stamp.get("window") or {}).get("closed") == "filled":
+        return False, False
     ticker, by, koid = blob.get("kalshi_ticker"), bool(blob.get("kalshi_buy_yes")), blob.get("kalshi_order_id")
-    if not twin or not ticker or not koid:
+    if not ticker:
         return False, False
     orders, _p = _kalshi_acct(fresh=True)
-    if orders is None:
+    if orders is None or _p is None:
         return False, False
-    o = _kalshi_pick_order(blob, orders)
-    gone = o is None
-    if gone:
-        # THE KALSHI ORDER IS ALREADY GONE (Oct 24 2026, Sacramento State @ Ball
-        # State O 50.5: the take's own pre-take cancel executed a beat after it
-        # read "did not cancel", the window closed `order_gone`, and the orphan
-        # path RETIRED the bet — the chase never got its turn). Nothing held on
-        # Kalshi → the whole bet still wants filling: it goes to the chase on
-        # the Polymarket twin with the unfilled size. A lot held → the finish
-        # books it (cancelled=True: there is nothing left to cancel).
-        held_k = _kv.held_for(_p, ticker, by)
-        if held_k is None:
+    # POSITIONS FIRST (the Troy/Ohio duplicates): the chase carries only what is unfilled
+    held = _kv.held_for(_p, ticker, by)
+    if held is None:
+        return False, False
+    if blob.get("pmm_slug") and client is not None:
+        ph = _hand_poly_side_held(client, blob["pmm_slug"], bool(blob.get("pmm_synthetic")))
+        if ph is None:
             return False, False
-        if held_k >= 1.0:
-            return False, True
-        try:
-            qty = int(round(float(blob.get("contracts") or 0) - held_k))
-        except (TypeError, ValueError):
-            qty = 0
-        k_c = blob.get("price_c")
-    else:
-        try:
-            qty = int(round(float(o.get("remaining") or 0)))
-        except (TypeError, ValueError):
-            qty = 0
-        k_c = _kv.our_c(o.get("yes_c"), by)
-    if qty < 1:
-        return False, False
+        held += ph
+    try:
+        contracts = float(blob.get("contracts") or 0)
+    except (TypeError, ValueError):
+        contracts = 0.0
+    o = _kalshi_pick_order(blob, orders) if koid else None
+    gone = o is None
+    unfilled = int(round(contracts - held)) if contracts > 0 else 0
+    if unfilled < 1:
+        stamp["chase_skipped"] = {"why": "lot_held", "held": round(held, 2), "contracts": contracts}
+        return False, gone                           # the finish books the lot (skip its cancel when nothing rests)
+    k_c = _kv.our_c(o.get("yes_c"), by) if o else blob.get("price_c")
     try:
         cap = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
     except (TypeError, ValueError):
         cap = _HAND_LIVE_SNIPE_C
-    tick = _pmm_tick_c(client, twin)
-    pbook = _hand_poly_book(client, twin)
-    if pbook is None:
-        return False, False
-    target, why = _hand_live_target(_hand_ladder_from_book(pbook, tsyn), _manual_side_book(pbook, tsyn)[1],
-                                    None, 0, cap, tick)
+    target, why, _book = _hand_live_target_kalshi(ticker, by, cap, k_c if o else None,
+                                                  float(o.get("remaining") or 0) if o else 0)
     if target is None:
         return False, False
-    cr, vr = None, {"resting": False, "gone_before": True}
     if not gone:
-        cr = _kv.cancel_order(koid, ticker)
-        vr = {}
-        for _i in range(3):
-            vr = _kv.order_resting(koid, ticker)
-            if vr.get("resting") is False:
-                break
-            _time.sleep(0.7)
-    if vr.get("resting") is not False:
-        _probe_log({"kind": "hand_start_chase", "hand_start_chase": True, "pick_id": r["id"], "venue": "KALSHI",
-                    "ticker": ticker, "result": "cancel_unverified", "cancel": cr, "verify": vr, "at": now.isoformat()})
-        return False, False                              # the old finish re-reads 8× and decides
-    out, _http = _manual_order_place(client, twin, tsyn, target, qty, r.get("event_start"),
-                                     book=pbook, verify="fresh", allow_started=True)
-    if not (out.get("ok") and out.get("order_id")):
-        _probe_log({"kind": "hand_start_chase", "hand_start_chase": True, "pick_id": r["id"], "venue": "KALSHI",
-                    "ticker": ticker, "slug": twin, "result": "poly_refused", "poly_error": out.get("error"),
-                    "target_c": target, "at": now.isoformat()})
-        return False, True                               # Kalshi order gone, nothing resting: the cancel finish books what is held
-    nb = {**blob, "kalshi_order_id": None, "kalshi_twin_ticker": ticker, "kalshi_twin_buy_yes": by,
-          "venue": "POLYMARKET", "pmm_slug": twin, "pmm_synthetic": tsyn, "order_id": out["order_id"],
-          "switched_at": now.isoformat(),
-          "venue_switches": (blob.get("venue_switches") or []) + [
-              {"at": now.isoformat(), "from": "KALSHI", "to": "POLYMARKET", "from_c": k_c, "to_c": target,
-               "why": "live_chase"}][-10:]}
+        filled_k = int(round(float(o.get("filled") or 0)))
+        qty_total = filled_k + unfilled
+        v, new_id, det = _kalshi_amend_pick(blob, float(target), o=o, total=qty_total)
+        if v != "amended":
+            _probe_log({"kind": "hand_start_chase", "hand_start_chase": True, "pick_id": r["id"], "venue": "KALSHI",
+                        "ticker": ticker, "result": f"amend_{v}", "detail": det, "target_c": target,
+                        "at": now.isoformat()})
+            if new_id and new_id != koid and v in ("unverified",):
+                sb.table("bot_picks").update({"signal_blob": {**blob, "kalshi_order_id": new_id}}).eq("id", r["id"]).execute()
+            return False, False                      # the old finish re-reads and decides
+        amend_word = "amended"
+    else:
+        new_id, det = _kalshi_live_create(ticker, by, float(target), unfilled)
+        if not new_id:
+            _probe_log({"kind": "hand_start_chase", "hand_start_chase": True, "pick_id": r["id"], "venue": "KALSHI",
+                        "ticker": ticker, "result": "create_refused", "detail": det, "target_c": target,
+                        "at": now.isoformat()})
+            return False, True                       # nothing resting anywhere: the finish books what is held
+        qty_total = unfilled
+        amend_word = "created"
+    nb = {**blob, "kalshi_order_id": new_id}
     for k in ("kalshi_cancel_sent", "kalshi_move_cancel_sent", "chase_err", "start_take_window"):
         nb.pop(k, None)
-    nb = _hand_chase_blob(nb, now, float(target), k_c, qty, (stamp.get("window") or {}).get("closed"), amended=False)
+    nb = _hand_chase_blob(nb, now, float(target), k_c, qty_total, (stamp.get("window") or {}).get("closed"),
+                          amended=(not gone))
+    nb["live_snipe"]["venue"] = "KALSHI"
     if gone:
         nb["live_snipe"]["kalshi_gone"] = True
-    upd = {"signal_blob": nb, "entry_book": "POLYMARKET"}
+    if held > 0:
+        nb["filled_qty"] = round(held, 2)
+    upd = {"signal_blob": nb}
     am_ = _cents_to_american_py(float(target))
     if am_ is not None:
         upd["entry_price"] = am_
     sb.table("bot_picks").update(upd).eq("id", r["id"]).execute()
     stamp.update({"kind": "hand_start_chase", "hand_start_chase": True, "hand_start_cancel": False,
-                  "slug": twin, "order_id": out["order_id"],
-                  "chase": {"from_c": k_c, "price_c": float(target), "why": why, "amend": "kalshi_to_poly",
-                            "leaves": qty, "qty_total": qty, "cap_c": cap, "until": nb["live_snipe"]["until"],
-                            "minutes": int(round(_hand_chase_s() / 60.0)), "from_venue": "KALSHI"},
-                  "result": {"ok": True, "chasing": True, "price_c": float(target), "leaves": qty}, "http": 200})
+                  "order_id": new_id,
+                  "chase": {"from_c": k_c, "price_c": float(target), "why": why, "amend": amend_word,
+                            "leaves": unfilled, "qty_total": qty_total, "cap_c": cap, "until": nb["live_snipe"]["until"],
+                            "minutes": int(round(_hand_chase_s() / 60.0)), "venue": "KALSHI", "held": round(held, 2)},
+                  "result": {"ok": True, "chasing": True, "price_c": float(target), "leaves": unfilled}, "http": 200})
     st["chased"] = st.get("chased", 0) + 1
     _hand_start_cancel_alert(stamp)
     try:
         _probe_log(stamp)
     except Exception:
         pass
-    app.logger.warning("hand start → LIVE CHASE KALSHI→POLY pick %s %s %s¢ → %s %s¢ until %s",
-                       r["id"], ticker, k_c, twin, target, nb["live_snipe"]["until"])
+    app.logger.warning("hand start → LIVE CHASE KALSHI pick %s %s %s¢ → %s¢ (%s, %s) until %s",
+                       r["id"], ticker, k_c, target, why, amend_word, nb["live_snipe"]["until"])
     return True, True
 
 
@@ -23956,13 +24044,19 @@ def _hand_live_expire(sb, client, r: dict, blob: dict, now, st: dict) -> None:
     unfilled → pick gone, a lot → kept at the held size) and the NOT FILLED
     alert, stamped `hand_start_cancel` + `chase_expired` so the Chasing card
     lists it as ended."""
-    slug = blob.get("pmm_slug")
-    LIVE_SNAP.pop(slug, None)
+    kalshi = _kalshi_pick(blob)
+    slug = blob.get("pmm_slug") if not kalshi else blob.get("pmm_twin_slug")
+    LIVE_SNAP.pop(blob.get("kalshi_ticker") if kalshi else slug, None)
     ls = blob.get("live_snipe") if isinstance(blob.get("live_snipe"), dict) else {}
     lc = blob.get("live_chase") if isinstance(blob.get("live_chase"), dict) else {}
-    out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
+    if kalshi:
+        out, code = _kalshi_cancel_exec(sb, client, r["id"])
+    else:
+        out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
     stamp = {"kind": "hand_start_cancel", "hand_start_cancel": True, "chase_expired": True, "pick_id": r["id"],
-             "slug": slug, "order_id": blob.get("order_id"), "bet": _hand_start_bet(r, blob), "at": now.isoformat(),
+             "venue": "KALSHI" if kalshi else "POLYMARKET", "ticker": blob.get("kalshi_ticker") if kalshi else None,
+             "slug": slug, "order_id": blob.get("kalshi_order_id") if kalshi else blob.get("order_id"),
+             "bet": _hand_start_bet(r, blob), "at": now.isoformat(),
              "chase": {"since": ls.get("at"), "until": ls.get("until"), "from_c": ls.get("from_c"),
                        "minutes": int(round(_hand_chase_s() / 60.0)), "moves": lc.get("moves"),
                        "pulls": lc.get("pulls"), "rejoins": lc.get("rejoins"), "last_c": lc.get("last_c")},
@@ -24129,10 +24223,199 @@ def _hand_live_worker() -> None:
             _time.sleep(0.2)
 
 
+def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
+    """THE LIVE CHASE ON KALSHI (Oct 24 2026 — the chase never changes venue):
+    the same planner (`_hand_live_plan` / `_hand_live_target`) off Kalshi's
+    socket book + tape, whole-cent grid; a move is an in-place amend
+    (`_kalshi_amend_pick`), a pull a verified cancel → `live_hold`, the
+    rejoin a new GTC order for the UNFILLED size off fresh positions."""
+    import kalshi_venue as _kv
+    now_m = _time.monotonic()
+    if now_m - _LIVE_LAST.get(ticker, 0.0) < _HAND_LIVE_DEBOUNCE_S:
+        return
+    now = datetime.now(timezone.utc)
+    now_ts = _time.time()
+    by = bool(snap.get("buy_yes"))
+    syn, tick, cap = not by, _KALSHI_TICK_C, float(snap.get("cap_c"))
+    rows = _hand_side_rows(KALSHI_TAPE.get(ticker), syn)
+    hit = KALSHI_BOOKS.get(ticker)
+    book = hit[1] if (hit and _kalshi_ws_fresh(ticker)) else _kalshi_hand_book(ticker)[0]
+    ladder = _hand_ladder_from_book(book, syn) if book else None
+    ask_c = _manual_side_book(book, syn)[1] if book else (rows[-1][3] if rows else None)
+    hold = snap.get("hold")
+    if hold:
+        if now_ts < float(hold.get("resume_ts") or 0):
+            return
+        if now_ts - float(hold.get("at_ts") or now_ts) > _HAND_LIVE_MAX_HOLD_S and hold.get("err"):
+            return
+        target, why = _hand_live_target(ladder, ask_c, None, 0, cap, tick)
+        if target is None:
+            return
+        r, blob = _bet_sheet_pick(sb, snap["pick_id"])
+        if not r or r.get("status") != "pending" or not isinstance(blob.get("live_hold"), dict):
+            LIVE_SNAP.pop(ticker, None)
+            return
+        _LIVE_LAST[ticker] = now_m
+        orders, pos = _kalshi_acct(fresh=True)
+        held = _kv.held_for(pos, ticker, by) if pos is not None else None
+        if held is not None and blob.get("pmm_slug") and client is not None:
+            ph = _hand_poly_side_held(client, blob["pmm_slug"], bool(blob.get("pmm_synthetic")))
+            held = None if ph is None else held + ph
+        try:
+            contracts = int(round(float(blob.get("contracts") or 0)))
+        except (TypeError, ValueError):
+            contracts = 0
+        if held is None or orders is None:
+            hold["resume_ts"] = now_ts + 5.0
+            return
+        if contracts and held >= contracts - 0.5:
+            nb = {k: v for k, v in blob.items() if k != "live_hold"}
+            lc = dict(blob.get("live_chase") or {})
+            lc.update({"filled_in_hold": now.isoformat(), "held": round(held, 2)})
+            nb.update({"kalshi_order_id": None, "filled_qty": round(held, 2), "live_chase": lc})
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            LIVE_SNAP.pop(ticker, None)
+            _LIVE_STATS["filled_in_hold"] = _LIVE_STATS.get("filled_in_hold", 0) + 1
+            try:
+                _probe_log({"hand_live_rejoin": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
+                            "filled": round(held, 2), "contracts": contracts, "why": "lot_held_no_rejoin",
+                            "at": now.isoformat()})
+            except Exception:
+                pass
+            return
+        qty = int(hold.get("qty") or snap.get("qty") or 1)
+        if contracts:
+            qty = max(1, min(qty, int(round(contracts - held))))
+        new_id, det = _kalshi_live_create(ticker, by, float(target), qty)
+        stamp = {"hand_live_rejoin": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
+                 "target_c": target, "why": why, "contracts": qty,
+                 "sat_out_s": round(now_ts - float(hold.get("at_ts") or now_ts), 1),
+                 "result": {"order_id": new_id, **det}, "at": now.isoformat()}
+        if new_id and not det.get("unverified"):
+            nb = {k: v for k, v in blob.items() if k != "live_hold"}
+            lc = dict(blob.get("live_chase") or {})
+            lc.update({"rejoins": int(lc.get("rejoins") or 0) + 1, "last_c": target, "at": now.isoformat()})
+            nb.update({"kalshi_order_id": new_id, "price_c": float(target), "anchor_c": float(target),
+                       "amended": False, "live_chase": lc})
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            snap.update({"order_id": new_id, "our_c": float(target), "qty": qty, "hold": None})
+            _LIVE_STATS["rejoins"] += 1
+        elif new_id:
+            # the create went in but the list did not show it yet: record the id, let the tick re-vouch
+            nb = {k: v for k, v in blob.items() if k != "live_hold"}
+            nb.update({"kalshi_order_id": new_id, "price_c": float(target), "anchor_c": float(target)})
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            LIVE_SNAP.pop(ticker, None)
+        else:
+            _LIVE_STATS["errors"] += 1
+            err = str(det.get("error") or det.get("status") or "create failed")[:120]
+            hold["err"], hold["err_at"] = err, now.isoformat()
+            hold["resume_ts"] = now_ts + 5.0
+            sb.table("bot_picks").update({"signal_blob": {**blob, "live_hold": {
+                **blob["live_hold"], "err": err, "err_at": now.isoformat()}}}).eq("id", r["id"]).execute()
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        app.logger.warning("hand live rejoin KALSHI %s pick %s at %s¢ → %s", ticker, r["id"], target, new_id)
+        return
+    oid = snap.get("order_id")
+    orders, _pos = _kalshi_acct(fresh=False)
+    if orders is None:
+        _LIVE_STATS["skips"] += 1
+        return
+    o = _kalshi_pick_order({"kalshi_order_id": oid}, orders)
+    if o is None:
+        LIVE_SNAP.pop(ticker, None)                    # filled / gone — the tick re-vouches from the venue
+        _LIVE_STATS["skips"] += 1
+        return
+    leaves = float(o.get("remaining") or 0.0)
+    our_c = _kv.our_c(o.get("yes_c"), by)
+    if our_c is None:
+        _LIVE_STATS["skips"] += 1
+        return
+    try:
+        drop = float(_machine_flag_val("hand_live_drop_pct", _HAND_LIVE_DROP_PCT))
+    except (TypeError, ValueError):
+        drop = _HAND_LIVE_DROP_PCT
+    verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop)
+    if verdict == "stay":
+        _LIVE_STATS["stays"] += 1
+        return
+    _LIVE_LAST[ticker] = now_m
+    r, blob = _bet_sheet_pick(sb, snap["pick_id"])
+    if not r or r.get("status") != "pending" or blob.get("kalshi_order_id") != oid:
+        LIVE_SNAP.pop(ticker, None)
+        return
+    if verdict == "cancel":
+        try:
+            calm = float(_machine_flag_val("hand_live_calm_s", _HAND_LIVE_CALM_S))
+        except (TypeError, ValueError):
+            calm = _HAND_LIVE_CALM_S
+        gone = False
+        try:
+            _kv.cancel_order(oid, ticker)
+            for _i in range(4):
+                vr = _kv.order_resting(oid, ticker)
+                if vr.get("resting") is False:
+                    gone = True
+                    break
+                _time.sleep(0.7)
+        except Exception as e:
+            det["cancel_error"] = str(e)[:120]
+        stamp = {"hand_live_pull": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker, "order_id": oid,
+                 "gone": gone, "detail": det, "at": now.isoformat()}
+        if gone:
+            qty = max(1, int(round(leaves)))
+            lh = {"at": now.isoformat(), "resume_at": (now + timedelta(seconds=calm)).isoformat(),
+                  "from_c": our_c, "qty": qty, "venue": "KALSHI",
+                  "detail": {k: det.get(k) for k in ("hi_q", "cur_q", "drop_pct")}}
+            nb = {**blob, "kalshi_order_id": None, "live_hold": lh}
+            lc = dict(blob.get("live_chase") or {})
+            lc.update({"pulls": int(lc.get("pulls") or 0) + 1, "at": now.isoformat()})
+            nb["live_chase"] = lc
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            snap.update({"order_id": None, "hold": {"at_ts": now_ts, "resume_ts": now_ts + calm, "qty": qty}})
+            _LIVE_STATS["pulls"] += 1
+        else:
+            _LIVE_STATS["errors"] += 1
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        app.logger.warning("hand live pull KALSHI %s pick %s: %s%% off (%s→%s) gone=%s", ticker, r["id"],
+                           det.get("drop_pct"), det.get("hi_q"), det.get("cur_q"), gone)
+        return
+    target = float(det["target_c"])
+    v, new_id, adet = _kalshi_amend_pick(blob, target, o=o)
+    if v == "amended":
+        lc = dict(blob.get("live_chase") or {})
+        lc.update({"moves": int(lc.get("moves") or 0) + 1, "last_c": target, "from_c": our_c,
+                   "why": det.get("target_why"), "at": now.isoformat()})
+        nb = {**blob, "price_c": target, "anchor_c": target, "amended": True, "repegged_from_c": our_c,
+              "repeg_at": now.isoformat(), "live_chase": lc, "kalshi_order_id": new_id or oid}
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+        snap.update({"our_c": target, "order_id": new_id or oid})
+        _LIVE_STATS["moves"] += 1
+        app.logger.info("hand live chase KALSHI %s %s→%s (%s)", ticker, our_c, target, det.get("target_why"))
+    elif v == "gone":
+        LIVE_SNAP.pop(ticker, None)
+        _LIVE_STATS["skips"] += 1
+    else:
+        _LIVE_STATS["errors"] += 1
+        nb = {**blob, "chase_err": {"verdict": v, "at": now.isoformat(), "target_c": target, "live": True,
+                                    "venue": "KALSHI", **(adet or {})}}
+        if new_id and new_id != oid:
+            nb["kalshi_order_id"] = new_id
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+
+
 def _hand_live_one(sb, client, slug: str) -> None:
     snap = LIVE_SNAP.get(slug)
     if not snap:
         return
+    if snap.get("venue") == "KALSHI":
+        return _hand_live_one_kalshi(sb, client, slug, snap)
     now_m = _time.monotonic()
     if now_m - _LIVE_LAST.get(slug, 0.0) < _HAND_LIVE_DEBOUNCE_S:
         return
@@ -24304,8 +24587,9 @@ def _hand_live_one(sb, client, slug: str) -> None:
 
 def _hand_live_tick(sb, client, now) -> dict:
     """Every handbets tick: re-vouch LIVE_SNAP from the picks + the mirror
-    (every live-snipe Polymarket bet with a resting order or a live hold),
-    start the worker, report its counters."""
+    (every live-snipe bet — Polymarket by slug, Kalshi by ticker — with a
+    resting order or a live hold), cancel a resting order on a FULL lot (the
+    duplicate class), start the worker, report its counters."""
     st = {"snaps": 0, "holds": 0}
     if not _machine_flag("hand_live_chase", True):
         LIVE_SNAP.clear()
@@ -24324,12 +24608,99 @@ def _hand_live_tick(sb, client, now) -> dict:
         cap = _HAND_LIVE_SNIPE_C
     orders = _pmm_open_orders_raw(client, fresh=False) or []
     by_id = {o["id"]: o for o in orders if o.get("id")}
+    ppos = _pmm_positions_raw(client, fresh=False)
+    k_orders = k_pos = None
+    k_tried = False
     want: dict = {}
     now_ts = _time.time()
     for r in rows:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if not blob.get("live_snipe") or blob.get("in_play"):
+            continue
+        if _kalshi_pick(blob):
+            # THE LIVE CHASE ON KALSHI (Oct 24 2026 — the chase never changes venue)
+            import kalshi_venue as _kv
+            ticker, by, koid = blob.get("kalshi_ticker"), bool(blob.get("kalshi_buy_yes")), blob.get("kalshi_order_id")
+            if not ticker:
+                continue
+            if _hand_chase_expired(blob, now_ts):
+                try:
+                    _hand_live_expire(sb, client, r, blob, now, st)
+                except Exception as e:
+                    st["expire_errors"] = st.get("expire_errors", 0) + 1
+                    app.logger.warning("hand live expire KALSHI pick %s: %s", r.get("id"), str(e)[:160])
+                continue
+            if not k_tried:
+                k_orders, k_pos = _kalshi_acct(fresh=False)
+                k_tried = True
+            if k_orders is None:
+                if ticker in LIVE_SNAP:
+                    want[ticker] = LIVE_SNAP[ticker]     # unreadable this tick: keep what we have
+                continue
+            lh = blob.get("live_hold") if isinstance(blob.get("live_hold"), dict) else None
+            o = _kalshi_pick_order(blob, k_orders) if koid else None
+            cap_k = round(_grid_dn(cap, _KALSHI_TICK_C), 2)
+            if o is not None:
+                held_k = _kv.held_for(k_pos, ticker, by) if k_pos is not None else None
+                try:
+                    _ct = float(blob.get("contracts") or 0)
+                except (TypeError, ValueError):
+                    _ct = 0.0
+                if held_k is not None and _ct > 0 and held_k >= _ct - 0.5:
+                    # A FULL LOT WITH AN ORDER STILL RESTING is a duplicate — cancel it (verified)
+                    st["dup_orders"] = st.get("dup_orders", 0) + 1
+                    try:
+                        _kv.cancel_order(koid, ticker)
+                        gone = False
+                        for _i in range(3):
+                            if _kv.order_resting(koid, ticker).get("resting") is False:
+                                gone = True
+                                break
+                            _time.sleep(0.7)
+                        if gone:
+                            nb = {k: v for k, v in blob.items() if k != "live_hold"}
+                            nb.update({"kalshi_order_id": None, "filled_qty": round(held_k, 2),
+                                       "dup_order_cancelled": {"at": now.isoformat(), "order_id": koid, "held": round(held_k, 2),
+                                                               "venue": "KALSHI", "src": "live_tick"}})
+                            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                            _probe_log({"hand_dup_order": True, "pick_id": r["id"], "venue": "KALSHI", "ticker": ticker,
+                                        "order_id": koid, "held": round(held_k, 2), "cancelled": True, "src": "live_tick",
+                                        "bet": _hand_start_bet(r, blob), "at": now.isoformat()})
+                    except Exception as e:
+                        app.logger.warning("hand live dup cancel KALSHI pick %s: %s", r["id"], str(e)[:120])
+                    continue
+                want[ticker] = {"pick_id": r["id"], "order_id": koid, "our_c": _kv.our_c(o.get("yes_c"), by),
+                                "qty": o.get("remaining"), "synth": not by, "buy_yes": by, "cap_c": cap_k,
+                                "tick": _KALSHI_TICK_C, "venue": "KALSHI", "event_start": r.get("event_start"), "hold": None}
+            elif lh and not koid:
+                try:
+                    _fq, _ct = float(blob.get("filled_qty") or 0.0), float(blob.get("contracts") or 0.0)
+                except (TypeError, ValueError):
+                    _fq, _ct = 0.0, 0.0
+                if _ct > 0 and _fq >= _ct - 0.5:
+                    try:
+                        sb.table("bot_picks").update({"signal_blob": {k: v for k, v in blob.items() if k != "live_hold"}}
+                                                     ).eq("id", r["id"]).execute()
+                    except Exception:
+                        pass
+                    st["holds_dropped"] = st.get("holds_dropped", 0) + 1
+                    continue
+                prev = (LIVE_SNAP.get(ticker) or {}).get("hold")
+                try:
+                    at_ts = datetime.fromisoformat(str(lh.get("at")).replace("Z", "+00:00")).timestamp()
+                    resume_ts = datetime.fromisoformat(str(lh.get("resume_at")).replace("Z", "+00:00")).timestamp()
+                except (TypeError, ValueError):
+                    at_ts, resume_ts = _time.time(), _time.time()
+                hold = prev or {"at_ts": at_ts, "resume_ts": resume_ts, "qty": int(lh.get("qty") or 1)}
+                if lh.get("err"):
+                    hold["err"] = lh["err"]
+                want[ticker] = {"pick_id": r["id"], "order_id": None, "our_c": None, "qty": hold["qty"],
+                                "synth": not by, "buy_yes": by, "cap_c": cap_k, "tick": _KALSHI_TICK_C,
+                                "venue": "KALSHI", "event_start": r.get("event_start"), "hold": hold}
+                st["holds"] += 1
+            continue
         slug, oid, syn = blob.get("pmm_slug"), blob.get("order_id"), bool(blob.get("pmm_synthetic"))
-        if not slug or not blob.get("live_snipe") or _kalshi_pick(blob) or blob.get("in_play"):
+        if not slug:
             continue
         if _hand_chase_expired(blob, now_ts):
             # THE HOUR IS UP (Rob, Oct 24 2026: "You have 1 hour"): the old cancel
@@ -24342,6 +24713,32 @@ def _hand_live_tick(sb, client, now) -> dict:
         lh = blob.get("live_hold") if isinstance(blob.get("live_hold"), dict) else None
         o = by_id.get(oid) if oid else None
         if o is not None and o.get("state") in _OPEN_ORDER_STATES:
+            # A FULL LOT WITH AN ORDER STILL RESTING IS A DUPLICATE (Oct 24 2026,
+            # Troy −13.5 / Ohio −10.5 / EM@Ohio O 48.5 — two of them FILLED into
+            # 20-lots): the invariant is enforced every tick, verified cancel.
+            try:
+                _ct = float(blob.get("contracts") or 0)
+            except (TypeError, ValueError):
+                _ct = 0.0
+            held_p = float(_bet_sheet_pick_side_held(ppos.get(slug), syn)) if ppos is not None else None
+            if held_p is not None and _ct > 0 and held_p >= _ct - 0.5:
+                st["dup_orders"] = st.get("dup_orders", 0) + 1
+                try:
+                    fresh_held = _hand_poly_side_held(client, slug, syn)
+                    if fresh_held is not None and fresh_held >= _ct - 0.5:
+                        gone, _ = _bet_sheet_cancel(client, oid, slug)
+                        if gone:
+                            nb = {k: v for k, v in blob.items() if k != "live_hold"}
+                            nb.update({"order_id": None, "filled_qty": round(fresh_held, 2),
+                                       "dup_order_cancelled": {"at": now.isoformat(), "order_id": oid, "held": round(fresh_held, 2),
+                                                               "venue": "POLYMARKET", "src": "live_tick"}})
+                            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                            _probe_log({"hand_dup_order": True, "pick_id": r["id"], "venue": "POLYMARKET", "slug": slug,
+                                        "order_id": oid, "held": round(fresh_held, 2), "cancelled": True, "src": "live_tick",
+                                        "bet": _hand_start_bet(r, blob), "at": now.isoformat()})
+                        continue
+                except Exception as e:
+                    app.logger.warning("hand live dup cancel pick %s: %s", r["id"], str(e)[:120])
             try:
                 py = float(o["price_yes"]) * 100.0
                 our_c = round((100.0 - py) if syn else py, 2)
