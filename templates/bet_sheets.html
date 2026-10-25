@@ -970,6 +970,11 @@
         if (_inflight.length) _pollT = setTimeout(pollQueue, 1500);
         else finishBatch();
     }
+    // THE QUOTE BUTTON (Oct 25 2026, Rob: "My quote button doesn't function anymore?"):
+    // this one-liner was deleted with the Oct 24 tap-and-go rewrite, so the
+    // button's onclick threw ReferenceError and the request never left the
+    // page — the selftest now checks every onclick on the page resolves.
+    function quoteSlip() { disarmPlace(); postSlip(true); }
     // TWO TAPS, NO MODAL (Oct 24 2026): the first tap arms the button with
     // what it will do, the second (within 7s, not a double-tap) sends it.
     // Touching the slip disarms it (saveSlip).

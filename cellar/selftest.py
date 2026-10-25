@@ -4982,6 +4982,27 @@ def test_sheet_pin_quote() -> None:
     check("the quote never spends a parlay credit", "paid=False" in src and "paid=True" not in src)
 
 
+def test_page_onclick_handlers_exist() -> None:
+    """THE QUOTE BUTTON DID NOTHING (Oct 25 2026, Rob: "My quote button
+    doesn't function anymore?"): the Oct 24 tap-and-go rewrite deleted
+    `function quoteSlip` while the button kept `onclick="quoteSlip()"`, so
+    every tap threw ReferenceError and no request ever left the page — the
+    JS syntax check cannot see a missing name. Every inline onclick on the
+    admin pages must name a function the page defines."""
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for tpl in ("templates/bet_sheets.html", "templates/football_picks.html"):
+        src = open(os.path.join(root, tpl), encoding="utf-8").read()
+        names = sorted(set(re.findall(r'onclick="\s*([A-Za-z_$][\w$]*)\s*\(', src)))
+        missing = [n for n in names
+                   if not re.search(r"\bfunction\s+" + re.escape(n) + r"\s*\(", src)
+                   and not re.search(r"\b(?:const|let|var)\s+" + re.escape(n) + r"\s*=", src)
+                   and not re.search(r"\bwindow\." + re.escape(n) + r"\s*=", src)]
+        check(f"{tpl}: every onclick handler is defined ({len(names)} checked)", not missing, f"missing: {missing}")
+    bs = open(os.path.join(root, "templates/bet_sheets.html"), encoding="utf-8").read()
+    check("bet_sheets: Quote = postSlip(true)", "function quoteSlip() { disarmPlace(); postSlip(true); }" in bs)
+
+
 def test_bet_sheet_reads() -> None:
     """The model's read on a stopped bet (Oct 15 2026): each option priced
     by the sheet's own model at its own line and price; recommend the
@@ -5703,7 +5724,7 @@ def main() -> int:
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_gridiron_move_favorable, test_gridiron_key_hook, test_cfbd_consensus, test_gridiron_qb_adjust,
-              test_pin_line_center, test_sheet_pin_quote,
+              test_pin_line_center, test_sheet_pin_quote, test_page_onclick_handlers_exist,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
