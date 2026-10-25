@@ -1041,8 +1041,9 @@
     // rejoin that errored, outbid in-play); green = filled and done;
     // yellow = resting and the box has it (chasing, thin touch, holds).
     function recShort(b, rr) {
-        const r = b.read.rec;
-        return r === 'move' ? '★ model says move to ' + rungLabel(b, rr && rr.line)
+        const r = b.read.rec, hc = b.read.hold && b.read.hold.price_c != null ? b.read.hold.price_c + '¢' : 'your bid';
+        return r === 'hold' ? '★ model says hold ' + hc + ' — still a play at your price; at game start the box chases from it, never higher'
+             : r === 'move' ? '★ model says move to ' + rungLabel(b, rr && rr.line)
              : r === 'repeg' ? '★ model says ' + (rr ? 'stay and ' : '') + 're-peg — still a play'
              : r === 'live' ? '★ model says move to live — a play at ' + ((b.read.live || {}).price_c != null ? b.read.live.price_c + '¢' : 'the live cap') + ', not at the touch'
              : '★ model says cancel — no longer a play';
@@ -1302,7 +1303,7 @@
                     + (b.take_window.bump && b.take_window.bump.verdict === 'amended' ? ', bid moved up to ' + b.take_window.bump.to_c + '¢ as the maker' : '') + '), then cancels.'
                 : b.start_seen ? 'Game started and the cancel didn\'t take — this order is still resting at its pre-game price.'
                 : b.start_blind ? 'The box has no pre-start book for this game, so it can\'t see game start — cancel or move it yourself.'
-                : 'Past the listed time, but the makers are still quoting, so the game has not started for the box. At the drop (95% of the touch leaves) it takes inside your 1¢ for 5 minutes, then chases live under the cap for an hour.') + '</div>';
+                : 'Past the listed time, but the makers are still quoting, so the game has not started for the box. At the drop (95% of the touch leaves) it chases live from your bid, never higher, for an hour.') + '</div>';
             if (!b.live_snipe) acts.push('<button class="abtn' + (lv ? ' on' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : 'Move to Live · 49.5¢') + '</button>');
             acts.push('<button class="abtn dng' + (cn ? ' on' : ' pri') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : 'Cancel order') + '</button>');
         }
@@ -1310,7 +1311,11 @@
             const on = inSlip(_sheetAdd[0]);
             acts.push('<button class="abtn' + (on ? ' on' : '') + '" onclick="sheetAddMore()">' + (on ? '✓ More of this on the slip' : 'Add more to the slip') + '</button>');
         }
-        acts.push('<button class="abtn" onclick="closeSheet()">Close</button>');
+        // THE HOLD (Oct 25 2026, Rob: "stay should be the star"): nothing to tap —
+        // the bet rests at his price and the box chases from it at game start.
+        const _rdH = b.read || null, _hc = _rdH && _rdH.hold && _rdH.hold.price_c != null ? _rdH.hold.price_c + '¢' : 'your bid';
+        const _holdStar = _rdH && _rdH.rec === 'hold' && b.status === 'pending' && o.resting && !b.started;
+        acts.push('<button class="abtn' + (_holdStar ? ' pri' : '') + '" onclick="closeSheet()">' + (_holdStar ? '★ Hold ' + _hc + ' · nothing to do, the box chases from it at game start' : 'Close') + '</button>');
         h += '<div class="acts">' + acts.join('') + '</div>';
         document.getElementById('as').innerHTML = h;
     }
@@ -1331,17 +1336,21 @@
                  + (x.why ? '<div class="dim" style="font-size:12px;margin-top:2px">' + esc(x.why) + '</div>' : '') + '</div>';
         };
         const lvc = rd.live && rd.live.price_c != null ? rd.live.price_c + '¢' : 'the live cap';
-        const recTxt = rd.rec === 'move' ? 'Move to ' + rungLabel(b, rr && rr.line)
+        const hc = rd.hold && rd.hold.price_c != null ? rd.hold.price_c + '¢' : 'your bid';
+        const recTxt = rd.rec === 'hold' ? 'Hold ' + betLabel(b) + ' @ ' + hc
+                     : rd.rec === 'move' ? 'Move to ' + rungLabel(b, rr && rr.line)
                      : rd.rec === 'repeg' ? 'Stay on ' + betLabel(b) + ' — re-peg to the touch'
                      : rd.rec === 'live' ? 'Move to Live — ' + betLabel(b) + ' @ ' + lvc
                      : 'Cancel — no longer a play at any price';
         const why = rd.rec === 'cancel' ? ''
                   : ' <span class="g" style="font-weight:500;font-size:13px;color:var(--text2)">· ' + (rd.rec === 'live' ? 'not a play at the touch, a play at the live cap'
-                  : (rd.move && rd.stay && rd.move.verdict !== 'pass' && rd.stay.verdict !== 'pass') ? 'more value per dollar' : 'the only option the model trusts') + '</span>';
+                  : rd.rec === 'hold' ? 'your price stands — at game start the box chases from ' + hc + ', never higher'
+                  : (rd.move && rd.hold && rd.move.verdict !== 'pass' && rd.hold.verdict !== 'pass') ? 'more value per dollar' : 'the only option the model trusts') + '</span>';
         let h = '<div class="rd"><div class="rh">THE MODEL\'S READ</div>'
               + '<div class="rec ' + (rd.rec === 'cancel' ? 'no' : 'go') + '">★ ' + esc(recTxt) + why + '</div>';
+        if (rd.hold) h += opt('Hold', rd.hold, betLabel(b));
         if (rr) h += opt('Move', rd.move, rungLabel(b, rr.line));
-        h += opt(rr ? 'Stay' : 'Re-peg', rd.stay, betLabel(b));
+        h += opt('Re-peg', rd.stay, betLabel(b));
         if (rd.live) h += opt('Live', rd.live, betLabel(b));
         return h + '</div>';
     }

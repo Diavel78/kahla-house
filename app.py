@@ -23170,8 +23170,13 @@ def _bs_line_prob(sb, sport: str, blob: dict, mt: str, side: str, line):
     return None
 
 
-def _bs_option_read(sb, sport, blob, mt, side, line, price_c):
-    """One option priced: model %, fair, value vs the price, verdict."""
+def _bs_option_read(sb, sport, blob, mt, side, line, price_c, hold=False):
+    """One option priced: model %, fair, value vs the price, verdict.
+    `hold` = the bet at ROB'S OWN resting price (Oct 25 2026): the chalk
+    rules gate a NEW seat or a climb, not a bid he already placed — holding
+    places nothing, and at game start the box chases from that bid down
+    (the cap is his bid), so a chalky hold is still priced on its value;
+    the claimed-edge cliff still applies."""
     got = _bs_line_prob(sb, sport, blob, mt, side, line)
     if got is None:
         return None
@@ -23199,15 +23204,25 @@ def _bs_option_read(sb, sport, blob, mt, side, line, price_c):
                 v = "pass"
                 out["why"] = f"a {e:.1f}¢ edge is past the {imp:.0f}¢ the model is trusted to"
             if mt == "moneyline" and v != "pass" and float(price_c) >= _BS_READ_CHALK_C:
-                v = "pass"   # THE CHALK RULE: the sheet gives no ML bet at −140 or shorter
-                out["why"] = f"{price_c:g}¢ is {_SHEET_CHALK_ML} or shorter — the chalk rule, no moneyline past it"
+                if hold:
+                    out["chalk"] = True
+                    out["why"] = f"{price_c:g}¢ is {_SHEET_CHALK_ML} or shorter, but it is your own bid — holding places nothing new, and the chase starts here at game start"
+                else:
+                    v = "pass"   # THE CHALK RULE: the sheet gives no ML bet at −140 or shorter
+                    out["why"] = f"{price_c:g}¢ is {_SHEET_CHALK_ML} or shorter — the chalk rule, no moneyline past it"
     if v and v != "pass" and mt != "moneyline" and price_c is not None:
         try:
             if float(price_c) >= _hand_chalk_cap_c(mt) - 1e-9:
-                v = "pass"   # THE O/U CHALK (Oct 23 2026): no spread or total at −120 or shorter
-                out["why"] = f"{float(price_c):g}¢ is {_SHEET_CHALK_OU} or shorter — the chalk rule, nothing past it"
+                if hold:
+                    out["chalk"] = True
+                    out["why"] = f"{float(price_c):g}¢ is {_SHEET_CHALK_OU} or shorter, but it is your own bid — holding places nothing new, and the chase starts here at game start"
+                else:
+                    v = "pass"   # THE O/U CHALK (Oct 23 2026): no spread or total at −120 or shorter
+                    out["why"] = f"{float(price_c):g}¢ is {_SHEET_CHALK_OU} or shorter — the chalk rule, nothing past it"
         except (TypeError, ValueError):
             pass
+    if hold:
+        out["hold"] = True
     out["verdict"] = v
     return out
 
@@ -23264,13 +23279,17 @@ def _bs_opt_label(mt, side, x) -> str:
     return f"{ln:+g}"
 
 
-def _bs_recommend(stay, move, live=None):
-    """'move' / 'repeg' / 'live' / 'cancel' (None = the model could price
-    nothing). Stay and move are judged first — they fill pre-game, which is
-    the bet Rob placed; `live` (the same bet at the live cap, an in-play
-    fill) is the recommendation only when neither of those is a play but
-    the cap price is."""
-    if stay is None and move is None and live is None:
+def _bs_recommend(stay, move, live=None, hold=None):
+    """'hold' / 'move' / 'repeg' / 'live' / 'cancel' (None = the model could
+    price nothing). HOLD IS THE STAR (Oct 25 2026, Rob on KC +3.5 resting
+    55¢ with the read starring the 49.5¢ live drop: "stay should be the
+    star"): since the auto chase caps at his bid, a resting bet is "hold my
+    price pre-game, chase from it at the start" — the bet he placed, at his
+    number, with the live fill covered. It is judged first with the move
+    (more value per dollar wins); re-peg to the touch is a climb and comes
+    after; `live` (the same bet dropped to the live cap now) only when
+    nothing else is a play but the cap price is."""
+    if stay is None and move is None and live is None and hold is None:
         return None
     rank = {"play": 2, "lean": 1}
 
@@ -23280,11 +23299,13 @@ def _bs_recommend(stay, move, live=None):
     def _roi(x):                      # value per dollar staked — what the money earns
         return x["value_c"] / max(float(x.get("price_c") or 1.0), 1.0)
     best = None
-    for name, x in (("repeg", stay), ("move", move)):
+    for name, x in (("hold", hold), ("move", move)):
         if _ok(x) and (best is None or _roi(x) > _roi(best[1])):
             best = (name, x)
     if best:
         return best[0]
+    if _ok(stay):
+        return "repeg"
     return "live" if _ok(live) else "cancel"
 
 
@@ -23311,6 +23332,18 @@ def _bet_sheet_reads(sb, out: list) -> None:
             continue
         touch = b.get("touch_c") if b.get("touch_c") is not None else hold.get("touch_c")
         stay = _bs_option_read(sb, sport, blob, mt, side, b.get("line"), touch)
+        # THE HOLD (Oct 25 2026): the bet at ROB'S resting price — the auto
+        # chase caps at that bid, so holding is "fill at my number pre-game,
+        # else chase from it at the start". Chalk does not pass it (nothing
+        # new is placed); the model's value at the price does.
+        own_c = (b.get("order") or {}).get("price_c")
+        if own_c is None:
+            own_c = b.get("price_c")
+        own = None
+        try:
+            own = _bs_option_read(sb, sport, blob, mt, side, b.get("line"), float(own_c), hold=True) if own_c is not None else None
+        except (TypeError, ValueError):
+            own = None
         rr = hold.get("rerung") if isinstance(hold.get("rerung"), dict) else None
         move = (_bs_option_read(sb, sport, blob, mt, side, rr.get("line"), rr.get("bid_c"))
                 if rr and rr.get("slug") and rr.get("line") is not None else None)
@@ -23331,10 +23364,10 @@ def _bet_sheet_reads(sb, out: list) -> None:
             live = _bs_option_read(sb, sport, blob, mt, side, b.get("line"), live_c)
             if live:
                 live["live"] = True
-        rec = _bs_recommend(stay, move if rr else None, live)
+        rec = _bs_recommend(stay, move if rr else None, live, own)
         if rec is None:
             continue
-        b["read"] = {"stay": stay, "move": move, "live": live, "rec": rec}
+        b["read"] = {"hold": own, "stay": stay, "move": move, "live": live, "rec": rec}
 
 
 _BS_LIVE_MAX_H = 6.0          # a pending bet this long past its start is the resolver's, not "live"

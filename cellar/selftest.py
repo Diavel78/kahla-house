@@ -5084,12 +5084,38 @@ def test_bet_sheet_reads() -> None:
     check("stay and move both PASS, live a LEAN → move to live",
           R({**a, "verdict": "pass"}, {**m, "verdict": "pass"}, lv) == "live")
     check("a playable stay beats the live option (it fills pre-game)", R(a, None, lv) == "repeg")
+    # THE HOLD IS THE STAR (Oct 25 2026, Rob on KC +3.5 resting 55¢ — touch 56
+    # chalk-capped, the read starred the 49.5¢ live drop: "stay should be the
+    # star"): his own bid, priced on value with the chalk rule waived (nothing
+    # new is placed; the auto chase caps at that bid), judged before everything.
+    fb = {"model": {"total_raw": 49.6, "total_cal": 49.6, "margin_raw": 0.3, "margin_cal": 0.3}}   # home by 0.3 → KC +3.5 covers by 3.2, model 59.5%
+    _app._power_snapshot = lambda sb, sport: snap
+    try:
+        hd = _app._bs_option_read(None, "NFL", fb, "spread", "away", 3.5, 55.0, hold=True)
+        rp = _app._bs_option_read(None, "NFL", fb, "spread", "away", 3.5, 56.0)
+        check("hold KC +3.5 @ 55¢: chalk waived, still a play on value", hd["verdict"] == "play" and hd.get("hold") is True
+              and hd.get("chalk") is True and "your own bid" in (hd.get("why") or ""), str(hd))
+        check("the same bet at the 56¢ touch (a climb) stays a chalk PASS", rp["verdict"] == "pass" and "chalk" in (rp.get("why") or ""), str(rp))
+        check("…and the hold is the star over the 49.5 live play", R(rp, None, lv, hd) == "hold")
+        check("hold with no value → live is the rec", R(rp, None, lv, {**hd, "value_c": -1.0}) == "live")
+        mv = {"verdict": "play", "value_c": 6.0, "price_c": 50.0}
+        check("a move with more value per dollar beats the hold", R(rp, mv, lv, hd) == "move")
+        check("repeg (a climb to the touch) only when hold and move are not plays", R(a, None, lv, {**hd, "verdict": "pass"}) == "repeg")
+        check("the read stamps hold and the recommender sees it",
+              '"read"] = {"hold": own' in _insp.getsource(_app._bet_sheet_reads) and "hold=True" in _insp.getsource(_app._bet_sheet_reads))
+    finally:
+        _app._power_snapshot = old
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "templates/bet_sheets.html"), encoding="utf-8").read()
+    check("bet_sheets: the hold is a starred line in the read and the starred action is Close",
+          "r === 'hold' ? '★ model says hold '" in src and "opt('Hold', rd.hold, betLabel(b))" in src and "★ Hold ' + _hc" in src)
+    check("bet_sheets: the started-game note no longer promises the retired take", "takes inside your 1¢ for 5 minutes" not in src)
     check("live a PASS too → cancel", R({**a, "verdict": "pass"}, None, {**lv, "verdict": "pass"}) == "cancel")
     check("live priced alone → live", R(None, None, lv) == "live" and R(None, None, None) is None)
     import inspect as _ins
     _src = _ins.getsource(_app._bet_sheet_reads)
     check("the read prices the live option at hand_live_snipe_c and passes it to the recommender",
-          "hand_live_snipe_c" in _src and "_bs_recommend(stay, move if rr else None, live)" in _src)
+          "hand_live_snipe_c" in _src and "_bs_recommend(stay, move if rr else None, live, own)" in _src)
     # MONEYLINES (Oct 20 2026, the Atlanta ML past its leash with no star):
     # priced off the sheet's win prob; the chalk rule caps the read at 60¢.
     o = _app._bs_option_read(None, "NBA", {"model": {"win_home": 0.42}}, "moneyline", "away", None, 45.5)
