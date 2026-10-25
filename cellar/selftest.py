@@ -3318,7 +3318,7 @@ def test_live_snipe_hands_off() -> None:
     for fn in (_app._hand_chase_tick, _app._hand_move_tick, _app._hand_start_tick,
                _app._hand_reset_tick):
         check(f"{fn.__name__} skips a live snipe", "live_snipe" in inspect.getsource(fn))
-    check("the ops route accepts 'live'", '"live", "getlive")' in inspect.getsource(_app.api_bet_sheets_ops))
+    check("the ops route accepts 'live'", '"live", "getlive", "flip")' in inspect.getsource(_app.api_bet_sheets_ops))
     src = inspect.getsource(_app._bet_sheet_live_exec)
     check("live move is GTC (gtt None)", "qty_total, None)" in src)
     check("live move never moves up", "<= target + 1e-9" in src)
@@ -5127,7 +5127,75 @@ def test_bet_sheet_reads() -> None:
     import inspect as _ins
     _src = _ins.getsource(_app._bet_sheet_reads)
     check("the read prices the live option at hand_live_snipe_c and passes it to the recommender",
-          "hand_live_snipe_c" in _src and "_bs_recommend(stay, move if rr else None, live, own)" in _src)
+          "hand_live_snipe_c" in _src and "_bs_recommend(stay, move if rr else None, live, own, flip)" in _src)
+    # THE FLIP (Oct 25 2026, Rob on O 46.5 resting at the touch with the sheet
+    # now on Under 46.5 — the strip said "keep it or cancel": "You made a
+    # suggestion but don't give me the option?"): the read prices the OTHER
+    # side at its touch; when his side is no play at his price and the other
+    # side is, the rec is flip — and the flip op cancels first, then places
+    # the other side through the ordinary create path.
+    check("flip side/line: a total shares the line, a spread mirrors it, a moneyline has none",
+          _app._bs_flip_side("total", "over") == "under" and _app._bs_flip_side("spread", "home") == "away"
+          and _app._bs_flip_line("total", 46.5) == 46.5 and _app._bs_flip_line("spread", 3.5) == -3.5
+          and _app._bs_flip_line("moneyline", None) is None and _app._bs_flip_side("nrfi", "yes") is None)
+    check("flip label", _app._bs_flip_label("Cincinnati Bengals @ Baltimore Ravens", "total", "under", 46.5) == "U 46.5"
+          and _app._bs_flip_label("Cincinnati Bengals @ Baltimore Ravens", "spread", "away", -3.5) == "Cincinnati Bengals -3.5"
+          and _app._bs_flip_label("A @ B", "moneyline", "home", None) == "B ML")
+    fp = {"verdict": "lean", "value_c": 3.4, "price_c": 50.5}
+    check("his side a PASS everywhere, the other side a LEAN at its touch → flip",
+          R({**a, "verdict": "pass"}, None, None, {**hd, "verdict": "pass"}, fp) == "flip")
+    check("a playable hold beats the flip (the bet he placed, at his price)", R(rp, None, None, hd, fp) == "hold")
+    check("a playable re-peg (his side at the touch) beats the flip", R(a, None, None, {**hd, "verdict": "pass"}, fp) == "repeg")
+    check("the flip beats the live drop of his own side", R({**a, "verdict": "pass"}, None, lv, {**hd, "verdict": "pass"}, fp) == "flip")
+    check("the flip a PASS too → live, else cancel",
+          R({**a, "verdict": "pass"}, None, lv, {**hd, "verdict": "pass"}, {**fp, "verdict": "pass"}) == "live"
+          and R({**a, "verdict": "pass"}, None, None, {**hd, "verdict": "pass"}, {**fp, "verdict": "pass"}) == "cancel")
+    # the read on an UNSTOPPED bet: the CIN@BAL shape — model total 45.2 (under
+    # by 1.3), O 46.5 resting 48.5 at the touch, mid 48.75 → the under's bid
+    # is 100 − (2·48.75 − 48.5) = 51; the over reads PASS at 48.5, the under a
+    # LEAN at 51 → read {hold, flip, rec flip}. A bet the model still likes
+    # (O 44.5) gets no read at all.
+    _app._power_snapshot = lambda sb, sport: snap
+    cin = {"model": {"total_raw": 45.2, "total_cal": 45.2, "margin_raw": -1.4, "margin_cal": -1.4}}
+    old_blob = _app._bs_sheet_blob
+    _app._bs_sheet_blob = lambda sb, sport, mid, ev, cache: cin
+    try:
+        row = {"status": "pending", "started": False, "order": {"resting": True, "price_c": 48.5, "leaves": 10},
+               "chase": {"hold": None}, "market_type": "total", "side": "over", "sport": "NFL", "line": 46.5,
+               "market_id": "m1", "event_name": "Cincinnati Bengals @ Baltimore Ravens", "touch_c": 48.5, "cur_c": 48.75,
+               "price_c": 48.5}
+        _app._bet_sheet_reads(None, [row], cache={})
+        rd = row.get("read") or {}
+        check("flipped bet: the read stamps hold (PASS) + flip (LEAN U 46.5 @ 51¢) and recommends the flip",
+              rd.get("rec") == "flip" and (rd.get("hold") or {}).get("verdict") == "pass"
+              and (rd.get("flip") or {}).get("verdict") == "lean" and rd["flip"]["price_c"] == 51.0
+              and rd["flip"]["side"] == "under" and rd["flip"]["line"] == 46.5 and rd["flip"]["label"] == "U 46.5", str(rd))
+        check("…and no stay/move/live on an unstopped bet (nothing to re-peg to)", "stay" not in rd and "live" not in rd)
+        row2 = {k: v for k, v in row.items() if k != "read"}; row2["line"] = 44.5
+        _app._bet_sheet_reads(None, [row2], cache={})
+        check("a bet the model still likes (O 44.5, +0.7 pts lean at 48.5) gets no read", "read" not in row2, str(row2.get("read")))
+        row3 = {k: v for k, v in row.items() if k != "read"}
+        row3.update(chase={"hold": {"touch_c": 49.0, "price_c": 48.5, "leash_c": 2.0}}, touch_c=49.0, cur_c=49.25)
+        _app._bet_sheet_reads(None, [row3], cache={})
+        rd3 = row3.get("read") or {}
+        check("a stopped flipped bet: the full read carries the flip option and recommends it",
+              rd3.get("rec") == "flip" and rd3.get("flip") and "stay" in rd3, str(rd3))
+    finally:
+        _app._power_snapshot = old
+        _app._bs_sheet_blob = old_blob
+    _fs = _ins.getsource(_app._bet_sheet_flip_exec)
+    check("the flip op cancels first (verified) and places nothing on a failed or unreadable cancel",
+          _fs.index("_bet_sheet_cancel_exec(sb, client, r[\"id\"])") < _fs.index("_hand_order_execute(sb, client, crow, worker)")
+          and "held is None" in _fs and "game already started" in _fs)
+    check("the flip op is a queue op: dispatched by the executor, accepted by /ops",
+          'if op == "flip":' in _ins.getsource(_app._hand_order_execute)
+          and '"getlive", "flip")' in open(os.path.join(root, "app.py"), encoding="utf-8").read())
+    check("bet_sheets: the flip is an action on the sheet, a slip op, a read row, and the strip says tap to flip",
+          "sheetOp(\\'flip\\')" in src and "opt('Flip', rd.flip, flipLabel(b))" in src
+          and "i.op === 'flip'" in src and "tap to flip or hold" in src and "function flipLabel(b)" in src
+          and "flip: 'flipping to the other side…'" in src)
+    check("bet_sheets: a flipped bet whose read says hold is not red",
+          "!(b.read && b.read.rec === 'hold') ? 'warn' : st.cls" in src)
     # MONEYLINES (Oct 20 2026, the Atlanta ML past its leash with no star):
     # priced off the sheet's win prob; the chalk rule caps the read at 60¢.
     o = _app._bs_option_read(None, "NBA", {"model": {"win_home": 0.42}}, "moneyline", "away", None, 45.5)

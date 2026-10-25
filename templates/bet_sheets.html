@@ -291,6 +291,7 @@
         .si .tag.rerung { background: var(--a-bd); color: var(--bg); }
         .si .tag.live { background: #8b5cf6; color: #fff; }
         .si .tag.getlive { background: #8b5cf6; color: #fff; }
+        .si .tag.flip { background: var(--r-bd); color: #fff; }
         .slip-cost { color: var(--text2); font-size: 14px; font-family: var(--mono); }
         /* TAP AND GO (Oct 24 2026, Rob: "I tap my credit card, I take my shit and I leave… to me it looks instant"):
            a sent bet leaves the slip at once; its card button reads "sending…" until the box has it resting. */
@@ -739,12 +740,14 @@
                     ? ('move ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + ' → 49.5¢ · no game-start cancel · the box leaves it to you')
                     : i.op === 'rerung'
                     ? ('cancel ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + ' → rest them on ' + i.rerung_label + (i.rerung_c != null ? ' (bid ' + i.rerung_c + '¢ now)' : '') + ' · priced at the touch when it runs')
+                    : i.op === 'flip'
+                    ? ('cancel ' + (lv != null ? Math.round(lv) + ' unfilled' : 'the unfilled') + (rest != null ? ' @ ' + rest + '¢' : '') + ' → bet them on ' + i.flip_label + (i.flip_c != null ? ' (bid ' + i.flip_c + '¢ now)' : '') + ' · the sheet\'s rung, priced at the touch when it runs')
                     : i.op === 'getlive'
                     ? ('rest ' + (i.contracts || '?') + ' live at ' + ((_lastBetsPayload && _lastBetsPayload.live_snipe_c) || 49.5) + '¢ or the bid, whichever is cheaper' + (i.bid_c != null ? ' (bid ' + i.bid_c + '¢ now)' : '') + ' · GTC, the box leaves it to you')
                     : ('pull the resting order' + (o.leaves != null ? ' · ' + Math.round(o.leaves) + ' unfilled' : ''));
                 if (i.q && i.q.ok === false) q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + '</div>';
                 else q = '<div class="q">' + esc(line) + '</div>';
-                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : i.op === 'live' ? 'LIVE' : i.op === 'getlive' ? 'CHASE' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
+                return '<div class="si"><div class="lab"><span class="tag ' + i.op + '">' + (i.op === 'repeg' ? 'RE-PEG' : i.op === 'rerung' ? 'NEW LINE' : i.op === 'live' ? 'LIVE' : i.op === 'getlive' ? 'CHASE' : i.op === 'flip' ? 'FLIP' : 'CANCEL') + '</span><b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport || '') + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                      + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
             }
             const liveCap = (_lastBetsPayload && _lastBetsPayload.live_snipe_c) || 49.5;
@@ -905,6 +908,7 @@
         if (i.op === 'cancel') return 'Cancelled ' + i.label + (x.deleted ? '' : ' (' + x.held + ' filled stays)');
         if (i.op === 'getlive') return x.ok === false ? (i.label + ': ' + (x.reason || x.error || 'not placed')) : ('Live: ' + (x.contracts || i.contracts || '') + ' ' + i.label + ' resting @ ' + x.price_c + '¢' + (x.venue === 'KALSHI' ? ' on Kalshi' : '') + (x.priced === 'bid' ? ' (the bid, cheaper than the live price)' : x.priced === 'under_ask' ? ' (a tick under the ask)' : '') + ' · yours to watch');
         if (i.op === 'live') return x.ok === false ? (i.label + ': ' + (x.note || 'not moved')) : ((x.moved ? 'Moved ' + i.label + ' ' + (x.from_c != null ? x.from_c + '¢ → ' : 'to ') + x.price_c + '¢' : i.label + ' @ ' + x.price_c + '¢') + ' · live, no game-start cancel');
+        if (i.op === 'flip') return x.flipped ? ('Flipped ' + i.label + ' → ' + (x.label || i.flip_label) + ' @ ' + x.price_c + '¢' + (x.venue === 'KALSHI' ? ' on Kalshi' : '') + (x.held ? ' (' + x.held + ' filled stays)' : '') + (x.warning ? ' · ' + x.warning : '')) : (i.label + ': ' + (x.note || x.error || x.reason || 'not flipped'));
         if (i.op === 'rerung') return x.rerung ? ('Moved ' + i.label + ' → ' + (x.label || i.rerung_label) + ' @ ' + x.price_c + '¢' + (x.held ? ' (' + x.held + ' filled stays on the old line)' : '') + (x.warning ? ' · ' + x.warning : '')) : (i.label + ': ' + (x.note || 'not moved'));
         if (x.moved) return 'Moved ' + i.label + ' ' + (x.from_c != null ? x.from_c + '¢ → ' : 'to ') + x.price_c + '¢';
         return i.label + ': ' + (x.note || 'no move');
@@ -996,7 +1000,7 @@
             return;
         }
         const n = contractsN(), fr = freshItems();
-        const nb = fr.filter(i => !i.op).length, nr = fr.filter(i => i.op === 'repeg').length, nc = fr.filter(i => i.op === 'cancel').length, nx = fr.filter(i => i.op === 'rerung').length, nl = fr.filter(i => i.op === 'live').length, ng = fr.filter(i => i.op === 'getlive').length;
+        const nb = fr.filter(i => !i.op).length, nr = fr.filter(i => i.op === 'repeg').length, nc = fr.filter(i => i.op === 'cancel').length, nx = fr.filter(i => i.op === 'rerung').length, nl = fr.filter(i => i.op === 'live').length, ng = fr.filter(i => i.op === 'getlive').length, nf = fr.filter(i => i.op === 'flip').length;
         const parts = [];
         if (nb) parts.push(nb + ' bet' + (nb === 1 ? '' : 's') + ' × ' + n + ' at the touch');
         if (nr) parts.push('re-peg ' + nr);
@@ -1004,6 +1008,7 @@
         if (nl) parts.push(nl + ' to live 49.5¢');
         if (ng) parts.push(ng + ' live again (49.5¢ or the bid)');
         if (nx) parts.push(nx + ' to the new line');
+        if (nf) parts.push(nf + ' flipped to the other side');
         bp.classList.add('arm');
         bp.textContent = 'Tap again → ' + parts.join(' · ');
         _armAt = Date.now();
@@ -1150,7 +1155,7 @@
         const key = slipKey(g, mt, side), on = inSlip(key), mine = myBetOn(g, mt, side);
         const args = [JSON.stringify(key), JSON.stringify(mt), JSON.stringify(side), Number(line), JSON.stringify(label), gi].join(',');
         let cls = 'bb' + (verdict === 'pass' ? ' pass' : ''), sub = '', click;
-        const OPV = { repeg: 're-pegging…', cancel: 'cancelling…', rerung: 'moving to the new line…', live: 'moving to live…' };
+        const OPV = { repeg: 're-pegging…', cancel: 'cancelling…', rerung: 'moving to the new line…', live: 'moving to live…', flip: 'flipping to the other side…' };
         if (mine) {
             _btnIds[mine.id] = 1;
             cls += ' st-' + betState(mine).cls;
@@ -1190,8 +1195,10 @@
     }
     function betStrip(b, withGame, flip) {
         const st = betState(b), loud = flip && !b.app;
-        const cls = loud && st.cls === 'rest' ? 'warn' : st.cls;
-        const fd = flip ? (loud ? ' · model now on ' + flip.label + ' — keep it or cancel' : ' · against the model (' + flip.label + ')') : '';
+        const cls = loud && st.cls === 'rest' && !(b.read && b.read.rec === 'hold') ? 'warn' : st.cls;
+        // THE FLIP (Rob, Oct 25 2026: "You made a suggestion but don't give me the
+        // option?"): the strip names the model's side; the action sheet offers it.
+        const fd = flip ? (loud ? ' · model now on ' + flip.label + (b.read && b.read.rec === 'hold' ? ' — yours still plays at your price, hold' : ' — tap to flip or hold') : ' · against the model (' + flip.label + ')') : '';
         return '<div class="xb st-' + cls + '" onclick="openSheet(\'' + String(b.id).replace(/[^\w-]/g, '') + '\')">'
              + '<div class="xt"><span class="xl">' + esc(betLabel(b)) + '<span class="xs">' + esc(st.short) + (b.app ? ' · APP' : '') + ' · ' + venueName(b).toUpperCase() + '</span>'
              + (loud ? '<span class="xf">MODEL FLIPPED</span>' : '') + '</span>'
@@ -1286,11 +1293,16 @@
             h += '<div class="note">Sheet line ' + esc(rungLabel(b, _sheetAdd[3])) + ' · yours rests on ' + esc(betLabel(b)) + '.</div>';
         const acts = [];
         if (b.status === 'pending' && o.resting && !b.started) {
-            const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id)), rx = inSlip(opKey('rerung', b.id)), lv = inSlip(opKey('live', b.id));
+            const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id)), rx = inSlip(opKey('rerung', b.id)), lv = inSlip(opKey('live', b.id)), fl = inSlip(opKey('flip', b.id));
             const rr = (b.chase && b.chase.hold && b.chase.hold.rerung && b.chase.hold.rerung.slug) ? b.chase.hold.rerung : null;
             const rd = b.read || null, rec = rd ? rd.rec : (rr ? 'move' : 'repeg');
             if (rd) h += readBlock(b, rd, rr);
             const star = k => (rd && rd.rec === k ? '★ ' : '');
+            // THE FLIP (Rob, Oct 25 2026): the model's side is on offer whenever the
+            // read prices it or the sheet's button has moved to the other side.
+            const fp = rd && rd.flip ? rd.flip : null, fo = flipOf(b);
+            if (fp || (fo && !b.app && b.market_type !== 'moneyline'))
+                acts.push('<button class="abtn' + (fl ? ' on' : rec === 'flip' ? ' pri' : '') + '" onclick="sheetOp(\'flip\')">' + (fl ? '✓ On the slip: flip to ' + esc(flipLabel(b)) : star('flip') + 'Flip to ' + esc(flipLabel(b)) + (fp && fp.price_c != null ? ' @ ' + fp.price_c + '¢' : '') + ' · cancel this, bet the other side') + '</button>');
             if (rr) acts.push('<button class="abtn' + (rx ? ' on' : rec === 'move' ? ' pri' : '') + '" onclick="sheetOp(\'rerung\')">' + (rx ? '✓ On the slip: move to ' : star('move') + 'Move to ') + esc(rungLabel(b, rr.line)) + (rr.bid_c != null ? ' @ ' + rr.bid_c + '¢' : '') + '</button>');
             acts.push('<button class="abtn' + (rp ? ' on' : rec === 'repeg' ? ' pri' : '') + '" onclick="sheetOp(\'repeg\')">' + (rp ? '✓ On the slip: re-peg to touch' : star('repeg') + 'Re-peg to touch') + '</button>');
             if (!b.live_snipe) acts.push('<button class="abtn' + (lv ? ' on' : rec === 'live' ? ' pri' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : star('live') + 'Move to Live · 49.5¢, no game-start cancel') + '</button>');
@@ -1343,7 +1355,9 @@
         };
         const lvc = rd.live && rd.live.price_c != null ? rd.live.price_c + '¢' : 'the live cap';
         const hc = rd.hold && rd.hold.price_c != null ? rd.hold.price_c + '¢' : 'your bid';
+        const fc = rd.flip && rd.flip.price_c != null ? ' @ ' + rd.flip.price_c + '¢' : '';
         const recTxt = rd.rec === 'hold' ? 'Hold ' + betLabel(b) + ' @ ' + hc
+                     : rd.rec === 'flip' ? 'Flip to ' + flipLabel(b) + fc + ' — cancel ' + betLabel(b)
                      : rd.rec === 'move' ? 'Move to ' + rungLabel(b, rr && rr.line)
                      : rd.rec === 'repeg' ? 'Stay on ' + betLabel(b) + ' — re-peg to the touch'
                      : rd.rec === 'live' ? 'Move to Live — ' + betLabel(b) + ' @ ' + lvc
@@ -1351,12 +1365,14 @@
         const why = rd.rec === 'cancel' ? ''
                   : ' <span class="g" style="font-weight:500;font-size:13px;color:var(--text2)">· ' + (rd.rec === 'live' ? 'not a play at the touch, a play at the live cap'
                   : rd.rec === 'hold' ? 'your price stands — at game start the box chases from ' + hc + ', never higher'
+                  : rd.rec === 'flip' ? 'yours is no play at any price — the other side is, at its touch'
                   : (rd.move && rd.hold && rd.move.verdict !== 'pass' && rd.hold.verdict !== 'pass') ? 'more value per dollar' : 'the only option the model trusts') + '</span>';
         let h = '<div class="rd"><div class="rh">THE MODEL\'S READ</div>'
               + '<div class="rec ' + (rd.rec === 'cancel' ? 'no' : 'go') + '">★ ' + esc(recTxt) + why + '</div>';
         if (rd.hold) h += opt('Hold', rd.hold, betLabel(b));
         if (rr) h += opt('Move', rd.move, rungLabel(b, rr.line));
-        h += opt('Re-peg', rd.stay, betLabel(b));
+        if (rd.stay !== undefined) h += opt('Re-peg', rd.stay, betLabel(b));
+        if (rd.flip) h += opt('Flip', rd.flip, flipLabel(b));
         if (rd.live) h += opt('Live', rd.live, betLabel(b));
         return h + '</div>';
     }
@@ -1388,6 +1404,14 @@
     function rungLabel(b, line) {
         if (line == null) return betLabel(b);
         return betLabel(Object.assign({}, b, { line: line, label: null }));
+    }
+    // The other side of the same market: "U 46.5", "Cincinnati −3.5", "Seattle ML".
+    function flipLabel(b) {
+        const fp = b.read && b.read.flip;
+        const side = fp ? fp.side : ({ over: 'under', under: 'over', home: 'away', away: 'home' })[b.side];
+        if (!side) return '?';
+        const line = fp ? fp.line : (b.market_type === 'spread' && b.line != null ? -Number(b.line) : b.line);
+        return betLabel(Object.assign({}, b, { side: side, line: line, label: null }));
     }
     function money(x) { if (x == null) return ''; return (x >= 0 ? '+$' : '−$') + Math.abs(x).toFixed(2); }
     function setAlerts(list) {
@@ -1646,6 +1670,7 @@
                          label: betLabel(b), game: gameShort(b),
                          resting_c: o.price_c, touch_c: b.touch_c, leaves: o.leaves,
                          ...(op === 'rerung' ? { rerung_slug: rr.slug, rerung_label: rungLabel(b, rr.line), rerung_c: rr.bid_c } : {}),
+                         ...(op === 'flip' ? { flip_label: flipLabel(b), flip_c: (b.read && b.read.flip) ? b.read.flip.price_c : null } : {}),
                          ...(op === 'getlive' ? { slug: b.slug, synthetic: !!b.synthetic, contracts: b.contracts, market_type: b.market_type, side: b.side,
                                                   line: b.line, event_name: b.event_name, market_id: b.market_id, want_c: b.price_c,
                                                   bid_c: b.bid_c, ask_c: b.ask_c, venue: b.venue || 'POLYMARKET', ticker: b.ticker || null,
@@ -2060,7 +2085,7 @@
         let summ = '';
         if (bs.length) {
             const n = { fill: 0, rest: 0, warn: 0 };
-            bs.forEach(b => { const c = betState(b).cls; n[flips[b.id] && !b.app && c === 'rest' ? 'warn' : c]++; });
+            bs.forEach(b => { const c = betState(b).cls; n[flips[b.id] && !b.app && c === 'rest' && !(b.read && b.read.rec === 'hold') ? 'warn' : c]++; });
             summ = n.warn ? '<span class="gs warn">' + n.warn + ' need' + (n.warn === 1 ? 's' : '') + ' you</span>'
                  : '<span class="gs">' + [n.fill ? n.fill + ' filled' : '', n.rest ? n.rest + ' resting' : ''].filter(Boolean).join(' · ') + '</span>';
         }

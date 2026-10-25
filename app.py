@@ -16402,6 +16402,10 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
         out, _st = _bet_sheet_live_exec(sb, client, row.get("pick_id"))
         out["via"] = worker
         return out
+    if op == "flip":
+        out = _bet_sheet_flip_exec(sb, client, row, worker)
+        out["via"] = worker
+        return out
     return {"ok": False, "error": f"unknown op {op}"}
 
 
@@ -23312,7 +23316,39 @@ def _bs_opt_label(mt, side, x) -> str:
     return f"{ln:+g}"
 
 
-def _bs_recommend(stay, move, live=None, hold=None):
+def _bs_ok(x) -> bool:
+    """A priced option the model would take: a play or lean with value at the price."""
+    return (isinstance(x, dict) and x.get("verdict") in ("play", "lean")
+            and x.get("value_c") is not None and x["value_c"] > 0)
+
+
+def _bs_flip_side(mt, side):
+    """The other side of the same market (None for a side the market has no mirror of)."""
+    return {"over": "under", "under": "over", "home": "away", "away": "home"}.get(side) if mt in ("spread", "total", "moneyline") else None
+
+
+def _bs_flip_line(mt, line):
+    """The other side's own line: a total shares it, a spread mirrors it, a moneyline has none."""
+    if mt == "moneyline" or line is None:
+        return None
+    try:
+        return -float(line) if mt == "spread" else float(line)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bs_flip_label(event_name, mt, side, line) -> str:
+    parts = (event_name or "").split(" @ ")
+    away, home = (parts + ["", ""])[:2]
+    team = home if side == "home" else away
+    if mt == "total":
+        return f"{'O' if side == 'over' else 'U'} {float(line):g}"
+    if mt == "spread":
+        return f"{team} {float(line):+g}"
+    return f"{team} ML"
+
+
+def _bs_recommend(stay, move, live=None, hold=None, flip=None):
     """'hold' / 'move' / 'repeg' / 'live' / 'cancel' (None = the model could
     price nothing). HOLD IS THE STAR (Oct 25 2026, Rob on KC +3.5 resting
     55¢ with the read starring the 49.5¢ live drop: "stay should be the
@@ -23322,13 +23358,9 @@ def _bs_recommend(stay, move, live=None, hold=None):
     (more value per dollar wins); re-peg to the touch is a climb and comes
     after; `live` (the same bet dropped to the live cap now) only when
     nothing else is a play but the cap price is."""
-    if stay is None and move is None and live is None and hold is None:
+    if stay is None and move is None and live is None and hold is None and flip is None:
         return None
-    rank = {"play": 2, "lean": 1}
-
-    def _ok(x):
-        return (x is not None and x.get("verdict") in rank
-                and x.get("value_c") is not None and x["value_c"] > 0)
+    _ok = _bs_ok
     def _roi(x):                      # value per dollar staked — what the money earns
         return x["value_c"] / max(float(x.get("price_c") or 1.0), 1.0)
     best = None
@@ -23339,12 +23371,19 @@ def _bs_recommend(stay, move, live=None, hold=None):
         return best[0]
     if _ok(stay):
         return "repeg"
+    if _ok(flip):
+        return "flip"                 # THE FLIP (Oct 25 2026): his side is no play at any price, the other side is
     return "live" if _ok(live) else "cancel"
 
 
 def _bet_sheet_reads(sb, out: list, cache: dict = None) -> None:
     """Stamp `read` on every pre-game resting bet the box stopped chasing
-    (manual re-peg or line moved): {hold, stay, move, live, rec}."""
+    (manual re-peg or line moved): {hold, stay, move, live, flip, rec} — and
+    on a bet the MODEL FLIPPED on (Oct 25 2026, Rob on O 46.5 resting with
+    the sheet now on Under 46.5: "You made a suggestion but don't give me
+    the option?"): a resting bet whose own side reads no play at his price
+    while the OTHER side of the same market reads one at its touch gets
+    {hold, flip, rec: flip}, and the page offers the flip."""
     cache = cache if isinstance(cache, dict) else {}
     for b in out:
         if b.get("status") != "pending" or b.get("started"):
@@ -23353,7 +23392,7 @@ def _bet_sheet_reads(sb, out: list, cache: dict = None) -> None:
             continue
         hold = (b.get("chase") or {}).get("hold")
         if not isinstance(hold, dict):
-            continue
+            hold = None
         mt, side = b.get("market_type"), b.get("side")
         sport = (b.get("sport") or "").upper()
         if mt == "moneyline":
@@ -23363,12 +23402,21 @@ def _bet_sheet_reads(sb, out: list, cache: dict = None) -> None:
         blob = _bs_sheet_blob(sb, sport, b.get("market_id"), b.get("event_name"), cache)
         if not blob:
             continue
-        touch = b.get("touch_c") if b.get("touch_c") is not None else hold.get("touch_c")
-        stay = _bs_option_read(sb, sport, blob, mt, side, b.get("line"), touch)
-        # THE HOLD (Oct 25 2026): the bet at ROB'S resting price — the auto
-        # chase caps at that bid, so holding is "fill at my number pre-game,
-        # else chase from it at the start". Chalk does not pass it (nothing
-        # new is placed); the model's value at the price does.
+        touch = b.get("touch_c") if b.get("touch_c") is not None else (hold or {}).get("touch_c")
+        # THE FLIP OPTION: the other side at ITS touch — our side's ask is the
+        # other side's bid, and the strip row carries the mid, so ask = 2·mid − touch.
+        flip = None
+        fside, fline = _bs_flip_side(mt, side), _bs_flip_line(mt, b.get("line"))
+        if fside and (mt == "moneyline" or fline is not None) and touch is not None and b.get("cur_c") is not None:
+            try:
+                other_c = round(100.0 - (2.0 * float(b["cur_c"]) - float(touch)), 2)
+            except (TypeError, ValueError):
+                other_c = None
+            if other_c is not None and 1.0 <= other_c <= 99.0:
+                flip = _bs_option_read(sb, sport, blob, mt, fside, fline, other_c)
+                if flip:
+                    flip.update({"flip": True, "side": fside, "line": fline,
+                                 "label": _bs_flip_label(b.get("event_name"), mt, fside, fline)})
         own_c = (b.get("order") or {}).get("price_c")
         if own_c is None:
             own_c = b.get("price_c")
@@ -23377,6 +23425,17 @@ def _bet_sheet_reads(sb, out: list, cache: dict = None) -> None:
             own = _bs_option_read(sb, sport, blob, mt, side, b.get("line"), float(own_c), hold=True) if own_c is not None else None
         except (TypeError, ValueError):
             own = None
+        if hold is None:
+            # not stopped: a read only when the model has flipped — his side is
+            # no play at his own price and the other side is one at its touch
+            if _bs_ok(flip) and own is not None and not _bs_ok(own):
+                b["read"] = {"hold": own, "flip": flip, "rec": "flip"}
+            continue
+        stay = _bs_option_read(sb, sport, blob, mt, side, b.get("line"), touch)
+        # THE HOLD (Oct 25 2026): the bet at ROB'S resting price — the auto
+        # chase caps at that bid, so holding is "fill at my number pre-game,
+        # else chase from it at the start". Chalk does not pass it (nothing
+        # new is placed); the model's value at the price does.
         rr = hold.get("rerung") if isinstance(hold.get("rerung"), dict) else None
         move = (_bs_option_read(sb, sport, blob, mt, side, rr.get("line"), rr.get("bid_c"))
                 if rr and rr.get("slug") and rr.get("line") is not None else None)
@@ -23397,10 +23456,10 @@ def _bet_sheet_reads(sb, out: list, cache: dict = None) -> None:
             live = _bs_option_read(sb, sport, blob, mt, side, b.get("line"), live_c)
             if live:
                 live["live"] = True
-        rec = _bs_recommend(stay, move if rr else None, live, own)
+        rec = _bs_recommend(stay, move if rr else None, live, own, flip)
         if rec is None:
             continue
-        b["read"] = {"hold": own, "stay": stay, "move": move, "live": live, "rec": rec}
+        b["read"] = {"hold": own, "stay": stay, "move": move, "live": live, "flip": flip, "rec": rec}
 
 
 _BS_LIVE_MAX_H = 6.0          # a pending bet this long past its start is the resolver's, not "live"
@@ -23516,7 +23575,7 @@ def _bet_sheet_missed_from_queue(sb, now, want: set) -> dict:
     made = {}
     for q in rows:
         res = q.get("result") if isinstance(q.get("result"), dict) else {}
-        if q.get("op") in ("create", "rerung") and res.get("pick_id") is not None:
+        if q.get("op") in ("create", "rerung", "flip") and res.get("pick_id") is not None:
             made[int(res["pick_id"])] = q
     out = {}
     # an APP bet never went through the queue — its adoption stamp has the
@@ -23548,6 +23607,9 @@ def _bet_sheet_missed_from_queue(sb, now, want: set) -> dict:
         bet = {"price_c": res.get("price_c"), "contracts": res.get("contracts") or q.get("contracts")}
         if q.get("op") == "rerung":
             bet.update({"label": res.get("label"), "line": res.get("to_line")})
+        if q.get("op") == "flip":                   # the flip row carries its own create item
+            bet.update({"label": res.get("label"), "line": res.get("line")})
+            q = dict(q, op="create", payload={"item": res.get("item") or {}}, synthetic=res.get("synthetic"))
         origin = q
         while origin is not None and origin.get("op") == "rerung" and hop < 6:
             hop += 1
@@ -24014,6 +24076,93 @@ def _bet_sheet_rerung_exec(sb, client, pick_id, want_slug=None):
     if warn:
         ret["warning"] = warn
     return ret, 200
+
+
+def _bet_sheet_flip_exec(sb, client, row: dict, worker: str) -> dict:
+    """THE FLIP (Oct 25 2026, Rob on O 46.5 resting with the sheet now on
+    Under 46.5: "You made a suggestion but don't give me the option?"):
+    cancel the resting order (verified; a partial fill keeps its lot) and
+    rest the UNFILLED size on the other side of the same market, through
+    the ordinary create path (the sheet's rung rule, the chalk step, the
+    venue question), booked as its own pick with `flip_from`. Nothing is
+    placed unless the cancel verified."""
+    pid = row.get("pick_id")
+    r, blob = _bet_sheet_pick(sb, pid)
+    if not r:
+        return {"ok": False, "error": "pick not found"}
+    try:
+        full = (sb.table("bot_picks").select("sport,event_name,market_type,side,entry_line,asked_by,event_start")
+                .eq("id", r["id"]).single().execute().data) or {}
+    except Exception as e:
+        return {"ok": False, "error": f"pick read failed: {e}"[:160]}
+    mt, side = full.get("market_type"), full.get("side")
+    fside, fline = _bs_flip_side(mt, side), _bs_flip_line(mt, full.get("entry_line"))
+    if not fside or (mt != "moneyline" and fline is None):
+        return {"ok": False, "error": "this market has no other side to flip to"}
+    try:
+        ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad event_start on the pick"}
+    if ev.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return {"ok": False, "error": "game already started — pre-game only"}
+    if not (blob.get("order_id") or blob.get("kalshi_order_id")):
+        return {"ok": False, "error": "no resting order on this bet"}
+    try:
+        contracts = int(round(float(blob.get("contracts") or 0)))
+    except (TypeError, ValueError):
+        contracts = 0
+    if contracts < 1:
+        return {"ok": False, "error": "the pick carries no size"}
+    from_label = blob.get("label") or _bs_flip_label(full.get("event_name"), mt, side, full.get("entry_line"))
+    label = _bs_flip_label(full.get("event_name"), mt, fside, fline)
+    out_c, _st_c = _bet_sheet_cancel_exec(sb, client, r["id"])
+    if not out_c.get("ok"):
+        return {**out_c, "ok": False}                        # nothing placed
+    held = out_c.get("held")
+    if held is None:
+        return {"ok": False, "error": f"{from_label} cancelled, but its held size is unreadable — place {label} from the sheet"}
+    qty = max(0, contracts - int(round(float(held))))
+    if qty < 1:
+        return {"ok": True, "flipped": False, "note": "it filled before the flip — nothing left to move", "held": held}
+    parts = (full.get("event_name") or "").split(" @ ")
+    away, home = (parts + ["", ""])[:2]
+    item = {"sport": full.get("sport"), "away": away, "home": home, "event_start": r.get("event_start"),
+            "market_type": "ml" if mt == "moneyline" else mt, "side": fside, "line": fline, "label": label,
+            "venue": "auto"}
+    bad = _bet_sheet_item_check(item)
+    if bad:
+        return {"ok": False, "error": f"{from_label} cancelled, but {label} can't be placed: {bad} — place it from the sheet", "held": held}
+    pl = row.get("payload") or {}
+    now_iso = datetime.now(timezone.utc).isoformat()
+    crow = {"op": "create", "slug": None, "synthetic": False, "price_c": None, "contracts": qty,
+            "event_start": r.get("event_start"),
+            "payload": {"item": item, "asked_by": full.get("asked_by") or pl.get("asked_by"), "contracts": qty}}
+    try:
+        out = _hand_order_execute(sb, client, crow, worker)
+    except Exception as e:
+        out = {"ok": False, "error": f"{type(e).__name__}: {e}"[:160]}
+    flip_from = {"pick_id": r["id"], "label": from_label, "side": side, "line": full.get("entry_line"),
+                 "price_c": blob.get("price_c"), "venue": blob.get("venue") or "POLYMARKET", "at": now_iso}
+    if not out.get("ok"):
+        _probe_log({"bet_sheet_flip": True, "pick_id": r["id"], "from": from_label, "to": label,
+                    "error": out.get("error"), "held": held})
+        return {"ok": False, "error": (f"{from_label} cancelled, but {label} failed: "
+                                       f"{out.get('error') or 'order failed'} — place it from the sheet"), "held": held}
+    npid = out.get("pick_id")
+    if npid:
+        try:
+            nr = (sb.table("bot_picks").select("signal_blob").eq("id", npid).single().execute().data) or {}
+            sb.table("bot_picks").update({"signal_blob": {**(nr.get("signal_blob") or {}), "flip_from": flip_from}}).eq("id", npid).execute()
+        except Exception as e:
+            out["warning"] = ((out.get("warning") or "") + f" · flip stamp failed: {e}"[:80]).strip(" ·")
+    _probe_log({"bet_sheet_flip": True, "pick_id": r["id"], "new_pick_id": npid, "from": from_label, "to": label,
+                "from_c": blob.get("price_c"), "to_c": out.get("price_c"), "qty": qty, "held_old": held,
+                "venue": out.get("venue") or "POLYMARKET", "resting": out.get("resting")})
+    ret = {**out, "ok": True, "flipped": True, "label": label, "from_label": from_label, "contracts": qty,
+           "item": item, "line": fline, "side": fside}
+    if held:
+        ret["held"] = held
+    return ret
 
 
 def _bet_sheet_repeg_exec(sb, client, pick_id):
@@ -26231,7 +26380,7 @@ def api_bet_sheets_ops():
         key = (it or {}).get("key") or f"op|{(it or {}).get('op')}|{(it or {}).get('pick_id')}"
         op = str((it or {}).get("op") or "").lower()
         res = {"key": key, "op": op, "pick_id": (it or {}).get("pick_id")}
-        if op not in ("cancel", "repeg", "rerung", "live", "getlive"):
+        if op not in ("cancel", "repeg", "rerung", "live", "getlive", "flip"):
             res.update({"ok": False, "reason": "unknown action"}); results.append(res); continue
         cid = (it or {}).get("cid")
         if cid in seen:                           # a repeat of a ticket already queued

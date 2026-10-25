@@ -34,6 +34,6 @@ create index if not exists hand_orders_state_idx on hand_orders (state, created_
 -- Idempotent: the box re-applies this file once per daemon boot.
 alter table hand_orders drop constraint if exists hand_orders_op_check;
 alter table hand_orders add constraint hand_orders_op_check
-  check (op in ('create','cancel','repeg','rerung','live'));
+  check (op in ('create','cancel','repeg','rerung','live','flip'));
 -- PostgREST caches the schema: a new table is invisible until it reloads.
 notify pgrst, 'reload schema';
