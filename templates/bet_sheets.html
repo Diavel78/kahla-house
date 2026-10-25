@@ -577,9 +577,15 @@
         } else {
             s = side ? am(P[side === 'home' ? 'spread_home_odds' : 'spread_away_odds'])
               : (P.spread_home_odds != null && P.spread_away_odds != null ? favLine(g, P.spread_home, 1) + ' ' + am(P.spread_home_odds) + ' / ' + am(P.spread_away_odds) : '');
+            // THE LINE IT IS QUOTING (Rob, Oct 25 2026, Bet105 −104 beside a +3.5
+            // button: "I assume is at 3?? … can you list what line you are
+            // quoting?"): Pinnacle's price is at PINNACLE'S line, which is the
+            // market's number, not the bettable half-point rung on the button.
+            if (s && side && P.spread_home != null) s = sgn(side === 'home' ? P.spread_home : -P.spread_home, 1) + ' ' + s;
         }
+        if (s && side && mt === 'total' && P.total != null) s = (side === 'over' ? 'O ' : 'U ') + P.total + ' ' + s;
         if (!s) return '';
-        return ' <span class="pinq" title="Bet105\'s price at this line (Bet105 resells Pinnacle\'s lines; this is Pinnacle\'s feed)">Bet105 ' + s + '</span>';
+        return ' <span class="pinq" title="Bet105\'s price at Pinnacle\'s line (Bet105 resells Pinnacle\'s lines; this is Pinnacle\'s feed) — the line shown is Pinnacle\'s, not the half-point rung on the button">Bet105 ' + s + '</span>';
     }
 
 

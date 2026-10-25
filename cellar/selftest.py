@@ -4895,6 +4895,12 @@ def test_sheet_pin_quote() -> None:
                                "over_odds": -105, "under_odds": -115})
     check("hockey lines → the puck line is the spread", b and b["spread_home"] == -1.5 and b["spread_home_odds"] == 150)
     check("a book line is not Pinnacle's", _app._sheet_pin_block({"provider": "espn", "ml_home": -158}) is None)
+    # THE LINE IT IS QUOTING (Rob, Oct 25 2026): the Bet105 price is at
+    # Pinnacle's line, and both sheets say which line that is
+    for tpl in ("templates/bet_sheets.html", "templates/football_picks.html"):
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), tpl), encoding="utf-8").read()
+        check(f"{tpl}: Bet105 prints Pinnacle's spread line", "P.spread_home : -P.spread_home, 1) + ' ' + s" in src)
+        check(f"{tpl}: Bet105 prints Pinnacle's total", "(side === 'over' ? 'O ' : 'U ') + P.total" in src)
     # the slip's preview reads Pinnacle beside both venues, never instead of them
     import inspect as _ins
     src = _ins.getsource(_app.api_bet_sheets_place)
