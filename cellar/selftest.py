@@ -2885,6 +2885,30 @@ def test_hand_auto_chase_cap() -> None:
     import app as _app
     C, F = _app._hand_auto_chase_cap, _app._hand_live_cap_for
     check("auto cap: his 52.5 bid is the cap", C(52.5, 49.5) == 52.5)
+    # NO AUTO CHASE ON MLB / NHL (Rob, Oct 25 2026: "Runs and Goals to much
+    # swing. I'll handle them live on your new live tab"): the drop hands
+    # football / basketball to the live chase and gives MLB / NHL the plain
+    # cancel; every hand-off site asks the same per-sport gate.
+    import inspect as _ii
+    _mf, _mfv = _app._machine_flag, _app._machine_flag_val
+    try:
+        _app._machine_flag = lambda name, default=None: True if name == "hand_start_chase" else default
+        _app._machine_flag_val = lambda name, default=None: default
+        on = _app._hand_start_chase_on
+        check("no auto chase on MLB / NHL, chase on NFL / NCAAF / NBA",
+              on("MLB") is False and on("nhl") is False and on("NFL") and on("NCAAF") and on("NBA"))
+        _app._machine_flag_val = lambda name, default=None: ["NBA"] if name == "hand_start_chase_off_sports" else default
+        check("the flag list overrides the code default", on("NBA") is False and on("NHL") is True)
+        _app._machine_flag = lambda name, default=None: False if name == "hand_start_chase" else default
+        check("the master kill switch turns every sport off", on("NFL") is False)
+    finally:
+        _app._machine_flag, _app._machine_flag_val = _mf, _mfv
+    for fn in (_app._hand_start_finish_poly, _app._hand_start_finish_kalshi, _app._hand_kalshi_gone_chase):
+        src_ = _ii.getsource(fn)
+        check(f"{fn.__name__} gates the chase per sport", '_hand_start_chase_on(r.get("sport"))' in src_
+              and '_machine_flag("hand_start_chase", True):\n        try' not in src_)
+    code, txt = _app._hand_start_cancel_text({"bet": {"contracts": 5}, "result": {"ok": True, "deleted": True}, "chase_off": "sport"})
+    check("the game-start alert says the sport has no auto chase", code == "start_not_filled" and "no auto chase on this sport" in txt, txt)
     check("auto cap: a bid under the flag keeps the flag", C(47.0, 49.5) == 49.5)
     check("auto cap: no bid → the flag", C(None, 49.5) == 49.5 and C("x", 49.5) == 49.5)
     check("auto cap: a junk bid → the flag", C(0.0, 49.5) == 49.5 and C(100.0, 49.5) == 49.5)

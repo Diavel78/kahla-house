@@ -16719,6 +16719,8 @@ def _hand_start_cancel_text(stamp: dict):
     if stamp.get("chase_expired"):
         took = (f" · chased live {ch.get('minutes') or 60} min under the cap"
                 + (f", {ch.get('pulls')} pulls" if ch.get("pulls") else "") + " · chase ended")
+    if stamp.get("chase_off") == "sport" and not took:
+        took = " · no auto chase on this sport, the Live tab is yours"
     if out.get("deleted"):
         return "start_not_filled", f"NOT FILLED · cancelled at game start{took}"
     held = out.get("held")
@@ -17930,19 +17932,42 @@ def _hand_start_complete_poly(sb, client, r: dict, blob: dict, slug: str, oid: s
     app.logger.warning("hand start complete %s pick %s was_open=%s → %s", slug, r["id"], was_open, out)
 
 
+# NO AUTO CHASE ON MLB AND NHL (Rob, Oct 25 2026: "No automated live chase on
+# MLB and NHL, Runs and Goals to much swing. I'll handle them live on your new
+# live tab if I want to bet them"): at the drop an unfilled MLB/NHL order gets
+# the plain cancel (the Chasing card lists it, Get it live / the Live tab are
+# his); football and basketball keep the auto chase. `machine_flags
+# hand_start_chase_off_sports` (a list) overrides the code default.
+_HAND_START_CHASE_OFF_SPORTS = ("MLB", "NHL")
+
+
+def _hand_start_chase_on(sport) -> bool:
+    """Does the drop hand this sport's unfilled order to the live chase?"""
+    if not _machine_flag("hand_start_chase", True):
+        return False
+    off = _machine_flag_val("hand_start_chase_off_sports", list(_HAND_START_CHASE_OFF_SPORTS))
+    try:
+        off_set = {str(x).upper() for x in (off or [])}
+    except TypeError:
+        off_set = set(_HAND_START_CHASE_OFF_SPORTS)
+    return str(sport or "").upper() not in off_set
+
+
 def _hand_start_finish_poly(sb, client, r: dict, stamp: dict, take, cum0: float, took_px, now, st: dict, tw=None) -> None:
     """The cancel after the take(s): unfilled → pick gone, a lot → kept at
     the held size with the price blended across the maker fill and every
     take (`tw` carries the window's totals when there was one). Stamps.
     SINCE OCT 24 2026 THE CANCEL IS THE FALLBACK: an unfilled order with the
     chase flag on goes to the live chase instead (`_hand_start_chase_poly`)."""
-    if _machine_flag("hand_start_chase", True):
+    if _hand_start_chase_on(r.get("sport")):
         try:
             if _hand_start_chase_poly(sb, client, r, stamp, now, st, tw=tw):
                 return
         except Exception as e:
             app.logger.warning("hand start chase pick %s: %s — falling back to the cancel", r.get("id"), str(e)[:160])
             stamp["chase_error"] = str(e)[:160]
+    elif _machine_flag("hand_start_chase", True):
+        stamp["chase_off"] = "sport"                     # MLB / NHL: the plain cancel, the Live tab is Rob's
     out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
     took_total = float((tw or {}).get("filled") or 0.0) if tw else 0.0
     cost_total = float((tw or {}).get("cost_c") or 0.0) if tw else 0.0
@@ -21066,7 +21091,9 @@ def _hand_start_finish_kalshi(sb, client, r: dict, stamp: dict, take, cum0: floa
     SINCE OCT 24 2026 THE CANCEL IS THE FALLBACK: a still-resting Kalshi
     order with the chase flag on moves to the Polymarket twin and the live
     chase (`_hand_start_chase_kalshi`)."""
-    if (not cancelled and _machine_flag("hand_start_chase", True)
+    if not cancelled and not _hand_start_chase_on(r.get("sport")) and _machine_flag("hand_start_chase", True):
+        stamp["chase_off"] = "sport"                     # MLB / NHL: the plain cancel, the Live tab is Rob's
+    if (not cancelled and _hand_start_chase_on(r.get("sport"))
             and (stamp.get("window") or {}).get("closed") != "filled"):
         try:
             handled, cancelled = _hand_start_chase_kalshi(sb, client, r, stamp, now, st)
@@ -24609,7 +24636,7 @@ def _hand_kalshi_gone_chase(sb, client, r: dict, blob: dict, now, st: dict, tick
     for the unfilled size — never the Polymarket twin: Rob, Oct 24 2026,
     "if it didn't fill on Kalshi, it stays on Kalshi"). True when the chase
     took it; False leaves the bet for the next tick / the retire."""
-    if not _machine_flag("hand_start_chase", True):
+    if not _hand_start_chase_on(r.get("sport")):
         return False
     stamp = {"kind": "hand_start_cancel", "bet": {**_hand_start_bet(r, blob), "venue": "KALSHI", "ticker": ticker},
              "hand_start_cancel": True, "venue": "KALSHI", "pick_id": r["id"], "slug": twin, "ticker": ticker,
