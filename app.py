@@ -1134,6 +1134,86 @@ def _sheet_pin_block(ln: dict | None, provider_key: str = "provider") -> dict | 
     return out
 
 
+def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None) -> dict | None:
+    """Pure. PINNACLE'S FAIR AT THE RUNG ROB BETS (Rob, Oct 25 2026, on
+    Bet105 +3 −104 beside a New Orleans +3.5 button: "Then you'd be able to
+    actually calculate fair… based on its line for 3 I'm guessing? That and
+    the model"). Pinnacle's two prices at ITS line, devigged for the pick's
+    side, then carried to the half-point rung by the push rate on that
+    whole number (`pmm_push_rates`): the side that GAINS the half point adds
+    the push mass (p·(1−push) + push), the side that gives it up loses it
+    (p·(1−push)) — the exact mixture, not the Pick Bot's additive hop. A rung
+    already on Pinnacle's line is the plain devig; a hop past a half point
+    is None (the table can't carry it), never a guess. `mt` is spread / total
+    / ml (a puck line is a spread). Returns {american, prob, pin_line, push}."""
+    if not isinstance(pick, dict) or not isinstance(pin, dict) or not pick.get("side"):
+        return None
+    side = str(pick.get("side"))
+    if mt == "ml":
+        a, b = _amer_to_prob_py(pin.get("ml_home")), _amer_to_prob_py(pin.get("ml_away"))
+        if a is None or b is None or a + b <= 0 or side not in ("home", "away"):
+            return None
+        p = (a if side == "home" else b) / (a + b)
+        return {"american": _american_from_p(p), "prob": round(p, 4), "pin_line": None, "push": None}
+    try:
+        rung = float(pick.get("line"))
+    except (TypeError, ValueError):
+        return None
+    if mt == "spread":
+        if side not in ("home", "away") or pin.get("spread_home") is None:
+            return None
+        a, b = _amer_to_prob_py(pin.get("spread_home_odds")), _amer_to_prob_py(pin.get("spread_away_odds"))
+        if a is None or b is None or a + b <= 0:
+            return None
+        p = (a if side == "home" else b) / (a + b)
+        pin_line = float(pin["spread_home"]) if side == "home" else -float(pin["spread_home"])
+        gains = rung > pin_line                      # more points for our side = easier
+    elif mt == "total":
+        if side not in ("over", "under") or pin.get("total") is None:
+            return None
+        a, b = _amer_to_prob_py(pin.get("over_odds")), _amer_to_prob_py(pin.get("under_odds"))
+        if a is None or b is None or a + b <= 0:
+            return None
+        p = (a if side == "over" else b) / (a + b)
+        pin_line = float(pin["total"])
+        gains = (rung < pin_line) if side == "over" else (rung > pin_line)
+    else:
+        return None
+    delta = abs(rung - pin_line)
+    push = 0.0
+    if delta > 0.01:
+        if abs(delta - 0.5) > 0.01:
+            return None                              # more than a half-point hop: the table can't carry it
+        try:
+            from pmm_push_rates import _lookup_push_rate
+            push = float(_lookup_push_rate(sport, mt, pin_line) or 0.0)
+        except Exception:
+            return None
+        p = p * (1.0 - push) + (push if gains else 0.0)
+    p = min(max(p, 0.001), 0.999)
+    return {"american": _american_from_p(p), "prob": round(p, 4), "pin_line": pin_line,
+            "push": (round(push, 3) if delta > 0.01 else None)}
+
+
+def _sheet_attach_pin_fair(sport: str, g: dict) -> None:
+    """Each pick block on a sheet game (spread / puck / total / ml) gets
+    `pin_fair` = Pinnacle's fair at that pick's rung, when the game carries
+    Pinnacle's prices. Never raises — a miss just leaves the model's fair."""
+    pin = g.get("pin") if isinstance(g, dict) else None
+    if not isinstance(pin, dict):
+        return
+    for key, mt in (("spread", "spread"), ("puck", "spread"), ("total", "total"), ("ml", "ml")):
+        pk = g.get(key)
+        if not isinstance(pk, dict):
+            continue
+        try:
+            pf = _pin_fair_at_rung(sport, mt, pk, pin)
+        except Exception:
+            pf = None
+        if pf and pf.get("american") is not None:
+            pk["pin_fair"] = pf
+
+
 def _sheet_game_football(r: dict) -> dict:
     """Football row → Line / Model / Picks. Line and model are both home-
     oriented (negative = home favored); the model spread is the CALIBRATED
@@ -1837,6 +1917,7 @@ def api_football_picks():
                      else _sheet_game_nba(r) if sport == "NBA"
                      else _sheet_game_mlb(r) if sport == "MLB"
                      else _sheet_game_football(r))
+        _sheet_attach_pin_fair(sport, games[-1])     # Pinnacle's fair at the rung beside the model's
         blob = r.get("data_blob") or {}
         stamp = (blob.get("friday") or {}).get("built_at") or r.get("data_built_at")
         if stamp and (lines_updated_at is None or stamp > lines_updated_at):

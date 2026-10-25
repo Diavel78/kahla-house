@@ -452,6 +452,15 @@
     function edgeTxt(p, pts) {
         if (!p) return '';
         const e = pts ? sgn(p.edge_pts) + ' pts' : sgn(p.edge_pp) + '%';
+        // PINNACLE'S FAIR AT THE RUNG (Rob, Oct 25 2026: "you'd be able to actually calculate
+        // fair… based on its line for 3… that and the model"): Pinnacle's two prices at its own
+        // line, devigged, carried to the half point by the push rate on that number (server
+        // `_pin_fair_at_rung`). Beside it the model's fair is labelled so neither is mistaken.
+        const pf = p.pin_fair;
+        if (pf && pf.american != null)
+            return ' <span class="dim">· edge ' + e + (p.fair != null ? ' · model ' + am(p.fair) : '')
+                 + ' · <span class="pinq" title="Pinnacle\'s fair at this rung: its two prices at ' + (pf.pin_line != null ? pf.pin_line : 'its line') + ' devigged'
+                 + (pf.push != null ? ', shifted by the ' + Math.round(pf.push * 1000) / 10 + '% push on that number' : '') + '">PIN fair ' + am(pf.american) + '</span></span>';
         return ' <span class="dim">· edge ' + e + (p.fair != null ? ' · fair ' + am(p.fair) : '') + '</span>';
     }
     // The price in both languages — "−120 / 54.5%" (Rob, Oct 23 2026: "it
