@@ -1422,6 +1422,90 @@ def held_for(pos: dict | None, ticker: str, buy_yes: bool) -> float | None:
     return -net if net < 0 else 0.0
 
 
+# ───────────── settlements: THE VENUE IS THE GRADER ─────────────
+# Rob, Oct 25 2026 (Denver @ Arizona O 42.5: Kalshi paid the over at 46
+# points with 6:21 left and the sheet read OFF THE BOOK): "Settled only
+# comes from Polymarket and Kalshi." Shape off docs.kalshi.com/api-reference/
+# portfolio/get-settlements.md (fetched the same day): `market_result`
+# yes|no|scalar, `yes_count_fp`/`no_count_fp` (contracts held at settlement,
+# fixed-point strings), `*_total_cost_dollars`, `revenue` in CENTS (winners
+# pay 100¢ a contract), `fee_cost` dollars, `settled_time`. Archived
+# settlements fall off this feed — read it soon after the game, not weeks on.
+def my_settlements(ticker: str | None = None, min_ts: int | None = None, limit: int = 200,
+                   cursor: str | None = None) -> dict:
+    p: dict = {"limit": int(limit)}
+    if ticker:
+        p["ticker"] = ticker
+    if min_ts:
+        p["min_ts"] = int(min_ts)
+    if cursor:
+        p["cursor"] = cursor
+    return signed_request("GET", "/portfolio/settlements", params=p)
+
+
+def parse_settlement(s: dict) -> dict | None:
+    """One settlement row → {ticker, event_ticker, result, yes_q, no_q,
+    yes_cost, no_cost, revenue_usd, fee_usd, settled_time}; None on a row
+    with no ticker or result."""
+    if not isinstance(s, dict) or not s.get("ticker") or not s.get("market_result"):
+        return None
+    rev = _num(s.get("revenue"))
+    return {"ticker": s.get("ticker"), "event_ticker": s.get("event_ticker"),
+            "result": str(s.get("market_result")).lower(),
+            "yes_q": _num(s.get("yes_count_fp")) if s.get("yes_count_fp") is not None else _num(s.get("yes_count")),
+            "no_q": _num(s.get("no_count_fp")) if s.get("no_count_fp") is not None else _num(s.get("no_count")),
+            "yes_cost": _num(s.get("yes_total_cost_dollars")),
+            "no_cost": _num(s.get("no_total_cost_dollars")),
+            "revenue_usd": None if rev is None else round(rev / 100.0, 2),
+            "fee_usd": _num(s.get("fee_cost")) or 0.0,
+            "settled_time": s.get("settled_time")}
+
+
+def settlements(min_ts: int | None = None, max_pages: int = 3) -> dict | None:
+    """{ticker: parsed settlement} for the live settlement set (newest first
+    from the venue; the first row per ticker wins). None when the read
+    failed — a failed read must never look like 'nothing settled'."""
+    out: dict = {}
+    cursor = None
+    for _ in range(max_pages):
+        _pace()
+        res = my_settlements(min_ts=min_ts, limit=200, cursor=cursor)
+        if not res.get("ok"):
+            return None
+        data = res.get("data") or {}
+        for s in (data.get("settlements") or []):
+            ps = parse_settlement(s)
+            if ps and ps["ticker"] not in out:
+                out[ps["ticker"]] = ps
+        cursor = data.get("cursor")
+        if not cursor:
+            break
+    return out
+
+
+def settle_verdict(ps: dict | None, buy_yes: bool) -> dict | None:
+    """What the venue did to OUR side of a settled market (pure).
+    {status won|lost, qty, cost_usd, revenue_usd, fee_usd, pnl_usd,
+    result, settled_time}; None when the market settled scalar (not a
+    binary we bet), the row is unreadable, or we held nothing on our side
+    (a bet that never filled is not graded — it was cancelled or missed)."""
+    if not ps or ps.get("result") not in ("yes", "no"):
+        return None
+    qty = ps.get("yes_q") if buy_yes else ps.get("no_q")
+    if qty is None or float(qty) <= 0.0:
+        return None
+    cost = (ps.get("yes_cost") if buy_yes else ps.get("no_cost")) or 0.0
+    won = (ps["result"] == "yes") == bool(buy_yes)
+    rev = ps.get("revenue_usd")
+    if rev is None:
+        rev = round(float(qty), 2) if won else 0.0
+    fee = float(ps.get("fee_usd") or 0.0)
+    return {"status": "won" if won else "lost", "qty": round(float(qty), 2),
+            "cost_usd": round(float(cost), 2), "revenue_usd": round(float(rev), 2), "fee_usd": round(fee, 2),
+            "pnl_usd": round(float(rev) - float(cost) - fee, 2),
+            "result": ps["result"], "settled_time": ps.get("settled_time")}
+
+
 # ───────────── the socket book (pure; cellar/kalshifeed.py feeds it) ─────────────
 # Kalshi's `orderbook_delta` channel: one `orderbook_snapshot` per market on
 # subscribe ({market_ticker, yes: [[price, qty]…], no: [[…]]} — cents ints

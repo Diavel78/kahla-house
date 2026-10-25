@@ -5628,6 +5628,53 @@ def test_kalshi_hand_lane() -> None:
     check("kalshi hand lane: book shape, orders/positions, venue pick", True)
 
 
+def test_kalshi_settle_grade() -> None:
+    """THE VENUE IS THE GRADER (Rob, Oct 25 2026, Denver @ Arizona O 42.5 —
+    Kalshi paid the over at 46 points with 6:21 left and the sheet read OFF
+    THE BOOK: "Settled only comes from Polymarket and Kalshi"): a Kalshi lot
+    grades off the venue's settlement row, with the venue's own result and
+    dollars, never off a score."""
+    print("kalshi: the settlement grade")
+    import inspect
+    import kalshi_venue as kv
+    import app as _app
+    row = {"ticker": "KXNFLTOTAL-26OCT25DENARI-43", "event_ticker": "KXNFLTOTAL-26OCT25DENARI",
+           "market_result": "yes", "yes_count_fp": "10.48", "yes_total_cost_dollars": "4.9256",
+           "no_count_fp": "0.00", "no_total_cost_dollars": "0.0000", "revenue": 1048,
+           "settled_time": "2026-10-25T22:40:00Z", "fee_cost": "0.0000"}
+    ps = kv.parse_settlement(row)
+    check("the row parses: result, our count, cost, revenue in dollars",
+          ps["result"] == "yes" and ps["yes_q"] == 10.48 and ps["yes_cost"] == 4.9256 and ps["revenue_usd"] == 10.48)
+    v = kv.settle_verdict(ps, True)
+    check("YES held, market YES → won, the venue's dollars", v["status"] == "won" and v["qty"] == 10.48
+          and v["pnl_usd"] == round(10.48 - 4.9256, 2))
+    check("the NO side of the same market held nothing → no grade (never filled)", kv.settle_verdict(ps, False) is None)
+    lost = kv.parse_settlement({**row, "market_result": "no", "revenue": 0})
+    vl = kv.settle_verdict(lost, True)
+    check("YES held, market NO → lost at cost", vl["status"] == "lost" and vl["pnl_usd"] == -4.93 and vl["revenue_usd"] == 0.0)
+    check("a scalar settlement is not ours", kv.settle_verdict(kv.parse_settlement({**row, "market_result": "scalar"}), True) is None)
+    check("an unreadable row grades nothing", kv.parse_settlement({"ticker": "X"}) is None and kv.settle_verdict(None, True) is None)
+    pick = {"id": 1, "entry_price": -113, "units": 1}
+    blob = {"venue": "KALSHI", "kalshi_ticker": row["ticker"], "kalshi_buy_yes": True, "kalshi_order_id": "abc",
+            "filled_qty": 10.48, "label": "Over 42.5"}
+    upd = _app._hand_kalshi_settle_update(pick, blob, ps)
+    check("the pick update: won, +1u to-win, graded_by kalshi, the lot booked, the order id dropped",
+          upd["status"] == "won" and upd["pnl_units"] == 1.0 and upd["result_score"]["graded_by"] == "kalshi"
+          and upd["result_score"]["pnl_usd"] == v["pnl_usd"] and upd["signal_blob"]["kalshi_order_id"] is None
+          and upd["signal_blob"]["filled_qty"] == 10.48 and upd["signal_blob"]["kalshi_settlement"]["ticker"] == row["ticker"])
+    updl = _app._hand_kalshi_settle_update(pick, blob, lost)
+    check("lost: the to-win loss at −113", updl["status"] == "lost" and abs(updl["pnl_units"] + 1.13) < 1e-6)
+    check("nothing held on our side → no update", _app._hand_kalshi_settle_update(pick, {**blob, "kalshi_buy_yes": False}, ps) is None)
+    src = inspect.getsource(_app._hand_kalshi_settle_tick).split('"""')[2]   # the body, past the docstring
+    check("the tick grades off the venue's settlement set, never a score",
+          "_kv.settlements(" in src and "espn" not in src.lower() and "_live_decided_prob" not in src
+          and "sets is None" in src and "settlements unreadable" in src)
+    whole = inspect.getsource(_app)
+    check("the handbets tick runs the settlement grade", 'stats["ksettle"] = _hand_kalshi_settle_tick(sb, now)' in whole)
+    check("/mine prefers the venue's dollars on a venue-graded pick",
+          'pnl_usd = r["result_score"]["pnl_usd"]' in whole)
+
+
 def test_kalshi_ws_book() -> None:
     """THE KALSHI SOCKET BOOK (Oct 18 2026): snapshot + deltas → the same
     order-book shape the REST read returns, on either wire shape (legacy
@@ -5860,7 +5907,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

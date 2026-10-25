@@ -5236,6 +5236,14 @@ def api_bet_sheets_picks():
             out["dup_orders"] = _hand_dup_order_sweep(sb, get_client(), apply=bool(request.args.get("apply")))
         except Exception as e:
             out["dup_orders"] = {"ok": False, "error": str(e)[:200]}
+    if request.args.get("ksettle"):
+        # THE VENUE IS THE GRADER (Oct 25 2026): grade Kalshi lots off the venue's
+        # settlement set from here, now — dry unless &apply=1
+        try:
+            out["ksettle"] = _hand_kalshi_settle_tick(sb, datetime.now(timezone.utc),
+                                                      apply=bool(request.args.get("apply")), force=True)
+        except Exception as e:
+            out["ksettle"] = {"ok": False, "error": str(e)[:200]}
     re_slug = (request.args.get("readopt") or "").strip()
     if re_slug:                                        # THE MISSOURI RE-ATTACH (Oct 6 2026): book one
         out["readopt"] = _hand_readopt(sb, re_slug)     # held lot as a hand bet, from Vercel, now
@@ -19576,6 +19584,118 @@ def _hand_rebought_after(trades: list, syn: bool, after_at) -> bool:
     return False
 
 
+_HAND_KSETTLE_EVERY_S = 60          # one settlements read a minute on the handbets tick
+_HAND_KSETTLE_LOOKBACK_D = 3        # the venue's live settlement set; archived rows fall off it
+_HAND_KSETTLE = {"at": 0.0}
+
+
+def _hand_kalshi_settle_update(r: dict, blob: dict, ps: dict | None) -> dict | None:
+    """The bot_picks update for ONE Kalshi pick the venue settled (pure).
+    None when the venue has no binary verdict on our side (scalar, no lot
+    held — a bet that never filled is the start rule's, not a grade)."""
+    import kalshi_venue as _kv
+    v = _kv.settle_verdict(ps, bool(blob.get("kalshi_buy_yes")))
+    if v is None:
+        return None
+    units = r.get("units") or 1
+    try:
+        pnl_units = _pmm_pnl_units(v["status"], int(r.get("entry_price")), units)
+    except (TypeError, ValueError):
+        pnl_units = float(units) if v["status"] == "won" else -float(units)
+    result = {"graded_by": "kalshi", "ticker": blob.get("kalshi_ticker"), "market_result": v["result"],
+              "qty": v["qty"], "cost_usd": v["cost_usd"], "revenue_usd": v["revenue_usd"],
+              "fee_usd": v["fee_usd"], "pnl_usd": v["pnl_usd"], "settled_time": v.get("settled_time")}
+    nb = {**blob, "filled": True, "filled_qty": v["qty"], "kalshi_order_id": None,
+          "kalshi_settlement": {**result, "at": datetime.now(timezone.utc).isoformat()}}
+    return {"status": v["status"], "pnl_units": round(pnl_units, 4), "result_score": result,
+            "settled_at": datetime.now(timezone.utc).isoformat(), "signal_blob": nb}
+
+
+def _hand_kalshi_settle_tick(sb, now, apply: bool = True, force: bool = False) -> dict:
+    """THE VENUE IS THE GRADER (Rob, Oct 25 2026, Denver @ Arizona O 42.5 —
+    Kalshi paid the over at 46 points with 6:21 left while the sheet read
+    OFF THE BOOK and waited on a score: "I really don't give a fuck what ESPN
+    thinks. Settled only comes from Polymarket and Kalshi"). Polymarket lots
+    grade off the venue's resolution rows in the resolver; Kalshi lots had
+    no venue grader. Once a minute on the handbets tick: every pending
+    Kalshi sheet pick that started or holds a fill is checked against the
+    venue's settlement set, and a settled market grades the pick with the
+    venue's own result and dollars (`result_score.graded_by = kalshi`).
+    A failed read grades nothing. Kill switch `machine_flags
+    hand_kalshi_settle`; `/api/bet-sheets/picks?ksettle=1[&apply=1]` runs
+    it from Vercel (dry unless apply)."""
+    import kalshi_venue as _kv
+    st = {"cands": 0, "graded": 0, "settled": 0, "skipped": {}}
+    if not _machine_flag("hand_kalshi_settle", True):
+        st["gate"] = "disabled"
+        return st
+    if not force and _time.monotonic() - _HAND_KSETTLE["at"] < _HAND_KSETTLE_EVERY_S:
+        st["gate"] = "clock"
+        return st
+
+    def _skip(k):
+        st["skipped"][k] = st["skipped"].get(k, 0) + 1
+    try:
+        picks = (sb.table("bot_picks").select("id,event_name,event_start,entry_price,units,signal_blob")
+                 .eq("status", "pending").eq("signal_blob->>bet_sheet", "true")
+                 .eq("signal_blob->>venue", "KALSHI")
+                 .gte("event_start", (now - timedelta(days=_HAND_KSETTLE_LOOKBACK_D)).isoformat())
+                 .limit(200).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    cands = []
+    for r in picks:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if not _kalshi_pick(b) or not b.get("kalshi_ticker"):
+            continue
+        try:
+            started = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00")) <= now
+        except (TypeError, ValueError):
+            started = False
+        if started or b.get("filled") or float(b.get("filled_qty") or 0) > 0:
+            cands.append((r, b))
+    st["cands"] = len(cands)
+    _HAND_KSETTLE["at"] = _time.monotonic()
+    if not cands:
+        return st
+    try:
+        sets = _kv.settlements(min_ts=int((now - timedelta(days=_HAND_KSETTLE_LOOKBACK_D)).timestamp()))
+    except Exception as e:
+        sets = None
+        st["err"] = str(e)[:120]
+    if sets is None:
+        st["gate"] = "settlements unreadable"
+        return st
+    st["settled"] = len(sets)
+    out_rows = []
+    for r, b in cands:
+        ps = sets.get(b["kalshi_ticker"])
+        if ps is None:
+            _skip("not_settled")
+            continue
+        upd = _hand_kalshi_settle_update(r, b, ps)
+        if upd is None:
+            _skip("no_lot" if ps.get("result") in ("yes", "no") else "scalar")
+            continue
+        row = {"pick_id": r["id"], "ticker": b["kalshi_ticker"], "game": r.get("event_name"),
+               "label": b.get("label"), "status": upd["status"], "pnl_usd": upd["result_score"]["pnl_usd"],
+               "qty": upd["result_score"]["qty"], "market_result": ps.get("result"), "applied": False}
+        if apply:
+            try:
+                sb.table("bot_picks").update(upd).eq("id", r["id"]).eq("status", "pending").execute()
+                row["applied"] = True
+                st["graded"] += 1
+                _probe_log({"hand_kalshi_settle": True, **row, "at": now.isoformat()})
+                app.logger.info("KALSHI-settled pick %s %s %s → %s ($%s)", r["id"], r.get("event_name"),
+                                b.get("label"), upd["status"], upd["result_score"]["pnl_usd"])
+            except Exception as e:
+                row["err"] = str(e)[:120]
+        out_rows.append(row)
+    st["rows"] = out_rows
+    return st
+
+
 def _hand_sold_tick(sb, client, now) -> dict:
     """Close sheet/app picks whose filled lot Rob sold before settlement."""
     st = {"cands": 0, "sold": 0, "skipped": {}}
@@ -22474,6 +22594,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
         except Exception as e:
             stats["sold"] = {"err": str(e)[:80]}
         try:
+            stats["ksettle"] = _hand_kalshi_settle_tick(sb, now)     # the venue settled it → graded, venue dollars
+        except Exception as e:
+            stats["ksettle"] = {"err": str(e)[:80]}
+        try:
             stats["twins"] = _hand_twin_backfill(sb, now)        # Kalshi twins for pre-lane bets → watch set + switch
         except Exception as e:
             stats["twins"] = {"err": str(e)[:80]}
@@ -22998,6 +23122,9 @@ def api_bet_sheets_mine():
         if st == "void" and _sold:
             st = "sold"                       # closed by a sale in the app, not graded
             pnl_usd = _sold.get("pnl_usd")
+        elif (st in ("won", "lost", "push") and isinstance(r.get("result_score"), dict)
+                and r["result_score"].get("pnl_usd") is not None):
+            pnl_usd = r["result_score"]["pnl_usd"]      # the venue graded it: its dollars, not ours
         elif st in ("won", "lost", "push") and price_c is not None and qty is not None:
             # NO FILL ON RECORD = NO DOLLARS (Oct 10 2026): the old fallback
             # priced a never-filled graded pick at its full contracts.

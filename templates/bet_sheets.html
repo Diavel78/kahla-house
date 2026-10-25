@@ -1105,6 +1105,16 @@
             return { cls: 'rest', short: held > 0 ? 'PARTIAL' : 'RESTING', detail: (held > 0 ? pre + rest : qp) + (why ? ' · ' + why : '') };
         }
         if (held > 0) return { cls: 'fill', short: 'FILLED', detail: held + ' @ ' + (b.price_c != null ? cA(b.price_c) : am(b.entry_price)) };
+        // A LOT THE VENUE CLOSED IS SETTLED, NEVER OFF THE BOOK (Rob, Oct 25 2026, Denver @
+        // Arizona O 42.5 on Kalshi reading OFF THE BOOK red at 46 points with 6:21 left —
+        // Kalshi had paid the over: "Settled only comes from Polymarket and Kalshi"). The
+        // box grades it off the venue's settlement within the minute; until that lands,
+        // a started game with a fill on record and nothing held is the venue's doing.
+        const fq = Number(b.filled_qty || 0), fpx = b.price_c != null ? cA(b.price_c) : am(b.entry_price);
+        if (fq >= 1 && b.held_unknown)
+            return { cls: 'fill', short: 'FILLED', detail: fmtQ(fq) + ' @ ' + fpx + ' · on record — the venue\'s positions read failed' };
+        if (fq >= 1 && b.started)
+            return { cls: 'fill', short: 'SETTLED', detail: fmtQ(fq) + ' @ ' + fpx + ' · the venue closed the lot — grading off its settlement' };
         if (b.line_hold) {
             const lh = b.line_hold;
             if (lh.why === 'venue_reset') {
@@ -1135,7 +1145,7 @@
     function stateTxt(b, line) {
         const st = betState(b), o = b.order || {};
         let s = st.short;
-        if (st.cls === 'fill') s = 'FILLED ' + fmtQ(b.held) + (b.price_c != null ? ' @ ' + cA(b.price_c) : '');
+        if (st.cls === 'fill') s = (st.short === 'SETTLED' ? 'SETTLED ' : 'FILLED ') + fmtQ(b.held > 0 ? b.held : b.filled_qty) + (b.price_c != null ? ' @ ' + cA(b.price_c) : '');
         else if (o.resting && st.cls === 'rest') s = st.short + ' ' + Math.round(o.leaves || 0) + (o.price_c != null ? ' @ ' + cA(o.price_c) : '');
         if (b.line != null && line != null && Math.abs(Number(b.line) - Number(line)) > 0.01)
             s += ' · on ' + (b.market_type === 'total' ? Number(b.line) : sgn(Number(b.line), 1));
