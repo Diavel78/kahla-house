@@ -4503,8 +4503,11 @@ def api_bet_sheets_picks():
     kinds = [k.strip() for k in (request.args.get("stamps") or "").split(",") if k.strip()]
     if kinds:                                          # e.g. stamps=hand_move_cancel,hand_move_rejoin
         try:
-            st = (get_supabase().table("exec_probe_runs").select("at,params,result")
-                  .order("at", desc=True).limit(int(request.args.get("n") or 600)).execute().data) or []
+            _q = get_supabase().table("exec_probe_runs").select("at,params,result")
+            _before = (request.args.get("before") or "").strip()      # page back: stamps older than this ISO time
+            if _before:
+                _q = _q.lt("at", _before)
+            st = (_q.order("at", desc=True).limit(int(request.args.get("n") or 600)).execute().data) or []
         except Exception as e:
             st = []
             out["stamps_err"] = str(e)[:160]
