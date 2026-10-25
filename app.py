@@ -22883,7 +22883,7 @@ def api_bet_sheets_mine():
                           "thin_hold": blob.get("thin_hold")}),
                       **({"auto": bool(blob["live_snipe"].get("auto")), "since": blob["live_snipe"].get("at"),
                           "until": blob["live_snipe"].get("until"), "from_c": blob["live_snipe"].get("from_c"),
-                          "chase_venue": blob["live_snipe"].get("venue")}
+                          "cap_c": blob["live_snipe"].get("cap_c"), "chase_venue": blob["live_snipe"].get("venue")}
                          if isinstance(blob.get("live_snipe"), dict) and blob["live_snipe"].get("until") else {})},
             "line_hold": (bx.get("line_hold") if bx is not None else blob.get("line_hold")),
         })
@@ -23944,6 +23944,47 @@ def _bet_sheet_repeg_exec(sb, client, pick_id):
 _HAND_LIVE_SNIPE_C = 49.5
 
 
+def _hand_auto_chase_cap(bid_c, flag_cap) -> float:
+    """Pure. THE AUTO CHASE'S CAP IS ROB'S BID (Rob, Oct 25 2026: "starting
+    the chase at my bid… if I bid 52.5 cents and it didn't fill, that being
+    the cap instead of just a hard 49.5… don't drop off of the make or
+    touch… I'm concerned we won't get games filled"): the price he rested
+    pre-game is his price for the bet, so the hand-off's ceiling is that
+    bid, never under the flag's 49.5 (strictly more fills than before).
+    With the market bid at or above his, the order STAYS where it is at the
+    drop. Oct 24: every chase fill came when the market came back DOWN to
+    49; four chases sat 3-5¢ under a market at his bid and expired or took
+    1-2 hours. Manual Move to Live / Get it live keep the flag cap — Rob
+    picks those prices himself."""
+    try:
+        f = float(flag_cap)
+    except (TypeError, ValueError):
+        f = _HAND_LIVE_SNIPE_C
+    try:
+        b = float(bid_c)
+    except (TypeError, ValueError):
+        return f
+    if not (0.0 < b < 100.0):
+        return f
+    return round(max(b, f), 2)
+
+
+def _hand_live_cap_for(blob: dict, flag_cap) -> float:
+    """Pure. The live chase's cap for one pick: the cap the hand-off stamped
+    on `live_snipe.cap_c` (the auto chase — Rob's bid), else the flag."""
+    ls = blob.get("live_snipe") if isinstance(blob, dict) and isinstance(blob.get("live_snipe"), dict) else {}
+    try:
+        c = float(ls.get("cap_c"))
+        if 0.0 < c < 100.0:
+            return c
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(flag_cap)
+    except (TypeError, ValueError):
+        return _HAND_LIVE_SNIPE_C
+
+
 def _hand_blob_close_window(blob: dict, now_iso: str, closed: str = "live_snipe") -> dict:
     """Pure. A Move to Live INSIDE the take window (Oct 24 2026, WMU@Toledo
     O 46.5: Rob pressed it at minute 4 of 5) left `start_take_window` on the
@@ -24101,7 +24142,7 @@ def _hand_chase_expired(blob: dict, now_ts: float) -> bool:
     return u is not None and now_ts >= u
 
 
-def _hand_chase_blob(blob: dict, now, price_c, from_c, qty_total, closed, tw=None, amended=True) -> dict:
+def _hand_chase_blob(blob: dict, now, price_c, from_c, qty_total, closed, tw=None, amended=True, cap_c=None) -> dict:
     """Pure. The pick's blob after the start rule hands an unfilled bet to the
     live chase: holds and the take window gone, `live_snipe` with the clock,
     the price/anchor at the chase's seat, the take lot (if the window took
@@ -24113,6 +24154,8 @@ def _hand_chase_blob(blob: dict, now, price_c, from_c, qty_total, closed, tw=Non
     nb.update({"live_snipe": {"at": now_iso, "from_c": from_c, "price_c": price_c, "auto": True,
                               "until": until, "closed": closed},
                "price_c": price_c, "anchor_c": price_c, "contracts": qty_total})
+    if cap_c is not None:
+        nb["live_snipe"]["cap_c"] = float(cap_c)     # the auto chase's ceiling = Rob's bid (`_hand_auto_chase_cap`)
     if amended:
         nb.update({"amended": True, "repegged_from_c": from_c, "repeg_at": now_iso})
     took_total = float((tw or {}).get("filled") or 0.0) if tw else 0.0
@@ -24187,6 +24230,7 @@ def _hand_start_chase_poly(sb, client, r: dict, stamp: dict, now, st: dict, tw=N
         cap = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
     except (TypeError, ValueError):
         cap = _HAND_LIVE_SNIPE_C
+    cap = _hand_auto_chase_cap(cur_c, cap)            # Rob's bid is the ceiling (Oct 25 2026)
     tick = _pmm_tick_c(client, slug)
     book = _hand_poly_book(client, slug)
     ladder = _hand_ladder_from_book(book, syn) if book else _hand_side_ladder(slug, syn)
@@ -24203,7 +24247,7 @@ def _hand_start_chase_poly(sb, client, r: dict, stamp: dict, now, st: dict, tw=N
             return False                                 # filled or killed under us — the cancel path reads positions
     price_c = float(target) if verdict in ("amended", "stay") else float(cur_c)
     nb = _hand_chase_blob(blob, now, price_c, cur_c, qty_total, (stamp.get("window") or {}).get("closed"),
-                          tw=tw, amended=(verdict == "amended"))
+                          tw=tw, amended=(verdict == "amended"), cap_c=cap)
     if verdict == "unverified":
         nb["live_snipe"]["amend"] = "unverified"
     upd = {"signal_blob": nb}
@@ -24340,6 +24384,7 @@ def _hand_start_chase_kalshi(sb, client, r: dict, stamp: dict, now, st: dict) ->
         cap = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
     except (TypeError, ValueError):
         cap = _HAND_LIVE_SNIPE_C
+    cap = _hand_auto_chase_cap(k_c, cap)              # Rob's bid is the ceiling (Oct 25 2026); whole cents in the target
     target, why, _book = _hand_live_target_kalshi(ticker, by, cap, k_c if o else None,
                                                   float(o.get("remaining") or 0) if o else 0)
     if target is None:
@@ -24369,7 +24414,7 @@ def _hand_start_chase_kalshi(sb, client, r: dict, stamp: dict, now, st: dict) ->
     for k in ("kalshi_cancel_sent", "kalshi_move_cancel_sent", "chase_err", "start_take_window"):
         nb.pop(k, None)
     nb = _hand_chase_blob(nb, now, float(target), k_c, qty_total, (stamp.get("window") or {}).get("closed"),
-                          amended=(not gone))
+                          amended=(not gone), cap_c=cap)
     nb["live_snipe"]["venue"] = "KALSHI"
     if gone:
         nb["live_snipe"]["kalshi_gone"] = True
@@ -25087,7 +25132,7 @@ def _hand_live_tick(sb, client, now) -> dict:
                 continue
             lh = blob.get("live_hold") if isinstance(blob.get("live_hold"), dict) else None
             o = _kalshi_pick_order(blob, k_orders) if koid else None
-            cap_k = round(_grid_dn(cap, _KALSHI_TICK_C), 2)
+            cap_k = round(_grid_dn(_hand_live_cap_for(blob, cap), _KALSHI_TICK_C), 2)   # the hand-off's cap (Rob's bid), else the flag
             if o is not None:
                 held_k = _kv.held_for(k_pos, ticker, by) if k_pos is not None else None
                 try:
@@ -25207,7 +25252,7 @@ def _hand_live_tick(sb, client, now) -> dict:
             except (TypeError, ValueError, KeyError):
                 our_c = blob.get("price_c")
             want[slug] = {"pick_id": r["id"], "order_id": oid, "our_c": our_c, "qty": o.get("leaves"),
-                          "synth": syn, "cap_c": cap, "tick": _pmm_tick_c(client, slug),
+                          "synth": syn, "cap_c": _hand_live_cap_for(blob, cap), "tick": _pmm_tick_c(client, slug),
                           "event_start": r.get("event_start"), "hold": None}
         elif lh and not oid:
             try:
@@ -25233,7 +25278,7 @@ def _hand_live_tick(sb, client, now) -> dict:
             if lh.get("err"):
                 hold["err"] = lh["err"]
             want[slug] = {"pick_id": r["id"], "order_id": None, "our_c": None, "qty": hold["qty"],
-                          "synth": syn, "cap_c": cap, "tick": _pmm_tick_c(client, slug),
+                          "synth": syn, "cap_c": _hand_live_cap_for(blob, cap), "tick": _pmm_tick_c(client, slug),
                           "event_start": r.get("event_start"), "hold": hold}
             st["holds"] += 1
     for s_ in list(LIVE_SNAP):

@@ -1055,7 +1055,7 @@
                 return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing — ' + (b.read ? recShort(b, null) : 'no model read on this game — re-peg it or cancel') };
             if (b.live_snipe)
                 return (b.chase && b.chase.until)
-                    ? { cls: 'rest', short: 'CHASING', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · live chase under the cap · ends ~' + fmtClock(b.chase.until) }
+                    ? { cls: 'rest', short: 'CHASING', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · live chase' + (b.chase.cap_c != null ? ' to ' + b.chase.cap_c + '¢' : ' under the cap') + ' · ends ~' + fmtClock(b.chase.until) }
                     : { cls: 'rest', short: 'LIVE', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · no game-start cancel · yours to watch' };
             if (b.outbid && b.in_play)
                 return { cls: 'warn', short: 'OUTBID', detail: pre + rest + ' · touch ' + b.touch_c + '¢ · in play — re-peg in the app' };
@@ -1495,7 +1495,7 @@
             // the box is re-trying the take inside the 1¢ cap until the window ends
             const chz = b.chase && b.chase.until ? ' · ends ~' + esc(fmtClock(b.chase.until)) : '';
             const tag = (mine && b.live_hold) ? '<span class="tag ' + (b.live_hold.err ? 'red' : 'amb') + '">PULLED · back ~' + esc(fmtClock(b.live_hold.resume_at)) + chz + '</span>'
-                      : mine ? '<span class="tag amb">CHASING' + ((b.chase && b.chase.chase_venue === 'KALSHI') || b.venue === 'KALSHI' ? ' · KALSHI' : '') + (b.chase && b.chase.until ? chz : ' · no clock') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
+                      : mine ? '<span class="tag amb">CHASING' + ((b.chase && b.chase.chase_venue === 'KALSHI') || b.venue === 'KALSHI' ? ' · KALSHI' : '') + (b.chase && b.chase.cap_c != null ? ' · to ' + esc(String(b.chase.cap_c)) + '¢' : '') + (b.chase && b.chase.until ? chz : ' · no clock') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
                       : tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
                       : limbo(b) ? '<span class="tag gry">LISTED ' + esc(fmtClock(b.event_start)) + ' · WAITING FOR THE DROP</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'

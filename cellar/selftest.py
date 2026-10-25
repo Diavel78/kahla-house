@@ -2875,6 +2875,36 @@ def test_hand_start_take_retired() -> None:
         assert "hand_start_chase" in body and "_hand_start_chase_" in body
 
 
+def test_hand_auto_chase_cap() -> None:
+    """THE AUTO CHASE'S CAP IS ROB'S BID (Rob, Oct 25 2026: "if I bid 52.5
+    cents and it didn't fill, that being the cap instead of just a hard
+    49.5… don't drop off of the make or touch"): the hand-off's ceiling is
+    the resting bid, never under the flag; the tick reads it per pick off
+    `live_snipe.cap_c`; manual Move to Live keeps the flag."""
+    import inspect
+    import app as _app
+    C, F = _app._hand_auto_chase_cap, _app._hand_live_cap_for
+    check("auto cap: his 52.5 bid is the cap", C(52.5, 49.5) == 52.5)
+    check("auto cap: a bid under the flag keeps the flag", C(47.0, 49.5) == 49.5)
+    check("auto cap: no bid → the flag", C(None, 49.5) == 49.5 and C("x", 49.5) == 49.5)
+    check("auto cap: a junk bid → the flag", C(0.0, 49.5) == 49.5 and C(100.0, 49.5) == 49.5)
+    check("per-pick cap: the stamped cap wins", F({"live_snipe": {"cap_c": 52.5}}, 49.5) == 52.5)
+    check("per-pick cap: a manual live snipe reads the flag", F({"live_snipe": {"at": "x"}}, 49.5) == 49.5 and F({}, 49.5) == 49.5)
+    # at the drop with the market bid at or above his bid the order STAYS
+    T = _app._hand_live_target
+    lad = lambda *pq: [(float(p), float(q)) for p, q in pq]
+    check("drop: market at his 52.5 → stay at 52.5", T(lad((52.5, 300), (52, 900)), 54.0, 52.5, 10, 52.5, 0.5) == (52.5, "cap"))
+    check("drop: market above his bid → his bid is the ceiling", T(lad((55, 300), (54, 900)), 56.0, 52.5, 10, 52.5, 0.5) == (52.5, "cap"))
+    check("drop: market under his bid → join it down", T(lad((50, 300), (49, 900)), 53.0, 52.5, 10, 52.5, 0.5) == (50.0, "join"))
+    for fn in (_app._hand_start_chase_poly, _app._hand_start_chase_kalshi):
+        src = inspect.getsource(fn)
+        check(f"{fn.__name__} caps at Rob's bid and stamps it", "_hand_auto_chase_cap(" in src and "cap_c=cap" in src)
+    src = inspect.getsource(_app._hand_live_tick)
+    check("the live tick reads the per-pick cap (both venues, order + hold)", src.count("_hand_live_cap_for(blob, cap)") >= 3)
+    src = inspect.getsource(_app._bet_sheet_live_exec)
+    check("manual Move to Live still uses the flag price", "_hand_auto_chase_cap" not in src)
+
+
 def test_hand_take_window() -> None:
     """The 2-minute take window (Rob, Oct 18 2026): attempts fold into one
     record, fills and cost accumulate, the ledger stays bounded."""
@@ -5600,7 +5630,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
