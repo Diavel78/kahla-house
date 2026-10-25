@@ -565,14 +565,18 @@
     // number next to the pick (`g.pin`, one shape on every sport). A side →
     // that side's price; no side → both.
     function pinTxt(g, mt, side, p) {
-        // THE RUNG'S OWN PRICE (Rob, Oct 25 2026: "Can't ya just pull the half points off
-        // Pinnacle's webpage?"): when the slate's alternate ladder carries the pick's rung,
-        // the label is Pinnacle's price AT THE RUNG — "Bet105 +3.5 −132" — the main line only
-        // when it isn't.
+        // THE DEVIGGED LINE IS THE ONE TO BEAT (Rob, Oct 25 2026: "I think you should show the
+        // devig'd line, that's what we are trying to beat"): the label is Pinnacle's FAIR at
+        // the pick's rung (`pin_fair` — its own two prices at the rung devigged when the
+        // alternate ladder carries it, else the main line shifted by the push rate), with
+        // the line it is at; Bet105's vig-inclusive price lives on the hover.
         const pf = p && p.pin_fair;
-        if (pf && pf.src === 'rung' && pf.price != null && pf.pin_line != null) {
-            const lab = mt === 'total' ? ((side === 'over' ? 'O ' : 'U ') + pf.pin_line) : sgn(pf.pin_line, 1);
-            return ' <span class="pinq" title="Bet105\'s price at this rung (Pinnacle\'s alternate line; Bet105 resells Pinnacle\'s lines)">Bet105 ' + lab + ' ' + am(pf.price) + '</span>';
+        if (pf && pf.american != null) {
+            const ln = pf.pin_line == null ? '' : (mt === 'total' ? ((side === 'over' ? 'O ' : 'U ') + pf.pin_line) : sgn(pf.pin_line, 1)) + ' ';
+            const how = pf.src === 'rung' ? 'Pinnacle\'s own prices at this rung, ' + am(pf.price) + ' / ' + am(pf.opp_price) + ', devigged (Bet105 charges ' + am(pf.price) + ')'
+                      : pf.src === 'push' ? 'Pinnacle\'s prices at its main line devigged, shifted by the ' + Math.round((pf.push || 0) * 1000) / 10 + '% push on that number — the rung itself is not on its ladder'
+                      : 'Pinnacle\'s prices at this line, devigged';
+            return ' <span class="pinq" title="' + how + '">PIN ' + ln + am(pf.american) + (pf.src === 'push' ? ' ≈' : '') + '</span>';
         }
         const P = g.pin;
         if (!P) return '';
@@ -1661,15 +1665,8 @@
     function edgeTxt(p, pts) {
         if (!p) return '';
         const e = pts ? sgn(p.edge_pts) + ' pts' : sgn(p.edge_pp) + '%';
-        // PINNACLE'S FAIR AT THE RUNG (Rob, Oct 25 2026: "you'd be able to actually calculate
-        // fair… based on its line for 3… that and the model"): Pinnacle's two prices at its own
-        // line, devigged, carried to the half point by the push rate on that number (server
-        // `_pin_fair_at_rung`). Beside it the model's fair is labelled so neither is mistaken.
-        const pf = p.pin_fair;
-        if (pf && pf.american != null)
-            return ' <span class="dim">· edge ' + e + (p.fair != null ? ' · model ' + am(p.fair) : '')
-                 + ' · <span class="pinq" title="' + (pf.src === 'rung' ? 'Pinnacle\'s fair at this rung: its own two prices at ' + pf.pin_line + ' (' + am(pf.price) + ' / ' + am(pf.opp_price) + ') devigged' : 'Pinnacle\'s fair at this rung: its two prices at ' + (pf.pin_line != null ? pf.pin_line : 'its line') + ' devigged' + (pf.push != null ? ', shifted by the ' + Math.round(pf.push * 1000) / 10 + '% push on that number' : '')) + '">PIN fair ' + am(pf.american) + '</span></span>';
-        return ' <span class="dim">· edge ' + e + (p.fair != null ? ' · fair ' + am(p.fair) : '') + '</span>';
+        // 'model' not 'fair' since Oct 25 2026 — Pinnacle's fair sits beside it (pinTxt)
+        return ' <span class="dim">· edge ' + e + (p.fair != null ? ' · model ' + am(p.fair) : '') + '</span>';
     }
     // the market's body: the model-side button pre-game; on a final, the
     // pick and its ✅/❌ (a PASS shows nothing — it was never a pick)

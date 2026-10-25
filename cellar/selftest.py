@@ -4920,8 +4920,9 @@ def test_sheet_pin_fair_at_rung() -> None:
     check("the API attaches it per game", "_sheet_attach_pin_fair(sport, games[-1], _pin_evs)" in inspect.getsource(_app.api_football_picks))
     for tpl in ("templates/bet_sheets.html", "templates/football_picks.html"):
         src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), tpl), encoding="utf-8").read()
-        check(f"{tpl}: PIN fair beside the model's fair", "PIN fair ' + am(pf.american)" in src and "' · model ' + am(p.fair)" in src)
-        check(f"{tpl}: Bet105 prints the rung's own price when the ladder has it", "pf.src === 'rung' && pf.price != null" in src)
+        # the label is the DEVIGGED line (Rob, Oct 25 2026: "that's what we are trying to beat"), the raw price on hover
+        check(f"{tpl}: PIN's devigged fair at the rung beside the model's", "PIN ' + ln + am(pf.american)" in src and "' · model ' + am(p.fair)" in src)
+        check(f"{tpl}: Bet105's vig-inclusive price is the hover, not the label", "Bet105 charges ' + am(pf.price)" in src and "PIN fair '" not in src)
 
 
 def test_sheet_pin_quote() -> None:
