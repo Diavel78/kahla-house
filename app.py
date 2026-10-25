@@ -17457,6 +17457,20 @@ def _hand_take_retry_ok(take, leaves) -> bool:
 
 _HAND_START_TAKE_WINDOW_S = 300.0   # Rob, Oct 20 2026: "change that damn make to 5 minutes… I want the damn bet filled" (was 120, Oct 18)
 
+# THE TAKE AT THE DROP IS RETIRED (Rob, Oct 25 2026: "get rid of the 5-minute
+# make-take thing. If it doesn't fill before the game starts, go straight to
+# the chase"). The 95% drop still says "the game started"; an unfilled order
+# then goes to `_hand_start_finish_*` → `_hand_start_chase_*` at once: amended
+# in place to the live rule's price, GTC, the chase's hour on the clock. No
+# IOC, no maker bump, no window. Oct 24's drop fills went 4-20 (−$80) while
+# the chase's went 7-2 (+$15). `machine_flags hand_start_take=true` restores
+# the window; the window code stays for that and for legacy blobs.
+HAND_START_TAKE_ENABLED = False
+
+
+def _hand_start_take_on() -> bool:
+    return bool(_machine_flag("hand_start_take", HAND_START_TAKE_ENABLED))
+
 
 def _hand_take_window_s() -> float:
     try:
@@ -17687,7 +17701,7 @@ def _hand_take_window_poly(sb, client, r: dict, blob: dict, o, slug: str, oid, n
     # the drop fired) — after a maker bump the order rests at pc0 + cap, and a
     # cap measured off THAT would creep a cent every tick.
     pc0 = tw.get("price_c") if tw.get("price_c") is not None else pc
-    if now_ts < until_ts and leaves >= 1 and pc is not None and _machine_flag("hand_start_take", True):
+    if now_ts < until_ts and leaves >= 1 and pc is not None and _hand_start_take_on():
         take = _hand_take_attempt_poly(client, slug, bool(blob.get("pmm_synthetic")), pc0, leaves, start_ts, now_ts)
         took_px = take.get("took_px")
         tw = _hand_take_window_add(tw, take)
@@ -17958,7 +17972,7 @@ def _hand_start_tick(sb, client, now) -> dict:
             leaves, pc = _hand_order_leaves_pc(o, blob) if (not sat_out and o) else (0, None)
             cum0 = float((o or {}).get("cum") or 0) if o else 0.0
             if (not sat_out and o and now_ts >= start_ts
-                    and _machine_flag("hand_start_take", True) and leaves >= 1 and pc is not None):
+                    and _hand_start_take_on() and leaves >= 1 and pc is not None):
                 syn_t = bool(blob.get("pmm_synthetic"))
                 take = _hand_take_attempt_poly(client, slug, syn_t, pc, leaves, start_ts, now_ts)
                 took_px = take.get("took_px")
@@ -20741,7 +20755,7 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
         take, took_px, took_venue, cancelled = None, None, None, False
         cum0 = float(o.get("filled") or 0.0)
         leaves, pc = _hand_kalshi_leaves_pc(o, blob, by)
-        if now_ts >= start_ts and _machine_flag("hand_start_take", True) and leaves >= 1 and pc is not None:
+        if now_ts >= start_ts and _hand_start_take_on() and leaves >= 1 and pc is not None:
             take, took_px, took_venue, cancelled = _hand_take_attempt_kalshi(
                 sb, client, r, blob, ticker, by, koid, twin, pc, leaves, start_ts, now_ts, now)
             win_s = _hand_take_window_s()
@@ -21013,7 +21027,7 @@ def _hand_take_window_kalshi(sb, client, r: dict, blob: dict, o, ticker: str, by
     # at the drop) — a maker bump moves the order to pc0 + cap, never the cap
     pc0 = tw.get("price_c") if tw.get("price_c") is not None else pc
     take, took_px, took_venue, cancelled = None, None, None, False
-    if now_ts < until_ts and leaves >= 1 and pc is not None and _machine_flag("hand_start_take", True):
+    if now_ts < until_ts and leaves >= 1 and pc is not None and _hand_start_take_on():
         take, took_px, took_venue, cancelled = _hand_take_attempt_kalshi(
             sb, client, r, blob, ticker, by, koid, twin, pc0, leaves, start_ts, now_ts, now)
         tw = _hand_take_window_add(tw, take)
