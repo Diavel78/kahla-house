@@ -1134,7 +1134,7 @@ def _sheet_pin_block(ln: dict | None, provider_key: str = "provider") -> dict | 
     return out
 
 
-def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None) -> dict | None:
+def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None, rung=None) -> dict | None:
     """Pure. PINNACLE'S FAIR AT THE RUNG ROB BETS (Rob, Oct 25 2026, on
     Bet105 +3 −104 beside a New Orleans +3.5 button: "Then you'd be able to
     actually calculate fair… based on its line for 3 I'm guessing? That and
@@ -1146,15 +1146,29 @@ def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None) 
     already on Pinnacle's line is the plain devig; a hop past a half point
     is None (the table can't carry it), never a guess. `mt` is spread / total
     / ml (a puck line is a spread). Returns {american, prob, pin_line, push}."""
-    if not isinstance(pick, dict) or not isinstance(pin, dict) or not pick.get("side"):
+    if not isinstance(pick, dict) or not pick.get("side"):
         return None
     side = str(pick.get("side"))
+    if rung and mt in ("spread", "total"):
+        # PINNACLE'S OWN TWO PRICES AT THE RUNG (Oct 25 2026 — the alternate
+        # ladder off its feed, `_pin_rung_prices`): the devig, no push table
+        try:
+            a, b = _amer_to_prob_py(rung[0]), _amer_to_prob_py(rung[1])
+            rl = float(pick.get("line"))
+        except (TypeError, ValueError, IndexError):
+            a = b = rl = None
+        if a is not None and b is not None and a + b > 0 and rl is not None:
+            pr = a / (a + b)
+            return {"american": _american_from_p(pr), "prob": round(pr, 4), "pin_line": rl,
+                    "push": None, "src": "rung", "price": int(rung[0]), "opp_price": int(rung[1])}
+    if not isinstance(pin, dict):
+        return None
     if mt == "ml":
         a, b = _amer_to_prob_py(pin.get("ml_home")), _amer_to_prob_py(pin.get("ml_away"))
         if a is None or b is None or a + b <= 0 or side not in ("home", "away"):
             return None
         p = (a if side == "home" else b) / (a + b)
-        return {"american": _american_from_p(p), "prob": round(p, 4), "pin_line": None, "push": None}
+        return {"american": _american_from_p(p), "prob": round(p, 4), "pin_line": None, "push": None, "src": "line"}
     try:
         rung = float(pick.get("line"))
     except (TypeError, ValueError):
@@ -1192,26 +1206,55 @@ def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None) 
         p = p * (1.0 - push) + (push if gains else 0.0)
     p = min(max(p, 0.001), 0.999)
     return {"american": _american_from_p(p), "prob": round(p, 4), "pin_line": pin_line,
-            "push": (round(push, 3) if delta > 0.01 else None)}
+            "push": (round(push, 3) if delta > 0.01 else None), "src": ("push" if delta > 0.01 else "line")}
 
 
-def _sheet_attach_pin_fair(sport: str, g: dict) -> None:
+def _sheet_attach_pin_fair(sport: str, g: dict, slate=None) -> None:
     """Each pick block on a sheet game (spread / puck / total / ml) gets
-    `pin_fair` = Pinnacle's fair at that pick's rung, when the game carries
-    Pinnacle's prices. Never raises — a miss just leaves the model's fair."""
-    pin = g.get("pin") if isinstance(g, dict) else None
-    if not isinstance(pin, dict):
+    `pin_fair` = Pinnacle's fair at that pick's rung: the slate's own two
+    prices at the rung when the ladder carries it (`_pin_rung_prices`, the
+    alternate lines off Pinnacle's feed), else the push shift off the
+    game's main-line block. Never raises — a miss leaves the model's fair."""
+    if not isinstance(g, dict):
         return
+    pin = g.get("pin") if isinstance(g.get("pin"), dict) else None
     for key, mt in (("spread", "spread"), ("puck", "spread"), ("total", "total"), ("ml", "ml")):
         pk = g.get(key)
         if not isinstance(pk, dict):
             continue
+        rung = None
+        if slate and mt in ("spread", "total"):
+            try:
+                rp = _pin_rung_prices(slate, g.get("away"), g.get("home"), mt, str(pk.get("side") or ""),
+                                      pk.get("line"), start=g.get("event_start"))
+                rung = rp if rp and rp[0] is not None else None
+            except Exception:
+                rung = None
         try:
-            pf = _pin_fair_at_rung(sport, mt, pk, pin)
+            pf = _pin_fair_at_rung(sport, mt, pk, pin, rung=rung)
         except Exception:
             pf = None
         if pf and pf.get("american") is not None:
             pk["pin_fair"] = pf
+
+
+def _pin_sheet_slate(sb, sport: str, now, slates: dict):
+    """One Pinnacle slate per sport per request: the cached slate when it is
+    under _PIN_QUOTE_FRESH_MIN old, else Pinnacle's own feed (`_pin_slate(
+    paid=False)` — never a parlay-api credit). Returns (events, age_min);
+    (None, None) on any miss. Shared by the slip quote and the sheet API."""
+    sport = str(sport or "").upper()
+    try:
+        if sport not in slates:
+            events, age = _pin_slate_cached(sb, sport, now)
+            if not events or age is None or age > _PIN_QUOTE_FRESH_MIN:
+                fresh = _pin_slate(sb, sport, now, paid=False)
+                if fresh:
+                    events, age = fresh, 0.0
+            slates[sport] = (events, age)
+        return slates[sport]
+    except Exception:
+        return None, None
 
 
 def _sheet_game_football(r: dict) -> dict:
@@ -1912,12 +1955,13 @@ def api_football_picks():
                 if path else None)
 
     games, lines_updated_at, built_at = [], None, None
+    _pin_evs = _pin_sheet_slate(sb, sport, datetime.now(timezone.utc), {})[0] if rows else None
     for r in rows:
         games.append(_sheet_game_nhl(r) if sport == "NHL"
                      else _sheet_game_nba(r) if sport == "NBA"
                      else _sheet_game_mlb(r) if sport == "MLB"
                      else _sheet_game_football(r))
-        _sheet_attach_pin_fair(sport, games[-1])     # Pinnacle's fair at the rung beside the model's
+        _sheet_attach_pin_fair(sport, games[-1], _pin_evs)   # Pinnacle's fair at the rung beside the model's
         blob = r.get("data_blob") or {}
         stamp = (blob.get("friday") or {}).get("built_at") or r.get("data_built_at")
         if stamp and (lines_updated_at is None or stamp > lines_updated_at):
@@ -15416,16 +15460,8 @@ def _bet_sheet_pin_quote(sb, item: dict, now, slates: dict) -> dict | None:
     One slate per sport per request: the cached slate when it is under
     _PIN_QUOTE_FRESH_MIN old, else Pinnacle's own feed (`_pin_slate(paid=
     False)` — never a parlay-api credit). Never raises; None on any miss."""
-    sport = str(item.get("sport") or "").upper()
     try:
-        if sport not in slates:
-            events, age = _pin_slate_cached(sb, sport, now)
-            if not events or age is None or age > _PIN_QUOTE_FRESH_MIN:
-                fresh = _pin_slate(sb, sport, now, paid=False)
-                if fresh:
-                    events, age = fresh, 0.0
-            slates[sport] = (events, age)
-        events, age = slates[sport]
+        events, age = _pin_sheet_slate(sb, item.get("sport"), now, slates)
         return _pin_quote_from_events(events, item, age)
     except Exception:
         return None
@@ -41793,12 +41829,24 @@ def _pin_direct_to_events(matchups, markets, now) -> list:
         games[m.get("id")] = {"id": f"pd-{m.get('id')}", "away_team": aw, "home_team": hm,
                               "commence_time": st, "src": "pinnacle_direct", "_mk": {}}
     want = {"moneyline": "h2h", "spread": "spreads", "total": "totals"}
+    # THE ALTERNATE LADDERS TOO (Rob, Oct 25 2026, Bet105 showing NO +3.5 at
+    # −132 next to the sheet's push-rate guess: "Can't ya just pull the half
+    # points off Pinnacle's webpage?"): every `isAlternate` spread/total
+    # market is kept under TOA's own `alternate_spreads` / `alternate_totals`
+    # keys (one flat outcome list, each outcome its own point), so a rung
+    # reads Pinnacle's real two prices (`_pin_rung_prices`) instead of a
+    # shift off the main line. Main-line readers are untouched.
+    alt_key = {"spread": "alternate_spreads", "total": "alternate_totals"}
     for x in (markets or []):
         g = games.get((x or {}).get("matchupId"))
         mk = want.get((x or {}).get("type"))
-        if not g or not mk or x.get("period") not in (0, None) or x.get("isAlternate"):
+        if not g or not mk or x.get("period") not in (0, None):
             continue
-        if mk in g["_mk"]:
+        if x.get("isAlternate"):
+            mk = alt_key.get((x or {}).get("type"))
+            if not mk:
+                continue
+        elif mk in g["_mk"]:
             continue
         outs = []
         for pr in (x.get("prices") or []):
@@ -41814,7 +41862,10 @@ def _pin_direct_to_events(matchups, markets, now) -> list:
                 o["point"] = pr.get("points")
             outs.append(o)
         if len(outs) == 2:
-            g["_mk"][mk] = outs
+            if mk.startswith("alternate_"):
+                g["_mk"].setdefault(mk, []).extend(outs)
+            else:
+                g["_mk"][mk] = outs
     out = []
     for g in games.values():
         mks = g.pop("_mk")
@@ -42112,6 +42163,17 @@ def api_pinnacle_probe():
     out["sample_market"] = mk[0] if mk else None
     if find:
         out["find"] = [g for g in vals if find in (g["away"] + " " + g["home"]).lower()][:6]
+        # the alternate ladders the sheets' PIN fair reads (Oct 25 2026)
+        evs_f = _pin_direct_to_events(mu, mk, datetime.now(timezone.utc))
+        for g_ in out["find"]:
+            ev, _sw = _pin_match_event(evs_f, g_["away"], g_["home"], g_.get("start"))
+            alts = {}
+            for m_ in (((ev or {}).get("bookmakers") or [{}])[0].get("markets") or []):
+                if str(m_.get("key", "")).startswith("alternate_"):
+                    alts[m_["key"]] = sorted({(o.get("designation"), o.get("point"), o.get("price"))
+                                              for o in (m_.get("outcomes") or [])},
+                                             key=lambda t: (t[0] or "", t[1] or 0))
+            g_["alts"] = {k: [list(t) for t in v] for k, v in alts.items()}
     if request.args.get("match"):
         # our upcoming games (ESPN names) vs the converted slate — the
         # match rate the sheets will actually get
@@ -42194,17 +42256,12 @@ def _pin_name_q(a: str, b: str) -> float:
     return 0.0
 
 
-def _pin_outcomes(events, away: str, home: str, mkt_key: str, side: str,
-                  book: str | None = "pinnacle", start=None):
-    """Match (game, market, side) in a TOA-shaped slate → (pick, opp)
-    outcomes, or (None, None). The game is the BEST name match over the
-    whole slate, either orientation (Pinnacle's college names are short —
-    'Miami' must not take 'Miami (OH)''s game, and a neutral site can list
-    the teams the other way round); a side is read off the outcome's
-    `designation` when the slate carries one (Pinnacle's own feed), else
-    by name. With `start` (our game's start, datetime or ISO) a slate game
-    more than 12h away never matches — a slate spans days, and the same two
-    teams can meet twice in it (NBA preseason vs opening week, Oct 10 2026)."""
+def _pin_match_event(events, away: str, home: str, start=None):
+    """The slate game for (away, home): the BEST name match over the whole
+    slate, either orientation, within 12h of `start` when given. Returns
+    (event, swapped) — swapped=True when the slate lists the teams the other
+    way round. (Lifted out of _pin_outcomes so the alternate-ladder reader
+    matches games exactly the way the main-line reader does.)"""
     aw, hm = _pin_norm(away), _pin_norm(home)
     st0 = None
     if start is not None:
@@ -42229,6 +42286,67 @@ def _pin_outcomes(events, away: str, home: str, mkt_key: str, side: str,
             qa, qh = _pin_name_q(x, aw), _pin_name_q(y, hm)
             if qa > 0 and qh > 0 and qa + qh > best_q:
                 best, best_q, swapped = e, qa + qh, sw
+    return best, swapped
+
+
+def _pin_rung_prices(events, away: str, home: str, mt: str, side: str, line, start=None,
+                     book: str | None = "pinnacle"):
+    """Pure. Pinnacle's two prices AT ONE RUNG (the side's own line) off a
+    slate that carries the alternate ladders: the main line when it is the
+    rung, else the alternate with that point. Returns (pick_price,
+    opp_price) as American, or (None, None) when the rung isn't on the
+    ladder. `mt` spread / total; a spread's opp sits at −line, a total's
+    at the same line."""
+    try:
+        L = float(line)
+    except (TypeError, ValueError):
+        return None, None
+    if mt not in ("spread", "total") or side not in ("home", "away", "over", "under"):
+        return None, None
+    best, swapped = _pin_match_event(events, away, home, start)
+    if best is None:
+        return None, None
+    bm = next((b for b in (best.get("bookmakers") or []) if book is None or b.get("key") == book), None)
+    keys = ("spreads", "alternate_spreads") if mt == "spread" else ("totals", "alternate_totals")
+    outs = []
+    for m in ((bm or {}).get("markets") or []):
+        if m.get("key") in keys:
+            outs.extend(m.get("outcomes") or [])
+    if not outs:
+        return None, None
+    want = side
+    if mt == "spread" and swapped:
+        want = "away" if side == "home" else "home"
+    opp_d = ({"home": "away", "away": "home"} if mt == "spread" else {"over": "under", "under": "over"})[want]
+    opp_L = -L if mt == "spread" else L
+
+    def _at(d, pt):
+        for o in outs:
+            try:
+                if o.get("designation") == d and abs(float(o.get("point")) - pt) < 0.01 and o.get("price") is not None:
+                    return int(round(float(o["price"])))
+            except (TypeError, ValueError):
+                continue
+        return None
+    pk, op = _at(want, L), _at(opp_d, opp_L)
+    if pk is None or op is None:
+        return None, None
+    return pk, op
+
+
+def _pin_outcomes(events, away: str, home: str, mkt_key: str, side: str,
+                  book: str | None = "pinnacle", start=None):
+    """Match (game, market, side) in a TOA-shaped slate → (pick, opp)
+    outcomes, or (None, None). The game is the BEST name match over the
+    whole slate, either orientation (Pinnacle's college names are short —
+    'Miami' must not take 'Miami (OH)''s game, and a neutral site can list
+    the teams the other way round); a side is read off the outcome's
+    `designation` when the slate carries one (Pinnacle's own feed), else
+    by name. With `start` (our game's start, datetime or ISO) a slate game
+    more than 12h away never matches — a slate spans days, and the same two
+    teams can meet twice in it (NBA preseason vs opening week, Oct 10 2026)."""
+    aw, hm = _pin_norm(away), _pin_norm(home)
+    best, swapped = _pin_match_event(events, away, home, start)
     if best is None:
         return None, None
     bm = next((b for b in (best.get("bookmakers") or [])

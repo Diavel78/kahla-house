@@ -564,7 +564,16 @@
     // so Pinnacle's price at the sheet's line is printed as the Bet105
     // number next to the pick (`g.pin`, one shape on every sport). A side →
     // that side's price; no side → both.
-    function pinTxt(g, mt, side) {
+    function pinTxt(g, mt, side, p) {
+        // THE RUNG'S OWN PRICE (Rob, Oct 25 2026: "Can't ya just pull the half points off
+        // Pinnacle's webpage?"): when the slate's alternate ladder carries the pick's rung,
+        // the label is Pinnacle's price AT THE RUNG — "Bet105 +3.5 −132" — the main line only
+        // when it isn't.
+        const pf = p && p.pin_fair;
+        if (pf && pf.src === 'rung' && pf.price != null && pf.pin_line != null) {
+            const lab = mt === 'total' ? ((side === 'over' ? 'O ' : 'U ') + pf.pin_line) : sgn(pf.pin_line, 1);
+            return ' <span class="pinq" title="Bet105\'s price at this rung (Pinnacle\'s alternate line; Bet105 resells Pinnacle\'s lines)">Bet105 ' + lab + ' ' + am(pf.price) + '</span>';
+        }
         const P = g.pin;
         if (!P) return '';
         let s = '';
@@ -1659,8 +1668,7 @@
         const pf = p.pin_fair;
         if (pf && pf.american != null)
             return ' <span class="dim">· edge ' + e + (p.fair != null ? ' · model ' + am(p.fair) : '')
-                 + ' · <span class="pinq" title="Pinnacle\'s fair at this rung: its two prices at ' + (pf.pin_line != null ? pf.pin_line : 'its line') + ' devigged'
-                 + (pf.push != null ? ', shifted by the ' + Math.round(pf.push * 1000) / 10 + '% push on that number' : '') + '">PIN fair ' + am(pf.american) + '</span></span>';
+                 + ' · <span class="pinq" title="' + (pf.src === 'rung' ? 'Pinnacle\'s fair at this rung: its own two prices at ' + pf.pin_line + ' (' + am(pf.price) + ' / ' + am(pf.opp_price) + ') devigged' : 'Pinnacle\'s fair at this rung: its two prices at ' + (pf.pin_line != null ? pf.pin_line : 'its line') + ' devigged' + (pf.push != null ? ', shifted by the ' + Math.round(pf.push * 1000) / 10 + '% push on that number' : '')) + '">PIN fair ' + am(pf.american) + '</span></span>';
         return ' <span class="dim">· edge ' + e + (p.fair != null ? ' · fair ' + am(p.fair) : '') + '</span>';
     }
     // the market's body: the model-side button pre-game; on a final, the
@@ -1685,7 +1693,7 @@
         if (bs && bs.line != null) ln = Number(bs.line);
         else if (bs && L.spread_home != null) ln = bs.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home);
         if (bs || L.spread_home != null || M)
-            out.push(mkRow('Spread', bs, mdl + edgeTxt(bs, true) + pinTxt(g, 'spread', bs ? bs.side : null),
+            out.push(mkRow('Spread', bs, mdl + edgeTxt(bs, true) + pinTxt(g, 'spread', bs ? bs.side : null, bs),
                      mkBody(g, up, 'spread', bs, ln, bs ? nameOf(g, bs.side) + ' ' + sgn(ln, 1) : '', 'spread')));
         out.push(totalMarket(g, up, true));
         return out.join('');
@@ -1711,7 +1719,7 @@
         const tl = p && p.line != null ? p.line : L.total;
         if (tl != null && !p) mdl = 'line ' + tl + (mdl ? ' · ' + mdl : '');
         if (!p && tl == null && !mdl) return '';
-        return mkRow('Total', p, mdl + edgeTxt(p, pts) + pinTxt(g, 'total', p ? p.side : null),
+        return mkRow('Total', p, mdl + edgeTxt(p, pts) + pinTxt(g, 'total', p ? p.side : null, p),
                      mkBody(g, up, 'total', p, tl, p ? (p.side === 'over' ? 'Over ' : 'Under ') + tl : '', 'total', p ? p.price : null) + openTxt(g));
     }
     // THE CHALK RULE (Rob, Oct 11 2026: "-180 and a -262? Yeah, I ain't
@@ -1742,7 +1750,7 @@
         if (!p && !mdl) return '';
         let ln = null;
         if (p && p.side) ln = p.line != null ? Number(p.line) : (L.spread_home != null ? (p.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home)) : null);
-        return mkRow(_sport === 'MLB' ? 'Run line' : 'Spread', p, mdl + edgeTxt(p, false) + pinTxt(g, 'spread', p ? p.side : null),
+        return mkRow(_sport === 'MLB' ? 'Run line' : 'Spread', p, mdl + edgeTxt(p, false) + pinTxt(g, 'spread', p ? p.side : null, p),
                      mkBody(g, up, 'spread', p, ln, p && p.side ? nameOf(g, p.side) + ' ' + sgn(ln, 1) : '', 'spread', p ? p.price : null));
     }
     // Hockey puck line: priced server-side like the ML (`g.puck`, model cover
@@ -1756,7 +1764,7 @@
             mdl = 'line ' + favLine(g, L.puck_home, 1) + (po != null ? ' ' + am(po) : '') + (mdl ? ' · ' + mdl : '');
         }
         if (!p && !mdl) return '';
-        return mkRow('Puck', p, mdl + edgeTxt(p, false) + pinTxt(g, 'spread', p ? p.side : null),
+        return mkRow('Puck', p, mdl + edgeTxt(p, false) + pinTxt(g, 'spread', p ? p.side : null, p),
                      mkBody(g, up, 'spread', p, p ? p.line : null, p && p.side ? nameOf(g, p.side) + ' ' + sgn(p.line, 1) : '', 'puck', p ? p.price : null));
     }
     function marketsFor(g, up) {

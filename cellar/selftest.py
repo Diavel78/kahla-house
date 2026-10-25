@@ -4858,6 +4858,7 @@ def test_sheet_pin_fair_at_rung() -> None:
     beside the model's fair on both sheets."""
     print("sheets: Pinnacle's fair at the rung")
     import inspect, os
+    from datetime import datetime, timedelta, timezone
     import app as _app
     F = _app._pin_fair_at_rung
     pin = {"spread_home": -3.0, "spread_home_odds": -104, "spread_away_odds": -108,
@@ -4882,13 +4883,45 @@ def test_sheet_pin_fair_at_rung() -> None:
     check("no Pinnacle block → None", F("NFL", "spread", {"side": "away", "line": 3.5}, None) is None)
     check("a puck line (half point, no push) devigs", F("NHL", "spread", {"side": "home", "line": -1.5},
           {"spread_home": -1.5, "spread_home_odds": 150, "spread_away_odds": -180}) is not None)
+    # THE RUNG OFF PINNACLE'S OWN LADDER (Rob, Oct 25 2026: "Can't ya just pull the half
+    # points off Pinnacle's webpage?"): the feed's alternates are kept, the rung's two
+    # prices devig, the push table is the fallback only
+    now_ = datetime.now(timezone.utc)
+    mu = [{"id": 1, "startTime": (now_ + timedelta(hours=6)).isoformat(),
+           "participants": [{"alignment": "away", "name": "Pittsburgh Steelers"}, {"alignment": "home", "name": "New Orleans Saints"}]}]
+    mk = [{"matchupId": 1, "type": "spread", "period": 0, "prices": [{"designation": "home", "points": 3.0, "price": -108}, {"designation": "away", "points": -3.0, "price": -104}]},
+          {"matchupId": 1, "type": "spread", "period": 0, "isAlternate": True, "prices": [{"designation": "home", "points": 3.5, "price": -132}, {"designation": "away", "points": -3.5, "price": 116}]},
+          {"matchupId": 1, "type": "spread", "period": 0, "isAlternate": True, "prices": [{"designation": "home", "points": 4.0, "price": -150}, {"designation": "away", "points": -4.0, "price": 130}]},
+          {"matchupId": 1, "type": "total", "period": 0, "prices": [{"designation": "over", "points": 42.5, "price": -118}, {"designation": "under", "points": 42.5, "price": 101}]},
+          {"matchupId": 1, "type": "total", "period": 0, "isAlternate": True, "prices": [{"designation": "over", "points": 43.5, "price": 102}, {"designation": "under", "points": 43.5, "price": -120}]},
+          {"matchupId": 1, "type": "moneyline", "period": 0, "prices": [{"designation": "home", "price": 138}, {"designation": "away", "price": -156}]}]
+    evs = _app._pin_direct_to_events(mu, mk, now_)
+    keys = {m["key"] for m in evs[0]["bookmakers"][0]["markets"]}
+    check("the direct feed keeps the alternate ladders", {"spreads", "alternate_spreads", "totals", "alternate_totals", "h2h"} <= keys, str(keys))
+    check("main-line readers still read the main line",
+          _app._pin_line_from_events(evs, "Pittsburgh Steelers", "New Orleans Saints", "spread", book="pinnacle") == 3.0)
+    R = _app._pin_rung_prices
+    check("rung prices: NO +3.5 off the alternate", R(evs, "Pittsburgh Steelers", "New Orleans Saints", "spread", "home", 3.5) == (-132, 116))
+    check("rung prices: PIT −3.5 is the mirror", R(evs, "Pittsburgh Steelers", "New Orleans Saints", "spread", "away", -3.5) == (116, -132))
+    check("rung prices: the main line is a rung too", R(evs, "Pittsburgh Steelers", "New Orleans Saints", "spread", "home", 3.0) == (-108, -104))
+    check("rung prices: a rung off the ladder is (None, None)", R(evs, "Pittsburgh Steelers", "New Orleans Saints", "spread", "home", 5.5) == (None, None))
+    check("rung prices: the total's alternate", R(evs, "Pittsburgh Steelers", "New Orleans Saints", "total", "under", 43.5) == (-120, 102))
+    r = F("NFL", "spread", {"side": "home", "line": 3.5}, None, rung=(-132, 116))
+    check("the rung's own prices devig: −132/+116 → 55.1% = −123, no push", r and r["src"] == "rung" and r["american"] == -123 and r["push"] is None and r["price"] == -132, str(r))
+    g2 = {"away": "Pittsburgh Steelers", "home": "New Orleans Saints", "event_start": mu[0]["startTime"], "pin": pin,
+          "spread": {"side": "home", "line": 3.5}, "total": {"side": "over", "line": 42.5}}
+    _app._sheet_attach_pin_fair("NFL", g2, evs)
+    check("attach prefers the ladder's rung over the push shift", g2["spread"]["pin_fair"]["src"] == "rung" and g2["spread"]["pin_fair"]["price"] == -132)
+    check("attach: a rung on the main line reads 'line' off the ladder", g2["total"]["pin_fair"]["src"] == "rung" and g2["total"]["pin_fair"]["price"] == -118)
+    check("the API hands the slate to the attach", "_sheet_attach_pin_fair(sport, games[-1], _pin_evs)" in inspect.getsource(_app.api_football_picks))
     g = {"pin": pin, "spread": {"side": "away", "line": 3.5}, "total": {"side": "over", "line": 42.5}, "ml": None}
     _app._sheet_attach_pin_fair("NFL", g)
     check("attach: every pick block gets pin_fair", g["spread"]["pin_fair"]["american"] == -123 and "pin_fair" in g["total"])
-    check("the API attaches it per game", "_sheet_attach_pin_fair(sport, games[-1])" in inspect.getsource(_app.api_football_picks))
+    check("the API attaches it per game", "_sheet_attach_pin_fair(sport, games[-1], _pin_evs)" in inspect.getsource(_app.api_football_picks))
     for tpl in ("templates/bet_sheets.html", "templates/football_picks.html"):
         src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), tpl), encoding="utf-8").read()
         check(f"{tpl}: PIN fair beside the model's fair", "PIN fair ' + am(pf.american)" in src and "' · model ' + am(p.fair)" in src)
+        check(f"{tpl}: Bet105 prints the rung's own price when the ladder has it", "pf.src === 'rung' && pf.price != null" in src)
 
 
 def test_sheet_pin_quote() -> None:
@@ -4944,7 +4977,7 @@ def test_sheet_pin_quote() -> None:
     import inspect as _ins
     src = _ins.getsource(_app.api_bet_sheets_place)
     check("preview quotes Pinnacle for every item", "_bet_sheet_pin_quote(" in src and "pin_slates" in src)
-    src = _ins.getsource(_app._bet_sheet_pin_quote)
+    src = _ins.getsource(_app._bet_sheet_pin_quote) + _ins.getsource(_app._pin_sheet_slate)   # the slate reader is shared with the sheet API
     check("the quote never spends a parlay credit", "paid=False" in src and "paid=True" not in src)
 
 
