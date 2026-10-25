@@ -3777,6 +3777,18 @@ def test_hand_red_alert() -> None:
           r and r[0] == "past_leash" and "3¢ past your 42¢" in r[1] and "58.5 @ 51¢" in r[1], str(r))
     r = R({"recon": {"red": [{"code": "dead_order", "msg": "the pick's order X is not on the book"}]}}, resting)
     check("CHECK ME is red before anything else", r and r[0] == "check_me" and "not on the book" in r[1], str(r))
+    # A HOLD IS NOT RED (Rob, Oct 25 2026): the model's read says hold → CHALK / PAST LEASH are nothing to do
+    chalk = {"anchor_c": 55.0, "chase_hold": {"touch_c": 56.0, "chalk_c": 54.55}}
+    check("CHALK with no read is red", R(chalk, resting) and R(chalk, resting)[0] == "chalk")
+    check("CHALK with the read saying HOLD is not red", R(chalk, resting, rec="hold") is None)
+    check("PAST LEASH with the read saying HOLD is not red", R({"anchor_c": 42.0, "chase_hold": {"touch_c": 45.0}}, resting, rec="hold") is None)
+    check("…but a read saying move / live / cancel keeps the red", R(chalk, resting, rec="live")[0] == "chalk" and R(chalk, resting, rec="cancel")[0] == "chalk")
+    check("CHECK ME stays red whatever the read says", R({"recon": {"red": [{"code": "x", "msg": "y"}]}}, resting, rec="hold")[0] == "check_me")
+    _tsrc = _insp.getsource(_app._hand_red_alert_tick)
+    check("the tick builds the page's read for a stopped bet and hands it to the red state",
+          "_hand_red_read_rec(" in _tsrc and "rec=rec" in _tsrc and "_bet_sheet_reads(sb, [b]" in _insp.getsource(_app._hand_red_read_rec))
+    _page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates/bet_sheets.html"), encoding="utf-8").read()
+    check("bet_sheets: a hold-recommended stopped bet is amber HOLD, not red", "b.read.rec === 'hold')\n                return { cls: 'rest', short: 'HOLD'" in _page)
     check("an in-play app bet is never red (outbid in play is Rob's to move)", R({"in_play": True}, resting) is None)
     check("PRE-GAME ONLY: a started game is never red, whatever the strip says (settled lot gone, sold, past leash)",
           R({}, off, started=True) is None and R({"anchor_c": 42.0, "chase_hold": {"touch_c": 45.0}}, resting, started=True) is None

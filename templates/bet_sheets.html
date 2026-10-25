@@ -1072,6 +1072,12 @@
             // THE CHALK CAP (Oct 23 2026, Rob: "ML chalk should be -140, O/U
             // chalk should be -120"): the touch sits at or past the cap, so
             // the box will not chase — the cheaper rung is the way back in.
+            // A HOLD IS NOT RED (Rob, Oct 25 2026, KC +3.5 reading CHALK while the read
+            // starred hold: "if the recommendation is to hold it… then it shouldn't be
+            // red"): the box stopped chasing, the bet is still a play at his price, and
+            // game start chases from it — nothing to do, so amber, not "needs you".
+            if (hold && hold.touch_c != null && b.read && b.read.rec === 'hold')
+                return { cls: 'rest', short: 'HOLD', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + (hold.chalk_c != null ? ', at or past the ' + hold.chalk_c + '¢ chalk cap' : past) + ', so the box stopped chasing — ' + recShort(b, rr) };
             if (hold && hold.touch_c != null && hold.chalk_c != null)
                 return { cls: 'warn', short: 'CHALK', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, at or past the ' + hold.chalk_c + '¢ chalk cap, so the box stopped chasing' + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') : ' — ' + (b.read ? recShort(b, null) : 'no cheaper rung yet — hold or cancel')) };
             if (hold && hold.touch_c != null && rr)

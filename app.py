@@ -16581,10 +16581,17 @@ _HAND_RED_MIN_TICKS = 2
 _TG_RED_PREFIX = "\U0001f534"       # 🔴
 
 
-def _hand_red_state(blob: dict, s: dict, started: bool = False):
+def _hand_red_state(blob: dict, s: dict, started: bool = False, rec=None):
     """Pure. (code, text) when the page would paint this bet RED, else None.
     `s` = the strip entry (order/held/touch_c/outbid/held_unknown). A venue
-    read the box could not make (`held_unknown`) is never a red.
+    read the box could not make (`held_unknown`) is never a red. `rec` =
+    the model's read on the bet (`_bet_sheet_reads`): A HOLD IS NOT RED
+    (Rob, Oct 25 2026, KC +3.5 reading CHALK with the read starring hold:
+    "if the recommendation is to hold it… then it shouldn't be red") — the
+    box stopped chasing because the touch climbed into chalk, but the bet
+    is still a play at his own price and the start chases from it, so
+    there is nothing for him to do; CHALK / PAST LEASH stay red only when
+    the read asks for a move, a re-peg, live or a cancel.
     PRE-GAME ONLY (Rob, Oct 22 2026, after OFF THE BOOK pings on two settled
     games and a bet he had sold in the app: "I wanted the bet at the start,
     it didn't fill and cancelled, that's it"): once the game has started
@@ -16605,6 +16612,8 @@ def _hand_red_state(blob: dict, s: dict, started: bool = False):
         return "check_me", "CHECK ME · " + " · ".join(str(f.get("msg") or f.get("code")) for f in reds)
     hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
     if resting:
+        if hold and rec == "hold":
+            return None                    # the model says hold: nothing to do, not red
         if hold and hold.get("touch_c") is not None and hold.get("chalk_c") is not None:
             try:
                 tc, cc = float(hold["touch_c"]), float(hold["chalk_c"])
@@ -16799,6 +16808,28 @@ def _hand_start_alert_retry() -> int:
     return sent
 
 
+def _hand_red_read_rec(sb, r: dict, blob: dict, s: dict, started: bool, cache: dict):
+    """The model's read on a STOPPED resting bet, exactly as the page builds
+    it (`_bet_sheet_reads` over a /mine-shaped row), so the box's red alert
+    and the page agree on whether a CHALK / PAST LEASH is red. None when the
+    bet is not stopped, not resting, or the read cannot price it."""
+    hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
+    o = s.get("order") if isinstance(s.get("order"), dict) else {}
+    if not hold or not o.get("resting") or started:
+        return None
+    try:
+        b = {"status": "pending", "started": False, "order": dict(o),
+             "chase": {"hold": hold}, "market_type": r.get("market_type"), "side": r.get("side"),
+             "sport": r.get("sport"), "line": r.get("entry_line"), "market_id": r.get("market_id"),
+             "event_name": r.get("event_name"), "touch_c": s.get("touch_c"),
+             "price_c": blob.get("price_c"), "live_snipe": bool(blob.get("live_snipe"))}
+        _bet_sheet_reads(sb, [b], cache=cache)
+        rd = b.get("read") if isinstance(b.get("read"), dict) else None
+        return rd.get("rec") if rd else None
+    except Exception:
+        return None
+
+
 def _hand_red_alert_tick(sb, now) -> dict:
     """Handbets tick, after the reconcile: ping Telegram once per red."""
     if not _machine_flag("hand_red_alert", True):
@@ -16810,13 +16841,14 @@ def _hand_red_alert_tick(sb, now) -> dict:
         return {"skip": "no_strip"}
     try:
         picks = (sb.table("bot_picks")
-                 .select("id,event_name,event_start,sport,market_type,side,entry_line,signal_blob")
+                 .select("id,event_name,event_start,sport,market_type,side,entry_line,market_id,signal_blob")
                  .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                  .limit(300).execute().data or [])
     except Exception as e:
         return {"err": f"picks: {e}"[:120]}
     reds = sent = cleared = 0
     live_ids = set()
+    read_cache: dict = {}
     for r in picks:
         pid = str(r.get("id"))
         live_ids.add(pid)
@@ -16830,7 +16862,8 @@ def _hand_red_alert_tick(sb, now) -> dict:
             started = ev <= datetime.now(timezone.utc)
         except Exception:
             started = False
-        red = _hand_red_state(blob, s, started=started)
+        rec = _hand_red_read_rec(sb, r, blob, s, started, read_cache) if not started else None
+        red = _hand_red_state(blob, s, started=started, rec=rec)
         ra = blob.get("red_alert") if isinstance(blob.get("red_alert"), dict) else None
         if not red:
             _HAND_RED_SEEN.pop(pid, None)
@@ -23309,10 +23342,10 @@ def _bs_recommend(stay, move, live=None, hold=None):
     return "live" if _ok(live) else "cancel"
 
 
-def _bet_sheet_reads(sb, out: list) -> None:
+def _bet_sheet_reads(sb, out: list, cache: dict = None) -> None:
     """Stamp `read` on every pre-game resting bet the box stopped chasing
-    (manual re-peg or line moved): {stay, move, rec}."""
-    cache: dict = {}
+    (manual re-peg or line moved): {hold, stay, move, live, rec}."""
+    cache = cache if isinstance(cache, dict) else {}
     for b in out:
         if b.get("status") != "pending" or b.get("started"):
             continue
