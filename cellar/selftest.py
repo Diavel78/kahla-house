@@ -5675,6 +5675,111 @@ def test_kalshi_settle_grade() -> None:
           'pnl_usd = r["result_score"]["pnl_usd"]' in whole)
 
 
+def test_hand_start_chase_never_cancels() -> None:
+    """THE DROP NEVER CANCELS A CHASEABLE BET (Oct 25 2026, KC @ SEA O 41.5 on
+    Kalshi: the bid sat at 53¢ with the market above it, the chase's target
+    was 53¢, Kalshi answered the no-op amend 400 AMEND_ORDER_NO_OP, and the
+    hand-off fell to the cancel — the bet was deleted 171s after the start
+    with the game at 13:11 in the 1st; Rob: "IT JUST STARTED"). A bet already
+    at the chase's price is chased in place; a read that fails leaves the
+    order resting for the next tick; an empty book at the drop (the makers
+    just left) chases in place at his bid."""
+    print("hand start: the chase never cancels")
+    import inspect
+    import app as _app
+    from datetime import datetime as _dt, timezone as _tz
+
+    class _Q:
+        def __init__(self, log): self.log = log
+        def update(self, payload): self.log.append(payload); return self
+        def eq(self, *a): return self
+        def execute(self): return self
+
+    class _SB:
+        def __init__(self): self.log = []
+        def table(self, name): return _Q(self.log)
+
+    now = _dt.now(_tz.utc)
+    tk = "KXNFLTOTAL-26OCT25KCSEA-42"
+    blob = {"venue": "KALSHI", "bet_sheet": True, "kalshi_ticker": tk, "kalshi_buy_yes": True,
+            "kalshi_order_id": "o1", "price_c": 53.0, "anchor_c": 51.0, "contracts": 10, "label": "Over 41.5"}
+    row = {"id": 1, "status": "pending", "sport": "NFL", "event_start": "2026-10-26T00:20:00+00:00",
+           "signal_blob": blob}
+    order = {"order_id": "o1", "ticker": tk, "yes_c": 53.0, "filled": 0.0, "remaining": 10.0, "status": "resting"}
+    saved = {k: getattr(_app, k) for k in ("_bet_sheet_pick", "_kalshi_acct", "_hand_live_target_kalshi",
+                                            "_kalshi_amend_pick", "_kalshi_live_create", "_probe_log",
+                                            "_hand_start_cancel_alert", "_kalshi_pick_order", "_machine_flag_val")}
+    calls = {"amend": 0, "create": 0}
+    try:
+        _app._bet_sheet_pick = lambda sb, pid: (row, dict(blob))
+        _app._kalshi_acct = lambda fresh=False: ({"o1": order}, {tk: 0.0})
+        _app._kalshi_pick_order = lambda b, orders: orders.get(b.get("kalshi_order_id"))
+        _app._hand_live_target_kalshi = lambda ticker, by, cap, our_c, our_q: (53.0, "cap", {})
+        def _no_amend(*a, **k):
+            calls["amend"] += 1
+            return "error", "o1", {"error": "HTTP 400: AMEND_ORDER_NO_OP", "status": 400}
+        _app._kalshi_amend_pick = _no_amend
+        _app._kalshi_live_create = lambda *a, **k: (calls.__setitem__("create", calls["create"] + 1), (None, {}))[1]
+        _app._probe_log = lambda *a, **k: None
+        _app._hand_start_cancel_alert = lambda *a, **k: None
+        _app._machine_flag_val = lambda name, default=None: default
+        sb = _SB()
+        stamp = {"kind": "hand_start_cancel", "hand_start_cancel": True, "pick_id": 1}
+        handled, cancelled = _app._hand_start_chase_kalshi(sb, None, row, stamp, now, {})
+        ls = (sb.log[-1].get("signal_blob") or {}).get("live_snipe") if sb.log else None
+        check("already at the target: chased in place, no amend sent, no cancel",
+              handled is True and calls["amend"] == 0 and stamp.get("hand_start_chase") is True
+              and stamp.get("hand_start_cancel") is False and ls and ls.get("auto") and ls.get("price_c") == 53.0
+              and ls.get("cap_c") == 53.0 and ls.get("venue") == "KALSHI", (handled, calls, stamp.get("chase")))
+        # the venue's own no-op refusal reads as 'stay' when the size changed under it
+        _app._hand_live_target_kalshi = lambda ticker, by, cap, our_c, our_q: (52.0, "join", {})
+        sb2, stamp2 = _SB(), {"kind": "hand_start_cancel", "hand_start_cancel": True, "pick_id": 1}
+        handled2, _ = _app._hand_start_chase_kalshi(sb2, None, row, stamp2, now, {})
+        check("a NO_OP answer from the venue is a stay, never a cancel",
+              handled2 is True and calls["amend"] == 1 and stamp2.get("hand_start_cancel") is False
+              and (stamp2.get("chase") or {}).get("amend") == "stay")
+        # any other amend failure: the order still rests at his bid → chase in place
+        _app._kalshi_amend_pick = lambda *a, **k: ("error", "o1", {"error": "HTTP 500", "status": 500})
+        sb3, stamp3 = _SB(), {"kind": "hand_start_cancel", "hand_start_cancel": True, "pick_id": 1}
+        handled3, _ = _app._hand_start_chase_kalshi(sb3, None, row, stamp3, now, {})
+        ls3 = (sb3.log[-1].get("signal_blob") or {}).get("live_snipe")
+        check("an amend that failed chases in place at the resting bid",
+              handled3 is True and ls3 and ls3.get("price_c") == 53.0 and ls3.get("amend") == "error"
+              and str((stamp3.get("chase") or {}).get("why", "")).startswith("in_place"))
+        # no book at the drop → chase in place
+        _app._hand_live_target_kalshi = lambda ticker, by, cap, our_c, our_q: (None, "no_book", None)
+        sb4, stamp4 = _SB(), {"kind": "hand_start_cancel", "hand_start_cancel": True, "pick_id": 1}
+        handled4, _ = _app._hand_start_chase_kalshi(sb4, None, row, stamp4, now, {})
+        check("no book at the drop: chased in place, not cancelled",
+              handled4 is True and (stamp4.get("chase") or {}).get("price_c") == 53.0
+              and "no_book" in str((stamp4.get("chase") or {}).get("why")))
+        # the venue unreadable → retry, the order rests
+        _app._kalshi_acct = lambda fresh=False: (None, None)
+        stamp5 = {"kind": "hand_start_cancel", "hand_start_cancel": True, "pick_id": 1}
+        handled5, cancelled5 = _app._hand_start_chase_kalshi(_SB(), None, row, stamp5, now, {})
+        check("an unreadable venue is a retry, never a cancel",
+              handled5 is None and cancelled5 is False and (stamp5.get("chase_retry") or {}).get("why") == "kalshi_unreadable")
+        # the order gone with nothing resting → the finish books the lot (no cancel)
+        _app._kalshi_acct = lambda fresh=False: ({}, {tk: 0.0})
+        _app._hand_live_target_kalshi = lambda ticker, by, cap, our_c, our_q: (53.0, "cap", {})
+        stamp6 = {"kind": "hand_start_cancel", "hand_start_cancel": True, "pick_id": 1}
+        handled6, cancelled6 = _app._hand_start_chase_kalshi(_SB(), None, row, stamp6, now, {})
+        check("a gone order with the create refused hands the lot to the finish, cancel skipped",
+              handled6 is False and cancelled6 is True and calls["create"] == 1)
+    finally:
+        for k, v in saved.items():
+            setattr(_app, k, v)
+    for fn in (_app._hand_start_finish_poly, _app._hand_start_finish_kalshi):
+        src_ = inspect.getsource(fn)
+        check(f"{fn.__name__}: a retry verdict leaves the order resting, an exception never cancels",
+              "if handled is None:" in src_ and "_hand_start_chase_retry(stamp, r, st, now)" in src_
+              and "falling back to the cancel" not in src_)
+    src_p = inspect.getsource(_app._hand_start_chase_poly)
+    check("the Polymarket hand-off retries on an unreadable venue and chases in place with no book",
+          'stamp["chase_retry"] = {"why": "orders_unreadable"}' in src_p and "in_place:" in src_p
+          and src_p.count("return None") >= 3)
+
+
 def test_kalshi_ws_book() -> None:
     """THE KALSHI SOCKET BOOK (Oct 18 2026): snapshot + deltas → the same
     order-book shape the REST read returns, on either wire shape (legacy
@@ -5907,7 +6012,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

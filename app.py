@@ -17961,6 +17961,22 @@ def _hand_start_chase_on(sport) -> bool:
     return str(sport or "").upper() not in off_set
 
 
+def _hand_start_chase_retry(stamp: dict, r: dict, st: dict, now) -> None:
+    """The hand-off could not read the venue this tick: the order keeps
+    resting (his bid is the chase's own cap), nothing is cancelled, no
+    alert; the start tick re-detects the drop and re-tries. Stamped so the
+    next tick's cancel, if it ever comes, is never the first record."""
+    stamp.update({"kind": "hand_start_chase_retry", "hand_start_chase_retry": True, "hand_start_cancel": False,
+                  "result": {"ok": True, "retry": True}, "http": 200})
+    st["chase_retry"] = st.get("chase_retry", 0) + 1
+    try:
+        _probe_log(stamp)
+    except Exception:
+        pass
+    app.logger.warning("hand start chase pick %s: %s — order left resting, retry next tick",
+                       r.get("id"), (stamp.get("chase_retry") or {}).get("why"))
+
+
 def _hand_start_finish_poly(sb, client, r: dict, stamp: dict, take, cum0: float, took_px, now, st: dict, tw=None) -> None:
     """The cancel after the take(s): unfilled → pick gone, a lot → kept at
     the held size with the price blended across the maker fill and every
@@ -17969,11 +17985,17 @@ def _hand_start_finish_poly(sb, client, r: dict, stamp: dict, take, cum0: float,
     chase flag on goes to the live chase instead (`_hand_start_chase_poly`)."""
     if _hand_start_chase_on(r.get("sport")):
         try:
-            if _hand_start_chase_poly(sb, client, r, stamp, now, st, tw=tw):
+            handled = _hand_start_chase_poly(sb, client, r, stamp, now, st, tw=tw)
+            if handled:
+                return
+            if handled is None:
+                _hand_start_chase_retry(stamp, r, st, now)      # a read failed: the order rests, retry next tick
                 return
         except Exception as e:
-            app.logger.warning("hand start chase pick %s: %s — falling back to the cancel", r.get("id"), str(e)[:160])
-            stamp["chase_error"] = str(e)[:160]
+            app.logger.warning("hand start chase pick %s: %s — leaving the order, retry next tick", r.get("id"), str(e)[:160])
+            stamp["chase_retry"] = {"why": "exception", "error": str(e)[:160]}
+            _hand_start_chase_retry(stamp, r, st, now)
+            return
     elif _machine_flag("hand_start_chase", True):
         stamp["chase_off"] = "sport"                     # MLB / NHL: the plain cancel, the Live tab is Rob's
     out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
@@ -21219,9 +21241,17 @@ def _hand_start_finish_kalshi(sb, client, r: dict, stamp: dict, take, cum0: floa
             handled, cancelled = _hand_start_chase_kalshi(sb, client, r, stamp, now, st)
             if handled:
                 return
+            if handled is None:
+                # a read failed: the order keeps resting, the next tick re-tries —
+                # never a cancel on an unreadable venue (Rob, Oct 25 2026)
+                _hand_start_chase_retry(stamp, r, st, now)
+                return
         except Exception as e:
-            app.logger.warning("hand start chase KALSHI pick %s: %s — falling back to the cancel", r.get("id"), str(e)[:160])
-            stamp["chase_error"] = str(e)[:160]
+            # an exception in the hand-off is a bug of ours, not a reason to cancel his bet
+            app.logger.warning("hand start chase KALSHI pick %s: %s — leaving the order, retry next tick", r.get("id"), str(e)[:160])
+            stamp["chase_retry"] = {"why": "exception", "error": str(e)[:160]}
+            _hand_start_chase_retry(stamp, r, st, now)
+            return
     out, code = _kalshi_cancel_exec(sb, client, r["id"], skip_cancel=cancelled)
     if took_px is not None and out.get("ok") and not out.get("deleted"):
         held = out.get("held")
@@ -24668,10 +24698,12 @@ def _hand_start_chase_poly(sb, client, r: dict, stamp: dict, now, st: dict, tw=N
         return False
     ords = _pmm_open_orders_raw(client, fresh=True)
     if ords is None:
-        return False
+        stamp["chase_retry"] = {"why": "orders_unreadable"}
+        return None                                     # the order rests; retry next tick
     cur = next((o for o in ords if o.get("id") == oid and o.get("state") in _OPEN_ORDER_STATES), None)
     if cur is None:
-        return False
+        stamp["chase_skipped"] = {"why": "order_gone"}
+        return False                                    # filled or killed: the cancel path reads positions
     # THE TAKE MAY HAVE FILLED THE BET ALREADY (Oct 24 2026, Troy −13.5 / Ohio
     # −10.5 / EM@Ohio O 48.5: the window's IOC filled all 10, and this
     # hand-off amended the still-resting 10 into a chase without reading
@@ -24683,7 +24715,8 @@ def _hand_start_chase_poly(sb, client, r: dict, stamp: dict, now, st: dict, tw=N
         return False
     held = _hand_poly_side_held(client, slug, syn)
     if held is None:
-        return False
+        stamp["chase_retry"] = {"why": "held_unreadable"}
+        return None
     try:
         contracts = float(blob.get("contracts") or 0)
     except (TypeError, ValueError):
@@ -24723,7 +24756,10 @@ def _hand_start_chase_poly(sb, client, r: dict, stamp: dict, now, st: dict, tw=N
     ask_c = _manual_side_book(book, syn)[1] if book else None
     target, why = _hand_live_target(ladder, ask_c, cur_c, leaves, cap, tick)
     if target is None:
-        return False
+        if cur_c is None:
+            stamp["chase_retry"] = {"why": why or "no_book"}
+            return None
+        target, why = float(cur_c), f"in_place:{why or 'no_book'}"   # no book at the drop: chase in place
     verdict = "stay"
     size_change = qty_total != _amend_total(cur.get("leaves"), cur.get("cum"))
     if cur_c is None or abs(float(target) - float(cur_c)) > 0.001 or size_change:
@@ -24845,15 +24881,20 @@ def _hand_start_chase_kalshi(sb, client, r: dict, stamp: dict, now, st: dict) ->
         return False, False
     orders, _p = _kalshi_acct(fresh=True)
     if orders is None or _p is None:
-        return False, False
+        # A READ THAT FAILED IS NOT A REASON TO CANCEL (Oct 25 2026): the order
+        # rests where it is; the next tick re-tries the hand-off.
+        stamp["chase_retry"] = {"why": "kalshi_unreadable", "orders": orders is not None, "positions": _p is not None}
+        return None, False
     # POSITIONS FIRST (the Troy/Ohio duplicates): the chase carries only what is unfilled
     held = _kv.held_for(_p, ticker, by)
     if held is None:
-        return False, False
+        stamp["chase_retry"] = {"why": "held_unreadable"}
+        return None, False
     if blob.get("pmm_slug") and client is not None:
         ph = _hand_poly_side_held(client, blob["pmm_slug"], bool(blob.get("pmm_synthetic")))
         if ph is None:
-            return False, False
+            stamp["chase_retry"] = {"why": "poly_held_unreadable"}
+            return None, False
         held += ph
     try:
         contracts = float(blob.get("contracts") or 0)
@@ -24874,19 +24915,46 @@ def _hand_start_chase_kalshi(sb, client, r: dict, stamp: dict, now, st: dict) ->
     target, why, _book = _hand_live_target_kalshi(ticker, by, cap, k_c if o else None,
                                                   float(o.get("remaining") or 0) if o else 0)
     if target is None:
-        return False, False
+        # NO BOOK AT THE DROP IS THE NORMAL CASE — the makers just left. The
+        # order stays at its own price (his bid is the chase's cap anyway) and
+        # the live chase owns it from here; it moves the order once a book shows.
+        if k_c is None:
+            stamp["chase_retry"] = {"why": why or "no_book"}
+            return None, False
+        target, why = float(k_c), f"in_place:{why or 'no_book'}"
     if not gone:
         filled_k = int(round(float(o.get("filled") or 0)))
         qty_total = filled_k + unfilled
-        v, new_id, det = _kalshi_amend_pick(blob, float(target), o=o, total=qty_total)
-        if v != "amended":
+        try:
+            cur_total = filled_k + int(round(float(o.get("remaining") or 0)))
+        except (TypeError, ValueError):
+            cur_total = qty_total
+        if k_c is not None and abs(float(target) - float(k_c)) < 0.01 and qty_total == cur_total:
+            # ALREADY AT THE CHASE'S PRICE (Oct 25 2026, KC@SEA O 41.5: the bid sat at
+            # 53¢ with the market above it, the target was 53¢, Kalshi answered the
+            # no-op amend 400 AMEND_ORDER_NO_OP, and the old code cancelled a bet that
+            # was exactly where the chase wanted it). Nothing to send: chase in place.
+            v, new_id, det = "stay", koid, {"note": "already at target"}
+        else:
+            v, new_id, det = _kalshi_amend_pick(blob, float(target), o=o, total=qty_total)
+            if v == "error" and "NO_OP" in str((det or {}).get("error") or "").upper():
+                v, new_id, det = "stay", koid, {"note": "venue: no-op amend", "venue_error": (det or {}).get("error")}
+        if v == "gone":
+            _probe_log({"kind": "hand_start_chase", "hand_start_chase": True, "pick_id": r["id"], "venue": "KALSHI",
+                        "ticker": ticker, "result": "amend_gone", "detail": det, "target_c": target, "at": now.isoformat()})
+            return False, True                       # filled or killed under us: the finish reads positions, no cancel
+        if v not in ("amended", "stay"):
+            # the amend failed but the order still rests at his bid — that IS a
+            # chase seat under the cap rule; the live chase re-tries the move
             _probe_log({"kind": "hand_start_chase", "hand_start_chase": True, "pick_id": r["id"], "venue": "KALSHI",
                         "ticker": ticker, "result": f"amend_{v}", "detail": det, "target_c": target,
-                        "at": now.isoformat()})
-            if new_id and new_id != koid and v in ("unverified",):
-                sb.table("bot_picks").update({"signal_blob": {**blob, "kalshi_order_id": new_id}}).eq("id", r["id"]).execute()
-            return False, False                      # the old finish re-reads and decides
-        amend_word = "amended"
+                        "at": now.isoformat(), "chase_in_place": True})
+            if new_id and new_id != koid and v == "unverified":
+                blob = {**blob, "kalshi_order_id": new_id}
+            else:
+                new_id = koid
+            target, why = float(k_c) if k_c is not None else float(target), f"in_place:amend_{v}"
+        amend_word = v
     else:
         new_id, det = _kalshi_live_create(ticker, by, float(target), unfilled)
         if not new_id:
@@ -24900,8 +24968,10 @@ def _hand_start_chase_kalshi(sb, client, r: dict, stamp: dict, now, st: dict) ->
     for k in ("kalshi_cancel_sent", "kalshi_move_cancel_sent", "chase_err", "start_take_window"):
         nb.pop(k, None)
     nb = _hand_chase_blob(nb, now, float(target), k_c, qty_total, (stamp.get("window") or {}).get("closed"),
-                          amended=(not gone), cap_c=cap)
+                          amended=(amend_word == "amended"), cap_c=cap)
     nb["live_snipe"]["venue"] = "KALSHI"
+    if amend_word not in ("amended", "created"):
+        nb["live_snipe"]["amend"] = amend_word
     if gone:
         nb["live_snipe"]["kalshi_gone"] = True
     if held > 0:
