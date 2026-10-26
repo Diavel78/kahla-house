@@ -2018,6 +2018,11 @@ def api_kalshi_livedata():
         rec = kv.pbp_recent(gs.get("pbp"), n=n_pl, now_ts=_time.time())
         out["game_stats"] = {"game": first_live["game"], "ok": gs.get("ok"), "error": gs.get("error"), "ms": gs.get("ms"),
                              **rec}
+        if request.args.get("pbp_raw"):                # the venue's own event shape (a sport the flattener misread)
+            _per = (gs.get("pbp") or {}).get("periods") if isinstance(gs.get("pbp"), dict) else None
+            _evs = ((_per or [{}])[0] or {}).get("events") or [] if isinstance(_per, list) and _per else []
+            out["game_stats"]["raw_events"] = json.dumps(_evs[-3:], default=str)[:6000]
+            out["game_stats"]["raw_period_keys"] = sorted((_per[0] or {}).keys()) if isinstance(_per, list) and _per and isinstance(_per[0], dict) else None
     out["elapsed_s"] = round(_time.monotonic() - t0, 2)
     _probe_log(out)
     return jsonify(out)
