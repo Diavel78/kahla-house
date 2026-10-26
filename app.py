@@ -12974,7 +12974,12 @@ def api_docs_fetch():
                                             # with the rewards sync)
             out["mode"] = "text"
         out["chars"] = len(body)
-        out["text"] = body[:14000]
+        try:
+            off = max(0, int(request.args.get("offset") or 0))   # page a long .md (llms.txt is 66k)
+        except ValueError:
+            off = 0
+        out["offset"] = off
+        out["text"] = body[off:off + 14000]
     except Exception as e:
         out.update(ok=False, error=f"{type(e).__name__}: {e}"[:300])
     _probe_log(out)
