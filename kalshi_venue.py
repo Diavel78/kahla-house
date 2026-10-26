@@ -416,6 +416,47 @@ def game_stats(milestone_id: str) -> dict:
             "error": err, "ms": ms}
 
 
+def pbp_recent(pbp, n: int = 12, now_ts: float | None = None) -> dict:
+    """PURE. The play-by-play (`game_stats` → `pbp`, measured Oct 25 2026:
+    `periods[].events[]` = drives {drive_id, end_reason, play_count, gain,
+    off_points/def_points, plays[]}, each play {sequence, clock, down, yfd,
+    play_type, description, turnover, wall_clock, home_points, away_points})
+    flattened to the last `n` plays NEWEST FIRST plus a per-drive summary of
+    the latest period. Tolerates missing keys; an unknown shape → empty."""
+    periods = (pbp or {}).get("periods") if isinstance(pbp, dict) else None
+    plays, drives = [], []
+    if isinstance(periods, list):
+        for pi, per in enumerate(periods):
+            evs = (per or {}).get("events") if isinstance(per, dict) else None
+            for dv in evs or []:
+                if not isinstance(dv, dict):
+                    continue
+                pl = dv.get("plays") or []
+                drives.append({"period": pi + 1, "drive_id": dv.get("drive_id"), "end": dv.get("end_reason"),
+                               "plays": dv.get("play_count", len(pl)), "gain": dv.get("gain"),
+                               "off_pts": dv.get("off_points"), "def_pts": dv.get("def_points")})
+                for x in pl:
+                    if not isinstance(x, dict):
+                        continue
+                    try:
+                        wc = float(x.get("wall_clock")) if x.get("wall_clock") is not None else None
+                    except (TypeError, ValueError):
+                        wc = None
+                    plays.append({"period": pi + 1, "seq": x.get("sequence"), "clock": x.get("clock"),
+                                  "down": x.get("down"), "yfd": x.get("yfd"), "type": x.get("play_type"),
+                                  "desc": x.get("description"), "turnover": x.get("turnover") or None,
+                                  "score": f"{x.get('away_points')}-{x.get('home_points')}",
+                                  "wall_clock": wc,
+                                  "age_s": (round(now_ts - wc, 1) if (now_ts is not None and wc is not None) else None)})
+    def _key(x):
+        return ((x.get("wall_clock") or 0.0), (x.get("seq") or 0))
+    plays.sort(key=_key)
+    last_per = max((d["period"] for d in drives), default=None)
+    return {"n_periods": len(periods) if isinstance(periods, list) else 0, "n_drives": len(drives),
+            "n_plays": len(plays), "recent": list(reversed(plays[-n:])),
+            "drives_latest_period": [d for d in drives if d["period"] == last_per][-6:]}
+
+
 def _milestone_dt(m: dict):
     v = m.get("start_date")
     if not v:

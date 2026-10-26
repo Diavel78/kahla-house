@@ -5837,6 +5837,25 @@ def test_kalshi_live_data() -> None:
     check("live_data: the venue reads are plain functions",
           all(callable(getattr(kv, n, None)) for n in ("milestones", "live_data_batch", "live_data", "game_stats")))
 
+    # the play-by-play flattener (shape measured on KC @ SEA, Oct 25 2026)
+    pbp = {"periods": [{"events": [{"drive_id": "d1", "end_reason": "Punt", "play_count": 2, "gain": 48,
+                                     "plays": [{"sequence": 1, "clock": "4:00", "down": 2, "yfd": 11, "play_type": "pass",
+                                                "description": "P.Mahomes pass complete", "turnover": "", "wall_clock": 100,
+                                                "away_points": 0, "home_points": 0},
+                                               {"sequence": 2, "clock": "1:54", "down": 4, "yfd": 4, "play_type": "punt",
+                                                "description": "M.Araiza punts", "turnover": "", "wall_clock": 160,
+                                                "away_points": 0, "home_points": 0}]}]},
+                       {"events": [{"drive_id": "d2", "end_reason": "Touchdown", "play_count": 1, "gain": 31,
+                                     "plays": [{"sequence": 3, "clock": "11:10", "down": 2, "yfd": 7, "play_type": "rush",
+                                                "description": "E.Wilson rush", "turnover": "", "wall_clock": 200,
+                                                "away_points": 0, "home_points": 10}]}]}]}
+    rec = kv.pbp_recent(pbp, n=2, now_ts=203.0)
+    check("pbp_recent: newest first, capped at n, with age", [p["desc"] for p in rec["recent"]] == ["E.Wilson rush", "M.Araiza punts"]
+          and rec["recent"][0]["age_s"] == 3.0 and rec["recent"][0]["score"] == "0-10", str(rec))
+    check("pbp_recent: counts + the latest period's drives", rec["n_periods"] == 2 and rec["n_drives"] == 2 and rec["n_plays"] == 3
+          and rec["drives_latest_period"] == [{"period": 2, "drive_id": "d2", "end": "Touchdown", "plays": 1, "gain": 31, "off_pts": None, "def_pts": None}], str(rec))
+    check("pbp_recent: an unknown shape is empty, never a raise", kv.pbp_recent(None)["n_plays"] == 0 and kv.pbp_recent({"periods": "x"})["recent"] == [])
+
 
 def test_hand_game_feed() -> None:
     """THE GAME-STATE FEED (Oct 25 2026, Rob: "How are the big players

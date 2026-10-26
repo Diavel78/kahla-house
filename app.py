@@ -2011,14 +2011,13 @@ def api_kalshi_livedata():
     out["rows"] = mapped
     if request.args.get("pbp") and first_live:
         gs = kv.game_stats(first_live["milestone"]["id"])
-        periods = (gs.get("pbp") or {}).get("periods") if isinstance(gs.get("pbp"), dict) else None
-        tail = []
-        if isinstance(periods, list) and periods:
-            evs = (periods[-1] or {}).get("events") or []
-            tail = evs[-3:]
+        try:
+            n_pl = max(1, min(60, int(request.args.get("plays") or 12)))
+        except (TypeError, ValueError):
+            n_pl = 12
+        rec = kv.pbp_recent(gs.get("pbp"), n=n_pl, now_ts=_time.time())
         out["game_stats"] = {"game": first_live["game"], "ok": gs.get("ok"), "error": gs.get("error"), "ms": gs.get("ms"),
-                             "periods": len(periods) if isinstance(periods, list) else None,
-                             "last_events_raw": json.dumps(tail, default=str)[:3000]}
+                             **rec}
     out["elapsed_s"] = round(_time.monotonic() - t0, 2)
     _probe_log(out)
     return jsonify(out)
