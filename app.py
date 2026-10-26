@@ -25371,7 +25371,7 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
     rejoin a new GTC order for the UNFILLED size off fresh positions."""
     import kalshi_venue as _kv
     now_m = _time.monotonic()
-    if now_m - _LIVE_LAST.get(ticker, 0.0) < _HAND_LIVE_DEBOUNCE_S:
+    if now_m - _LIVE_LAST.get(ticker, 0.0) < _HAND_LIVE_DEBOUNCE_S and not snap.get("game_pull"):
         return
     now = datetime.now(timezone.utc)
     now_ts = _time.time()
@@ -25384,6 +25384,7 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
     ask_c = _manual_side_book(book, syn)[1] if book else (rows[-1][3] if rows else None)
     hold = snap.get("hold")
     if hold:
+        snap.pop("game_pull", None)                    # nothing resting — a game pull is moot while sitting out
         if now_ts < float(hold.get("resume_ts") or 0):
             return
         if now_ts - float(hold.get("at_ts") or now_ts) > _HAND_LIVE_MAX_HOLD_S and hold.get("err"):
@@ -25479,6 +25480,9 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
     except (TypeError, ValueError):
         drop = _HAND_LIVE_DROP_PCT
     verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop)
+    gp = snap.pop("game_pull", None)
+    if gp and verdict != "cancel":
+        verdict, det = "cancel", {**(det or {}), "why": "game_event", "game_event": gp, "book_verdict": verdict}
     if verdict == "stay":
         _LIVE_STATS["stays"] += 1
         if det.get("why") == "collapse_unconfirmed":
@@ -25560,7 +25564,7 @@ def _hand_live_one(sb, client, slug: str) -> None:
     if snap.get("venue") == "KALSHI":
         return _hand_live_one_kalshi(sb, client, slug, snap)
     now_m = _time.monotonic()
-    if now_m - _LIVE_LAST.get(slug, 0.0) < _HAND_LIVE_DEBOUNCE_S:
+    if now_m - _LIVE_LAST.get(slug, 0.0) < _HAND_LIVE_DEBOUNCE_S and not snap.get("game_pull"):
         return
     now = datetime.now(timezone.utc)
     now_ts = _time.time()
@@ -25569,6 +25573,7 @@ def _hand_live_one(sb, client, slug: str) -> None:
     ladder = _hand_side_ladder(slug, syn)
     hold = snap.get("hold")
     if hold:
+        snap.pop("game_pull", None)                    # nothing resting — a game pull is moot while sitting out
         # SITTING OUT → REJOIN after the calm, at the rule's price, unfilled size
         if now_ts < float(hold.get("resume_ts") or 0):
             return
@@ -25665,6 +25670,11 @@ def _hand_live_one(sb, client, slug: str) -> None:
     except (TypeError, ValueError):
         drop = _HAND_LIVE_DROP_PCT
     verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop)
+    gp = snap.pop("game_pull", None)
+    if gp and verdict != "cancel":
+        # THE GAME SAID SO (Oct 25 2026): a score against our side — pull now,
+        # no 3s book confirmation; the evidence is the play, not the ladder.
+        verdict, det = "cancel", {**(det or {}), "why": "game_event", "game_event": gp, "book_verdict": verdict}
     if verdict == "stay":
         _LIVE_STATS["stays"] += 1
         if det.get("why") == "collapse_unconfirmed":
@@ -25731,6 +25741,221 @@ def _hand_live_one(sb, client, slug: str) -> None:
             "verdict": v, "at": now.isoformat(), "target_c": target, "live": True}}}).eq("id", r["id"]).execute()
 
 
+# ───────────── THE GAME-STATE FEED (Oct 25 2026) ─────────────
+# Rob: "How are the big players doing this?? How are they reacting fast?"
+# They price off the GAME, not the book. Kalshi publishes the game
+# (`/live_data/batch`, public, provider-fed, measured 3s behind the play
+# on KC @ SEA), keyed by MILESTONE = the game itself, so a Polymarket-only
+# bet maps to the same milestone as a Kalshi bet and one feed drives the
+# chase on both venues. The worker polls every live-snipe game every
+# `_GAME_FEED_S` and, on a SCORE AGAINST OUR SIDE (the opponent of a
+# spread/ML side scores; any score on an under), PULLS the resting bid at
+# once — the market is about to fall through it — through the live
+# chase's own pull path (verified cancel → live_hold → the 20s calm →
+# rejoin at the rule's price off fresh positions), skipping the 3s book
+# confirmation: the evidence is the play, not the ladder. A score FOR our
+# side does nothing (the market rises away; the join-up handles it).
+# Kill switch `machine_flags hand_game_feed`; cadence `hand_game_feed_s`.
+_GAME_FEED_S = 2.0
+_GAME_MS_NEG_S = 600.0             # a game with no milestone is re-looked-up this often
+GAME_STATE: dict = {}              # milestone_id -> {state, details, at_ts, ms}
+GAME_WATCH: dict = {}              # milestone_id -> [LIVE_SNAP keys]
+_GAME_MS_CACHE: dict = {}          # (sport, away, home, start) -> (ts, milestone_id | None)
+_GAME_FEED_STATS = {"polls": 0, "events": 0, "pulls": 0, "favorable": 0, "errors": 0, "ms": 0, "lag_s": None}
+_GAME_THREAD = None
+
+
+def _hand_game_milestone(sport, away, home, start_iso):
+    """The Kalshi milestone id for a game (team names + start), cached;
+    None when the venue lists no such game (re-asked every 10 min)."""
+    if not (sport and away and home):
+        return None
+    key = (str(sport).upper(), str(away), str(home), str(start_iso)[:16])
+    hit = _GAME_MS_CACHE.get(key)
+    if hit and (hit[1] or _time.time() - hit[0] < _GAME_MS_NEG_S):
+        return hit[1]
+    import kalshi_venue as _kv
+    try:
+        min_start = (datetime.now(timezone.utc) - timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ms = _kv.milestones(str(sport).upper(), min_start)
+        m = _kv.pick_milestone(ms.get("milestones") or [], away, home, start_iso)
+    except Exception as e:
+        app.logger.warning("game feed milestone %s %s @ %s: %s", sport, away, home, str(e)[:120])
+        m = None
+    mid = m.get("id") if m else None
+    _GAME_MS_CACHE[key] = (_time.time(), mid)
+    return mid
+
+
+def _hand_game_ms_for(sb, r: dict, blob: dict):
+    """The pick's milestone id: the stamped `kalshi_milestone`, else resolved
+    off the row's sport + event_name ('Away @ Home') + start and STAMPED
+    (in the blob object too, so the tick's later writes keep it)."""
+    mid = blob.get("kalshi_milestone")
+    if mid:
+        return mid
+    away, home = _split_event_name(str(r.get("event_name") or "").split(" · ")[0])
+    if not away:
+        away, home = blob.get("away"), blob.get("home")
+    mid = _hand_game_milestone(r.get("sport"), away, home, r.get("event_start"))
+    if mid:
+        blob["kalshi_milestone"] = mid
+        try:
+            sb.table("bot_picks").update({"signal_blob": blob}).eq("id", r["id"]).execute()
+        except Exception:
+            pass
+    return mid
+
+
+def _hand_game_events(prev: dict | None, cur: dict) -> list:
+    """PURE. What changed between two state reads: a `score` event per side
+    whose points rose (team home|away, delta), a `status` event when the
+    status changed. The first read (no prev) yields nothing — never react to
+    a score that happened before we were watching."""
+    if not prev or not cur:
+        return []
+    out = []
+    for team in ("home", "away"):
+        a, b = prev.get(f"{team}_score"), cur.get(f"{team}_score")
+        if a is None or b is None:
+            continue
+        try:
+            d = float(b) - float(a)
+        except (TypeError, ValueError):
+            continue
+        if d > 0:
+            out.append({"kind": "score", "team": team, "delta": d, "home": cur.get("home_score"),
+                        "away": cur.get("away_score"), "period": cur.get("period"), "clock": cur.get("clock"),
+                        "last_play": cur.get("last_play")})
+    if prev.get("status") != cur.get("status") and cur.get("status"):
+        out.append({"kind": "status", "status": cur.get("status"), "was": prev.get("status")})
+    return out
+
+
+def _hand_game_event_plan(market_type, side, event: dict) -> tuple:
+    """PURE. Our resting BID against a game event → ('pull' | 'none', why).
+    A score against our side (the opponent of a spread/ML side; any score
+    on an under) → pull: the market is about to fall through the bid.
+    A score for our side → none (the price rises away). Anything else → none."""
+    if not isinstance(event, dict) or event.get("kind") != "score":
+        return "none", "not_a_score"
+    mt, sd, team = str(market_type or "").lower(), str(side or "").lower(), str(event.get("team") or "")
+    if mt in ("total",):
+        if sd == "under":
+            return "pull", f"{team}_scored_vs_under"
+        if sd == "over":
+            return "none", f"{team}_scored_for_over"
+        return "none", "unknown_side"
+    if mt in ("spread", "ml", "moneyline", "puck", "runline"):
+        if sd in ("home", "away"):
+            return ("none", f"{team}_scored_for_us") if team == sd else ("pull", f"{team}_scored_against_us")
+        return "none", "unknown_side"
+    return "none", "unknown_market"
+
+
+def _hand_game_watch_update() -> int:
+    """Rebuild GAME_WATCH from LIVE_SNAP (snaps carrying `ms_id`), start the
+    worker when there is something to watch. Returns the games watched."""
+    w: dict = {}
+    for k, snap in list(LIVE_SNAP.items()):
+        mid = (snap or {}).get("ms_id")
+        if mid:
+            w.setdefault(mid, []).append(k)
+    GAME_WATCH.clear()
+    GAME_WATCH.update(w)
+    for mid in [m for m in list(GAME_STATE) if m not in w]:
+        GAME_STATE.pop(mid, None)
+    if w:
+        _ensure_game_worker()
+    return len(w)
+
+
+def _ensure_game_worker() -> None:
+    global _GAME_THREAD
+    if _GAME_THREAD is not None and _GAME_THREAD.is_alive():
+        return
+    try:
+        _GAME_THREAD = threading.Thread(target=_hand_game_worker, name="hand-game", daemon=True)
+        _GAME_THREAD.start()
+    except Exception:
+        pass
+
+
+def _hand_game_poll(now_ts: float) -> list:
+    """ONE batch read of every watched game; the events found, with the
+    pull decisions handed to the live worker. Never raises."""
+    import kalshi_venue as _kv
+    ids = list(GAME_WATCH)
+    if not ids:
+        return []
+    res = _kv.live_data_batch(ids)
+    _GAME_FEED_STATS["polls"] += 1
+    _GAME_FEED_STATS["ms"] = res.get("ms")
+    if not res.get("ok"):
+        _GAME_FEED_STATS["errors"] += 1
+        _GAME_FEED_STATS["last_error"] = str(res.get("error") or "")[:120]
+        return []
+    found = []
+    for mid, e in (res.get("live_datas") or {}).items():
+        det = e.get("details") or {}
+        cur = _kv.game_state(det)
+        prev = (GAME_STATE.get(mid) or {}).get("state")
+        if cur.get("last_ts"):
+            _GAME_FEED_STATS["lag_s"] = round(now_ts - float(cur["last_ts"]), 1)
+        events = _hand_game_events(prev, cur)
+        GAME_STATE[mid] = {"state": cur, "details": det, "at_ts": now_ts, "type": e.get("type")}
+        for ev in events:
+            _GAME_FEED_STATS["events"] += 1
+            decisions = []
+            for key in GAME_WATCH.get(mid) or []:
+                snap = LIVE_SNAP.get(key)
+                if not snap:
+                    continue
+                v, why = _hand_game_event_plan(snap.get("mt"), snap.get("side"), ev)
+                dec = {"key": key, "pick_id": snap.get("pick_id"), "venue": snap.get("venue") or "POLYMARKET",
+                       "mt": snap.get("mt"), "side": snap.get("side"), "verdict": v, "why": why,
+                       "resting": bool(snap.get("order_id")) and not snap.get("hold")}
+                if v == "pull" and dec["resting"]:
+                    snap["game_pull"] = {**ev, "why": why, "at_ts": now_ts}
+                    try:
+                        if LIVE_Q is not None:
+                            LIVE_Q.put_nowait(key)
+                    except Exception:
+                        pass
+                    _GAME_FEED_STATS["pulls"] += 1
+                elif v == "none" and ev.get("kind") == "score":
+                    _GAME_FEED_STATS["favorable"] += 1
+                decisions.append(dec)
+            found.append({"milestone": mid, "event": ev, "decisions": decisions})
+            try:
+                _probe_log({"kind": "hand_game_event", "hand_game_event": True, "milestone": mid, "event": ev,
+                            "decisions": decisions, "lag_s": _GAME_FEED_STATS.get("lag_s"),
+                            "at": datetime.now(timezone.utc).isoformat()})
+            except Exception:
+                pass
+            app.logger.warning("game event %s: %s → %s", mid, ev, [(d["key"], d["verdict"]) for d in decisions])
+    return found
+
+
+def _hand_game_worker() -> None:
+    while True:
+        try:
+            try:
+                every = float(_machine_flag_val("hand_game_feed_s", _GAME_FEED_S))
+            except (TypeError, ValueError):
+                every = _GAME_FEED_S
+            every = max(1.0, every)
+            if not GAME_WATCH or not _machine_flag("hand_game_feed", True):
+                _time.sleep(1.0)
+                continue
+            _hand_game_poll(_time.time())
+            _time.sleep(every)
+        except Exception as e:
+            _GAME_FEED_STATS["errors"] += 1
+            app.logger.warning("hand game worker: %s", str(e)[:120])
+            _time.sleep(1.0)
+
+
 def _hand_live_tick(sb, client, now) -> dict:
     """Every handbets tick: re-vouch LIVE_SNAP from the picks + the mirror
     (every live-snipe bet — Polymarket by slug, Kalshi by ticker — with a
@@ -25742,12 +25967,13 @@ def _hand_live_tick(sb, client, now) -> dict:
         st["gate"] = "off"
         return st
     try:
-        rows = (sb.table("bot_picks").select("id,event_start,signal_blob")
+        rows = (sb.table("bot_picks").select("id,event_start,signal_blob,sport,event_name,market_type,side")
                 .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                 .not_.is_("signal_blob->>live_snipe", "null").limit(200).execute().data or [])
     except Exception as e:
         st["gate"] = f"picks: {e}"[:120]
         return st
+    game_feed_on = _machine_flag("hand_game_feed", True)
     try:
         cap = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
     except (TypeError, ValueError):
@@ -25771,6 +25997,14 @@ def _hand_live_tick(sb, client, now) -> dict:
             _ct_full = float(blob.get("contracts") or 0)
         except (TypeError, ValueError):
             _ct_full = 0.0
+        # THE GAME-STATE FEED: every live snap carries its game's milestone + our market/side
+        _ms_id = None
+        if game_feed_on:
+            try:
+                _ms_id = _hand_game_ms_for(sb, r, blob)
+            except Exception as e:
+                app.logger.warning("game feed ms pick %s: %s", r.get("id"), str(e)[:120])
+        _gm = {"ms_id": _ms_id, "mt": r.get("market_type"), "side": r.get("side")}
 
         def _end_filled(held, venue, ident):
             # A FULL LOT ENDS THE CHASE (Oct 24 2026): the bet is done — no
@@ -25845,7 +26079,7 @@ def _hand_live_tick(sb, client, now) -> dict:
                     continue
                 want[ticker] = {"pick_id": r["id"], "order_id": koid, "our_c": _kv.our_c(o.get("yes_c"), by),
                                 "qty": o.get("remaining"), "synth": not by, "buy_yes": by, "cap_c": cap_k,
-                                "tick": _KALSHI_TICK_C, "venue": "KALSHI", "event_start": r.get("event_start"), "hold": None}
+                                "tick": _KALSHI_TICK_C, "venue": "KALSHI", "event_start": r.get("event_start"), "hold": None, **_gm}
             elif lh and not koid:
                 try:
                     _fq, _ct = float(blob.get("filled_qty") or 0.0), float(blob.get("contracts") or 0.0)
@@ -25870,7 +26104,7 @@ def _hand_live_tick(sb, client, now) -> dict:
                     hold["err"] = lh["err"]
                 want[ticker] = {"pick_id": r["id"], "order_id": None, "our_c": None, "qty": hold["qty"],
                                 "synth": not by, "buy_yes": by, "cap_c": cap_k, "tick": _KALSHI_TICK_C,
-                                "venue": "KALSHI", "event_start": r.get("event_start"), "hold": hold}
+                                "venue": "KALSHI", "event_start": r.get("event_start"), "hold": hold, **_gm}
                 st["holds"] += 1
             continue
         slug, oid, syn = blob.get("pmm_slug"), blob.get("order_id"), bool(blob.get("pmm_synthetic"))
@@ -25934,7 +26168,7 @@ def _hand_live_tick(sb, client, now) -> dict:
                 our_c = blob.get("price_c")
             want[slug] = {"pick_id": r["id"], "order_id": oid, "our_c": our_c, "qty": o.get("leaves"),
                           "synth": syn, "cap_c": _hand_live_cap_for(blob, cap), "tick": _pmm_tick_c(client, slug),
-                          "event_start": r.get("event_start"), "hold": None}
+                          "event_start": r.get("event_start"), "hold": None, **_gm}
         elif lh and not oid:
             try:
                 _fq, _ct = float(blob.get("filled_qty") or 0.0), float(blob.get("contracts") or 0.0)
@@ -25960,7 +26194,7 @@ def _hand_live_tick(sb, client, now) -> dict:
                 hold["err"] = lh["err"]
             want[slug] = {"pick_id": r["id"], "order_id": None, "our_c": None, "qty": hold["qty"],
                           "synth": syn, "cap_c": _hand_live_cap_for(blob, cap), "tick": _pmm_tick_c(client, slug),
-                          "event_start": r.get("event_start"), "hold": hold}
+                          "event_start": r.get("event_start"), "hold": hold, **_gm}
             st["holds"] += 1
     for s_ in list(LIVE_SNAP):
         if s_ not in want:
@@ -25975,6 +26209,11 @@ def _hand_live_tick(sb, client, now) -> dict:
     if LIVE_SNAP:
         _ensure_live_worker()
     st.update(dict(_LIVE_STATS))
+    try:
+        st["game_feed"] = {"on": game_feed_on, "games": _hand_game_watch_update() if game_feed_on else 0,
+                           **{k: v for k, v in _GAME_FEED_STATS.items()}}
+    except Exception as e:
+        st["game_feed"] = {"error": str(e)[:120]}
     return st
 
 

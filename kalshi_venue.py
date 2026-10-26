@@ -333,7 +333,12 @@ def milestones(sport: str, min_start_iso: str | None = None, max_pages: int = 4,
     error, params}. The competition name is the docs' example spelling —
     an empty answer with no error is read as "that filter spelled wrong",
     and the caller may retry with `competition=''` (type only)."""
-    comp = COMPETITION.get(sport.upper()) if competition is None else competition
+    # Oct 25 2026 probe: the docs' competition spellings ("Pro Football",
+    # "Pro Basketball (M)", "Pro Hockey") all returned ZERO rows; type-only
+    # returned 359 football / 504 basketball / 62 hockey games and
+    # `pick_milestone` matched 21 of 21 by team names + start. So the
+    # default is NO competition filter; pass one explicitly to probe it.
+    comp = competition or ""
     mtype = MILESTONE_TYPE.get(sport.upper())
     key = f"ms:{sport}:{comp}:{min_start_iso}"
     hit = _CACHE.get(key)
@@ -472,12 +477,16 @@ def _walk(obj, path="", out=None, depth=0):
 
 
 def game_state(details: dict) -> dict:
-    """PURE, BEST-EFFORT read of a live_data `details` object into one
-    shape {status, home_score, away_score, period, clock, delayed, raw_keys}.
-    The venue's field names are sport-specific and were UNVERIFIED when
-    this shipped (Oct 25 2026) — the probe route records the raw details,
-    and this reader is widened from what the probe shows. Anything it
-    cannot find is None, never a guess."""
+    """PURE read of a live_data `details` object into one shape {status,
+    home_score, away_score, period, clock, last_play, last_ts, possession,
+    delayed, raw_keys}. Field names MEASURED Oct 25 2026 on live games:
+    football (provider statsperform) `away_points/home_points/quarter/clock/
+    status(inprogress|closed)/last_play{description,occurence_ts}/
+    last_updated_ts/situation{down,yfd,possession_team_id}`; NBA (txodds)
+    `away_points/home_points/period/period_remaining_time/last_play(str)/
+    possession(home|away)/score_last_updated_ts/live_data_delayed`; NHL
+    `away_points/home_points/period/period_remaining_time/last_play(str)/
+    play_side`. Anything missing is None, never a guess."""
     d = details if isinstance(details, dict) else {}
     flat = _walk(d)
     low = {k.lower(): (k, v) for k, v in flat.items()}
@@ -490,12 +499,29 @@ def game_state(details: dict) -> dict:
                         return v
         return None
 
+    def num(v):
+        try:
+            return None if v is None else float(v)
+        except (TypeError, ValueError):
+            return None
+
+    lp = d.get("last_play")
+    last_play = lp.get("description") if isinstance(lp, dict) else (lp if isinstance(lp, str) else None)
+    last_ts = None
+    if isinstance(lp, dict):
+        last_ts = num(lp.get("occurence_ts"))
+    for k in ("score_last_updated_ts", "last_event_created_ts", "last_updated_ts"):
+        if last_ts is None:
+            last_ts = num(d.get(k))
     return {
         "status": find("status", "game_status", "state"),
-        "home_score": find("home_score", "home.score", "home.points", "homescore", "score.home"),
-        "away_score": find("away_score", "away.score", "away.points", "awayscore", "score.away"),
-        "period": find("period", "quarter", "inning", "half", "clock.period"),
-        "clock": find("clock", "game_clock", "time_remaining", "clock.display"),
+        "home_score": num(find("home_points", "home_score", "home.score", "home.points", "score.home")),
+        "away_score": num(find("away_points", "away_score", "away.score", "away.points", "score.away")),
+        "period": find("quarter", "period", "inning", "half"),
+        "clock": find("clock", "period_remaining_time", "game_clock", "time_remaining"),
+        "last_play": last_play,
+        "last_ts": last_ts,
+        "possession": find("possession", "situation.possession_team_id", "play_side"),
         "delayed": bool(find("live_data_delayed")),
         "raw_keys": sorted(flat.keys())[:80],
     }
