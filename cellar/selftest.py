@@ -6248,6 +6248,35 @@ def test_kalshi_venue_math() -> None:
     assert kv.pick_event_row([], "A", "B", None) is None
 
 
+def test_sheet_audit_row() -> None:
+    """The model-audit dump (Oct 26 2026) reads a football sheet row without
+    guessing: Monday + last re-price, Pinnacle at each, the pick, the grade."""
+    import app as _app
+    row = {"week_key": "2026-10-19", "event_name": "A @ B", "event_start": "2026-10-24T23:30:00+00:00",
+           "tier": "deep",
+           "data_blob": {"model": {"margin_cal": -3.1, "margin_raw": -4.0, "total_cal": 50.2, "win_prob_home": 0.6,
+                                   "bet_spread": {"side": "home", "line": -2.5, "edge_pts": 0.6, "verdict": "pass",
+                                                  "market_home_line": -2.5, "src": "pinnacle", "fair": -120},
+                                   "bet_total": {"side": "under", "line": 52.5, "edge_pts": -2.3, "verdict": "play",
+                                                 "market_line": 52.5, "src": "pinnacle", "fair": -140},
+                                   "box_model": {"cfbd": {"consensus": -4.4, "w_results": 0.5, "gp": 7}}},
+                         "pin_lines": {"spread_home": -2.5, "total": 52.5, "src": "pinnacle",
+                                       "spread_home_odds": -108, "spread_away_odds": -102},
+                         "friday": {"built_at": "2026-10-24T22:00:00+00:00",
+                                    "model": {"margin_cal": -2.0, "bet_spread": {"side": "away", "line": 3.5, "edge_pts": -0.8,
+                                                                                 "verdict": "lean", "market_home_line": -3.5}},
+                                    "pin_lines": {"spread_home": -3.5, "total": 51.5, "src": "pinnacle"}},
+                         "grade": {"final": {"home": 24, "away": 20}, "total": "win",
+                                   "model": {"spread": "win", "total": "win"}}}}
+    a = _app._sheet_audit_row(row)
+    check("audit: grade + final", a["fin"] == [20, 24] and a["gr"] == [None, "win", "win", "win"])
+    check("audit: monday pick", a["mon"]["sp"][:4] == ["home", -2.5, 0.6, "pass"] and a["mon"]["pin_sp"] == -2.5)
+    check("audit: monday total + cfbd", a["mon"]["tot"][3] == "play" and a["mon"]["cfbd"][0] == -4.4)
+    check("audit: friday re-price", a["fri"]["mkt_sp"] == -3.5 and a["fri"]["sp"][3] == "lean" and a["fri_at"] == "2026-10-24T22:00")
+    bare = _app._sheet_audit_row({"week_key": "x", "data_blob": None})
+    check("audit: empty row survives", bare["mon"] is None and bare["fri"] is None and bare["fin"] is None)
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
@@ -6264,7 +6293,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

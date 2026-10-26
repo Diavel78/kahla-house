@@ -2216,6 +2216,53 @@ def api_football_sheets_mirror():
     return jsonify(out)
 
 
+def _sheet_audit_row(r: dict) -> dict:
+    """Pure. One football sheet row -> a compact audit record for the model
+    review (Oct 26 2026, Rob: "analysis of your football model so far... bad
+    run? bad model?"): the Monday price and the last re-price side by side,
+    Pinnacle's line at each, the pick, the grade. Read through
+    /api/football-picks-debug?dump=1&sport=&weeks= (shared-secret, site-curl;
+    &gz=1 = gzip+base64 so a season fits the bridge's 60k log cap)."""
+    blob = r.get("data_blob") if isinstance(r.get("data_blob"), dict) else {}
+    g = blob.get("grade") or {}
+    fin = g.get("final") or {}
+    mg = g.get("model") or {}
+
+    def _m(model, pin):
+        if not isinstance(model, dict):
+            return None
+        pin = pin if isinstance(pin, dict) else {}
+        bs = model.get("bet_spread") or {}
+        bt = model.get("bet_total") or {}
+        bm = model.get("box_model") or {}
+        cf = bm.get("cfbd") or {}
+        qb = bm.get("qb") or {}
+        return {
+            "mkt_sp": bs.get("market_home_line"), "pin_sp": pin.get("spread_home"),
+            "sp_cal": model.get("margin_cal"), "sp_raw": model.get("margin_raw"),
+            "sp": ([bs.get("side"), bs.get("line"), bs.get("edge_pts"), bs.get("verdict"),
+                    bs.get("src"), bs.get("fair")] if bs else None),
+            "mkt_tot": bt.get("market_line"), "pin_tot": pin.get("total"),
+            "tot_cal": model.get("total_cal"), "tot_raw": model.get("total_raw"),
+            "tot": ([bt.get("side"), bt.get("line"), bt.get("edge_pts"), bt.get("verdict"),
+                     bt.get("src"), bt.get("fair")] if bt else None),
+            "wp": model.get("win_prob_home"),
+            "pin_px": ([pin.get("spread_home_odds"), pin.get("spread_away_odds"),
+                        pin.get("over_odds"), pin.get("under_odds")] if pin else None),
+            "cfbd": ([cf.get("consensus"), cf.get("w_results"), cf.get("gp"),
+                      cf.get("results_shrunk")] if cf else None),
+            "qb": [qb.get("home"), qb.get("away")] if qb else None,
+        }
+    fr = blob.get("friday") if isinstance(blob.get("friday"), dict) else None
+    return {"w": r.get("week_key"), "g": r.get("event_name"),
+            "t": str(r.get("event_start") or "")[:16], "tier": r.get("tier"),
+            "fin": [fin.get("away"), fin.get("home")] if fin else None,
+            "gr": [g.get("spread"), g.get("total"), mg.get("spread"), mg.get("total")],
+            "mon": _m(blob.get("model"), blob.get("pin_lines")),
+            "fri": _m(fr.get("model"), fr.get("pin_lines")) if fr else None,
+            "fri_at": ((fr or {}).get("built_at") or "")[:16] or None}
+
+
 @app.route("/api/football-picks-debug")
 def api_football_picks_debug():
     """Shared-secret diagnostic (Sep 19 2026 — the "games 2 weeks ago"
@@ -2249,6 +2296,30 @@ def api_football_picks_debug():
     sb = get_supabase()
     if not sb:
         out["error"] = "get_supabase() returned None"
+        return jsonify(out)
+    if request.args.get("dump"):
+        # THE MODEL AUDIT DUMP (Oct 26 2026): every sheet row for a sport /
+        # week list as _sheet_audit_row records. Read-only.
+        import gzip as _gzip
+        sport = (request.args.get("sport") or "NCAAF").upper()
+        weeks = [w.strip() for w in (request.args.get("weeks") or "").split(",") if w.strip()]
+
+        def _q():
+            q = (sb.table("football_sheets")
+                 .select("week_key,sport,event_name,event_start,tier,data_blob")
+                 .eq("sport", sport).order("event_start"))
+            return q.in_("week_key", weeks) if weeks else q
+        try:
+            rows = _sb_paged(_q, max_pages=5) or []
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:300]})
+        recs = [_sheet_audit_row(r) for r in rows]
+        out.update({"sport": sport, "weeks": weeks, "n": len(recs)})
+        if request.args.get("gz"):
+            raw = json.dumps(recs, separators=(",", ":"), default=str).encode()
+            out["gz"] = _b64.b64encode(_gzip.compress(raw, 9)).decode()
+        else:
+            out["rows"] = recs
         return jsonify(out)
     try:
         wk = (sb.table("football_sheet_weeks").select("week_key,sport,published_at")
