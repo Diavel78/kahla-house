@@ -1457,9 +1457,20 @@
             && String(b.sport || '').toUpperCase() === String(_sport || '').toUpperCase());
     }
     function _scoreLine(b) {
+        const t = (b.event_name || '').split(' @ ').map(shortTeam);
+        const g = b.game || {};
+        if (g.away_score != null && g.home_score != null) {
+            // THE GAME FEED (Oct 25 2026): Kalshi's record, seconds behind the play — period, clock, the last play
+            const per = g.period != null ? (g.type === 'football_game' ? 'Q' : g.type === 'hockey_match' ? 'P' : 'Q') + g.period : '';
+            const sit = g.situation && g.situation.down != null ? ' · ' + g.situation.down + '&' + (g.situation.yfd != null ? g.situation.yfd : '?') : '';
+            const lp = g.last_play ? ' · ' + String(g.last_play).slice(0, 80) : '';
+            const age = g.age_s != null && g.age_s <= 180 ? ' · ' + Math.round(g.age_s) + 's ago' : '';
+            const fin = g.status === 'closed' ? ' · FINAL' : '';
+            return (t[0] || 'Away') + ' ' + g.away_score + ' – ' + g.home_score + ' ' + (t[1] || 'Home')
+                + (fin || ((per ? ' · ' + per : '') + (g.clock ? ' ' + g.clock : '') + sit + lp + age));
+        }
         const sc = b.score || {};
         if (sc.away_score == null || sc.home_score == null) return '';
-        const t = (b.event_name || '').split(' @ ').map(shortTeam);
         return (t[0] || 'Away') + ' ' + sc.away_score + ' – ' + sc.home_score + ' ' + (t[1] || 'Home') + (sc.display_status ? ' · ' + sc.display_status : '');
     }
     function _plCls(x) { return x == null ? '' : (x > 0.004 ? 'pos' : x < -0.004 ? 'neg' : ''); }
@@ -2102,7 +2113,7 @@
         const subs = [];
         if (g._limbo) subs.push('<span class="final">LISTED ' + esc(clk(g.event_start)) + ' · WAITING FOR THE DROP</span>');
         else if (isLive && liveMode) {
-            const sb = bs.find(b => b.score && b.score.away_score != null);
+            const sb = bs.find(b => (b.game && b.game.away_score != null) || (b.score && b.score.away_score != null));
             subs.push('<span class="final">' + (sb ? esc(_scoreLine(sb)) : 'IN PROGRESS') + '</span>');
         } else if (isLive) subs.push('<span class="final">IN PROGRESS</span>');
         else if (!isUp && finalChip(g)) subs.push(finalChip(g));

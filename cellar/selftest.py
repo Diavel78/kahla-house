@@ -5908,6 +5908,71 @@ def test_hand_game_feed() -> None:
     check("game feed: the NBA/NHL shape reads", st["home_score"] == 91.0 and st["clock"] == "3:22"
           and st["possession"] == "home" and st["last_ts"] == 1792977535.0 and st["delayed"] is False, str(st))
 
+    # ── Oct 25 2026, Rob's "1,2,3": the lead measurement, the publish + page score, drive-ending plays ──
+    import time as _t2
+    now2 = _t2.time()
+    rows = [(now2 - 60, 49.0, 100.0, 51.0, 50.0, 100.0, None), (now2 - 20, 49.0, 100.0, 51.0, 50.0, 100.0, None),
+            (now2 - 9.0, 47.0, 400.0, 49.0, 50.0, 400.0, None), (now2 - 4.0, 45.0, 400.0, 47.0, 50.0, 400.0, None)]
+    bl = _app._hand_game_book_lead(rows, now2)
+    check("book lead: the bid moved 9s and 4s before the feed told us → first_move 9s, 2 moves, bid now 45",
+          bl["n_moves"] == 2 and bl["first_move_age_s"] == 9.0 and bl["last_move_age_s"] == 4.0 and bl["bid_now"] == 45.0, str(bl))
+    bl0 = _app._hand_game_book_lead(rows[:2], now2)
+    check("book lead: a book that has not moved → None (the feed was first)", bl0["n_moves"] == 0 and bl0["first_move_age_s"] is None and bl0["bid_now"] == 49.0, str(bl0))
+    check("book lead: empty / junk rows never raise", _app._hand_game_book_lead(None, now2)["n_moves"] == 0 and _app._hand_game_book_lead([("x",)], now2)["n_moves"] == 0)
+    # team ids learned off the venue's own frames (KC @ SEA, Oct 25 2026)
+    KC, SEA = "64f72720-2e4a-4cc8-a39b-ca148aecb389", "8e52cc75-cba8-4373-9b62-b535b53b3be8"
+    title = "KC Chiefs at SEA Seahawks"
+    check("abbrs off the title", _app._hand_game_abbrs(title) == ("KC", "SEA") and _app._hand_game_abbrs("Minnesota at Vancouver") == (None, None))
+    det1 = {"situation": {"side_team_id": KC, "possession_team_id": SEA, "yardline": 31},
+            "last_play": {"description": "E.Wilson rush to the right for 3 yards to the KC 31. Tackled by D.Tranquill."}}
+    ids = _app._hand_game_team_ids(det1, title)
+    check("team ids: the side of the field + the yard line name the away id; possession fills the other", ids == {KC: "away", SEA: "home"}, str(ids))
+    check("team ids: a kickoff text reads the LAST 'to the X nn' (receiving side)",
+          _app._hand_game_team_ids({"situation": {"side_team_id": SEA}, "last_play": {"description": "H.Butker kicks off from KC 35 to the SEA 3. T.Horton return for 23 yards to SEA 26."}}, title) == {SEA: "home"})
+    check("team ids: an unmatched abbreviation / no title teaches nothing",
+          _app._hand_game_team_ids(det1, "Minnesota at Vancouver") == {} and _app._hand_game_team_ids({"situation": {"side_team_id": KC}, "last_play": "Chiefs timeout."}, title) == {})
+    # drive-ending plays
+    DK = _app._hand_game_drive_kind
+    check("drive kind: interception / fumble / on downs = turnover; punt = punt; scores + kicks = None",
+          DK("S.Darnold pass INTERCEPTED by N.Williams") == "turnover" and DK("K.Walker FUMBLES, recovered by KC") == "turnover"
+          and DK("pass incomplete on 4th down, turnover on downs") == "turnover" and DK("M.Araiza punts 35 yards to SEA 7.") == "punt"
+          and DK("P.Mahomes pass complete for 12 yards, TOUCHDOWN.") is None and DK("H.Butker kicks off from KC 35") is None
+          and DK("58 yard field goal attempt by H.Butker is NO GOOD.") is None and DK("") is None and DK(None) is None)
+    pv = {"home_score": 10, "away_score": 0, "status": "inprogress", "possession": KC, "last_play": "P.Mahomes incomplete pass"}
+    cu = {"home_score": 10, "away_score": 0, "status": "inprogress", "possession": SEA, "last_play": "M.Araiza punts 35 yards to SEA 7. No return."}
+    ev = _app._hand_game_events(pv, cu, ids, "football_game")
+    check("drive event: possession flipped on a punt → punt BY the away side", len(ev) == 1 and ev[0]["kind"] == "punt" and ev[0]["team"] == "away" and ev[0]["to"] == "home", str(ev))
+    cu2 = {**cu, "last_play": "S.Darnold pass intended for J.Smith-Njigba INTERCEPTED by N.Williams and returned for 64 yards.", "possession": KC}
+    ev2 = _app._hand_game_events({**pv, "possession": SEA}, cu2, ids, "football_game")
+    check("drive event: an interception → turnover BY the home side", len(ev2) == 1 and ev2[0]["kind"] == "turnover" and ev2[0]["team"] == "home", str(ev2))
+    cu3 = {**cu, "last_play": "E.Wilson rush to the right for 3 yards to the KC 31."}
+    ev3 = _app._hand_game_events({**pv, "last_play": "M.Araiza punts 35 yards to SEA 7."}, cu3, ids, "football_game")
+    check("drive event: the flip frame already shows the next play → the PREVIOUS play names the drive end", len(ev3) == 1 and ev3[0]["kind"] == "punt", str(ev3))
+    check("drive event: a score in the same diff owns the flip (no second event)",
+          [e["kind"] for e in _app._hand_game_events(pv, {**cu, "home_score": 17}, ids, "football_game")] == ["score"])
+    check("drive event: never without team ids, never outside football",
+          _app._hand_game_events(pv, cu, {}, "football_game") == [] and _app._hand_game_events({**pv, "possession": "away"}, {**cu, "possession": "home"}, {"away": "away", "home": "home"}, "basketball_game") == [])
+    check("drive event: a flip on a play that says nothing (end of quarter, penalty) is no event",
+          _app._hand_game_events({**pv, "last_play": "End of quarter."}, {**cu, "last_play": "Timeout."}, ids, "football_game") == [])
+    PL = _app._hand_game_event_plan
+    check("plan: our turnover pulls a spread/ML bid; the opponent's does nothing; totals never",
+          PL("spread", "away", {"kind": "turnover", "team": "away"}) == ("pull", "our_turnover")
+          and PL("spread", "away", {"kind": "turnover", "team": "home"})[0] == "none"
+          and PL("total", "under", {"kind": "turnover", "team": "away"})[0] == "none")
+    check("plan: our punt pulls while punt_pull, stays with it off",
+          PL("ml", "home", {"kind": "punt", "team": "home"}) == ("pull", "our_punt") and PL("ml", "home", {"kind": "punt", "team": "home"}, punt_pull=False) == ("none", "punt_pull_off"))
+    # the wiring
+    src_p = inspect.getsource(_app._hand_game_poll)
+    check("poll: learns team ids, passes them + the type to the event diff, stamps the book lead per bet, publishes",
+          "_hand_game_team_ids(det, _GAME_MS_TITLE.get(mid), team_ids)" in src_p and "_hand_game_events(prev, cur, team_ids, gtype)" in src_p
+          and '"book": book' in src_p and "_hand_game_publish(now_ts)" in src_p and 'punt_pull' in src_p)
+    check("the idle worker still publishes a heartbeat", "_hand_game_publish(_time.time(), idle=True)" in inspect.getsource(_app._hand_game_worker))
+    check("health prints the game feed", '"game_feed": gf' in inspect.getsource(_app._cellar_health))
+    check("the live strip stamps the game off Kalshi for every in-play row", "_bet_sheet_live_game(out, now)" in inspect.getsource(_app._bet_sheet_live_enrich)
+          and 'b["game"] = g' in inspect.getsource(_app._bet_sheet_live_game))
+    html = open(os.path.join(os.path.dirname(_app.__file__), "templates", "bet_sheets.html"), encoding="utf-8").read()
+    check("the page draws the feed's score line (period, clock, last play, age) before ESPN's", "const g = b.game || {};" in html and "b.game && b.game.away_score != null" in html)
+
 
 def test_kalshi_ws_book() -> None:
     """THE KALSHI SOCKET BOOK (Oct 18 2026): snapshot + deltas → the same

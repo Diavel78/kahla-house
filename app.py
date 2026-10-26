@@ -6271,8 +6271,12 @@ def _cellar_health(sb) -> dict:
         ws = _ws_feed_health(sb)            # footer garnish — never fatal
     except Exception:
         ws = {}
+    try:
+        gf = _game_feed_health(sb)          # the game-state feed's vitals (Oct 25 2026)
+    except Exception:
+        gf = {}
     out_h = {
-        "lanes": lanes, "bad": bad, "boot": boot, "backup": backup, "ws": ws,
+        "lanes": lanes, "bad": bad, "boot": boot, "backup": backup, "ws": ws, "game_feed": gf,
         # Counted separately from `bad` so an intentional kill is VISIBLE
         # without being an alarm — "off" should read as a decision someone
         # made, not as something to go fix.
@@ -23865,6 +23869,58 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
                     wp, src = v, "book"
                     b["cur_c"] = round(v * 100.0, 2)
         b["win_prob"], b["prob_src"] = wp, src
+    _bet_sheet_live_game(out, now)
+
+
+_BS_LIVE_GAME_MAX = 25
+
+
+def _bet_sheet_live_game(out: list, now) -> None:
+    """THE LIVE SCORE ON THE PAGE (Oct 25 2026, step 2 of Rob's "1,2,3"): the
+    Kalshi game record for every in-progress row — score, period, clock,
+    the last play and its age — read by Vercel itself (public, one batch
+    call), so a manual in-play bet the box is not chasing still shows the
+    game. ESPN's 30s-cached score stays as the fallback. Stamps `game`."""
+    import kalshi_venue as _kv
+    rows = [b for b in out if b.get("live") and b.get("status") == "pending"]
+    if not rows:
+        return
+    mids: dict = {}
+    for b in rows[:_BS_LIVE_GAME_MAX]:
+        try:
+            away, home = _live_split_event(b.get("event_name") or "")
+            mid = _hand_game_milestone(b.get("sport"), away, home, b.get("event_start"))
+        except Exception:
+            mid = None
+        if mid:
+            mids.setdefault(mid, []).append(b)
+    if not mids:
+        return
+    try:
+        res = _kv.live_data_batch(list(mids))
+    except Exception:
+        return
+    if not res.get("ok"):
+        return
+    now_ts = _time.time()
+    for mid, e in (res.get("live_datas") or {}).items():
+        det = e.get("details") or {}
+        try:
+            st = _kv.game_state(det)
+        except Exception:
+            continue
+        g = {"status": st.get("status"), "away_score": st.get("away_score"), "home_score": st.get("home_score"),
+             "period": st.get("period"), "clock": st.get("clock"), "last_play": st.get("last_play"),
+             "age_s": (round(now_ts - float(st["last_ts"]), 1) if st.get("last_ts") else None),
+             "type": e.get("type"), "src": "kalshi"}
+        if isinstance(det.get("situation"), dict):
+            sit = det["situation"]
+            g["situation"] = {k: sit.get(k) for k in ("down", "yfd", "yardline") if sit.get(k) is not None}
+        for k in ("home_strength", "away_strength", "home_timeouts_remaining", "away_timeouts_remaining"):
+            if det.get(k) is not None:
+                g[k] = det.get(k)
+        for b in mids.get(mid) or []:
+            b["game"] = g
 
 
 _BS_MISSED_MAX_H = 6.0         # a missed bet stays on the list until its game is final, at most this long
@@ -25839,8 +25895,23 @@ _GAME_MS_NEG_S = 600.0             # a game with no milestone is re-looked-up th
 GAME_STATE: dict = {}              # milestone_id -> {state, details, at_ts, ms}
 GAME_WATCH: dict = {}              # milestone_id -> [LIVE_SNAP keys]
 _GAME_MS_CACHE: dict = {}          # (sport, away, home, start) -> (ts, milestone_id | None)
-_GAME_FEED_STATS = {"polls": 0, "events": 0, "pulls": 0, "favorable": 0, "errors": 0, "ms": 0, "lag_s": None}
+_GAME_FEED_STATS = {"polls": 0, "events": 0, "pulls": 0, "favorable": 0, "errors": 0, "ms": 0, "lag_s": None,
+                    "lead_s": None, "drive_events": 0}
 _GAME_THREAD = None
+_GAME_MS_TITLE: dict = {}          # milestone_id -> the venue's title ("KC Chiefs at SEA Seahawks") — the abbreviations
+_GAME_PUB_KEY = "game_feed"        # lookup_cache key the worker publishes its vitals + watched games to (health reads it)
+_GAME_PUB_EVERY_S = 10.0
+_GAME_PUB_IDLE_S = 60.0
+_GAME_PUB_LAST = {"ts": 0.0}
+_GAME_SB = None
+# THE MEASUREMENT (Oct 25 2026, Rob: "4-8 seconds after the play, the market
+# has already moved right?"): every game event records OUR-side tape moves
+# in the `_GAME_LEAD_WINDOW_S` before the feed told us — `book.first_move_age_s`
+# is how many seconds the book led the feed (None = the book had NOT moved
+# yet: the feed was early). Read it off `hand_game_event` stamps per sport
+# before building anything that assumes the feed is first.
+_GAME_LEAD_WINDOW_S = 45.0
+_GAME_YARD_RE = re.compile(r"\b(?:to|at) (?:the )?([A-Z]{2,4}) (\d{1,2})\b")
 
 
 def _hand_game_milestone(sport, away, home, start_iso):
@@ -25861,6 +25932,8 @@ def _hand_game_milestone(sport, away, home, start_iso):
         app.logger.warning("game feed milestone %s %s @ %s: %s", sport, away, home, str(e)[:120])
         m = None
     mid = m.get("id") if m else None
+    if mid and m.get("title"):
+        _GAME_MS_TITLE[mid] = str(m.get("title"))
     _GAME_MS_CACHE[key] = (_time.time(), mid)
     return mid
 
@@ -25885,11 +25958,67 @@ def _hand_game_ms_for(sb, r: dict, blob: dict):
     return mid
 
 
-def _hand_game_events(prev: dict | None, cur: dict) -> list:
+def _hand_game_abbrs(title) -> tuple:
+    """PURE. ('KC', 'SEA') off the venue's milestone title 'KC Chiefs at SEA
+    Seahawks' — away first. (None, None) when the title has no abbreviations."""
+    m = re.match(r"\s*([A-Z]{2,4})\b.*?\bat\s+([A-Z]{2,4})\b", str(title or ""))
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def _hand_game_team_ids(details, title, known=None) -> dict:
+    """PURE. Football team ids → 'away'|'home', learned from the venue's own
+    frames: `situation.side_team_id` is the team whose side of the field the
+    ball sits on, and the play text ends with that yard line ('…to the KC
+    31'); the title says KC is the away team. Once one id is known, the
+    other id seen in `possession_team_id` is the other side. Never guesses:
+    an unmatched abbreviation teaches nothing."""
+    ids = dict(known or {})
+    if not isinstance(details, dict):
+        return ids
+    sit = details.get("situation") if isinstance(details.get("situation"), dict) else {}
+    lp = details.get("last_play")
+    desc = lp.get("description") if isinstance(lp, dict) else (lp if isinstance(lp, str) else None)
+    away_ab, home_ab = _hand_game_abbrs(title)
+    sid = sit.get("side_team_id")
+    if sid and desc and away_ab and home_ab and away_ab != home_ab:
+        ms = _GAME_YARD_RE.findall(desc)
+        if ms:
+            ab = ms[-1][0]
+            side = "away" if ab == away_ab else "home" if ab == home_ab else None
+            if side and ids.get(sid, side) == side:
+                ids[sid] = side
+    pid = sit.get("possession_team_id")
+    if pid and pid not in ids and len(ids) == 1:
+        ids[pid] = "home" if list(ids.values())[0] == "away" else "away"
+    return ids
+
+
+_GAME_DRIVE_SCORE_RE = re.compile(r"touchdown|field goal|kicks? off|kickoff|extra point|two-point|safety", re.I)
+_GAME_DRIVE_TO_RE = re.compile(r"intercept|fumble|on downs", re.I)
+_GAME_DRIVE_PUNT_RE = re.compile(r"\bpunt", re.I)
+
+
+def _hand_game_drive_kind(desc) -> str | None:
+    """PURE. How a football drive ended, off the play text: 'turnover'
+    (interception / fumble / on downs), 'punt', or None (a score or a kick —
+    the score event owns those — or a play that says nothing)."""
+    d = str(desc or "")
+    if not d or _GAME_DRIVE_SCORE_RE.search(d):
+        return None
+    if _GAME_DRIVE_TO_RE.search(d):
+        return "turnover"
+    if _GAME_DRIVE_PUNT_RE.search(d):
+        return "punt"
+    return None
+
+
+def _hand_game_events(prev: dict | None, cur: dict, team_ids: dict | None = None, gtype: str | None = None) -> list:
     """PURE. What changed between two state reads: a `score` event per side
     whose points rose (team home|away, delta), a `status` event when the
-    status changed. The first read (no prev) yields nothing — never react to
-    a score that happened before we were watching."""
+    status changed, and — FOOTBALL ONLY, with the team ids learned — a
+    `turnover` / `punt` event when possession flipped on a drive-ending play
+    (team = the side that GAVE THE BALL UP). The first read (no prev) yields
+    nothing — never react to a score that happened before we were watching."""
     if not prev or not cur:
         return []
     out = []
@@ -25907,17 +26036,71 @@ def _hand_game_events(prev: dict | None, cur: dict) -> list:
                         "last_play": cur.get("last_play")})
     if prev.get("status") != cur.get("status") and cur.get("status"):
         out.append({"kind": "status", "status": cur.get("status"), "was": prev.get("status")})
+    # DRIVE-ENDING PLAYS (Oct 25 2026, step 3 of Rob's "1,2,3"): football only
+    # — NBA/NHL `possession` flips every play and means nothing here.
+    if str(gtype or "") == "football_game" and team_ids and not any(e["kind"] == "score" for e in out):
+        pp, cp = prev.get("possession"), cur.get("possession")
+        if pp and cp and pp != cp and pp in team_ids:
+            kind = _hand_game_drive_kind(cur.get("last_play")) or _hand_game_drive_kind(prev.get("last_play"))
+            if kind:
+                out.append({"kind": kind, "team": team_ids[pp], "to": team_ids.get(cp),
+                            "home": cur.get("home_score"), "away": cur.get("away_score"),
+                            "period": cur.get("period"), "clock": cur.get("clock"),
+                            "last_play": cur.get("last_play") or prev.get("last_play")})
     return out
 
 
-def _hand_game_event_plan(market_type, side, event: dict) -> tuple:
+def _hand_game_book_lead(rows, now_ts: float, window_s: float = _GAME_LEAD_WINDOW_S) -> dict:
+    """PURE. Did the BOOK move before the feed told us? rows = our-side tape
+    rows (ts, bid_c, …) oldest first. Every bid change inside the last
+    `window_s` → `moves` (age_s, from_c, to_c); `first_move_age_s` = how many
+    seconds before this event the book first moved (the market's lead),
+    None when the book had not moved yet (the feed was first)."""
+    moves, prev_bid, bid_now = [], None, None
+    lo = now_ts - window_s
+    for r in rows or []:
+        try:
+            ts, bid = float(r[0]), r[1]
+        except (TypeError, ValueError, IndexError):
+            continue
+        if bid is None:
+            continue
+        if ts < lo:
+            prev_bid = bid
+            continue
+        if prev_bid is not None and abs(float(bid) - float(prev_bid)) >= 0.01:
+            moves.append({"age_s": round(now_ts - ts, 1), "from_c": prev_bid, "to_c": bid})
+        prev_bid = bid
+        bid_now = bid
+    if bid_now is None and prev_bid is not None:
+        bid_now = prev_bid
+    return {"bid_now": bid_now, "n_moves": len(moves), "moves": moves[-6:],
+            "first_move_age_s": (max(m["age_s"] for m in moves) if moves else None),
+            "last_move_age_s": (min(m["age_s"] for m in moves) if moves else None)}
+
+
+def _hand_game_event_plan(market_type, side, event: dict, punt_pull: bool = True) -> tuple:
     """PURE. Our resting BID against a game event → ('pull' | 'none', why).
     A score against our side (the opponent of a spread/ML side; any score
     on an under) → pull: the market is about to fall through the bid.
-    A score for our side → none (the price rises away). Anything else → none."""
-    if not isinstance(event, dict) or event.get("kind") != "score":
-        return "none", "not_a_score"
+    A score for our side → none (the price rises away). A TURNOVER by our
+    side (spread/ML) → pull; a PUNT by our side → pull while `punt_pull`
+    (`machine_flags hand_game_punt_pull`); drive events never price a
+    total. Anything else → none."""
+    if not isinstance(event, dict):
+        return "none", "not_an_event"
     mt, sd, team = str(market_type or "").lower(), str(side or "").lower(), str(event.get("team") or "")
+    kind = event.get("kind")
+    if kind in ("turnover", "punt"):
+        if mt not in ("spread", "ml", "moneyline", "puck", "runline") or sd not in ("home", "away"):
+            return "none", f"{kind}_no_{mt or 'market'}"
+        if team != sd:
+            return "none", f"{team}_{kind}_for_us"
+        if kind == "punt" and not punt_pull:
+            return "none", "punt_pull_off"
+        return "pull", f"our_{kind}"
+    if kind != "score":
+        return "none", "not_a_score"
     if mt in ("total",):
         if sd == "under":
             return "pull", f"{team}_scored_vs_under"
@@ -25974,25 +26157,46 @@ def _hand_game_poll(now_ts: float) -> list:
         _GAME_FEED_STATS["last_error"] = str(res.get("error") or "")[:120]
         return []
     found = []
+    punt_pull = bool(_machine_flag("hand_game_punt_pull", True))
     for mid, e in (res.get("live_datas") or {}).items():
         det = e.get("details") or {}
         cur = _kv.game_state(det)
-        prev = (GAME_STATE.get(mid) or {}).get("state")
+        g0 = GAME_STATE.get(mid) or {}
+        prev = g0.get("state")
+        gtype = e.get("type") or g0.get("type")
+        team_ids = g0.get("team_ids") or {}
+        if str(gtype or "") == "football_game":
+            try:
+                team_ids = _hand_game_team_ids(det, _GAME_MS_TITLE.get(mid), team_ids)
+            except Exception:
+                pass
         if cur.get("last_ts"):
             _GAME_FEED_STATS["lag_s"] = round(now_ts - float(cur["last_ts"]), 1)
-        events = _hand_game_events(prev, cur)
-        GAME_STATE[mid] = {"state": cur, "details": det, "at_ts": now_ts, "type": e.get("type")}
+        events = _hand_game_events(prev, cur, team_ids, gtype)
+        GAME_STATE[mid] = {"state": cur, "details": det, "at_ts": now_ts, "type": gtype, "team_ids": team_ids}
         for ev in events:
             _GAME_FEED_STATS["events"] += 1
+            if ev.get("kind") in ("turnover", "punt"):
+                _GAME_FEED_STATS["drive_events"] += 1
             decisions = []
             for key in GAME_WATCH.get(mid) or []:
                 snap = LIVE_SNAP.get(key)
                 if not snap:
                     continue
-                v, why = _hand_game_event_plan(snap.get("mt"), snap.get("side"), ev)
+                v, why = _hand_game_event_plan(snap.get("mt"), snap.get("side"), ev, punt_pull)
+                try:
+                    if (snap.get("venue") or "POLYMARKET") == "KALSHI":
+                        _rows = _hand_side_rows(KALSHI_TAPE.get(key), not bool(snap.get("buy_yes")))
+                    else:
+                        _rows = _hand_side_rows(TOUCH_TAPE.get(key), bool(snap.get("synth")))
+                    book = _hand_game_book_lead(_rows, now_ts)
+                except Exception as _e:
+                    book = {"err": str(_e)[:80]}
+                if book.get("first_move_age_s") is not None or book.get("n_moves") == 0:
+                    _GAME_FEED_STATS["lead_s"] = book.get("first_move_age_s") if book.get("n_moves") else 0.0
                 dec = {"key": key, "pick_id": snap.get("pick_id"), "venue": snap.get("venue") or "POLYMARKET",
                        "mt": snap.get("mt"), "side": snap.get("side"), "verdict": v, "why": why,
-                       "resting": bool(snap.get("order_id")) and not snap.get("hold")}
+                       "resting": bool(snap.get("order_id")) and not snap.get("hold"), "book": book}
                 if v == "pull" and dec["resting"]:
                     snap["game_pull"] = {**ev, "why": why, "at_ts": now_ts}
                     try:
@@ -26006,13 +26210,76 @@ def _hand_game_poll(now_ts: float) -> list:
                 decisions.append(dec)
             found.append({"milestone": mid, "event": ev, "decisions": decisions})
             try:
-                _probe_log({"kind": "hand_game_event", "hand_game_event": True, "milestone": mid, "event": ev,
+                _probe_log({"kind": "hand_game_event", "hand_game_event": True, "milestone": mid,
+                            "game": _GAME_MS_TITLE.get(mid), "sport_type": gtype, "event": ev,
                             "decisions": decisions, "lag_s": _GAME_FEED_STATS.get("lag_s"),
+                            "detect_lag_s": (round(now_ts - float(cur["last_ts"]), 1) if cur.get("last_ts") else None),
                             "at": datetime.now(timezone.utc).isoformat()})
             except Exception:
                 pass
             app.logger.warning("game event %s: %s → %s", mid, ev, [(d["key"], d["verdict"]) for d in decisions])
+    _hand_game_publish(now_ts)
     return found
+
+
+def _hand_game_publish(now_ts: float, idle: bool = False) -> bool:
+    """The feed's vitals + every watched game's state → `lookup_cache`
+    `game_feed` (every `_GAME_PUB_EVERY_S` while watching, `_GAME_PUB_IDLE_S`
+    idle) — what `/api/cellar/health` prints and the one place a reader
+    outside the box can see the feed is alive. Never raises."""
+    global _GAME_SB
+    every = _GAME_PUB_IDLE_S if idle else _GAME_PUB_EVERY_S
+    if now_ts - _GAME_PUB_LAST["ts"] < every:
+        return False
+    try:
+        if _GAME_SB is None:
+            _GAME_SB = get_supabase()
+        games = {}
+        for mid, g in list(GAME_STATE.items()):
+            st = g.get("state") or {}
+            games[mid] = {"title": _GAME_MS_TITLE.get(mid), "type": g.get("type"), "keys": GAME_WATCH.get(mid) or [],
+                          "status": st.get("status"), "away": st.get("away_score"), "home": st.get("home_score"),
+                          "period": st.get("period"), "clock": st.get("clock"), "last_play": st.get("last_play"),
+                          "team_ids": len(g.get("team_ids") or {}), "age_s": round(now_ts - float(g.get("at_ts") or now_ts), 1)}
+        payload = {"at": datetime.now(timezone.utc).isoformat(), "on": bool(_machine_flag("hand_game_feed", True)),
+                   "watched": len(GAME_WATCH), "stats": dict(_GAME_FEED_STATS), "games": games}
+        _GAME_SB.table("lookup_cache").upsert({"key": _GAME_PUB_KEY, "sport": "ANY",
+                                               "fetched_at": payload["at"], "payload": payload}).execute()
+        _GAME_PUB_LAST["ts"] = now_ts
+        return True
+    except Exception as e:
+        _GAME_FEED_STATS["pub_err"] = str(e)[:120]
+        _GAME_PUB_LAST["ts"] = now_ts
+        return False
+
+
+def _game_feed_health(sb) -> dict:
+    """The game feed's block for `/api/cellar/health`, off the box's
+    `lookup_cache game_feed` publish: age, on, games watched, polls/events/
+    pulls, the venue lag and the measured book lead. {} when the box has
+    never published (a box on older code — omit, don't alarm)."""
+    try:
+        r = (sb.table("lookup_cache").select("fetched_at,payload").eq("key", _GAME_PUB_KEY)
+             .limit(1).execute().data) or []
+        if not r:
+            return {}
+        pl = r[0].get("payload") or {}
+        age_s = None
+        try:
+            age_s = int((datetime.now(timezone.utc) - _parse_iso(pl.get("at") or r[0].get("fetched_at"))).total_seconds())
+        except Exception:
+            pass
+        stt = pl.get("stats") or {}
+        return {"age_s": age_s, "on": pl.get("on"), "watched": pl.get("watched"),
+                "stale": (age_s is None or age_s > (180 if pl.get("watched") else 600)),
+                "polls": stt.get("polls"), "events": stt.get("events"), "pulls": stt.get("pulls"),
+                "drive_events": stt.get("drive_events"), "errors": stt.get("errors"), "lag_s": stt.get("lag_s"),
+                "lead_s": stt.get("lead_s"), "last_error": stt.get("last_error") or stt.get("pub_err"),
+                "games": [{"title": g.get("title"), "status": g.get("status"), "score": f"{g.get('away')}-{g.get('home')}",
+                           "period": g.get("period"), "clock": g.get("clock"), "bets": len(g.get("keys") or [])}
+                          for g in (pl.get("games") or {}).values()][:12]}
+    except Exception:
+        return {}
 
 
 def _hand_game_worker() -> None:
@@ -26024,6 +26291,7 @@ def _hand_game_worker() -> None:
                 every = _GAME_FEED_S
             every = max(1.0, every)
             if not GAME_WATCH or not _machine_flag("hand_game_feed", True):
+                _hand_game_publish(_time.time(), idle=True)      # "alive, nothing watched" — health reads it
                 _time.sleep(1.0)
                 continue
             _hand_game_poll(_time.time())
