@@ -25214,8 +25214,71 @@ def _ladder_covers(lad, p) -> bool:
         return False
 
 
+def _hand_live_hi(rows, our_c, our_qty, now_ts: float, since_ts=None,
+                  hold_s: float = _HAND_LIVE_CONFIRM_S):
+    """Pure. The SUSTAINED high of our rung (ours excluded) over the baseline
+    window — the largest size that HELD for `hold_s` — or None when no frame
+    qualifies. rows = our-side tape rows oldest first.
+
+    THE PASSING MAKER IS NOT A HIGH (Oct 25 2026, ORL @ NY U 224.5, 20
+    pulls in 35 minutes): a 1,000-lot maker re-pricing down through our rung
+    sat on it for ONE frame, that frame became the "60s high" (hi 1,344 /
+    4,273 against a rung that held 366 the whole time), and every rejoin
+    re-read the same spike and pulled again. A high counts only when the
+    rung held at or above it for `hold_s` (the min over that stretch — the
+    same test the collapse itself must pass). `since_ts` = the last rejoin:
+    the level we rejoined INTO is the new normal, nothing before it votes."""
+    def qty_at(lad, p):
+        tot = 0.0
+        for pp, q in (lad or []):
+            try:
+                if abs(float(pp) - float(p)) < 0.01:
+                    tot += float(q or 0.0)
+            except (TypeError, ValueError):
+                continue
+        return tot
+    lo = now_ts - _HAND_LIVE_BASE_S
+    if since_ts is not None:
+        try:
+            lo = max(lo, float(since_ts))
+        except (TypeError, ValueError):
+            pass
+    seq = []                                           # (ts, rung_q or None when the ladder misses the rung)
+    for r in rows or []:
+        try:
+            ts = float(r[0])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if ts < lo:
+            continue
+        lad = r[6] if len(r) > 6 and r[6] else None
+        if lad and _ladder_covers(lad, our_c):
+            seq.append((ts, max(0.0, qty_at(lad, our_c) - float(our_qty or 0.0))))
+        else:
+            seq.append((ts, None))
+    hi = None
+    n = len(seq)
+    for i, (ts_i, q_i) in enumerate(seq):
+        if q_i is None or ts_i >= now_ts - _HAND_LIVE_RECENT_S:
+            continue
+        m, k, ok = q_i, i + 1, True
+        while k < n and seq[k][0] < ts_i + hold_s:
+            if seq[k][1] is None:
+                ok = False
+                break
+            m = min(m, seq[k][1])
+            k += 1
+        if not ok:
+            continue
+        end = seq[k][0] if k < n else now_ts
+        if end - ts_i < hold_s:
+            continue
+        hi = m if hi is None else max(hi, m)
+    return hi
+
+
 def _hand_live_plan(rows, ladder, our_c, our_qty, cap_c, tick, now_ts: float,
-                    drop_pct: float = _HAND_LIVE_DROP_PCT):
+                    drop_pct: float = _HAND_LIVE_DROP_PCT, since_ts=None):
     """Pure. rows = our-side tape rows (ts, bid_c, bid_q, ask_c, ask_q, d3,
     ladder) oldest first; ladder = our-side (price, qty) best-first NOW;
     our_c/our_qty = the resting bid. -> (verdict, detail):
@@ -25253,11 +25316,16 @@ def _hand_live_plan(rows, ladder, our_c, our_qty, cap_c, tick, now_ts: float,
         # about our rung: it is not a frame of evidence, and never a collapse.
         # The current read comes off the SAME tape ladder as the baseline.
         base = [r for r in base if _ladder_covers(r[6], our_c)]
+        # THE HIGH MUST HAVE HELD (Oct 25 2026): `_hand_live_hi` — the max over
+        # the window of the min over any 3s stretch, read from the last rejoin
+        # on. A one-frame spike (a maker passing through our rung) is no high.
+        hi = _hand_live_hi(rows, our_c, our_qty, now_ts, since_ts) if base else None
+        if base and hi is None:
+            det["rung"] = "no_held_high"
         cur_lad = rows[-1][6] if len(rows[-1]) > 6 and rows[-1][6] else ladder
-        if fresh and base and not _ladder_covers(cur_lad, our_c):
+        if fresh and base and hi is not None and not _ladder_covers(cur_lad, our_c):
             det["rung"] = "beyond_snapshot"
-        elif fresh and base:
-            hi = max(max(0.0, qty_at(r[6], our_c) - float(our_qty or 0.0)) for r in base)
+        elif fresh and base and hi is not None:
             cur = max(0.0, qty_at(cur_lad, our_c) - float(our_qty or 0.0))
             # THE LIVE BOOK HAS A VOTE: when the socket's own book (Kalshi's
             # full book, the Poly depth table) reaches our rung and still
@@ -25276,6 +25344,8 @@ def _hand_live_plan(rows, ladder, our_c, our_qty, cap_c, tick, now_ts: float,
                 since = rows[-1][0]
                 for r in reversed(rows[:-1]):
                     if now_ts - r[0] > _HAND_LIVE_BASE_S or not (len(r) > 6 and r[6] and _ladder_covers(r[6], our_c)):
+                        break
+                    if since_ts is not None and float(r[0]) < float(since_ts):
                         break
                     if max(0.0, qty_at(r[6], our_c) - float(our_qty or 0.0)) > floor_q:
                         break
@@ -25439,7 +25509,8 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
             nb.update({"kalshi_order_id": new_id, "price_c": float(target), "anchor_c": float(target),
                        "amended": False, "live_chase": lc})
             sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
-            snap.update({"order_id": new_id, "our_c": float(target), "qty": qty, "hold": None})
+            snap.update({"order_id": new_id, "our_c": float(target), "qty": qty, "hold": None,
+                         "since_ts": now_ts})
             _LIVE_STATS["rejoins"] += 1
         elif new_id:
             # the create went in but the list did not show it yet: record the id, let the tick re-vouch
@@ -25479,7 +25550,8 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
         drop = float(_machine_flag_val("hand_live_drop_pct", _HAND_LIVE_DROP_PCT))
     except (TypeError, ValueError):
         drop = _HAND_LIVE_DROP_PCT
-    verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop)
+    verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop,
+                                   since_ts=snap.get("since_ts"))
     gp = snap.pop("game_pull", None)
     if gp and verdict != "cancel":
         verdict, det = "cancel", {**(det or {}), "why": "game_event", "game_event": gp, "book_verdict": verdict}
@@ -25637,7 +25709,8 @@ def _hand_live_one(sb, client, slug: str) -> None:
             nb.update({"order_id": out["order_id"], "price_c": target, "anchor_c": target, "amended": False,
                        "live_chase": lc})
             sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
-            snap.update({"order_id": out["order_id"], "our_c": target, "qty": qty, "hold": None})
+            snap.update({"order_id": out["order_id"], "our_c": target, "qty": qty, "hold": None,
+                         "since_ts": now_ts})
             _LIVE_STATS["rejoins"] += 1
         else:
             _LIVE_STATS["errors"] += 1
@@ -25669,7 +25742,8 @@ def _hand_live_one(sb, client, slug: str) -> None:
         drop = float(_machine_flag_val("hand_live_drop_pct", _HAND_LIVE_DROP_PCT))
     except (TypeError, ValueError):
         drop = _HAND_LIVE_DROP_PCT
-    verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop)
+    verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop,
+                                   since_ts=snap.get("since_ts"))
     gp = snap.pop("game_pull", None)
     if gp and verdict != "cancel":
         # THE GAME SAID SO (Oct 25 2026): a score against our side — pull now,
@@ -25956,6 +26030,21 @@ def _hand_game_worker() -> None:
             _time.sleep(1.0)
 
 
+def _hand_live_since_ts(blob: dict):
+    """Pure. The epoch of the chase's last rejoin (`live_chase.at`), else the
+    live snipe's start (`live_snipe.at`) — the baseline the live planner reads
+    from. None when the blob carries neither."""
+    for k in ("live_chase", "live_snipe"):
+        d = blob.get(k) if isinstance(blob, dict) else None
+        at = d.get("at") if isinstance(d, dict) else None
+        if at:
+            try:
+                return datetime.fromisoformat(str(at).replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 def _hand_live_tick(sb, client, now) -> dict:
     """Every handbets tick: re-vouch LIVE_SNAP from the picks + the mirror
     (every live-snipe bet — Polymarket by slug, Kalshi by ticker — with a
@@ -26004,7 +26093,8 @@ def _hand_live_tick(sb, client, now) -> dict:
                 _ms_id = _hand_game_ms_for(sb, r, blob)
             except Exception as e:
                 app.logger.warning("game feed ms pick %s: %s", r.get("id"), str(e)[:120])
-        _gm = {"ms_id": _ms_id, "mt": r.get("market_type"), "side": r.get("side")}
+        _gm = {"ms_id": _ms_id, "mt": r.get("market_type"), "side": r.get("side"),
+               "since_ts": _hand_live_since_ts(blob)}
 
         def _end_filled(held, venue, ident):
             # A FULL LOT ENDS THE CHASE (Oct 24 2026): the bet is done — no

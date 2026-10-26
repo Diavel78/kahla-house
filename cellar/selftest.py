@@ -3397,6 +3397,29 @@ def test_hand_live_chase() -> None:
     v, d = P(stale, lad((49.5, 200),), 49.5, 10, 49.5, 0.5, now)
     check("a stale tape (newest frame 25s old) never calls a collapse", v != "cancel", str(d))
     check("no book → stay", P([], None, 49.5, 10, 49.5, 0.5, now)[0] == "stay")
+    # THE PASSING MAKER (Oct 25 2026, ORL @ NY U 224.5: 20 pulls in 35 min — a
+    # 1,000-lot maker crossed our rung for ONE frame and that frame was the
+    # "60s high" on every pull after; the rung itself held 366 throughout)
+    plateau = [row(a, 55.0, 1779.0, 57.0, lad((55, 1779), (54, 2138), (49, 371.8))) for a in (58, 50, 40, 31, 25, 18, 12, 6, 0.5)]
+    spike = plateau[:3] + [row(30, 55.0, 1779.0, 57.0, lad((55, 1779), (49, 1371.8)))] + plateau[3:]
+    v, d = P(spike, lad((55, 1779), (54, 2138), (49, 371.8)), 49.0, 5, 49.5, 1.0, now)
+    check("a one-frame spike through our rung is NO high → a steady 366 is not a collapse", v == "stay" and d.get("why") != "collapse", str(d))
+    check("…the planner names it", d.get("hi_q") in (None, 366.8) and d.get("drop_pct") in (None, 0.0), str(d))
+    hi = _app._hand_live_hi(spike, 49.0, 5, now)
+    check("the sustained high reads the plateau, not the spike", hi is not None and abs(hi - 366.8) < 0.2, str(hi))
+    held = plateau[:4] + [row(a, 55.0, 1779.0, 57.0, lad((55, 1779), (49, 1371.8))) for a in (24, 20, 16, 12)] \
+        + [row(a, 55.0, 1779.0, 57.0, lad((55, 1779), (49, 371.8))) for a in (5, 0.5)]
+    v, d = P(held, lad((55, 1779), (49, 371.8)), 49.0, 5, 49.5, 1.0, now)
+    check("1,366 HELD 12s then 366 for 5s = a real collapse, still a pull", v == "cancel" and d["why"] == "collapse", str(d))
+    v, d = P(held, lad((55, 1779), (49, 371.8)), 49.0, 5, 49.5, 1.0, now, since_ts=now - 10)
+    check("…but a rejoin 10s ago resets the baseline: the level we rejoined into is the new normal", v == "stay", str(d))
+    src_w = inspect.getsource(_app._hand_live_one)
+    check("both workers hand the planner the rejoin time", src_w.count('since_ts=snap.get("since_ts")') == 1
+          and 'since_ts=snap.get("since_ts")' in inspect.getsource(_app._hand_live_one_kalshi))
+    check("…and both rejoins stamp it", '"since_ts": now_ts' in src_w and '"since_ts": now_ts' in inspect.getsource(_app._hand_live_one_kalshi))
+    check("the tick seeds it from the pick (a restart forgets nothing)", '"since_ts": _hand_live_since_ts(blob)' in inspect.getsource(_app._hand_live_tick))
+    check("since_ts reads live_chase.at", abs(_app._hand_live_since_ts({"live_chase": {"at": "2026-10-25T23:23:48+00:00"}}) - 1792970628.0) < 1
+          and _app._hand_live_since_ts({}) is None)
     # the wiring
     src_w = inspect.getsource(_app._hand_live_one)
     check("the worker sizes the amend off the mirror (leaves + cum)", "_amend_total(o.get(\"leaves\"), o.get(\"cum\"))" in src_w)
