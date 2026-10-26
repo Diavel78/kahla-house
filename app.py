@@ -2097,9 +2097,11 @@ def api_football_picks():
         if b and (built_at is None or b < built_at):
             built_at = b
     _sheet_attach_tv(sport, games)
+    _sheet_attach_venue(sb, sport, games)    # the box's Poly/Kalshi bids per pick, one DB read (Oct 26 2026)
     return jsonify({
         "ok": True, "sport": sport, "week_key": wk.get("week_key"),
         "games": games,
+        "venue_at": next((g["venue"].get("at") for g in games if isinstance(g.get("venue"), dict)), None),
         "pdf_url": _pub_url(wk.get("friday_pdf_path") or wk.get("pdf_path")),
         "picks_pdf_url": _pub_url(wk.get("picks_pdf_path")),
         "published_at": wk.get("friday_published_at") or wk.get("published_at"),
@@ -6275,8 +6277,13 @@ def _cellar_health(sb) -> dict:
         gf = _game_feed_health(sb)          # the game-state feed's vitals (Oct 25 2026)
     except Exception:
         gf = {}
+    try:
+        stq = _sheet_touch_health(sb)       # the sheet's venue quotes publish (Oct 26 2026)
+    except Exception:
+        stq = {}
     out_h = {
         "lanes": lanes, "bad": bad, "boot": boot, "backup": backup, "ws": ws, "game_feed": gf,
+        "sheet_touch": stq,
         # Counted separately from `bad` so an intentional kill is VISIBLE
         # without being an alarm — "off" should read as a decision someone
         # made, not as something to go fix.
@@ -22726,6 +22733,8 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
         stats["kalshi_probe"] = _kalshi_probe_tick(sb)      # one-shot, flag-driven, box IP
     except Exception as e:
         stats["kalshi_probe"] = {"err": f"{type(e).__name__}: {e}"[:120]}
+    if worker == "box":
+        _ensure_sheet_touch_worker()          # the sheet's venue quotes, its own thread (Oct 26 2026)
     client = _hand_queue_drain(sb, now, worker, stats, None, max_n=max_n)
     if stats.get("gate"):
         return stats
@@ -26299,6 +26308,332 @@ def _hand_game_worker() -> None:
             _GAME_FEED_STATS["errors"] += 1
             app.logger.warning("hand game worker: %s", str(e)[:120])
             _time.sleep(1.0)
+
+
+# ───────────────────── THE SHEET TOUCH (Oct 26 2026) ─────────────────────
+# Rob, on a CGY ML +133 priced at the 15:35 sheet run: "aren't we constantly
+# getting that from poly/kalshi… can't we just update the button like once
+# every 30 minutes with Poly numbers?? Without smoking Vercel??" The card's
+# price was the BOOK line frozen into the sheet row; the venues only ever
+# got read when he tapped Quote. Now THE BOX walks every upcoming sheet game
+# once per `sheet_touch_every_s` (1800) on its own daemon thread: one venue
+# event lookup per game (the whole ladder's embedded quotes), the slip's own
+# rung rule per pick (`_bet_sheet_rung`, no chalk step — a quote is a quote),
+# the Kalshi twin through `kalshi_venue.resolve`, and ONE lookup_cache row
+# (`sheet_touch`) keyed sport|event_name → pick key → {poly, kalshi}. Vercel's
+# sheet API reads that row once a request (`_sheet_attach_venue`) and the
+# pages draw Poly/Kalshi bids + age under each button. Vercel makes no venue
+# call for it. Kill switch `machine_flags sheet_touch`; budget
+# `_SHEET_TOUCH_BUDGET_S` a pass, nearest games first, an unreached game
+# keeps last pass's read (`partial` on the payload). Health: `sheet_touch`.
+_SHEET_TOUCH_KEY = "sheet_touch"
+_SHEET_TOUCH_EVERY_S = 1800.0
+_SHEET_TOUCH_MIN_EVERY_S = 300.0
+_SHEET_TOUCH_BUDGET_S = 240.0
+_SHEET_TOUCH_HORIZON_H = 7 * 24
+_SHEET_TOUCH_FRESH_S = 2 * 3600          # Vercel drops a blob older than this
+_SHEET_TOUCH_BOOT_WAIT_S = 45.0          # let the sockets seed before the first walk
+_SHEET_TOUCH_THREAD = None
+_SHEET_TOUCH_LAST: dict = {}
+_SHEET_TOUCH_STATS: dict = {"passes": 0, "errors": 0, "last_error": None}
+
+
+def _sheet_touch_items(sport: str, g: dict) -> list:
+    """Pure. Mirrors bet_sheets.html `pickSpec(g, k, force)`: every pick
+    block on a sheet game that names a side → the slip item the box would
+    resolve for it (sport/away/home/event_start/market_type/side/line).
+    ml line 0; puck = spread at the pick's own line; spread = the pick's
+    bettable half point else the side's own market line; total = the
+    pick's line else the market total. Picks with no side are skipped."""
+    if not isinstance(g, dict):
+        return []
+    L = g.get("line") if isinstance(g.get("line"), dict) else {}
+    out = []
+    for k in ("ml", "puck", "spread", "total"):
+        p = g.get(k)
+        if not isinstance(p, dict) or not p.get("side"):
+            continue
+        side = str(p["side"])
+        try:
+            if k == "ml":
+                if side not in ("home", "away"):
+                    continue
+                mt, line = "ml", 0.0
+            elif k == "puck":
+                if p.get("line") is None or side not in ("home", "away"):
+                    continue
+                mt, line = "spread", float(p["line"])
+            elif k == "spread":
+                if side not in ("home", "away"):
+                    continue
+                mt = "spread"
+                if p.get("line") is not None:
+                    line = float(p["line"])
+                elif L.get("spread_home") is not None:
+                    line = float(L["spread_home"]) if side == "home" else -float(L["spread_home"])
+                else:
+                    continue
+            else:
+                if side not in ("over", "under"):
+                    continue
+                mt = "total"
+                ln = p.get("line") if p.get("line") is not None else L.get("total")
+                if ln is None:
+                    continue
+                line = float(ln)
+        except (TypeError, ValueError):
+            continue
+        out.append({"k": k, "sport": sport, "away": g.get("away"), "home": g.get("home"),
+                    "event_start": g.get("event_start"), "market_type": mt, "side": side,
+                    "line": line})
+    return out
+
+
+def _entry_ask_c(e: dict):
+    """Our-side best ask of a pmm lookup entry, in cents (synthetic entries
+    carry the inverted quote already). None when the entry has no ask."""
+    q = (e or {}).get("quote") if isinstance((e or {}).get("quote"), dict) else None
+    if not q or q.get("ask") is None:
+        return None
+    try:
+        a = float(q["ask"])
+    except (TypeError, ValueError):
+        return None
+    return round(a * 100.0, 2) if a <= 1.0 else round(a, 2)
+
+
+def _sheet_touch_poly(client, item: dict, cache: dict) -> dict:
+    """The Polymarket rung + our-side bid/ask for one sheet pick. One venue
+    event lookup per GAME (shared across the game's picks through `cache`,
+    and pmm_markets' own cache across passes), the slip's rung rule with no
+    chalk step, the slug-agrees guard. {slug, synthetic, line, bid, ask,
+    why, chalk} or {why}."""
+    sport, mt, side = item["sport"], item["market_type"], item["side"]
+    ck = (sport, str(item.get("away")), str(item.get("home")), str(item.get("event_start")))
+    pmm = cache.get(ck)
+    if pmm is None:
+        if not _bet_sheet_wait_rl(10.0):
+            return {"why": "rate_limited"}
+        try:
+            import pmm_markets as _pm
+            pmm = _pm.lookup(client, sport, item.get("away"), item.get("home"), item.get("event_start"),
+                             want_props=False, max_age_s=600) or {}
+        except Exception as e:
+            return {"why": f"lookup: {e}"[:80]}
+        cache[ck] = pmm
+    if not pmm:
+        return {"why": "not_listed"}
+    if mt != "ml" and not pmm.get(mt):
+        return {"why": f"no_{mt}"}
+    entry, why = _bet_sheet_rung(pmm.get(mt), mt, side, item.get("line"), cap_c=None)
+    if entry is None:
+        return {"why": str(why)[:80]}
+    if _bet_sheet_slug_disagrees(entry, mt):
+        return {"why": "slug_disagrees", "slug": entry.get("slug")}
+    bid, ask = _entry_bid_c(entry), _entry_ask_c(entry)
+    try:
+        chalk = bid is not None and float(bid) >= _hand_chalk_cap_c(mt) - 1e-9
+    except Exception:
+        chalk = False
+    return {"slug": entry.get("slug"), "synthetic": bool(entry.get("synthetic")),
+            "line": entry.get("line"), "bid": bid, "ask": ask, "why": why, "chalk": chalk}
+
+
+def _sheet_touch_kalshi(item: dict) -> dict:
+    """The Kalshi contract + our-side bid/ask for one sheet pick, through the
+    same resolver the slip uses (event-first, exact rung else the nearest
+    more favorable). {ticker, buy_yes, line, bid, ask, why, fee} or {why}."""
+    try:
+        import kalshi_venue as _kv
+        rs = _kv.resolve(item["sport"], item.get("away"), item.get("home"), item.get("event_start"), item)
+    except Exception as e:
+        return {"why": f"resolve: {e}"[:80]}
+    if not rs or not rs.get("ok"):
+        return {"why": str((rs or {}).get("why") or "no_market")[:80]}
+    q = rs.get("quote") if isinstance(rs.get("quote"), dict) else {}
+    fee = rs.get("fee") if isinstance(rs.get("fee"), dict) else None
+    return {"ticker": rs.get("ticker"), "buy_yes": bool(rs.get("buy_yes")), "line": rs.get("line"),
+            "bid": q.get("bid"), "ask": q.get("ask"), "why": rs.get("why"),
+            "fee": ({k: fee.get(k) for k in ("fee_type", "fee_multiplier") if k in fee} if fee else None)}
+
+
+def _sheet_touch_rows(sb, now) -> list:
+    """Every UPCOMING sheet game (listed start after now, inside the horizon)
+    on each sport's latest week, shaped like the page sees it, nearest
+    first. [(sport, row, game)]."""
+    out = []
+    hi = (now + timedelta(hours=_SHEET_TOUCH_HORIZON_H)).isoformat()
+    for sport in _SHEET_SPORTS:
+        try:
+            wk = (sb.table("football_sheet_weeks").select("week_key").eq("sport", sport)
+                  .order("week_key", desc=True).limit(1).execute().data or [])
+            if not wk:
+                continue
+            rows = (sb.table("football_sheets")
+                    .select("market_id,event_name,event_start,data_blob")
+                    .eq("week_key", wk[0]["week_key"]).eq("sport", sport)
+                    .gte("event_start", now.isoformat()).lte("event_start", hi)
+                    .order("event_start").limit(200).execute().data or [])
+        except Exception as e:
+            app.logger.warning("sheet touch rows %s: %s", sport, str(e)[:100])
+            continue
+        for r in rows:
+            try:
+                g = (_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport == "NBA"
+                     else _sheet_game_mlb(r) if sport == "MLB" else _sheet_game_football(r))
+            except Exception:
+                continue
+            out.append((sport, r, g))
+    out.sort(key=lambda t: str(t[1].get("event_start") or ""))
+    return out
+
+
+def _sheet_touch_pass(sb, client, now=None) -> dict:
+    """One walk: every upcoming sheet game's picks quoted on both venues →
+    ONE lookup_cache row. Nearest games first under the budget; a game not
+    reached keeps the previous pass's read."""
+    t0 = _time.monotonic()
+    now = now or datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    prev = (_SHEET_TOUCH_LAST.get("games") or {}) if isinstance(_SHEET_TOUCH_LAST.get("games"), dict) else {}
+    games: dict = {}
+    st = {"games": 0, "items": 0, "poly": 0, "kalshi": 0, "kept": 0, "partial": False, "sports": {}}
+    cache: dict = {}
+    for sport, r, g in _sheet_touch_rows(sb, now):
+        key = f"{sport}|{r.get('event_name')}"
+        items = _sheet_touch_items(sport, g)
+        if not items:
+            continue
+        if _time.monotonic() - t0 > _SHEET_TOUCH_BUDGET_S:
+            st["partial"] = True
+            if prev.get(key):
+                games[key] = prev[key]
+                st["kept"] += 1
+            continue
+        picks: dict = {}
+        for it in items:
+            try:
+                pq = _sheet_touch_poly(client, it, cache)
+            except Exception as e:
+                pq = {"why": f"err: {e}"[:60]}
+            try:
+                kq = _sheet_touch_kalshi(it)
+            except Exception as e:
+                kq = {"why": f"err: {e}"[:60]}
+            picks[it["k"]] = {"mt": it["market_type"], "side": it["side"], "line": it["line"],
+                              "poly": pq, "kalshi": kq}
+            st["items"] += 1
+            st["poly"] += int(pq.get("bid") is not None)
+            st["kalshi"] += int(kq.get("bid") is not None)
+        games[key] = {"at": now_iso, "market_id": r.get("market_id"), "event_start": r.get("event_start"),
+                      "picks": picks}
+        st["games"] += 1
+        st["sports"][sport] = st["sports"].get(sport, 0) + 1
+        _time.sleep(0.15)                      # gentle on both venues; the pass is not a race
+    payload = {"at": now_iso, "ms": int((_time.monotonic() - t0) * 1000), **st, "games": games}
+    try:
+        sb.table("lookup_cache").upsert({"key": _SHEET_TOUCH_KEY, "sport": "ANY",
+                                         "fetched_at": now_iso, "payload": payload}).execute()
+        payload["published"] = True
+    except Exception as e:
+        payload["published"] = False
+        payload["pub_err"] = str(e)[:100]
+    _SHEET_TOUCH_LAST.clear()
+    _SHEET_TOUCH_LAST.update(payload)
+    _SHEET_TOUCH_STATS["passes"] += 1
+    app.logger.info("sheet touch: %d games %d items poly %d kalshi %d kept %d %dms%s",
+                    st["games"], st["items"], st["poly"], st["kalshi"], st["kept"], payload["ms"],
+                    " PARTIAL" if st["partial"] else "")
+    return {k: v for k, v in payload.items() if k != "games"}
+
+
+def _sheet_touch_worker() -> None:
+    _time.sleep(_SHEET_TOUCH_BOOT_WAIT_S)
+    while True:
+        try:
+            every = float(_machine_flag_val("sheet_touch_every_s", _SHEET_TOUCH_EVERY_S))
+        except (TypeError, ValueError):
+            every = _SHEET_TOUCH_EVERY_S
+        every = max(_SHEET_TOUCH_MIN_EVERY_S, every)
+        if not _machine_flag("sheet_touch", True):
+            _time.sleep(30.0)
+            continue
+        try:
+            sb = get_supabase()
+            if sb is None:
+                raise RuntimeError("no db")
+            _sheet_touch_pass(sb, get_client())
+        except Exception as e:
+            _SHEET_TOUCH_STATS["errors"] += 1
+            _SHEET_TOUCH_STATS["last_error"] = f"{type(e).__name__}: {e}"[:120]
+            app.logger.warning("sheet touch worker: %s", str(e)[:120])
+        _time.sleep(every)
+
+
+def _ensure_sheet_touch_worker() -> None:
+    global _SHEET_TOUCH_THREAD
+    if _SHEET_TOUCH_THREAD is not None and _SHEET_TOUCH_THREAD.is_alive():
+        return
+    try:
+        _SHEET_TOUCH_THREAD = threading.Thread(target=_sheet_touch_worker, name="sheet-touch", daemon=True)
+        _SHEET_TOUCH_THREAD.start()
+    except Exception:
+        pass
+
+
+def _sheet_touch_health(sb) -> dict:
+    """The sheet-touch publish on the health card: age, games/items quoted
+    per venue, partial, ms. {} when never published."""
+    try:
+        r = (sb.table("lookup_cache").select("fetched_at,payload").eq("key", _SHEET_TOUCH_KEY)
+             .limit(1).execute().data) or []
+        if not r:
+            return {}
+        pl = r[0].get("payload") or {}
+        age_s = None
+        try:
+            age_s = int((datetime.now(timezone.utc) - _parse_iso(pl.get("at") or r[0].get("fetched_at"))).total_seconds())
+        except Exception:
+            pass
+        return {"age_s": age_s, "stale": (age_s is None or age_s > _SHEET_TOUCH_FRESH_S),
+                "games": pl.get("games") if isinstance(pl.get("games"), int) else len(pl.get("games") or {}),
+                "items": pl.get("items"), "poly": pl.get("poly"), "kalshi": pl.get("kalshi"),
+                "kept": pl.get("kept"), "partial": pl.get("partial"), "ms": pl.get("ms"),
+                "sports": pl.get("sports")}
+    except Exception:
+        return {}
+
+
+def _sheet_attach_venue(sb, sport: str, games: list) -> None:
+    """VERCEL'S HALF: one lookup_cache read, the box's latest venue quotes
+    stamped onto each game as `venue {at, age_s, picks{k: {mt, side, line,
+    poly, kalshi}}}`. Nothing when the row is missing or older than
+    _SHEET_TOUCH_FRESH_S; never raises; never calls a venue."""
+    if not games:
+        return
+    try:
+        r = (sb.table("lookup_cache").select("fetched_at,payload").eq("key", _SHEET_TOUCH_KEY)
+             .limit(1).execute().data) or []
+        if not r:
+            return
+        pl = r[0].get("payload") or {}
+        gm = pl.get("games") if isinstance(pl.get("games"), dict) else {}
+        now = datetime.now(timezone.utc)
+        for g in games:
+            e = gm.get(f"{sport}|{g.get('event_name')}")
+            if not isinstance(e, dict) or not e.get("picks"):
+                continue
+            age_s = None
+            try:
+                age_s = int((now - _parse_iso(e.get("at") or pl.get("at"))).total_seconds())
+            except Exception:
+                pass
+            if age_s is not None and age_s > _SHEET_TOUCH_FRESH_S:
+                continue
+            g["venue"] = {"at": e.get("at"), "age_s": age_s, "picks": e["picks"]}
+    except Exception as e:
+        app.logger.warning("sheet venue attach: %s", str(e)[:100])
+
 
 
 def _hand_live_since_ts(blob: dict):

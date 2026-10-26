@@ -216,11 +216,14 @@
               border: 1px solid var(--line); color: var(--text); border-radius: 12px; padding: 10px 14px; font-size: 14px; font-weight: 600; }
         .dl .sub { color: var(--text2); font-weight: 400; font-size: 13px; }
         .mk-note { font-size: 14px; color: var(--text3); border: 1px dashed var(--line2); border-radius: 12px; padding: 10px 12px; }
-        .pb { min-height: 52px; border-radius: 12px; border: 1px solid var(--line); background: var(--card2); display: flex;
+        .pb { min-height: 52px; border-radius: 12px; border: 1px solid var(--line); background: var(--card2); display: flex; flex-wrap: wrap;
               align-items: center; justify-content: center; gap: 8px; padding: 6px 10px; font-family: var(--mono);
               font-size: 17px; font-weight: 600; color: var(--text); }
         .pb.pass { min-height: 46px; background: transparent; border-style: dashed; border-color: var(--line2); color: var(--text2); font-size: 16px; }
         .pb .pr { font-size: 14px; color: var(--text2); font-weight: 500; }
+        .pb .vq { display: block; width: 100%; font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--text2); margin-top: 2px; }
+        .pb .vq.old { color: var(--a-tx); }
+        .pb .vq .vq-no { color: var(--text3); }
         .mk-open { font-size: 13px; color: var(--text3); margin-top: 6px; }
         .clv-b { color: var(--green, #3fb950); font-weight: 600; }
         .clv-l { color: var(--red, #f85149); font-weight: 600; }
@@ -477,9 +480,25 @@
         const p = impl(x);
         return a + (p === null ? '' : ' / ' + pct(p));
     }
-    function pickBox(p, label, price, grade) {
+    function pickBox(p, label, price, grade, vq, mt, line) {
         return '<div class="pb' + (p.verdict === 'pass' ? ' pass' : '') + '">' + esc(label)
-             + (price != null ? ' <span class="pr">' + amPct(price) + '</span>' : '') + (grade || '') + '</div>';
+             + (price != null ? ' <span class="pr">' + amPct(price) + '</span>' : '') + (grade || '') + venueLine(vq, mt, line) + '</div>';
+    }
+    // The box's Poly/Kalshi bids on this side (read every ~30 min; see bet_sheets.html venueLine)
+    function venueLine(vq, mt, line) {
+        if (!vq) return '';
+        const c = x => Math.round(Number(x) * 10) / 10;
+        const rung = (vl) => (vl == null || mt === 'ml' || Math.abs(Number(vl) - Number(line)) < 0.01) ? ''
+                            : ' @ ' + (mt === 'total' ? Number(vl) : sgn(vl, 1));
+        const one = (name, q) => {
+            if (!q) return '';
+            if (q.bid == null) return '<span class="vq-no">' + name + ' —</span>';
+            return name + ' ' + c(q.bid) + '¢' + rung(q.line) + (q.chalk ? ' chalk' : '');
+        };
+        const parts = [one('Poly', vq.poly), one('Kalshi', vq.kalshi)].filter(Boolean);
+        if (!parts.length) return '';
+        const age = vq.age_s != null ? ' · ' + (vq.age_s < 90 ? 'now' : Math.round(vq.age_s / 60) + 'm') : '';
+        return '<span class="vq' + (vq.age_s > 45 * 60 ? ' old' : '') + '">' + parts.join(' · ') + age + '</span>';
     }
     // The box's grader doesn't grade the puck line; read it off the final.
     function puckGrade(g, p) {
@@ -492,7 +511,9 @@
         if (!p || !p.side || line == null) return '';
         const grade = gradeKey === 'puck' ? puckGrade(g, p) : gradeMark(g, gradeKey);
         if (g._st === 'final') return p.verdict !== 'pass' ? '<div class="mk-x">' + esc(label) + grade + '</div>' : '';
-        return pickBox(p, label, price, '');
+        const vp = ((g.venue || {}).picks || {})[gradeKey];
+        const vq = vp ? { poly: vp.poly, kalshi: vp.kalshi, age_s: g.venue.age_s } : null;
+        return pickBox(p, label, price, '', vq, gradeKey === 'puck' ? 'spread' : gradeKey, line);
     }
     // where the line came from: PIN = Pinnacle; anything else is the fallback and says so
     function srcTag(s) {

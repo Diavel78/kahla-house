@@ -5861,6 +5861,62 @@ def test_kalshi_live_data() -> None:
     check("pbp_recent: an unknown shape is empty, never a raise", kv.pbp_recent(None)["n_plays"] == 0 and kv.pbp_recent({"periods": "x"})["recent"] == [])
 
 
+def test_sheet_touch() -> None:
+    """THE SHEET TOUCH (Oct 26 2026, Rob: "CGY ML +133 is from hours ago…
+    can't we just update the button… with Poly numbers?? Without smoking
+    Vercel??"): the box quotes every upcoming sheet pick on both venues on
+    its own thread and publishes one lookup_cache row; Vercel reads it."""
+    import inspect
+    import app as _app
+    I = _app._sheet_touch_items
+    nhl = {"away": "Toronto Maple Leafs", "home": "Calgary Flames", "event_start": "2026-10-26T00:30:00+00:00",
+           "line": {"ml_home": 133, "ml_away": -155, "total": 6.5},
+           "ml": {"side": "home", "price": 133, "verdict": "lean"},
+           "puck": {"side": "away", "line": -1.5, "price": 160, "verdict": "pass"},
+           "total": {"side": "under", "line": 6.5, "verdict": "pass"}}
+    it = I("NHL", nhl)
+    by = {x["k"]: x for x in it}
+    check("sheet touch: hockey ml/puck/total items", set(by) == {"ml", "puck", "total"})
+    check("sheet touch: ml is line 0", by["ml"]["market_type"] == "ml" and by["ml"]["line"] == 0 and by["ml"]["side"] == "home")
+    check("sheet touch: puck is a spread at its own line", by["puck"]["market_type"] == "spread" and by["puck"]["line"] == -1.5)
+    check("sheet touch: total at the pick's line", by["total"]["market_type"] == "total" and by["total"]["line"] == 6.5 and by["total"]["side"] == "under")
+    check("sheet touch: items carry the game", all(x["away"] == nhl["away"] and x["home"] == nhl["home"] and x["event_start"] == nhl["event_start"] and x["sport"] == "NHL" for x in it))
+    fb = {"away": "A", "home": "B", "event_start": "x", "line": {"spread_home": -7, "total": 51},
+          "spread": {"side": "away", "verdict": "play"}, "total": {"side": "over", "verdict": "lean"}}
+    by = {x["k"]: x for x in I("NCAAF", fb)}
+    check("sheet touch: football spread off the side's own market line", by["spread"]["line"] == 7.0 and by["spread"]["market_type"] == "spread")
+    check("sheet touch: football total off the market total", by["total"]["line"] == 51.0)
+    by = {x["k"]: x for x in I("NCAAF", {**fb, "spread": {"side": "away", "line": 7.5, "verdict": "play"}})}
+    check("sheet touch: the bettable half point wins", by["spread"]["line"] == 7.5)
+    check("sheet touch: no side → no item", I("NHL", {"ml": {"verdict": "pass"}, "total": {"side": None}}) == [])
+    check("sheet touch: a bad shape is empty", I("NHL", None) == [] and I("NHL", {"ml": "x"}) == [])
+    check("sheet touch: ask cents off a pmm entry", _app._entry_ask_c({"quote": {"bid": 0.42, "ask": 0.44}}) == 44.0
+          and _app._entry_ask_c({"quote": {"bid": 0.42}}) is None)
+    # a quote is a quote: the rung walk runs WITHOUT the chalk step, chalk is a flag
+    src = inspect.getsource(_app._sheet_touch_poly)
+    check("sheet touch: rung walk has no chalk step", "cap_c=None" in src and '"chalk"' in src)
+    check("sheet touch: slug-agrees guard", "_bet_sheet_slug_disagrees" in src)
+    src = inspect.getsource(_app._sheet_touch_kalshi)
+    check("sheet touch: kalshi through the slip's resolver", "_kv.resolve(" in src)
+    src = inspect.getsource(_app._sheet_touch_pass)
+    check("sheet touch: budgeted, nearest first, unreached games keep the last read",
+          "_SHEET_TOUCH_BUDGET_S" in src and 'st["kept"]' in src and "_sheet_touch_rows" in src)
+    check("sheet touch: one lookup_cache row", '"key": _SHEET_TOUCH_KEY' in src)
+    src = inspect.getsource(_app._sheet_touch_worker)
+    check("sheet touch: kill switch + cadence floor", '_machine_flag("sheet_touch"' in src and "_SHEET_TOUCH_MIN_EVERY_S" in src)
+    check("sheet touch: the box tick starts the thread", "_ensure_sheet_touch_worker()" in inspect.getsource(_app._hand_orders_tick))
+    src = inspect.getsource(_app.api_football_picks)
+    check("sheet touch: the sheet API attaches the venue blob", "_sheet_attach_venue(sb, sport, games)" in src)
+    src = inspect.getsource(_app._sheet_attach_venue)
+    check("sheet touch: Vercel reads the cache, never a venue", "lookup_cache" in src and "lookup(" not in src and "_SHEET_TOUCH_FRESH_S" in src)
+    check("sheet touch: health block", '"sheet_touch": stq' in inspect.getsource(_app._cellar_health))
+    import os
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for page in ("bet_sheets.html", "football_picks.html"):
+        html = open(os.path.join(here, "templates", page), encoding="utf-8").read()
+        check(f"sheet touch: {page} draws the venue line", "function venueLine(" in html and "(g.venue || {}).picks" in html)
+
+
 def test_hand_game_feed() -> None:
     """THE GAME-STATE FEED (Oct 25 2026, Rob: "How are the big players
     reacting fast?"): a score against our side pulls the resting bid at
@@ -6208,7 +6264,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
