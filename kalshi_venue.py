@@ -425,8 +425,25 @@ def pbp_recent(pbp, n: int = 12, now_ts: float | None = None) -> dict:
     the latest period. Tolerates missing keys; an unknown shape → empty."""
     periods = (pbp or {}).get("periods") if isinstance(pbp, dict) else None
     plays, drives = [], []
+    # ⚠ THE PERIODS COME NEWEST FIRST (measured KC @ SEA Oct 25 2026: periods[0]
+    # held the 3rd quarter, periods[2] the 1st) — order them by their plays'
+    # wall clocks, never by list position, and number them from the oldest.
+    order = []
     if isinstance(periods, list):
         for pi, per in enumerate(periods):
+            wcs = []
+            for dv in ((per or {}).get("events") if isinstance(per, dict) else None) or []:
+                for x in (dv or {}).get("plays") or [] if isinstance(dv, dict) else []:
+                    try:
+                        wcs.append(float(x.get("wall_clock")))
+                    except (TypeError, ValueError):
+                        continue
+            order.append((min(wcs) if wcs else float("inf"), pi))
+        order.sort()
+    rank = {pi: k + 1 for k, (_w, pi) in enumerate(order)}
+    if isinstance(periods, list):
+        for pi, per in enumerate(periods):
+            pi = rank.get(pi, pi + 1) - 1
             evs = (per or {}).get("events") if isinstance(per, dict) else None
             for dv in evs or []:
                 if not isinstance(dv, dict):

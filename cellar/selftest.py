@@ -5850,6 +5850,10 @@ def test_kalshi_live_data() -> None:
                                                 "description": "E.Wilson rush", "turnover": "", "wall_clock": 200,
                                                 "away_points": 0, "home_points": 10}]}]}]}
     rec = kv.pbp_recent(pbp, n=2, now_ts=203.0)
+    rev = kv.pbp_recent({"periods": list(reversed(pbp["periods"]))}, n=2, now_ts=203.0)
+    check("pbp_recent: the venue lists quarters NEWEST first — numbered by wall clock, not position",
+          rev["recent"] == rec["recent"] and rev["drives_latest_period"] == rec["drives_latest_period"]
+          and rev["recent"][0]["period"] == 2, str(rev))
     check("pbp_recent: newest first, capped at n, with age", [p["desc"] for p in rec["recent"]] == ["E.Wilson rush", "M.Araiza punts"]
           and rec["recent"][0]["age_s"] == 3.0 and rec["recent"][0]["score"] == "0-10", str(rec))
     check("pbp_recent: counts + the latest period's drives", rec["n_periods"] == 2 and rec["n_drives"] == 2 and rec["n_plays"] == 3
