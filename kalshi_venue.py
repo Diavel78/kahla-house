@@ -310,6 +310,197 @@ def event_markets(event_ticker: str, status: str = "open", ttl_s: float = 30.0) 
     return res
 
 
+
+# ───────────────── live game data (milestones + live_data) ─────────────────
+# Oct 25 2026, Rob: "How are the big players doing this?? How are they
+# reacting fast?" — they price off the GAME, not the book. Kalshi publishes
+# the game: `/milestones` lists every game (title, start, Sportradar
+# source id) and `/live_data/batch` returns status + scores for up to 100
+# milestones a call, public, no auth. The milestone is the GAME, not a
+# Kalshi market — a Polymarket-only bet maps to the same milestone, so one
+# feed drives the chase on both venues. Polymarket publishes no game state
+# (its whole doc index read Oct 25 2026: teams/players/leagues only).
+COMPETITION = {"NFL": "Pro Football", "NCAAF": "College Football",
+               "NBA": "Pro Basketball (M)", "NHL": "Pro Hockey", "MLB": "Pro Baseball"}
+MILESTONE_TYPE = {"NFL": "football_game", "NCAAF": "football_game", "NBA": "basketball_game",
+                  "NHL": "hockey_match", "MLB": "baseball_game"}
+
+
+def milestones(sport: str, min_start_iso: str | None = None, max_pages: int = 4,
+               ttl_s: float = 300.0, competition: str | None = None) -> dict:
+    """Game milestones for a sport (`category=Sports`, competition + type
+    per the docs' examples), paged on the cursor. {ok, milestones, pages,
+    error, params}. The competition name is the docs' example spelling —
+    an empty answer with no error is read as "that filter spelled wrong",
+    and the caller may retry with `competition=''` (type only)."""
+    comp = COMPETITION.get(sport.upper()) if competition is None else competition
+    mtype = MILESTONE_TYPE.get(sport.upper())
+    key = f"ms:{sport}:{comp}:{min_start_iso}"
+    hit = _CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl_s:
+        return hit[1]
+    out, cursor, pages, err = [], None, 0, None
+    while pages < max_pages:
+        params: dict = {"limit": 200, "category": "Sports"}
+        if comp:
+            params["competition"] = comp
+        if mtype:
+            params["type"] = mtype
+        if min_start_iso:
+            params["minimum_start_date"] = min_start_iso
+        if cursor:
+            params["cursor"] = cursor
+        data, err = _get("/milestones", params)
+        if data is None:
+            break
+        rows = data.get("milestones") or []
+        out.extend(rows)
+        pages += 1
+        cursor = data.get("cursor")
+        if not cursor or not rows:
+            break
+    res = {"ok": pages > 0 and err is None, "sport": sport, "milestones": out, "pages": pages,
+           "error": err, "params": {"competition": comp, "type": mtype, "minimum_start_date": min_start_iso}}
+    if res["ok"] and out:
+        _CACHE[key] = (time.time(), res)
+    return res
+
+
+def live_data_batch(milestone_ids: list, include_player_stats: bool = False) -> dict:
+    """`GET /live_data/batch` for up to 100 milestones — {ok, live_datas:
+    {milestone_id: {type, details}}, error, ms}. Never cached: this IS the
+    clock the chase reads. `details.live_data_delayed` is the venue's own
+    staleness flag (set late, some feeds never set it — a missing flag is
+    not freshness)."""
+    ids = [str(x) for x in (milestone_ids or []) if x][:100]
+    if not ids:
+        return {"ok": False, "live_datas": {}, "error": "no ids", "ms": 0}
+    t0 = time.monotonic()
+    params = [("milestone_ids", i) for i in ids]
+    if include_player_stats:
+        params.append(("include_player_stats", "true"))
+    data, err = _get("/live_data/batch", params)
+    ms = round((time.monotonic() - t0) * 1000)
+    rows = (data or {}).get("live_datas") or [] if isinstance(data, dict) else []
+    by = {}
+    for r in rows:
+        if isinstance(r, dict) and r.get("milestone_id"):
+            by[str(r["milestone_id"])] = {"type": r.get("type"), "details": r.get("details") or {}}
+    return {"ok": data is not None, "live_datas": by, "error": err, "ms": ms}
+
+
+def live_data(milestone_id: str, include_player_stats: bool = False) -> dict:
+    """`GET /live_data/milestone/{id}` — one game. {ok, type, details, error, ms}."""
+    t0 = time.monotonic()
+    params = {"include_player_stats": "true"} if include_player_stats else None
+    data, err = _get(f"/live_data/milestone/{milestone_id}", params)
+    ms = round((time.monotonic() - t0) * 1000)
+    ld = (data or {}).get("live_data") or {} if isinstance(data, dict) else {}
+    return {"ok": data is not None, "type": ld.get("type"), "details": ld.get("details") or {},
+            "error": err, "ms": ms}
+
+
+def game_stats(milestone_id: str) -> dict:
+    """`GET /live_data/milestone/{id}/game_stats` — play-by-play by period
+    (Sportradar-backed; null for a milestone without a Sportradar id).
+    {ok, pbp, error, ms}."""
+    t0 = time.monotonic()
+    data, err = _get(f"/live_data/milestone/{milestone_id}/game_stats")
+    ms = round((time.monotonic() - t0) * 1000)
+    return {"ok": data is not None, "pbp": (data or {}).get("pbp") if isinstance(data, dict) else None,
+            "error": err, "ms": ms}
+
+
+def _milestone_dt(m: dict):
+    v = m.get("start_date")
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def pick_milestone(rows: list, away: str, home: str, start_iso: str | None,
+                   max_gap_s: float = 12 * 3600) -> dict | None:
+    """PURE. The milestone for this game: both teams named in its title
+    (or any `related_event_tickers` text) and its start within `max_gap_s`
+    of ours (a series replays one matchup; the nearest start wins). None
+    when nothing names both teams inside the window."""
+    try:
+        want = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        want = None
+    best, best_gap = None, None
+    for m in rows or []:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        text = " ".join([str(m.get("title") or ""), str(m.get("notification_message") or ""),
+                         " ".join(str(t) for t in (m.get("related_event_tickers") or []))])
+        if not (team_mentioned(text, away) and team_mentioned(text, home)):
+            continue
+        gap = 0.0
+        if want is not None:
+            d = _milestone_dt(m)
+            if d is None:
+                gap = max_gap_s  # dateless row: eligible, but any dated row beats it
+            else:
+                gap = abs((d - want).total_seconds())
+                if gap > max_gap_s:
+                    continue
+        if best is None or gap < best_gap:
+            best, best_gap = m, gap
+    return best
+
+
+def _walk(obj, path="", out=None, depth=0):
+    """Flatten a nested dict into {dotted.path: scalar} for the shape probe."""
+    if out is None:
+        out = {}
+    if depth > 6:
+        return out
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            _walk(v, f"{path}.{k}" if path else str(k), out, depth + 1)
+    elif isinstance(obj, list):
+        out[path] = f"<list len {len(obj)}>"
+        for i, v in enumerate(obj[:3]):
+            _walk(v, f"{path}[{i}]", out, depth + 1)
+    else:
+        out[path] = obj
+    return out
+
+
+def game_state(details: dict) -> dict:
+    """PURE, BEST-EFFORT read of a live_data `details` object into one
+    shape {status, home_score, away_score, period, clock, delayed, raw_keys}.
+    The venue's field names are sport-specific and were UNVERIFIED when
+    this shipped (Oct 25 2026) — the probe route records the raw details,
+    and this reader is widened from what the probe shows. Anything it
+    cannot find is None, never a guess."""
+    d = details if isinstance(details, dict) else {}
+    flat = _walk(d)
+    low = {k.lower(): (k, v) for k, v in flat.items()}
+
+    def find(*cands):
+        for c in cands:
+            for lk, (k, v) in low.items():
+                if lk == c or lk.endswith("." + c):
+                    if v is not None and not (isinstance(v, str) and v.startswith("<list")):
+                        return v
+        return None
+
+    return {
+        "status": find("status", "game_status", "state"),
+        "home_score": find("home_score", "home.score", "home.points", "homescore", "score.home"),
+        "away_score": find("away_score", "away.score", "away.points", "awayscore", "score.away"),
+        "period": find("period", "quarter", "inning", "half", "clock.period"),
+        "clock": find("clock", "game_clock", "time_remaining", "clock.display"),
+        "delayed": bool(find("live_data_delayed")),
+        "raw_keys": sorted(flat.keys())[:80],
+    }
+
+
 def series_fee(series: str, ttl_s: float = 6 * 3600) -> dict:
     """The series' fee terms off GET /series/{ticker}: {maker: bool, mult:
     float, fee_type, raw_keys, ok}. Field names are read defensively

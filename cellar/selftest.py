@@ -5780,6 +5780,41 @@ def test_hand_start_chase_never_cancels() -> None:
           and src_p.count("return None") >= 3)
 
 
+def test_kalshi_live_data() -> None:
+    """THE GAME-STATE FEED (Oct 25 2026): a Polymarket-only bet maps to the
+    same Kalshi milestone as a Kalshi bet would — the milestone is the
+    GAME. The pure pick + the best-effort state read, no network."""
+    import kalshi_venue as kv
+    rows = [
+        {"id": "m1", "title": "Kansas City Chiefs at Seattle Seahawks", "start_date": "2026-10-26T00:20:00Z",
+         "type": "football_game", "related_event_tickers": ["KXNFLGAME-26OCT25KCSEA"]},
+        {"id": "m2", "title": "Seattle Seahawks at Kansas City Chiefs", "start_date": "2026-11-15T21:25:00Z",
+         "type": "football_game", "related_event_tickers": []},
+        {"id": "m3", "title": "Denver Broncos at Arizona Cardinals", "start_date": "2026-10-25T20:05:00Z",
+         "type": "football_game", "related_event_tickers": []},
+    ]
+    m = kv.pick_milestone(rows, "Kansas City Chiefs", "Seattle Seahawks", "2026-10-26T00:20:00Z")
+    check("live_data: the game maps to its own milestone, not the rematch", m and m["id"] == "m1", str(m))
+    m = kv.pick_milestone(rows, "Kansas City", "Seattle", "2026-11-15T21:25:00Z")
+    check("live_data: the rematch maps to the nearer start", m and m["id"] == "m2", str(m))
+    m = kv.pick_milestone(rows, "Arizona Cardinals", "Denver Broncos", "2026-10-25T20:05:00Z")
+    check("live_data: either orientation matches", m and m["id"] == "m3", str(m))
+    m = kv.pick_milestone(rows, "Buffalo Bills", "Carolina Panthers", "2026-10-25T20:05:00Z")
+    check("live_data: an unlisted game maps to nothing", m is None, str(m))
+    m = kv.pick_milestone(rows, "Kansas City Chiefs", "Seattle Seahawks", "2026-12-01T00:20:00Z")
+    check("live_data: a start 15 days off is outside the window", m is None, str(m))
+    st = kv.game_state({"status": "live", "home": {"score": 14, "name": "SEA"}, "away": {"score": 7},
+                        "period": 2, "clock": "4:37", "live_data_delayed": False})
+    check("live_data: state reads status/scores/period/clock",
+          st["status"] == "live" and st["home_score"] == 14 and st["away_score"] == 7
+          and st["period"] == 2 and st["clock"] == "4:37" and st["delayed"] is False, str(st))
+    st = kv.game_state({"foo": {"bar": 1}})
+    check("live_data: unknown shape reads None, never a guess",
+          st["status"] is None and st["home_score"] is None and "foo.bar" in st["raw_keys"], str(st))
+    check("live_data: the venue reads are plain functions",
+          all(callable(getattr(kv, n, None)) for n in ("milestones", "live_data_batch", "live_data", "game_stats")))
+
+
 def test_kalshi_ws_book() -> None:
     """THE KALSHI SOCKET BOOK (Oct 18 2026): snapshot + deltas → the same
     order-book shape the REST read returns, on either wire shape (legacy
@@ -6012,7 +6047,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

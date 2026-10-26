@@ -1742,9 +1742,10 @@ def api_sheet_tv():
 # on each. The venue layer is kalshi_venue.py; the math is pure and
 # selftested. Spec: docs/dual-venue-hand-bets-spec.md.
 # ═══════════════════════════════════════════════════════════════════════
-def _sheet_games_today(sb, sport: str, days: int = 1) -> list:
+def _sheet_games_today(sb, sport: str, days: int = 1, include_started: bool = False) -> list:
     """Today's (AZ) upcoming sheet games for a sport, in the page's shape
-    (`days` widens the window: 2 = today + tomorrow)."""
+    (`days` widens the window: 2 = today + tomorrow). `include_started`
+    keeps the games already under way (the live-data probe wants them)."""
     wk = (sb.table("football_sheet_weeks").select("week_key").eq("sport", sport)
           .order("week_key", desc=True).limit(1).execute().data or [{}])[0]
     if not wk.get("week_key"):
@@ -1762,7 +1763,8 @@ def _sheet_games_today(sb, sport: str, days: int = 1) -> list:
     for r in rows:
         g = shape(r)
         try:
-            if datetime.fromisoformat(str(g.get("event_start")).replace("Z", "+00:00")) <= now:
+            if (not include_started
+                    and datetime.fromisoformat(str(g.get("event_start")).replace("Z", "+00:00")) <= now):
                 continue
         except (TypeError, ValueError):
             continue
@@ -1901,6 +1903,124 @@ def api_kalshi_coverage():
         "take_kalshi": sum(1 for r in rows if r["take"].get("venue") == "KALSHI"),
         "take_poly": sum(1 for r in rows if r["take"].get("venue") == "POLYMARKET"),
         "elapsed_s": round(_time.monotonic() - t0, 1)}
+    return jsonify(out)
+
+
+@app.route("/api/kalshi/livedata")
+def api_kalshi_livedata():
+    """READ-ONLY, shared-secret (site-curl). THE GAME-STATE PROBE (Oct 25
+    2026, Rob: "How are the big players reacting fast? Is it a system we
+    don't have access to?" — it is Kalshi's own live-data feed, public).
+    ?sport=NFL [&hours=6] [&live=1] [&pbp=1] [&game=seattle] [&n=12]
+    [&competition=] — maps today's sheet games (started ones included) to
+    Kalshi milestones by team names + start, reads `/live_data/batch` for
+    them, and returns the RAW `details` per game beside a best-effort
+    `state` read, so the box logic is written off real fields. `live=1`
+    keeps only games under way; `pbp=1` adds `/game_stats` for the first
+    live game. Stamps exec_probe_runs kind=kalshi_livedata."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    import kalshi_venue as kv
+    sport = (request.args.get("sport") or "NFL").upper()
+    gq = (request.args.get("game") or "").strip().lower()
+    try:
+        hours = max(1, min(48, int(request.args.get("hours") or 8)))
+        n_max = max(1, min(40, int(request.args.get("n") or 12)))
+    except ValueError:
+        return jsonify({"ok": False, "error": "bad hours/n"}), 400
+    live_only = bool(request.args.get("live"))
+    comp = request.args.get("competition")  # '' = type-only filter
+    now = datetime.now(timezone.utc)
+    out: dict = {"kind": "kalshi_livedata", "ok": True, "sport": sport,
+                 "at": datetime.now(ZoneInfo("America/Phoenix")).strftime("%Y-%m-%d %H:%M:%S")}
+    # 1. the milestone catalog for the sport, from yesterday on
+    min_start = (now - timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    t0 = _time.monotonic()
+    ms = kv.milestones(sport, min_start, competition=comp)
+    out["milestones"] = {"ok": ms.get("ok"), "n": len(ms.get("milestones") or []), "pages": ms.get("pages"),
+                         "error": ms.get("error"), "params": ms.get("params"),
+                         "ms": round((_time.monotonic() - t0) * 1000)}
+    if ms.get("ok") and not ms.get("milestones") and comp is None:
+        # the docs' competition spelling may be off — retry type-only
+        ms2 = kv.milestones(sport, min_start, competition="")
+        out["milestones"]["retry_type_only"] = {"ok": ms2.get("ok"), "n": len(ms2.get("milestones") or []),
+                                                "error": ms2.get("error")}
+        if ms2.get("milestones"):
+            ms = ms2
+    rows_ms = ms.get("milestones") or []
+    out["milestones"]["sample"] = [{"id": m.get("id"), "title": m.get("title"), "start": m.get("start_date"),
+                                    "type": m.get("type"), "source_ids": m.get("source_ids") or m.get("source_id"),
+                                    "events": (m.get("related_event_tickers") or [])[:3],
+                                    "details_status": (m.get("details") or {}).get("status")}
+                                   for m in rows_ms[:6]]
+    # 2. our games (sheet rows, started included)
+    sb = get_supabase()
+    try:
+        games = _sheet_games_today(sb, sport, 1, include_started=True)
+    except Exception as e:
+        return jsonify({**out, "ok": False, "error": f"sheet read: {e}"[:200]}), 500
+    lo = now - timedelta(hours=hours)
+    keep = []
+    for g in games:
+        try:
+            es = datetime.fromisoformat(str(g.get("event_start")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if es < lo:
+            continue
+        started = es <= now
+        if live_only and not started:
+            continue
+        if gq and gq not in f"{g.get('away')} {g.get('home')}".lower():
+            continue
+        keep.append((g, started))
+    out["games"] = len(keep)
+    keep = keep[:n_max]
+    # 3. map → milestone
+    mapped, unmatched = [], []
+    for g, started in keep:
+        m = kv.pick_milestone(rows_ms, g.get("away") or "", g.get("home") or "", g.get("event_start"))
+        row = {"game": f"{g.get('away')} @ {g.get('home')}", "start": g.get("event_start"), "started": started,
+               "market_id": g.get("market_id")}
+        if m:
+            row["milestone"] = {"id": m.get("id"), "title": m.get("title"), "start": m.get("start_date"),
+                                "source_ids": m.get("source_ids") or m.get("source_id")}
+            mapped.append(row)
+        else:
+            unmatched.append(row)
+    out["unmatched"] = unmatched
+    # 4. one batch read for every mapped game
+    ids = [r["milestone"]["id"] for r in mapped]
+    ld = kv.live_data_batch(ids) if ids else {"ok": False, "live_datas": {}, "error": "no mapped games", "ms": 0}
+    out["live_data"] = {"ok": ld.get("ok"), "n": len(ld.get("live_datas") or {}), "error": ld.get("error"),
+                        "ms": ld.get("ms")}
+    first_live = None
+    for r in mapped:
+        e = (ld.get("live_datas") or {}).get(r["milestone"]["id"])
+        if e:
+            det = e.get("details") or {}
+            r["type"] = e.get("type")
+            r["state"] = kv.game_state(det)
+            raw = json.dumps(det, default=str)
+            r["details_raw"] = raw[:3500] + ("…" if len(raw) > 3500 else "")
+            if r["started"] and first_live is None:
+                first_live = r
+        else:
+            r["state"] = None
+    out["rows"] = mapped
+    if request.args.get("pbp") and first_live:
+        gs = kv.game_stats(first_live["milestone"]["id"])
+        periods = (gs.get("pbp") or {}).get("periods") if isinstance(gs.get("pbp"), dict) else None
+        tail = []
+        if isinstance(periods, list) and periods:
+            evs = (periods[-1] or {}).get("events") or []
+            tail = evs[-3:]
+        out["game_stats"] = {"game": first_live["game"], "ok": gs.get("ok"), "error": gs.get("error"), "ms": gs.get("ms"),
+                             "periods": len(periods) if isinstance(periods, list) else None,
+                             "last_events_raw": json.dumps(tail, default=str)[:3000]}
+    out["elapsed_s"] = round(_time.monotonic() - t0, 2)
+    _probe_log(out)
     return jsonify(out)
 
 
