@@ -5967,6 +5967,8 @@ def test_hand_game_feed() -> None:
           "_hand_game_team_ids(det, _GAME_MS_TITLE.get(mid), team_ids)" in src_p and "_hand_game_events(prev, cur, team_ids, gtype)" in src_p
           and '"book": book' in src_p and "_hand_game_publish(now_ts)" in src_p and 'punt_pull' in src_p)
     check("the idle worker still publishes a heartbeat", "_hand_game_publish(_time.time(), idle=True)" in inspect.getsource(_app._hand_game_worker))
+    check("…and the worker is started whether or not anything is watched (Oct 25 2026: health read {} on a live box)",
+          "    _ensure_game_worker()          # always" in inspect.getsource(_app._hand_game_watch_update))
     check("health prints the game feed", '"game_feed": gf' in inspect.getsource(_app._cellar_health))
     check("the live strip stamps the game off Kalshi for every in-play row", "_bet_sheet_live_game(out, now)" in inspect.getsource(_app._bet_sheet_live_enrich)
           and 'b["game"] = g' in inspect.getsource(_app._bet_sheet_live_game))

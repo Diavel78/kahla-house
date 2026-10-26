@@ -26126,8 +26126,7 @@ def _hand_game_watch_update() -> int:
     GAME_WATCH.update(w)
     for mid in [m for m in list(GAME_STATE) if m not in w]:
         GAME_STATE.pop(mid, None)
-    if w:
-        _ensure_game_worker()
+    _ensure_game_worker()          # always: the idle worker publishes the "alive, nothing watched" heartbeat health reads
     return len(w)
 
 
