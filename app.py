@@ -2786,7 +2786,8 @@ def api_football_picks_debug():
             blk = {"game": g.get("event_name"), "start": g.get("event_start"), "venue_age_s": (g.get("venue") or {}).get("age_s"),
                    "picks": {k: {"side": g[k].get("side"), "line": g[k].get("line"), "model_verdict": g[k].get("model_verdict")}
                              for k in ("ml", "puck", "spread", "total") if isinstance(g.get(k), dict)},
-                   "pin": bool(g.get("pin")), "seeded": g.get("pin_seeded")}
+                   "pin": bool(g.get("pin")), "seeded": g.get("pin_seeded"),
+                   "venue": ((g.get("venue") or {}).get("picks") if request.args.get("venue") else None)}
             if raw_by_id:
                 blk["raw"] = raw_by_id.get(g.get("market_id"))
             for k in ("ml", "puck", "spread", "total"):
