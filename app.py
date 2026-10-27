@@ -24832,6 +24832,7 @@ def api_bet_sheets_mine():
             "held_unknown": bool((bx or {}).get("held_unknown")) if kalshi else False,
             "venue_pick": blob.get("venue_pick"),
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
+            "auto": bool(blob.get("auto_price")),      # the page's AUTO state (amber, never "need you")
             "live_snipe": bool(blob.get("live_snipe")),
             "getlive_from": blob.get("getlive_from"),
             # NO "PULLED · back ~" ON A FULL LOT (Oct 24 2026, BC@GT O 49.5: the pull's cancel raced
