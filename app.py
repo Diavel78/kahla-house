@@ -17310,8 +17310,18 @@ def _hand_status_publish(sb, client) -> dict:
                 .limit(300).execute().data or [])
     except Exception as e:
         return {"err": f"picks: {e}"[:120]}
-    orders = _pmm_open_orders_raw(client, fresh=False) or []
-    positions = _pmm_positions_raw(client, fresh=False) or {}
+    orders = _pmm_open_orders_raw(client, fresh=False)
+    positions = _pmm_positions_raw(client, fresh=False)
+    # A FAILED VENUE READ IS NOT AN EMPTY BOOK (Oct 27 2026, 10:07 AM AZ — 109
+    # OFF THE BOOK Telegrams in 60 seconds: both Polymarket reads returned
+    # None for two ticks, `or []` turned that into "no order resting and
+    # nothing held" on every Polymarket pick, and the red alert fired on all
+    # of them). None = unreadable: every Polymarket row reads held_unknown
+    # (never red), the strip says `venue_ok: False`, and the red alert tick
+    # stands down on it.
+    venue_ok = orders is not None and positions is not None
+    orders = orders or []
+    positions = positions or {}
     by_id = {o["id"]: o for o in orders if o.get("id")}
     out, quoted = {}, 0
     held_slugs: set = set()
@@ -17385,8 +17395,8 @@ def _hand_status_publish(sb, client) -> dict:
             quoted += 1
         out[str(r["id"])] = {
             "order": ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("cum"), "price_c": price_c}
-                      if resting else {"resting": False}),
-            "held": round(held, 2), "cur_c": cur_c, "touch_c": touch_c,
+                      if resting else ({"resting": False} if venue_ok else {"resting": False, "unread": True})),
+            "held": round(held, 2), "held_unknown": (not venue_ok), "cur_c": cur_c, "touch_c": touch_c,
             "outbid": bool(resting and touch_c is not None and price_c is not None
                            and price_c < float(touch_c) - 0.01),
             "chase": {"hold": blob.get("chase_hold"), "anchor_c": blob.get("anchor_c", blob.get("price_c")),
@@ -17425,7 +17435,7 @@ def _hand_status_publish(sb, client) -> dict:
     global HAND_HELD_SLUGS, KALSHI_WATCH_TICKERS
     HAND_HELD_SLUGS = held_slugs
     KALSHI_WATCH_TICKERS = k_watch | _hand_pre_tickers()   # cellar/kalshifeed.py subscribes this set (+ the slip's pre-subscribed tickers)
-    _HAND_STATUS_LAST.update({"at": _time.time(), "rows": out})   # the red alert reads this tick's strip
+    _HAND_STATUS_LAST.update({"at": _time.time(), "rows": out, "venue_ok": venue_ok})   # the red alert reads this tick's strip
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
         sb.table("lookup_cache").upsert({
@@ -17736,6 +17746,8 @@ def _hand_red_alert_tick(sb, now) -> dict:
     strip = st.get("rows") or {}
     if not strip or _time.time() - float(st.get("at") or 0) > 120.0:
         return {"skip": "no_strip"}
+    if st.get("venue_ok") is False:
+        return {"skip": "venue_unread", "retried": retried}   # a dark venue is nobody's red (Oct 27 2026)
     try:
         picks = (sb.table("bot_picks")
                  .select("id,event_name,event_start,sport,market_type,side,entry_line,market_id,signal_blob")

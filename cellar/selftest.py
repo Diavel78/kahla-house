@@ -4010,6 +4010,18 @@ def test_hand_red_alert() -> None:
     check("start alert: the red-alert tick drains the retry queue",
           "_hand_start_alert_retry()" in _insp.getsource(_app._hand_red_alert_tick))
 
+    # A DARK VENUE IS NOBODY'S RED (Oct 27 2026, 109 OFF THE BOOK pings on a failed read)
+    import inspect as _ri
+    _pub = _ri.getsource(_app._hand_status_publish)
+    check("red alert: the publisher keeps None (unreadable) apart from [] (empty) and marks every row held_unknown",
+          "venue_ok = orders is not None and positions is not None" in _pub
+          and '"held_unknown": (not venue_ok)' in _pub and '"venue_ok": venue_ok' in _pub)
+    check("red alert: an OFF THE BOOK read on an unreadable venue is not red",
+          _app._hand_red_state({"bet_sheet": True, "price_c": 50.0}, {"order": {"resting": False, "unread": True}, "held": 0.0, "held_unknown": True}) is None
+          and _app._hand_red_state({"bet_sheet": True, "price_c": 50.0}, {"order": {"resting": False}, "held": 0.0, "held_unknown": False}) is not None)
+    _tick = _ri.getsource(_app._hand_red_alert_tick)
+    check("red alert: the tick stands down on a strip whose venue reads failed",
+          'if st.get("venue_ok") is False:' in _tick and _tick.index('venue_unread') < _tick.index('for r in picks:'))
 
 def test_hand_guard_and_recon() -> None:
     """THE RELIABILITY LAYER (Oct 20 2026, Rob: "wrong sides, bad bets,
