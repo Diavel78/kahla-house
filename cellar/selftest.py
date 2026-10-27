@@ -6515,6 +6515,21 @@ def test_price_rule() -> None:
     check("fair pull: never a live snipe / in-play / sitting-out bet", all(P({**base, k: {"x": 1}}, 53.0, 51.0, 120)[0] == "skip" for k in ("live_snipe", "in_play", "line_hold", "poly_cancel_sent")))
     check("fair pull: never a lot held in full", P({**base, "filled_qty": 10}, 53.0, 51.0, 120)[0] == "skip")
     check("fair pull: nothing resting, nothing to pull", P({**base, "order_id": None}, 53.0, 51.0, 120)[0] == "skip")
+    # THE FLIP TO A LONGSHOT (Oct 26 2026, BKN @ BOS): the other side gets its own
+    # longshot / chalk mark off Pinnacle, and the card's venue line follows the side
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    _now = _dt.now(_tz.utc)
+    gf = {"sport": "NBA", "home": "Boston Celtics", "away": "Brooklyn Nets", "event_start": (_now + _td(hours=5)).isoformat(),
+          "ml": {"side": "home", "line": None, "price": -630, "team": "Boston Celtics", "verdict": "lean",
+                 "pin_fair": {"prob": 0.83, "american": -488}},
+          "venue": {"age_s": 60, "picks": {"ml": {"poly": {"bid": 84.0, "ask": 85.0, "line": None, "chalk": True},
+                                                  "kalshi": {"bid": 83.0, "ask": 85.0, "line": None}}}}}
+    _app._sheet_attach_price("NBA", gf, _now)
+    m = gf["ml"]
+    check("flip: the price rule takes the other side", m.get("flipped") is True and m.get("side") == "away")
+    check("flip: the +468 dog is marked longshot, not chalk", m.get("longshot") is True and not m.get("chalky"))
+    vq = gf["venue"]["picks"]["ml"]
+    check("flip: the venue line is mirrored to the new side", vq["poly"]["bid"] == 15.0 and vq["poly"]["ask"] == 16.0 and vq["poly"]["chalk"] is False and vq["kalshi"]["bid"] == 15.0)
 
 
 def main() -> int:

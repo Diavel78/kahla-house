@@ -1516,7 +1516,7 @@ def _sheet_grade_pick(g: dict, key: str, pick: dict):
     return "win" if m > 0 else "loss" if m < 0 else "push"
 
 
-def _sheet_flip_pick(g: dict, key: str, pick: dict, pv: dict) -> dict:
+def _sheet_flip_pick(g: dict, key: str, pick: dict, pv: dict, sport=None) -> dict:
     """Pure. The OTHER side of a sheet market as a pick dict, when the price
     rule bets it and the model's side is not under fair: side, line and
     team mirrored, Pinnacle's fair mirrored, the model's read kept under
@@ -1550,6 +1550,55 @@ def _sheet_flip_pick(g: dict, key: str, pick: dict, pv: dict) -> dict:
         out.pop(k, None)
     if key in ("spread", "puck") and out.get("line") is not None:
         out["market_line"] = out["line"]
+    if key == "ml" and npf and npf.get("american") is not None:
+        # the OTHER side gets its own chalk / longshot marks off Pinnacle's
+        # price (Oct 26 2026, BKN @ BOS: the flip to the +468 dog carried no
+        # longshot mark and the card read LEAN on a bet Rob never makes)
+        try:
+            px = float(npf["american"])
+            if px <= _SHEET_CHALK_ML:
+                out["chalky"] = True
+            if str(sport or g.get("sport") or "").upper() in ("NBA", "MLB") and px >= _SHEET_LONGSHOT_ML:
+                out["longshot"] = True
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _sheet_mirror_quote(q: dict, mt: str, key: str) -> dict:
+    """Pure. The venue touch for the OTHER side of a market off the quoted
+    side's book: our bid = 100 − their ask, our ask = 100 − their bid, the
+    line mirrored (a total keeps its number), chalk re-judged against the
+    market's cap (Oct 26 2026: a flipped card showed the model side's 84¢
+    'chalk' under a +468 dog's button)."""
+    out = {}
+    for v in ("poly", "kalshi"):
+        q0 = q.get(v) if isinstance(q.get(v), dict) else None
+        if not q0:
+            out[v] = q0
+            continue
+        try:
+            b0 = float(q0["bid"]) if q0.get("bid") is not None else None
+            a0 = float(q0["ask"]) if q0.get("ask") is not None else None
+        except (TypeError, ValueError):
+            b0, a0 = None, None
+        nb_ = round(100.0 - a0, 2) if a0 is not None else None
+        na_ = round(100.0 - b0, 2) if b0 is not None else None
+        ln = q0.get("line")
+        try:
+            nl = (None if ln is None else (float(ln) if key == "total" else -float(ln)))
+        except (TypeError, ValueError):
+            nl = None
+        cap = None
+        try:
+            cap = _hand_chalk_cap_c(mt)
+        except Exception:
+            cap = None
+        chalk = bool(nb_ is not None and cap is not None and nb_ >= float(cap) - 1e-9)
+        out[v] = {**q0, "bid": nb_, "ask": na_, "line": nl, "chalk": chalk, "mirrored": True}
+    for k, v in q.items():
+        if k not in ("poly", "kalshi"):
+            out[k] = v
     return out
 
 
@@ -1597,7 +1646,9 @@ def _sheet_attach_price(sport: str, g: dict, now) -> None:
         opp = pv.get("opp") if isinstance(pv.get("opp"), dict) else None
         if (key != "puck" and opp and opp.get("verdict") != "pass" and pv.get("verdict") == "pass"):
             # only the other side rests under fair → the price bets it
-            npk = _sheet_flip_pick(g, key, pk, pv)
+            npk = _sheet_flip_pick(g, key, pk, pv, sport=sport)
+            if q is not None and isinstance(vp, dict):
+                vp[key] = _sheet_mirror_quote(q, mt, key)       # the card's venue line follows the side
             npv = {**pv, "venue": opp.get("venue"), "cost_c": opp.get("cost_c"), "edge_c": opp.get("edge_c"),
                    "verdict": opp.get("verdict"), "rec": "opp", "flipped": True,
                    "fair_c": (round(100.0 - float(pv["fair_c"]), 2) if pv.get("fair_c") is not None else None),
