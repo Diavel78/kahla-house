@@ -4577,6 +4577,19 @@ def test_auto_price_lane() -> None:
     check("auto red: an auto bet's chalk hold is not red", _app._hand_red_state(hb2, st_) is None)
     hb3 = {"order_id": "x", "contracts": 5, "price_c": 48.0, "chase_hold": {"touch_c": 55.0, "chalk_c": 54.5, "price_c": 48.0}}
     check("auto red: a hand bet's chalk hold stays red", (_app._hand_red_state(hb3, st_) or (None,))[0] == "chalk")
+    # ONE SIDE MARKET PER GAME (Rob, Oct 26 2026: "That's way too much risk")
+    sk = _app._auto_price_side_key
+    check("one side: football and NBA play the spread",
+          sk("NFL", {}) == "spread" and sk("NCAAF", {}) == "spread" and sk("NBA", {"ml": {"side": "away"}, "pin": {"ml_home": -180, "ml_away": 157}}) == "spread")
+    gfav = {"ml": {"side": "home"}, "pin": {"ml_home": -123, "ml_away": 110}}
+    gdog = {"ml": {"side": "away"}, "pin": {"ml_home": -123, "ml_away": 110}}
+    check("one side: hockey favorite → puck line, dog → ML", sk("NHL", gfav) == "puck" and sk("NHL", gdog) == "ml")
+    check("one side: MLB favorite → run line, dog → ML", sk("MLB", gfav) == "spread" and sk("MLB", gdog) == "ml")
+    check("one side: no Pinnacle ML price = the dog → ML", sk("NHL", {"ml": {"side": "home"}}) == "ml")
+    import inspect as _insp2
+    src2 = _insp2.getsource(_app._auto_price_tick)
+    check("one side: the scan skips the other side market and sweeps a doubled seat",
+          '_skip("one_side_market")' in src2 and "hand_auto_side_pull" in src2 and src2.index("_auto_price_side_key(") < src2.index("for k in _AUTO_PRICE_KEYS"))
 
 
 def test_end_state_rosters() -> None:

@@ -22779,6 +22779,35 @@ def _auto_price_label(g: dict, key: str, pick: dict) -> str:
     return f"{nm} {ln:+g}" if ln is not None else f"{nm} {key}"
 
 
+def _auto_price_side_key(sport: str, g: dict):
+    """ONE SIDE MARKET PER GAME (Rob, Oct 26 2026, on DET ML + DET +3.5 both
+    resting: "That's way too much risk"). The sheet's own rules: football
+    and NBA play the spread; hockey plays the favorite's puck line and a
+    dog's ML; MLB the favorite's run line and a dog's ML. The total rides
+    beside it. The favorite is read off Pinnacle's ML prices for the ML
+    pick's side; no price = the dog. Returns the key or None."""
+    sport = str(sport or "").upper()
+    if sport in ("NFL", "NCAAF", "NBA"):
+        return "spread"
+    if sport not in ("NHL", "MLB"):
+        return None
+    ml = g.get("ml") if isinstance(g.get("ml"), dict) else {}
+    side = str(ml.get("side") or "")
+    pin = g.get("pin") if isinstance(g.get("pin"), dict) else {}
+    fav = False
+    try:
+        mh, ma = pin.get("ml_home"), pin.get("ml_away")
+        if mh is not None and ma is not None and side in ("home", "away"):
+            fav = float(mh if side == "home" else ma) < float(ma if side == "home" else mh)
+    except (TypeError, ValueError):
+        fav = False
+    if not side:
+        return "puck" if sport == "NHL" else "spread"
+    if fav:
+        return "puck" if sport == "NHL" else "spread"
+    return "ml"
+
+
 def _auto_price_tick(sb, client, now) -> dict:
     """THE SCAN: every upcoming sheet rung with Pinnacle fair and no pending
     sheet bet on its market gets ONE hand_orders create row priced by the
@@ -22803,13 +22832,20 @@ def _auto_price_tick(sb, client, now) -> dict:
     # what is already on the board: any pending sheet/app pick on a market blocks it
     hi = (now + timedelta(hours=_SHEET_TOUCH_HORIZON_H)).isoformat()
     try:
-        prow = (sb.table("bot_picks").select("sport,event_name,market_type")
+        prow = (sb.table("bot_picks").select("id,sport,event_name,event_start,market_type,side,signal_blob")
                 .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                 .gte("event_start", (now - timedelta(hours=12)).isoformat()).lte("event_start", hi)
                 .limit(500).execute().data) or []
     except Exception as e:
         st["gate"] = f"picks: {e}"[:100]
         return st
+    auto_pend: dict = {}                    # (sport, event_name, mt) -> the pending AUTO pick row
+    for r in prow:
+        b_ = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if isinstance(b_.get("auto_price"), dict):
+            auto_pend[(str(r.get("sport") or "").upper(), str(r.get("event_name") or ""),
+                       str(r.get("market_type") or ""))] = r
+    st["side_pulled"] = 0
     booked = {(str(r.get("sport") or "").upper(), str(r.get("event_name") or ""),
                {"moneyline": "ml"}.get(str(r.get("market_type") or ""), str(r.get("market_type") or "")))
               for r in prow}
@@ -22857,9 +22893,40 @@ def _auto_price_tick(sb, client, now) -> dict:
         if tq and tq.get("picks") and touch_age is not None and touch_age < _SHEET_TOUCH_FRESH_S:
             g["venue"] = {"at": tq.get("at"), "age_s": int(touch_age), "picks": tq["picks"]}
         _sheet_attach_price(sport, g, now)              # the flip: the price rule names the side
+        side_key = _auto_price_side_key(sport, g)
+        # THE DOUBLED SEAT COMES OFF (Oct 26 2026): a resting unfilled AUTO bet on
+        # the side market this game does NOT play (the ML beside a spread, the
+        # puck line beside a dog's ML) is cancelled through the ordinary path.
+        for mt_ in ("moneyline", "spread"):
+            k_ = "ml" if mt_ == "moneyline" else ("puck" if sport == "NHL" else "spread")
+            if k_ == side_key or st["side_pulled"] >= _AUTO_PRICE_PULL_MAX:
+                continue
+            pr = auto_pend.get((sport, str(g.get("event_name") or ""), mt_))
+            if not pr or client is None:
+                continue
+            pb = pr.get("signal_blob") if isinstance(pr.get("signal_blob"), dict) else {}
+            v0, _d0 = _hand_fair_pull_plan(pb, pb.get("price_c"), 0.0, lead_min, pull_c=1e9, reads=1)
+            if v0 == "skip":
+                continue
+            st["side_pulled"] += 1
+            try:
+                out_, code_ = _bet_sheet_cancel_exec(sb, client, pr["id"])
+            except Exception as e:
+                out_, code_ = {"ok": False, "error": str(e)[:120]}, 500
+            _AUTO_PRICE_SENT[(sport, str(g.get("event_name") or ""), mt_)] = _time.monotonic()
+            try:
+                _probe_log({"hand_auto_side_pull": True, "pick_id": pr["id"], "at": now.isoformat(), "auto": True,
+                            "sport": sport, "event_name": g.get("event_name"), "market_type": mt_,
+                            "kept_key": side_key, "label": pb.get("label"), "price_c": pb.get("price_c"),
+                            "venue": pb.get("venue") or "POLYMARKET", "result": out_, "code": code_})
+            except Exception:
+                pass
         for k in _AUTO_PRICE_KEYS.get(sport, ()):
             if len(rows_out) >= cfg["max_tick"]:
                 break
+            if k != "total" and k != side_key:
+                _skip("one_side_market")
+                continue
             pk = g.get(k)
             if not isinstance(pk, dict) or not pk.get("side"):
                 continue
