@@ -45193,7 +45193,9 @@ def _pin_slate_cached(sb, sport: str, now):
 # /api/pinnacle/probe?match=1 (Oct 10 2026: 40 of 46 matched without these).
 _PIN_ALIAS = {"mississippi": "ole miss", "central florida": "ucf",
               "connecticut": "uconn", "appalachian state": "app state",
-              "ul lafayette": "louisiana ragin cajuns", "miami ohio": "miami oh"}
+              "ul lafayette": "louisiana ragin cajuns", "miami ohio": "miami oh",
+              # Oct 27 2026 probe: ESPN names the school 'Sam Houston Bearkats'
+              "sam houston state": "sam houston"}
 
 
 def _pin_norm(name) -> str:
