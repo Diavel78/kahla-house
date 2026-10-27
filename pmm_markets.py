@@ -134,6 +134,21 @@ def _name_match(haystack: str, needle: str) -> bool:
     return n in h or h in n
 
 
+# A guessed tricode that is also an English word in the venue's question
+# text is no evidence (Oct 26 2026, "Who will win in the upcoming hockey
+# event FLA Panthers vs WPG Jets": Winnipeg's guessed code 'win' matched
+# the verb at position 9, the ML read HOME, the slug guard refused every
+# Polymarket read on the game, and the card showed 'Poly —').
+_CODE_STOPWORDS = frozenset({
+    "win", "won", "wins", "the", "and", "for", "vs", "over", "under", "more", "less", "than", "will",
+    "who", "what", "event", "cover", "total", "goals", "points", "runs", "game", "first", "half",
+    "period", "quarter", "inning", "record", "least", "most", "score", "team", "match", "upcoming",
+    "scheduled", "october", "november", "december", "january", "february", "march", "april", "may",
+    "june", "july", "august", "september", "pts", "ast", "reb", "yds", "tds", "sog", "hits", "outs",
+    "home", "away", "odd", "even", "both", "either", "any", "all", "not", "end", "tie", "draw",
+})
+
+
 def _team_mention_pos(q_norm: str, team: str) -> int:
     """Earliest position in the normalized question where this team is
     identifiable, trying full name → city/region → mascot last-token →
@@ -182,7 +197,7 @@ def _team_mention_pos(q_norm: str, team: str) -> int:
     # there anyway — the city variant already matched earlier).
     padded = " " + q_norm + " "
     for code in _team_code_cands(team):
-        if len(code) < 3:
+        if len(code) < 3 or code in _CODE_STOPWORDS:
             continue
         p = padded.find(f" {code} ")
         if p >= 0 and (best < 0 or p < best):

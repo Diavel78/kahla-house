@@ -28096,7 +28096,7 @@ def _sheet_touch_poly(client, item: dict, cache: dict) -> dict:
     ck = (sport, str(item.get("away")), str(item.get("home")), str(item.get("event_start")))
     pmm = cache.get(ck)
     if pmm is None:
-        if not _bet_sheet_wait_rl(10.0):
+        if not _bet_sheet_wait_rl(25.0):          # the breaker holds 20s; a 10s wait never cleared it
             return {"why": "rate_limited"}
         try:
             import pmm_markets as _pm
@@ -28198,6 +28198,7 @@ def _sheet_touch_pass(sb, client, now=None) -> dict:
                 st["kept"] += 1
             continue
         picks: dict = {}
+        prev_picks = ((prev.get(key) or {}).get("picks") or {}) if isinstance(prev.get(key), dict) else {}
         for it in items:
             try:
                 pq = _sheet_touch_poly(client, it, cache)
@@ -28207,6 +28208,23 @@ def _sheet_touch_pass(sb, client, now=None) -> dict:
                 kq = _sheet_touch_kalshi(it)
             except Exception as e:
                 kq = {"why": f"err: {e}"[:60]}
+            # A TRANSIENT MISS KEEPS LAST PASS'S READ (Oct 26 2026, CBJ @ PHI, the
+            # nearest game on the board: the venue's 429 breaker was up when the
+            # walk reached it, the read came back `rate_limited`, and the card
+            # read 'Poly —' on a market the lane had bet an hour earlier).
+            # RULE 0.001: a miss is ours, never the venue's.
+            pp = prev_picks.get(it["k"]) if isinstance(prev_picks.get(it["k"]), dict) else {}
+            for vn, cur in (("poly", pq), ("kalshi", kq)):
+                w = str((cur or {}).get("why") or "")
+                old_q = pp.get(vn) if isinstance(pp.get(vn), dict) else None
+                if ((cur or {}).get("bid") is None and (w == "rate_limited" or w.startswith("lookup:") or w.startswith("err:")
+                                                        or w.startswith("resolve:"))
+                        and old_q and old_q.get("bid") is not None and old_q.get("line") == it["line"]):
+                    kept = {**old_q, "kept": True, "kept_why": w, "kept_at": (prev.get(key) or {}).get("at")}
+                    if vn == "poly":
+                        pq = kept
+                    else:
+                        kq = kept
             picks[it["k"]] = {"mt": it["market_type"], "side": it["side"], "line": it["line"],
                               "poly": pq, "kalshi": kq}
             st["items"] += 1
