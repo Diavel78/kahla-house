@@ -22322,6 +22322,10 @@ _HAND_PIN_EVERY_S = 180.0
 _HAND_PIN_LAST = {"at": 0.0}
 _HAND_PIN_CLOSE_LEAD_MIN = 45.0
 _HAND_PIN_MAX = 80
+# Under the auto lane the read covers the WHOLE board (Oct 26 2026: 160
+# picks, the nearest 80 read, the Saturday college seats never priced,
+# never pulled, the chase skipping them as no_fair).
+_HAND_PIN_MAX_AUTO = 600
 # THE FAIR PULL (Oct 27 2026, Rob: "earlier the better" — resting from the
 # morning is safe only if the box takes a bet off the table the moment its
 # bid sits ABOVE Pinnacle fair): a resting, unfilled, pre-game sheet bet
@@ -22401,10 +22405,11 @@ def _hand_pin_tick(sb, now, client=None) -> dict:
                 .select("id,sport,event_name,event_start,market_type,side,entry_line,signal_blob")
                 .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                 .gte("event_start", lo).lte("event_start", hi)
-                .order("event_start").limit(_HAND_PIN_MAX).execute().data) or []
+                .order("event_start").limit(_HAND_PIN_MAX_AUTO if auto_on else _HAND_PIN_MAX).execute().data) or []
     except Exception as e:
         return {"err": str(e)[:80]}
     slates: dict = {}
+    tape: list = []                        # THE PIN-VENUE TAPE: [pick_id, fair_c, bid_c, ask_c, src] per auto pick per read
     for r in rows:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         st["seen"] += 1
@@ -22466,6 +22471,20 @@ def _hand_pin_tick(sb, now, client=None) -> dict:
                         st["rerung"] += 1
             except (TypeError, ValueError):
                 pass
+            if auto:
+                # the venue's touch at the SAME instant as the Pinnacle read, off the
+                # socket table (Rob, Oct 26 2026: "the lightning fast prediction
+                # markets" — the four-week lead/lag read, one stamp a minute)
+                try:
+                    _sl = blob.get("pmm_slug") or blob.get("pmm_twin_slug")
+                    _q = _ws_quote(_sl) if _sl else None
+                    if _q:
+                        _b, _a = _q
+                        if blob.get("pmm_synthetic"):
+                            _b, _a = ((100.0 - _a) if _a is not None else None), ((100.0 - _b) if _b is not None else None)
+                        tape.append([r["id"], pf["fair_c"], _b, _a, "twin" if not blob.get("pmm_slug") else "poly"])
+                except Exception:
+                    pass
             old = blob.get("pin_now") if isinstance(blob.get("pin_now"), dict) else {}
             try:
                 old_age = (now - _parse_iso(old.get("at"))).total_seconds() if old.get("at") else 1e9
@@ -22531,6 +22550,12 @@ def _hand_pin_tick(sb, now, client=None) -> dict:
         except Exception as e:
             st["err"] += 1
             st["last_err"] = str(e)[:80]
+    if tape:
+        st["tape"] = len(tape)
+        try:
+            _probe_log({"pin_venue_tape": True, "at": now.isoformat(), "n": len(tape), "pairs": tape})
+        except Exception:
+            pass
     return st
 
 
