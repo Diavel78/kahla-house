@@ -1209,6 +1209,143 @@ def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None, 
             "push": (round(push, 3) if delta > 0.01 else None), "src": ("push" if delta > 0.01 else "line")}
 
 
+# THE LINE IS PINNACLE'S (Oct 27 2026, the NBA/MLB probe: every upcoming
+# row carried `lines: {}` / `picks: {}` — the builders had no book line at
+# build time, so the model made no pick, so the price rule had nothing to
+# price). Under the price rule a sheet pick is only a RUNG to quote; the
+# market line is Pinnacle's, the model only names the side. So a game with
+# a Pinnacle block (the row's, else the slate's) gets every market the sport
+# bets seeded as a pick at the bettable half point of Pinnacle's line:
+# spread/total side = the model's side of Pinnacle's number (no model → the
+# favorite / the under), puck = the favorite's −1.5 only, ML side = the
+# model's over Pinnacle's devig (no model → the dog), chalk / longshot marks
+# off Pinnacle's own price. A pick the builder DID make is never touched.
+# Upcoming games only — a seeded pick on a final would grade a bet that
+# never existed.
+_SHEET_SEED_KEYS = {"NFL": ("spread", "total"), "NCAAF": ("spread", "total"),
+                    "NHL": ("ml", "puck", "total"), "NBA": ("ml", "spread", "total"),
+                    "MLB": ("ml", "spread", "total")}
+
+
+def _sheet_seed_pin_picks(sport: str, g: dict, slate=None, now=None) -> list:
+    """Seed the pick blocks a sheet game is missing off its Pinnacle block
+    (see above). Fills `g['pin']` from the slate and `g['line']` from the
+    block when the row carried neither. Returns the keys seeded. Never
+    raises."""
+    if not isinstance(g, dict):
+        return []
+    sport = str(sport or "").upper()
+    keys = _SHEET_SEED_KEYS.get(sport)
+    if not keys:
+        return []
+    if now is not None:
+        try:
+            ev = _parse_iso(g.get("event_start")) if g.get("event_start") else None
+            if not ev or ev <= now:
+                return []
+        except Exception:
+            return []
+    pin = g.get("pin") if isinstance(g.get("pin"), dict) else None
+    if pin is None and slate:
+        try:
+            pin = _pin_block_from_events(slate, g.get("away"), g.get("home"), start=g.get("event_start"))
+        except Exception:
+            pin = None
+        if pin:
+            g["pin"] = pin
+    if not pin:
+        return []
+    L = g.get("line") if isinstance(g.get("line"), dict) else None
+    if not L:
+        # the card draws Pinnacle's numbers when the sheet carried none
+        sk = "puck" if sport == "NHL" else "spread"
+        L = {"provider": "pinnacle"}
+        if pin.get("spread_home") is not None:
+            L[f"{sk}_home"] = pin["spread_home"]
+            L[f"{sk}_home_odds"] = pin.get("spread_home_odds")
+            L[f"{sk}_away_odds"] = pin.get("spread_away_odds")
+        if pin.get("total") is not None:
+            L["total"] = pin["total"]
+            L["over_odds"], L["under_odds"] = pin.get("over_odds"), pin.get("under_odds")
+        if pin.get("ml_home") is not None and pin.get("ml_away") is not None:
+            L["ml_home"], L["ml_away"] = pin["ml_home"], pin["ml_away"]
+        if pin.get("age_min") is not None:
+            L["age_min"] = pin["age_min"]
+        g["line"] = {k: v for k, v in L.items() if v is not None}
+    model = g.get("model") if isinstance(g.get("model"), dict) else {}
+
+    def _f(x):
+        try:
+            return float(x) if x is not None else None
+        except (TypeError, ValueError):
+            return None
+    seeded = []
+    for key in keys:
+        cur = g.get(key)
+        if isinstance(cur, dict) and cur.get("side"):
+            continue
+        pk = None
+        if key in ("spread", "puck"):
+            ph = _f(pin.get("spread_home"))
+            if ph is None:
+                continue
+            fav = "home" if ph < 0 else "away" if ph > 0 else None
+            msh = _f(model.get("spread_home"))
+            if key == "puck":
+                side = fav                              # the favorite's −1.5 only
+            elif msh is not None and abs(msh - ph) > 1e-9:
+                side = "home" if msh < ph else "away"   # the model's side of Pinnacle's number
+            else:
+                side = fav or "home"
+            if side is None:
+                continue
+            own = ph if side == "home" else -ph
+            rung = _bettable_half(own, "spread", side)
+            if rung is None:
+                continue
+            pk = {"side": side, "line": rung, "market_line": own,
+                  "price": pin.get("spread_home_odds") if side == "home" else pin.get("spread_away_odds")}
+        elif key == "total":
+            tt = _f(pin.get("total"))
+            if tt is None:
+                continue
+            mt_ = _f(model.get("total"))
+            side = ("over" if mt_ is not None and mt_ > tt else "under")
+            rung = _bettable_half(tt, "total", side)
+            if rung is None:
+                continue
+            pk = {"side": side, "line": rung, "market_line": tt,
+                  "price": pin.get("over_odds") if side == "over" else pin.get("under_odds")}
+        else:
+            mh, ma = _f(pin.get("ml_home")), _f(pin.get("ml_away"))
+            if mh is None or ma is None:
+                continue
+            ih, ia = _amer_to_prob_py(mh), _amer_to_prob_py(ma)
+            if not ih or not ia or ih + ia <= 0:
+                continue
+            ph_ = ih / (ih + ia)
+            wh = _f(model.get("win_home"))
+            if wh is not None and abs(wh - ph_) > 1e-9:
+                side = "home" if wh > ph_ else "away"
+            else:
+                side = "home" if mh > ma else "away"    # no model: the dog
+            px = mh if side == "home" else ma
+            pk = {"side": side, "line": None, "price": px}
+            if px <= _SHEET_CHALK_ML:
+                pk["chalky"] = True
+            if sport in ("NBA", "MLB") and px >= _SHEET_LONGSHOT_ML:
+                pk["longshot"] = True
+        if pk is None:
+            continue
+        pk.update({"team": g.get(pk["side"]) if pk["side"] in ("home", "away") else None,
+                   "fair": None, "verdict": "pass", "src": "pinnacle", "seeded": True})
+        g[key] = pk
+        seeded.append(key)
+    if seeded:
+        g["pin_seeded"] = seeded
+    return seeded
+
+
 def _sheet_attach_pin_fair(sport: str, g: dict, slate=None) -> None:
     """Each pick block on a sheet game (spread / puck / total / ml) gets
     `pin_fair` = Pinnacle's fair at that pick's rung: the slate's own two
@@ -2320,11 +2457,13 @@ def api_football_picks():
 
     games, lines_updated_at, built_at = [], None, None
     _pin_evs = _pin_sheet_slate(sb, sport, datetime.now(timezone.utc), {})[0] if rows else None
+    _now0 = datetime.now(timezone.utc)
     for r in rows:
         games.append(_sheet_game_nhl(r) if sport == "NHL"
                      else _sheet_game_nba(r) if sport == "NBA"
                      else _sheet_game_mlb(r) if sport == "MLB"
                      else _sheet_game_football(r))
+        _sheet_seed_pin_picks(sport, games[-1], _pin_evs, _now0)   # the line is Pinnacle's: missing picks seeded at its rung
         _sheet_attach_pin_fair(sport, games[-1], _pin_evs)   # Pinnacle's fair at the rung beside the model's
         blob = r.get("data_blob") or {}
         stamp = (blob.get("friday") or {}).get("built_at") or r.get("data_built_at")
@@ -2562,6 +2701,7 @@ def api_football_picks_debug():
         for r in rows:
             g = (_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport == "NBA"
                  else _sheet_game_mlb(r) if sport == "MLB" else _sheet_game_football(r))
+            _sheet_seed_pin_picks(sport, g, pin_evs, now)
             _sheet_attach_pin_fair(sport, g, pin_evs)
             games.append(g)
             if request.args.get("raw"):
@@ -2594,7 +2734,7 @@ def api_football_picks_debug():
             blk = {"game": g.get("event_name"), "start": g.get("event_start"), "venue_age_s": (g.get("venue") or {}).get("age_s"),
                    "picks": {k: {"side": g[k].get("side"), "line": g[k].get("line"), "model_verdict": g[k].get("model_verdict")}
                              for k in ("ml", "puck", "spread", "total") if isinstance(g.get(k), dict)},
-                   "pin": bool(g.get("pin"))}
+                   "pin": bool(g.get("pin")), "seeded": g.get("pin_seeded")}
             if raw_by_id:
                 blk["raw"] = raw_by_id.get(g.get("market_id"))
             for k in ("ml", "puck", "spread", "total"):
@@ -27212,6 +27352,7 @@ def _sheet_touch_rows(sb, now) -> list:
     first. [(sport, row, game)]."""
     out = []
     hi = (now + timedelta(hours=_SHEET_TOUCH_HORIZON_H)).isoformat()
+    slates: dict = {}
     for sport in _SHEET_SPORTS:
         try:
             wk = (sb.table("football_sheet_weeks").select("week_key").eq("sport", sport)
@@ -27226,10 +27367,12 @@ def _sheet_touch_rows(sb, now) -> list:
         except Exception as e:
             app.logger.warning("sheet touch rows %s: %s", sport, str(e)[:100])
             continue
+        pin_evs = _pin_sheet_slate(sb, sport, now, slates)[0] if rows else None
         for r in rows:
             try:
                 g = (_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport == "NBA"
                      else _sheet_game_mlb(r) if sport == "MLB" else _sheet_game_football(r))
+                _sheet_seed_pin_picks(sport, g, pin_evs, now)   # the same rungs the page quotes
             except Exception:
                 continue
             out.append((sport, r, g))

@@ -4447,6 +4447,63 @@ def test_hand_orders_queue() -> None:
     check("a queue wake makes handbets due now", _r._next_due["handbets"] == 0.0)
 
 
+def test_sheet_seed_pin_picks() -> None:
+    """THE LINE IS PINNACLE'S (Oct 27 2026): a sheet game with no builder
+    picks gets every market the sport bets seeded at the bettable half
+    point of Pinnacle's line, the model naming the side; a builder pick is
+    never touched; finals never seed."""
+    import app as _app
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    now = _dt.now(_tz.utc)
+    up = (now + _td(hours=20)).isoformat()
+    pin = {"spread_home": -3.0, "spread_home_odds": -108, "spread_away_odds": -104,
+           "total": 224.5, "over_odds": -110, "under_odds": -110, "ml_home": -150, "ml_away": 130}
+    g = {"event_start": up, "away": "Nets", "home": "Celtics", "line": {}, "pin": dict(pin),
+         "model": {"spread_home": -6.0, "total": 229.0, "win_home": 0.70}, "ml": {}, "spread": None, "total": None}
+    keys = _app._sheet_seed_pin_picks("NBA", g, None, now)
+    check("seed: every NBA market seeded", keys == ["ml", "spread", "total"], keys)
+    check("seed: the model's side of Pinnacle's number, at the bettable half",
+          g["spread"]["side"] == "home" and g["spread"]["line"] == -2.5 and g["spread"]["market_line"] == -3.0, g["spread"])
+    check("seed: total side off the model, over rung −0.5 of a whole, half stays",
+          g["total"]["side"] == "over" and g["total"]["line"] == 224.5, g["total"])
+    check("seed: ml side off the model vs the devig, chalky at −150",
+          g["ml"]["side"] == "home" and g["ml"]["price"] == -150 and g["ml"].get("chalky") is True, g["ml"])
+    check("seed: the card gets Pinnacle's line when the row had none",
+          g["line"].get("spread_home") == -3.0 and g["line"].get("provider") == "pinnacle" and g["line"].get("ml_away") == 130, g["line"])
+    check("seed: every seeded pick is a PASS with no model edge", all(g[k]["verdict"] == "pass" and g[k]["seeded"] for k in keys))
+    # no model: the favorite, the under, the dog
+    g2 = {"event_start": up, "away": "A", "home": "H", "pin": dict(pin), "model": None}
+    _app._sheet_seed_pin_picks("NBA", g2, None, now)
+    check("seed: no model → favorite / under / dog", g2["spread"]["side"] == "home" and g2["total"]["side"] == "under"
+          and g2["ml"]["side"] == "away" and g2["ml"].get("chalky") is None)
+    # hockey: the puck line is the favorite's −1.5 whatever the model says
+    g3 = {"event_start": up, "away": "A", "home": "H", "pin": {**pin, "spread_home": 1.5, "total": 6.0},
+          "model": {"spread_home": -1.0, "total": 5.5, "win_home": 0.6}}
+    k3 = _app._sheet_seed_pin_picks("NHL", g3, None, now)
+    check("seed: NHL keys", k3 == ["ml", "puck", "total"], k3)
+    check("seed: puck = the favorite's own −1.5", g3["puck"]["side"] == "away" and g3["puck"]["line"] == -1.5, g3["puck"])
+    check("seed: a whole total under → 6.5", g3["total"]["side"] == "under" and g3["total"]["line"] == 6.5)
+    check("seed: hockey line keys are puck_*", g3["line"].get("puck_home") == 1.5 and "spread_home" not in g3["line"])
+    # a builder pick is never touched; football seeds spread + total only; a final never seeds
+    g4 = {"event_start": up, "away": "A", "home": "H", "pin": dict(pin),
+          "spread": {"side": "away", "line": 3.5, "verdict": "play"}, "model": None}
+    k4 = _app._sheet_seed_pin_picks("NFL", g4, None, now)
+    check("seed: a builder pick stands, football seeds the total only", k4 == ["total"] and g4["spread"]["verdict"] == "play" and "ml" not in g4, k4)
+    g5 = {"event_start": (now - _td(hours=3)).isoformat(), "away": "A", "home": "H", "pin": dict(pin), "model": None}
+    check("seed: a started game never seeds", _app._sheet_seed_pin_picks("NBA", g5, None, now) == [] and "spread" not in g5)
+    g6 = {"event_start": up, "away": "A", "home": "H", "model": None}
+    check("seed: no Pinnacle block, nothing seeded", _app._sheet_seed_pin_picks("MLB", g6, None, now) == [])
+    # the seeded rung is what the touch worker quotes and the price rule prices
+    items = _app._sheet_touch_items("NBA", g)
+    check("seed: the touch worker quotes the seeded rungs",
+          sorted(i["k"] for i in items) == ["ml", "spread", "total"]
+          and next(i for i in items if i["k"] == "spread")["line"] == -2.5)
+    g["venue"] = {"age_s": 30, "picks": {"spread": {"poly": {"bid": 49.0, "ask": 51.0, "line": -2.5}}}}
+    g["spread"]["pin_fair"] = {"prob": 0.53}
+    _app._sheet_attach_price("NBA", g, now)
+    check("seed: a seeded pick takes a price verdict", g["spread"]["verdict"] == "play" and g["spread"]["model_verdict"] == "pass", g["spread"].get("pv"))
+
+
 def test_end_state_rosters() -> None:
     """Oct 6 2026 — the sheets are the product. Tape daemon = batch, grader,
     mirror; money daemon = handbets. The mirror lane carries the dashboard's
@@ -6365,7 +6422,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
