@@ -1244,7 +1244,7 @@
         // option?"): the strip names the model's side; the action sheet offers it.
         const fd = flip ? (loud ? ' · model now on ' + flip.label + (b.read && b.read.rec === 'hold' ? ' — yours still plays at your price, hold' : ' — tap to flip or hold') : ' · against the model (' + flip.label + ')') : '';
         return '<div class="xb st-' + cls + '" onclick="openSheet(\'' + String(b.id).replace(/[^\w-]/g, '') + '\')">'
-             + '<div class="xt"><span class="xl">' + esc(betLabel(b)) + '<span class="xs">' + esc(st.short) + (b.app ? ' · APP' : '') + (b.auto ? ' · AUTO' : '') + ' · ' + venueName(b).toUpperCase() + '</span>'
+             + '<div class="xt"><span class="xl">' + esc(betLabel(b)) + '<span class="xs">' + esc(st.short) + (b.app ? ' · APP' : '') + (b.auto && st.short !== 'AUTO' ? ' · AUTO' : '') + ' · ' + venueName(b).toUpperCase() + '</span>'
              + (loud ? '<span class="xf">MODEL FLIPPED</span>' : '') + '</span>'
              + '<span class="xd">' + esc(st.detail + fd) + (withGame ? ' · ' + esc(gameShort(b)) + ' · ' + fmtTime(b.event_start) + ' ' + clk(b.event_start) : '') + '</span></div>'
              + '<span class="go">›</span></div>';
@@ -2168,7 +2168,7 @@
         let summ = '';
         if (bs.length) {
             const n = { fill: 0, rest: 0, warn: 0 };
-            bs.forEach(b => { const c = betState(b).cls; n[flips[b.id] && !b.app && c === 'rest' && !(b.read && b.read.rec === 'hold') ? 'warn' : c]++; });
+            bs.forEach(b => { const c = betState(b).cls; n[flips[b.id] && !b.app && !b.auto && c === 'rest' && !(b.read && b.read.rec === 'hold') ? 'warn' : c]++; });
             summ = n.warn ? '<span class="gs warn">' + n.warn + ' need' + (n.warn === 1 ? 's' : '') + ' you</span>'
                  : '<span class="gs">' + [n.fill ? n.fill + ' filled' : '', n.rest ? n.rest + ' resting' : ''].filter(Boolean).join(' · ') + '</span>';
         }
