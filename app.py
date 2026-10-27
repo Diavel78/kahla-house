@@ -15,6 +15,7 @@ import random as _random
 import secrets
 import functools
 import time as _time
+import uuid
 import threading
 import requests as _http  # module-level HTTP client — ESPN scoreboard + Kalshi
                           # fetches use it. (Was accidentally dropped with the
@@ -5069,7 +5070,7 @@ def _audit_clv(rows: list) -> dict:
             qty = 0.0
         usd = _audit_usd(res, qty, price) if res else None
         bucket = (">=2c" if edge >= 2.0 else "0.5-2c" if edge >= 0.5 else "0-0.5c" if edge >= 0 else "above_fair")
-        origin = ("in_play" if b.get("in_play") else "app" if b.get("app_adopted") else "sheet")
+        origin = ("auto" if b.get("auto_price") else "in_play" if b.get("in_play") else "app" if b.get("app_adopted") else "sheet")
         sp = str(r.get("sport") or "").upper()
         for bk in (out["all"], out["by_sport"].setdefault(sp, B()), out["by_edge_at_bet"].setdefault(bucket, B()),
                    out["by_origin"].setdefault(origin, B())):
@@ -5162,7 +5163,7 @@ def api_bet_sheets_fill_audit():
                 fsum["venue_usd"] = round(fsum["venue_usd"] + float(vp["realized_usd"]), 2)
             except (TypeError, ValueError):
                 pass
-        origin = ("in_play" if b.get("in_play") else "app" if b.get("app_adopted") else "sheet")
+        origin = ("auto" if b.get("auto_price") else "in_play" if b.get("in_play") else "app" if b.get("app_adopted") else "sheet")
         lead = None
         try:
             fs = b.get("fill_seen")
@@ -5551,7 +5552,7 @@ def api_bet_sheets_picks():
                                "label": b.get("label"), "q": q, "price_c": pc, "contracts": b.get("contracts"),
                                "order_price_c": b.get("order_price_c"), "entry_src": b.get("entry_src"),
                                "app": b.get("app_adopted"), "in_play": b.get("in_play"),
-                               "tile_usd": usd, "slug": sl, "syn": b.get("pmm_synthetic"),
+                               "auto": bool(b.get("auto_price")), "tile_usd": usd, "slug": sl, "syn": b.get("pmm_synthetic"),
                                "score": r.get("result_score"), "venue": bys.get(sl),
                                "state": {k: b.get(k) for k in ("order_id", "anchor_c", "line_hold", "chase_hold",
                                                                "thin_hold", "rejoin_hold", "line_cancels",
@@ -5809,7 +5810,7 @@ def api_bet_sheets_picks():
                             **{k: (r.get("signal_blob") or {}).get(k) for k in
                                ("label", "price_c", "contracts", "filled_qty", "filled", "sold", "sheet_line",
                                 "rung_line", "app_adopted", "in_play", "rerung_from", "placed_via",
-                                "entry_src", "anchor_c")}}
+                                "entry_src", "anchor_c", "auto_price", "pin_rerung")}}
                            for r in prow][off:off + 80] if part != "sheet" else []
             out["bets_total"] = len(prow)
             if part == "take_est":
@@ -17092,6 +17093,13 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
             # fallback) resolves it here: venue event → rung → book, one read
             # each, no clock but the 15-min expiry.
             item = pl.get("item") or {}
+            ap = pl.get("auto_price") if isinstance(pl.get("auto_price"), dict) else None
+            if ap:
+                # THE AUTO PRICE LANE (Oct 27 2026): priced by the seat rule, not the touch
+                out_ap = _auto_price_execute(sb, client, row, pl, item, ap, worker, deferred, ms, _lap)
+                if isinstance(out_ap, dict) and "ms" not in out_ap:
+                    out_ap["ms"] = ms
+                return out_ap
             want = str(item.get("venue") or "auto").lower()
             k_on = _hand_kalshi_on()
             if want == "kalshi" and not k_on:
@@ -18466,7 +18474,8 @@ def _hand_start_bet(r: dict, blob: dict) -> dict:
             "line": r.get("entry_line"), "entry_price": r.get("entry_price"),
             "label": blob.get("label"), "price_c": blob.get("price_c"),
             "anchor_c": blob.get("anchor_c"), "contracts": blob.get("contracts"),
-            "synthetic": bool(blob.get("pmm_synthetic")), "app": bool(blob.get("app_adopted"))}
+            "synthetic": bool(blob.get("pmm_synthetic")), "app": bool(blob.get("app_adopted")),
+            "auto": bool(blob.get("auto_price"))}
 
 
 def _hand_book_pre(slug: str, syn: bool, start_ts: float):
@@ -19392,7 +19401,17 @@ def _hand_move_tick(sb, client, now) -> dict:
                 except (TypeError, ValueError):
                     pass
             anchor = blob.get("anchor_c", blob.get("price_c"))
-            if anchor is not None and touch > float(anchor) + leash + 1e-9:
+            leash_r = leash
+            if isinstance(blob.get("auto_price"), dict):
+                # THE AUTO LANE rejoins under fair − cap, no leash; no fresh fair = no rejoin
+                fc = _hand_fair_cap_c(blob, now)
+                if fc is None:
+                    continue
+                touch = min(touch, round(fc - _auto_cap_c(blob), 2))
+                leash_r = _AUTO_PRICE_LEASH_C
+                if touch < 1.0:
+                    continue
+            if anchor is not None and touch > float(anchor) + leash_r + 1e-9:
                 # the market ran away while we sat out — Rob's leash owns it
                 if not blob.get("chase_hold"):
                     sb.table("bot_picks").update({"signal_blob": {**blob, "chase_hold": {
@@ -21109,7 +21128,7 @@ def _kalshi_order_place(ticker: str, buy_yes: bool, price_c, contracts, event_st
 
 
 def _hand_order_execute_kalshi(sb, row: dict, pl: dict, item: dict, k_rs: dict,
-                               poly_rs: dict | None, worker: str, vdet: dict) -> dict:
+                               poly_rs: dict | None, worker: str, vdet: dict, extra: dict | None = None) -> dict:
     """The create branch when the venue pick is Kalshi: place, verify, log
     the pick with the Kalshi identity (+ the Polymarket twin rung)."""
     contracts = int(row.get("contracts") or pl.get("contracts") or 0)
@@ -21138,7 +21157,7 @@ def _hand_order_execute_kalshi(sb, row: dict, pl: dict, item: dict, k_rs: dict,
               "pmm_twin_synthetic": bool(poly_rs.get("synthetic")) if twin_ok else None,
               "poly_quote_c": poly_rs.get("price_c") if twin_ok else None,
               "venue_pick": res["venue_pick"]}
-    pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), item, rs_log, res, contracts)
+    pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), item, rs_log, res, contracts, extra=extra)
     res["pick_id"] = pick_id
     if warn:
         res["warning"] = ((res.get("warning") or "") + " · " + warn).strip(" ·")
@@ -21470,6 +21489,14 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
     # THE REJOIN HOLD CAPS THIS CHASE TOO (Oct 20 2026 — see `_hand_rejoin_cap`:
     # without it every Kalshi vanish drop was chased straight back up).
     chalk_c = _hand_pick_chalk_c(blob)
+    fair_cap = _hand_fair_cap_c(blob, now)          # never above Pinnacle fair (Oct 27 2026); the auto lane: fair − cap
+    if isinstance(blob.get("auto_price"), dict):
+        if fair_cap is None:
+            st["no_fair"] = st.get("no_fair", 0) + 1
+            return
+        fair_cap = round(fair_cap - _auto_cap_c(blob), 2)
+    if fair_cap is not None and (chalk_c is None or fair_cap < chalk_c):
+        chalk_c = fair_cap
     verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash,
                                              cap_c=_hand_rejoin_cap(blob, now, ev), chalk_c=chalk_c)
     hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
@@ -22340,18 +22367,23 @@ def _hand_pin_item(r: dict, blob: dict) -> dict:
 
 
 def _hand_pin_tick(sb, now, client=None) -> dict:
-    if _time.monotonic() - _HAND_PIN_LAST["at"] < _HAND_PIN_EVERY_S:
+    auto_on = _auto_price_on()
+    every = min(_HAND_PIN_EVERY_S, _AUTO_PRICE_EVERY_S) if auto_on else _HAND_PIN_EVERY_S   # the 60-second read (Oct 27 2026)
+    if _time.monotonic() - _HAND_PIN_LAST["at"] < every:
         return {"skip": "cadence"}
     if not _machine_flag("hand_pin_close", True):
         return {"off": True}
     _HAND_PIN_LAST["at"] = _time.monotonic()
-    st = {"seen": 0, "now": 0, "first": 0, "close": 0, "miss": 0, "err": 0, "over": 0, "pulled": 0}
+    st = {"seen": 0, "now": 0, "first": 0, "close": 0, "miss": 0, "err": 0, "over": 0, "pulled": 0, "rerung": 0}
     pull_on = client is not None and _machine_flag("hand_fair_pull", True)
     try:
         pull_c = float(_machine_flag_val("hand_fair_pull_c", _HAND_FAIR_PULL_C))
         pull_max = int(_machine_flag_val("hand_fair_pull_max", _HAND_FAIR_PULL_MAX))
     except (TypeError, ValueError):
         pull_c, pull_max = _HAND_FAIR_PULL_C, _HAND_FAIR_PULL_MAX
+    acfg = _auto_price_cfg() if auto_on else None
+    if auto_on:
+        pull_max = max(pull_max, _AUTO_PRICE_PULL_MAX)
     lo = (now - timedelta(minutes=15)).isoformat()
     hi = (now + timedelta(hours=_SHEET_TOUCH_HORIZON_H)).isoformat()
     try:
@@ -22370,15 +22402,60 @@ def _hand_pin_tick(sb, now, client=None) -> dict:
             ev = _parse_iso(r.get("event_start"))
             lead_min = (ev - now).total_seconds() / 60.0 if ev else None
             item = _hand_pin_item(r, blob)
-            events, age = _pin_sheet_slate(sb, item["sport"], now, slates)
+            auto = isinstance(blob.get("auto_price"), dict)
+            events, age = ((_pin_live_slate if auto_on else _pin_sheet_slate)(sb, item["sport"], now, slates))
             pf = _pin_fair_for_item(events, item["sport"], item, age) if events else None
             if not pf:
                 st["miss"] += 1
+                if auto and pull_on and events and lead_min is not None and lead_min > 0:
+                    # A RUNG PINNACLE STOPPED PRICING (Oct 27 2026): the feed answered
+                    # but carries no fair for this rung — after _AUTO_PRICE_MISS_READS
+                    # reads it is a bet with no price, and the auto lane pulls it.
+                    fm = blob.get("fair_miss") if isinstance(blob.get("fair_miss"), dict) else {}
+                    n_miss = int(fm.get("n") or 0) + 1
+                    v0, _d0 = _hand_fair_pull_plan(blob, blob.get("price_c"), 0.0, lead_min, pull_c=1e9, reads=1)
+                    if v0 == "skip":
+                        continue
+                    if n_miss >= _AUTO_PRICE_MISS_READS and st["pulled"] < pull_max:
+                        st["pulled"] += 1
+                        out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
+                        stamp = {"hand_fair_pull": True, "pick_id": r["id"], "at": now.isoformat(), "auto": True,
+                                 "price_c": blob.get("price_c"), "fair_c": None, "over": {"no_fair": n_miss},
+                                 "venue": blob.get("venue") or "POLYMARKET", "result": out, "code": code,
+                                 "bet": {"label": blob.get("label"), "side": r.get("side"), "line": blob.get("rung_line"),
+                                         "price_c": blob.get("price_c"), "contracts": blob.get("contracts"),
+                                         "event_name": r.get("event_name"), "event_start": r.get("event_start"),
+                                         "market_type": r.get("market_type"), "sport": r.get("sport"),
+                                         "venue": blob.get("venue") or "POLYMARKET"}}
+                        _AUTO_PRICE_SENT[(str(r.get("sport") or "").upper(), str(r.get("event_name") or ""), item["market_type"])] = _time.monotonic()
+                        try:
+                            _probe_log(stamp)
+                        except Exception:
+                            pass
+                    else:
+                        sb.table("bot_picks").update({"signal_blob": {**blob, "fair_miss": {"n": n_miss, "at": now.isoformat()}}}).eq("id", r["id"]).execute()
                 continue
             pf["at"] = now.isoformat()
             pf["lead_min"] = round(lead_min, 1) if lead_min is not None else None
             nb = dict(blob)
             changed = False
+            if blob.get("fair_miss"):
+                nb.pop("fair_miss", None)
+                changed = True
+            # THE RE-RUNG (Oct 27 2026, Rob: "when Pinnacle rerungs"): the main
+            # line moved ≥ half a point since the bet — stamped for the page and
+            # the audit; the fair at OUR rung (below) decides what happens.
+            try:
+                pb0 = blob.get("pin_bet") if isinstance(blob.get("pin_bet"), dict) else (blob.get("pin_first") or {})
+                l0, l1 = pb0.get("pin_line"), pf.get("pin_line")
+                if l0 is not None and l1 is not None and abs(float(l1) - float(l0)) >= 0.5:
+                    rr0 = blob.get("pin_rerung") if isinstance(blob.get("pin_rerung"), dict) else {}
+                    if rr0.get("to") != l1:
+                        nb["pin_rerung"] = {"from": l0, "to": l1, "at": now.isoformat()}
+                        changed = True
+                        st["rerung"] += 1
+            except (TypeError, ValueError):
+                pass
             old = blob.get("pin_now") if isinstance(blob.get("pin_now"), dict) else {}
             try:
                 old_age = (now - _parse_iso(old.get("at"))).total_seconds() if old.get("at") else 1e9
@@ -22404,7 +22481,11 @@ def _hand_pin_tick(sb, now, client=None) -> dict:
                     st["close"] += 1
             # THE FAIR PULL
             verdict, det = ("skip", "off")
-            if pull_on:
+            if pull_on and auto and acfg:
+                # THE AUTO RULE: no longer a LEAN at the current fair → pulled on ONE read
+                verdict, det = _hand_fair_pull_plan(blob, blob.get("price_c"), pf["fair_c"], lead_min,
+                                                    pull_c=-float(acfg["lean_c"]), reads=1)
+            elif pull_on:
                 verdict, det = _hand_fair_pull_plan(blob, blob.get("price_c"), pf["fair_c"], lead_min, pull_c)
             if verdict == "clear" and blob.get("fair_over"):
                 nb.pop("fair_over", None)
@@ -22418,7 +22499,9 @@ def _hand_pin_tick(sb, now, client=None) -> dict:
             if verdict == "pull" and st["pulled"] < pull_max:
                 st["pulled"] += 1
                 out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
-                stamp = {"hand_fair_pull": True, "pick_id": r["id"], "at": now.isoformat(),
+                if auto:
+                    _AUTO_PRICE_SENT[(str(r.get("sport") or "").upper(), str(r.get("event_name") or ""), item["market_type"])] = _time.monotonic()
+                stamp = {"hand_fair_pull": True, "pick_id": r["id"], "at": now.isoformat(), "auto": auto,
                          "price_c": blob.get("price_c"), "fair_c": pf["fair_c"], "over": det,
                          "pin": {k: pf.get(k) for k in ("pin_line", "src", "age_min")},
                          "venue": blob.get("venue") or "POLYMARKET", "result": out, "code": code,
@@ -22482,6 +22565,467 @@ def _hand_fair_cap_c(blob: dict, now):
         return round(float(pn["fair_c"]), 2)
     except Exception:
         return None
+
+
+# ── THE AUTO PRICE LANE (Oct 27 2026, Rob: "Today's picks… should be
+# everything… for the week… that's off from Pinnacle… the morning of??
+# Please, literally NOTHING will be bet… if pinnacle moves, and my bet is
+# no longer a play or lean, then the box cancels them… immediately, no
+# interaction on my side. If it's filled it's filled, and if pinnacle moves
+# and it becomes a play the other way? Well why not bet it… Shit, I'm
+# talking myself into an auto betting tool here… Go, build it. Pinnacle
+# becomes the driver.")
+#
+# PINNACLE IS THE DRIVER. Every rung on every sheet (the builder's pick, or
+# the one seeded off Pinnacle's own line) gets a resting maker bid from the
+# day Polymarket lists it: the SEAT is the higher of the venue touch and
+# Pinnacle fair − `auto_price_seat_c` (10), never above fair −
+# `auto_price_cap_c` (2) and never at the chalk cap (Rob: "no fucking way
+# I'm gonna be the only one out there leading the board 2 cents off
+# pinnacle… how about 10 cents off and chase up to 2 off pinnacle"). The
+# chase joins the touch up to fair − cap with NO leash (the fair cap
+# replaces Rob's anchor leash). The venue is the cheaper seat after fees,
+# Polymarket on a tie. The PULL runs on the 60-second Pinnacle read: a bid
+# that is no longer a LEAN (under `price_lean_c` of edge at the current
+# fair) is cancelled on ONE read, and a rung Pinnacle stops pricing (two
+# reads with no fair) is cancelled too — a pulled bet's market re-seats on
+# the next scan at the new fair, on whichever side the price rule names
+# (the flip). A re-rung (Pinnacle's main line moved ≥ half a point) is
+# stamped `pin_rerung`; the fair at our rung decides, never the move
+# itself. The line-move rule, the thin-touch guard, the start rules and
+# the venue switch are all unchanged — their rejoins are capped at fair −
+# cap. Stake `auto_price_contracts` (5). Flag `auto_price_bet` (code
+# default OFF). Off = no new seats; resting auto bets ride the ordinary
+# rules. Every pick it places carries `auto_price` in its blob — the fill
+# audit's CLV splits it out by origin.
+AUTO_PRICE_ENABLED = False
+_AUTO_PRICE_SEAT_C = 10.0
+_AUTO_PRICE_CAP_C = 2.0
+_AUTO_PRICE_CONTRACTS = 5
+_AUTO_PRICE_SPORTS = ("NFL", "NCAAF", "NHL", "NBA", "MLB")
+_AUTO_PRICE_EVERY_S = 60.0
+_AUTO_PRICE_BUDGET_S = 40.0
+_AUTO_PRICE_MAX_TICK = 10
+_AUTO_PRICE_RESEAT_S = 180.0        # a market the lane just sent (or pulled) waits this long before a new seat
+_AUTO_PRICE_MIN_LEAD_MIN = 10.0     # no new seat this close to the listed start — the start rule's hour
+_AUTO_PRICE_LEASH_C = 100.0         # the fair cap replaces Rob's leash on an auto bet
+_AUTO_PRICE_PULL_MAX = 20
+_AUTO_PRICE_MISS_READS = 2          # a rung Pinnacle stops pricing is pulled after this many no-fair reads
+_AUTO_PRICE_LAST = {"at": 0.0}
+_AUTO_PRICE_SENT: dict = {}         # (sport, event_name, mt) -> mono ts of the last row sent / pull
+_AUTO_PRICE_KEYS = {"NFL": ("spread", "total"), "NCAAF": ("spread", "total"),
+                    "NHL": ("ml", "puck", "total"), "NBA": ("ml", "spread", "total"),
+                    "MLB": ("ml", "spread", "total")}
+_PIN_LIVE_CACHE: dict = {}
+_PIN_LIVE_FRESH_S = 55.0
+
+
+def _auto_price_on() -> bool:
+    return bool(_machine_flag("auto_price_bet", AUTO_PRICE_ENABLED))
+
+
+def _auto_price_cfg() -> dict:
+    def _f(k, d):
+        try:
+            return float(_machine_flag_val(k, d))
+        except (TypeError, ValueError):
+            return float(d)
+    sports = _machine_flag_val("auto_price_sports", None)
+    if isinstance(sports, str):
+        sports = [s.strip().upper() for s in sports.split(",") if s.strip()]
+    elif not isinstance(sports, (list, tuple)):
+        sports = list(_AUTO_PRICE_SPORTS)
+    lean_c = _price_thresholds()[1]
+    return {"seat_c": _f("auto_price_seat_c", _AUTO_PRICE_SEAT_C),
+            "cap_c": _f("auto_price_cap_c", _AUTO_PRICE_CAP_C),
+            "contracts": max(1, min(250, int(_f("auto_price_contracts", _AUTO_PRICE_CONTRACTS)))),
+            "sports": [str(s).upper() for s in sports],
+            "max_tick": int(_f("auto_price_max_tick", _AUTO_PRICE_MAX_TICK)),
+            "lean_c": float(lean_c), "every_s": _f("auto_price_every_s", _AUTO_PRICE_EVERY_S)}
+
+
+def _auto_price_seat(fair_c, touch_c, seat_c: float, cap_c: float, chalk_c=None, tick: float = 0.5,
+                     ask_c=None):
+    """Pure. THE SEAT (Rob, Oct 27 2026): the higher of the venue touch and
+    Pinnacle fair − seat_c, never above fair − cap_c, never on or across
+    the ask, never at the chalk cap, on the market's grid. (price_c, why)
+    — why ∈ lead (we lead the touch), join (at the touch), under_touch (the
+    cap sits under the touch; we rest behind it); (None, reason) when the
+    rung has no seat: no_fair / chalk / crosses / under_1c."""
+    try:
+        fair = float(fair_c)
+    except (TypeError, ValueError):
+        return None, "no_fair"
+    if not 0.0 < fair < 100.0:
+        return None, "no_fair"
+    try:
+        touch = float(touch_c) if touch_c is not None else 0.0
+    except (TypeError, ValueError):
+        touch = 0.0
+    cap = fair - float(cap_c)
+    price = min(max(touch, fair - float(seat_c)), cap)
+    if ask_c is not None:
+        try:
+            a = float(ask_c)
+            if 0.0 < a < 100.0:
+                price = min(price, a - float(tick))
+        except (TypeError, ValueError):
+            pass
+    try:
+        price = round(_grid_dn(float(price), float(tick)), 2)
+    except Exception:
+        price = round(price, 2)
+    if price < 1.0:
+        return None, "under_1c"
+    if chalk_c is not None:
+        try:
+            if price >= float(chalk_c) - 1e-9:
+                return None, "chalk"
+        except (TypeError, ValueError):
+            pass
+    if ask_c is not None:
+        try:
+            if price >= float(ask_c) - 1e-9:
+                return None, "crosses"
+        except (TypeError, ValueError):
+            pass
+    why = "join" if abs(price - touch) < 1e-6 else ("lead" if price > touch else "under_touch")
+    return price, why
+
+
+def _auto_price_venue(poly: dict | None, kalshi: dict | None, qty: int):
+    """Pure. The cheaper seat after fees; Polymarket on a tie (no maker fee
+    there). poly/kalshi = {price_c, fee?} or None. ('POLYMARKET'|'KALSHI'|
+    None, detail)."""
+    pp = poly.get("price_c") if isinstance(poly, dict) else None
+    kp = kalshi.get("price_c") if isinstance(kalshi, dict) else None
+    det = {"poly_c": pp, "kalshi_c": kp}
+    k_all = None
+    if kp is not None:
+        try:
+            import kalshi_venue as _kv
+            fee = float(_kv.order_fee_c("KALSHI", "rest", float(kp), int(qty or 1), kalshi.get("fee"))) / float(max(1, int(qty or 1)))
+        except Exception:
+            fee = 0.0
+        k_all = round(float(kp) + fee, 3)
+        det["kalshi_all_in"] = k_all
+    if pp is None and k_all is None:
+        return None, {**det, "why": "no_seat"}
+    if pp is None:
+        return "KALSHI", {**det, "why": "poly_no_seat"}
+    if k_all is None:
+        return "POLYMARKET", {**det, "why": "kalshi_no_seat"}
+    if k_all < float(pp) - 1e-9:
+        return "KALSHI", {**det, "why": "cheaper"}
+    return "POLYMARKET", {**det, "why": ("tie" if abs(k_all - float(pp)) < 1e-9 else "cheaper")}
+
+
+def _auto_cap_c(blob: dict) -> float:
+    """The chase ceiling under fair for an auto bet: the stamp's cap_c, else the flag."""
+    ap = blob.get("auto_price") if isinstance(blob.get("auto_price"), dict) else {}
+    try:
+        return float(ap.get("cap_c")) if ap.get("cap_c") is not None else float(_auto_price_cfg()["cap_c"])
+    except (TypeError, ValueError):
+        return _AUTO_PRICE_CAP_C
+
+
+def _pin_live_slate(sb, sport: str, now, slates: dict):
+    """THE 60-SECOND PINNACLE READ: Pinnacle's own feed, cached in memory
+    _PIN_LIVE_FRESH_S per sport (no DB write a minute); the DB-cached slate
+    (`_pin_sheet_slate`) when the feed fails. (events, age_min)."""
+    sport = str(sport or "").upper()
+    if sport in slates:
+        return slates[sport]
+    hit = _PIN_LIVE_CACHE.get(sport)
+    if hit and _time.monotonic() - hit[0] < _PIN_LIVE_FRESH_S:
+        slates[sport] = (hit[1], round((_time.monotonic() - hit[0]) / 60.0, 2))
+        return slates[sport]
+    evs, why = (None, "no_league")
+    if sport in _PINDIRECT_LEAGUE:
+        try:
+            evs, why = _pin_direct_events(sport, now)
+        except Exception as e:
+            evs, why = None, str(e)[:80]
+    if evs:
+        _PIN_LIVE_CACHE[sport] = (_time.monotonic(), evs)
+        slates[sport] = (evs, 0.0)
+        return slates[sport]
+    _PIN_LIVE_CACHE[f"{sport}:why"] = why
+    slates[sport] = _pin_sheet_slate(sb, sport, now, {})
+    return slates[sport]
+
+
+def _auto_price_label(g: dict, key: str, pick: dict) -> str:
+    side = str(pick.get("side") or "")
+    nm = g.get(side) if side in ("home", "away") else None
+    try:
+        ln = float(pick.get("line")) if pick.get("line") is not None else None
+    except (TypeError, ValueError):
+        ln = None
+    if key == "ml":
+        return f"{nm} ML"
+    if key == "total":
+        return f"{'Over' if side == 'over' else 'Under'} {ln:g}" if ln is not None else f"{side} total"
+    return f"{nm} {ln:+g}" if ln is not None else f"{nm} {key}"
+
+
+def _auto_price_tick(sb, client, now) -> dict:
+    """THE SCAN: every upcoming sheet rung with Pinnacle fair and no pending
+    sheet bet on its market gets ONE hand_orders create row priced by the
+    seat rule on the cheaper venue; the executor re-reads the book and
+    places. Runs every `auto_price_every_s` under a budget."""
+    st = {"games": 0, "cands": 0, "sent": 0, "skip": {}, "no_fair": 0}
+    if not _auto_price_on():
+        st["gate"] = "off"
+        return st
+    cfg = _auto_price_cfg()
+    if _time.monotonic() - _AUTO_PRICE_LAST["at"] < cfg["every_s"]:
+        return {"skip": "cadence"}
+    _AUTO_PRICE_LAST["at"] = _time.monotonic()
+    t0 = _time.monotonic()
+    uid = _kalshi_owner_uid()
+    if not uid:
+        st["gate"] = "no_owner_uid"
+        return st
+
+    def _skip(why):
+        st["skip"][why] = st["skip"].get(why, 0) + 1
+    # what is already on the board: any pending sheet/app pick on a market blocks it
+    hi = (now + timedelta(hours=_SHEET_TOUCH_HORIZON_H)).isoformat()
+    try:
+        prow = (sb.table("bot_picks").select("sport,event_name,market_type")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .gte("event_start", (now - timedelta(hours=12)).isoformat()).lte("event_start", hi)
+                .limit(500).execute().data) or []
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:100]
+        return st
+    booked = {(str(r.get("sport") or "").upper(), str(r.get("event_name") or ""),
+               {"moneyline": "ml"}.get(str(r.get("market_type") or ""), str(r.get("market_type") or "")))
+              for r in prow}
+    try:
+        qrow = (sb.table("hand_orders").select("payload").in_("state", ["pending", "claimed"])
+                .limit(300).execute().data) or []
+        for q in qrow:
+            it = ((q.get("payload") or {}).get("item") or {}) if isinstance(q.get("payload"), dict) else {}
+            if it.get("sport") and it.get("away") and it.get("home"):
+                booked.add((str(it["sport"]).upper(), f"{it['away']} @ {it['home']}",
+                            str(it.get("market_type") or "")))
+    except Exception as e:
+        st["queue_err"] = str(e)[:80]
+    kalshi_on = _hand_kalshi_on()
+    touch = (_SHEET_TOUCH_LAST.get("games") or {}) if isinstance(_SHEET_TOUCH_LAST.get("games"), dict) else {}
+    try:
+        touch_age = (now - _parse_iso(_SHEET_TOUCH_LAST.get("at"))).total_seconds() if _SHEET_TOUCH_LAST.get("at") else None
+    except Exception:
+        touch_age = None
+    slates: dict = {}
+    pcache: dict = {}
+    rows_out = []
+    for sport, r, g in _sheet_touch_rows(sb, now):
+        if _time.monotonic() - t0 > _AUTO_PRICE_BUDGET_S:
+            st["gate"] = "budget"
+            break
+        if sport not in cfg["sports"] or len(rows_out) >= cfg["max_tick"]:
+            continue
+        try:
+            ev = _parse_iso(g.get("event_start"))
+            lead_min = (ev - now).total_seconds() / 60.0
+        except Exception:
+            continue
+        if lead_min < _AUTO_PRICE_MIN_LEAD_MIN:
+            continue
+        st["games"] += 1
+        evs, age = _pin_live_slate(sb, sport, now, slates)
+        if not evs:
+            _skip("no_pin_slate")
+            continue
+        _sheet_seed_pin_picks(sport, g, evs, now)
+        _sheet_attach_pin_fair(sport, g, evs)
+        key = f"{sport}|{g.get('event_name')}"
+        tq = touch.get(key) if isinstance(touch.get(key), dict) else None
+        if tq and tq.get("picks") and touch_age is not None and touch_age < _SHEET_TOUCH_FRESH_S:
+            g["venue"] = {"at": tq.get("at"), "age_s": int(touch_age), "picks": tq["picks"]}
+        _sheet_attach_price(sport, g, now)              # the flip: the price rule names the side
+        for k in _AUTO_PRICE_KEYS.get(sport, ()):
+            if len(rows_out) >= cfg["max_tick"]:
+                break
+            pk = g.get(k)
+            if not isinstance(pk, dict) or not pk.get("side"):
+                continue
+            mt = "spread" if k == "puck" else k
+            bkey = (sport, str(g.get("event_name") or ""), mt)
+            if bkey in booked:
+                _skip("booked")
+                continue
+            sent = _AUTO_PRICE_SENT.get(bkey)
+            if sent and _time.monotonic() - sent < _AUTO_PRICE_RESEAT_S:
+                _skip("cooldown")
+                continue
+            if k == "ml" and (pk.get("chalky") or pk.get("longshot")):
+                _skip("ml_chalk_or_longshot")
+                continue
+            pf = pk.get("pin_fair") if isinstance(pk.get("pin_fair"), dict) else None
+            if not pf or pf.get("prob") is None:
+                st["no_fair"] += 1
+                continue
+            st["cands"] += 1
+            fair_c = round(float(pf["prob"]) * 100.0, 2)
+            chalk_c = _hand_chalk_cap_c(mt)
+            item = {"sport": sport, "away": g.get("away"), "home": g.get("home"),
+                    "event_start": g.get("event_start"), "market_type": mt, "side": pk["side"],
+                    "line": (0.0 if mt == "ml" else pk.get("line")),
+                    "label": _auto_price_label(g, k, pk), "cid": f"auto-{uuid.uuid4().hex[:12]}"}
+            bad = _bet_sheet_item_check(item)
+            if bad:
+                _skip("item:" + bad[:30])
+                continue
+            # the venue touches: the touch worker's read for the un-flipped
+            # side, else a fresh read (one lookup per game, cached by pmm_markets)
+            vq = ((g.get("venue") or {}).get("picks") or {}).get(k) if isinstance(g.get("venue"), dict) else None
+            flipped = bool(pk.get("flipped"))
+            pq = kq = None
+            if vq and not flipped:
+                pq, kq = vq.get("poly"), vq.get("kalshi")
+            if not (pq and pq.get("bid") is not None):
+                try:
+                    pq = _sheet_touch_poly(client, item, pcache)
+                except Exception as e:
+                    pq = {"why": str(e)[:60]}
+            if kalshi_on and not (kq and kq.get("bid") is not None):
+                try:
+                    kq = _sheet_touch_kalshi(item)
+                except Exception as e:
+                    kq = {"why": str(e)[:60]}
+            seats = {}
+            if pq and pq.get("bid") is not None:
+                try:
+                    _ln_ok = pq.get("line") is None or mt == "ml" or abs(float(pq["line"]) - float(item["line"])) < 0.01
+                except (TypeError, ValueError):
+                    _ln_ok = False
+                if _ln_ok:
+                    _tk = 0.5
+                    try:
+                        _tk = float(_TICK_CACHE.get(pq.get("slug")) or 0.5)
+                    except Exception:
+                        pass
+                    p, why = _auto_price_seat(fair_c, pq["bid"], cfg["seat_c"], cfg["cap_c"], chalk_c, _tk, pq.get("ask"))
+                    seats["poly"] = {"price_c": p, "why": why, "touch_c": pq["bid"], "ask_c": pq.get("ask"), "slug": pq.get("slug")}
+            if kalshi_on and kq and kq.get("bid") is not None:
+                try:
+                    _ln_ok = kq.get("line") is None or mt == "ml" or abs(float(kq["line"]) - float(item["line"])) < 0.01
+                except (TypeError, ValueError):
+                    _ln_ok = False
+                if _ln_ok:
+                    p, why = _auto_price_seat(fair_c, kq["bid"], cfg["seat_c"], cfg["cap_c"], chalk_c, 1.0, kq.get("ask"))
+                    seats["kalshi"] = {"price_c": p, "why": why, "touch_c": kq["bid"], "ask_c": kq.get("ask"),
+                                       "fee": kq.get("fee"), "ticker": kq.get("ticker")}
+            if not seats:
+                _skip("no_venue_quote")
+                continue
+            venue, vdet = _auto_price_venue(seats.get("poly") if (seats.get("poly") or {}).get("price_c") is not None else None,
+                                            seats.get("kalshi") if (seats.get("kalshi") or {}).get("price_c") is not None else None,
+                                            cfg["contracts"])
+            if venue is None:
+                _skip("no_seat:" + ",".join(f"{v}:{s.get('why')}" for v, s in seats.items()))
+                continue
+            chosen = seats["poly" if venue == "POLYMARKET" else "kalshi"]
+            ap = {"fair_c": fair_c, "pin_line": pf.get("pin_line"), "src": pf.get("src"), "pin_age_min": age,
+                  "seat_c": cfg["seat_c"], "cap_c": cfg["cap_c"], "venue": venue, "price_c": chosen["price_c"],
+                  "seat_why": chosen.get("why"), "touch_c": chosen.get("touch_c"), "venue_pick": vdet,
+                  "flipped": flipped, "model_verdict": pk.get("model_verdict"), "key": k,
+                  "at": now.isoformat()}
+            item["venue"] = "kalshi" if venue == "KALSHI" else "poly"
+            rows_out.append({"op": "create", "contracts": cfg["contracts"], "event_start": g.get("event_start"),
+                             "payload": {"item": item, "asked_by": uid, "contracts": cfg["contracts"],
+                                         "auto_price": ap}})
+            _AUTO_PRICE_SENT[bkey] = _time.monotonic()
+    if rows_out:
+        try:
+            ids = _hand_orders_enqueue_many(sb, rows_out)
+            st["sent"] = sum(1 for i in ids if i is not None)
+        except Exception as e:
+            st["enqueue_err"] = str(e)[:100]
+    st["ms"] = int((_time.monotonic() - t0) * 1000)
+    return st
+
+
+def _auto_price_execute(sb, client, row: dict, pl: dict, item: dict, ap: dict, worker: str,
+                        deferred, ms: dict, _lap) -> dict:
+    """The executor's branch for an auto-price row: the rung off the venue,
+    the seat re-priced on the fresh book (the scan's touch is a minute old),
+    the ordinary post-only create, the pick stamped `auto_price`."""
+    cfg = _auto_price_cfg()
+    contracts = int(row.get("contracts") or pl.get("contracts") or cfg["contracts"])
+    venue = str(ap.get("venue") or "POLYMARKET").upper()
+    stamp = {k: ap.get(k) for k in ("fair_c", "pin_line", "src", "pin_age_min", "seat_c", "cap_c", "venue",
+                                     "seat_why", "touch_c", "venue_pick", "flipped", "model_verdict", "key", "at")}
+    if venue == "KALSHI":
+        if not _hand_kalshi_on():
+            return {"ok": False, "error": "Kalshi is switched off (machine_flags hand_kalshi_enabled)"}
+        k_rs = _bet_sheet_resolve_kalshi(item)
+        _lap("kalshi")
+        if not k_rs.get("ok"):
+            return {"ok": False, "error": k_rs.get("reason") or "could not resolve the Kalshi rung"}
+        price, why = _auto_price_seat(ap.get("fair_c"), k_rs.get("touch_c"), cfg["seat_c"], cfg["cap_c"],
+                                      _hand_chalk_cap_c(item.get("market_type")), 1.0, k_rs.get("ask_c"))
+        if price is None:
+            return {"ok": False, "error": f"no seat on Kalshi: {why}"}
+        k_rs = {**k_rs, "price_c": float(int(round(price))), "rung_why": k_rs.get("rung_why")}
+        stamp.update({"placed_c": k_rs["price_c"], "placed_why": why})
+        out = _hand_order_execute_kalshi(sb, row, pl, item, k_rs, None, worker,
+                                         {"why": "auto_price", **(ap.get("venue_pick") or {})},
+                                         extra={"auto_price": stamp})
+        _lap("place_log")
+        if isinstance(out, dict):
+            out["ms"] = ms
+            out["auto_price"] = True
+        return out
+    sl = _bet_sheet_slug(client, item)
+    _lap("resolve")
+    if not sl.get("ok"):
+        return {"ok": False, "error": sl.get("reason") or "could not resolve the rung"}
+    slug, syn, entry, pmm = sl["slug"], bool(sl["synthetic"]), sl["entry"], sl["pmm"]
+    book = _hand_poly_book(client, slug)
+    _lap("book")
+    if book is None:
+        return {"ok": False, "error": "book unreadable — try again"}
+    s_bid, s_ask = _manual_side_book(book, syn)
+    tick = _pmm_tick_c(client, slug)
+    price, why = _auto_price_seat(ap.get("fair_c"), s_bid, cfg["seat_c"], cfg["cap_c"],
+                                  _hand_chalk_cap_c(item.get("market_type")), tick, s_ask)
+    if price is None:
+        return {"ok": False, "error": f"no seat: {why}"}
+    out, _st = _manual_order_place(client, slug, syn, price, contracts, row.get("event_start"), book=book,
+                                   verify=("socket" if deferred is not None else "fresh"))
+    _lap("place")
+    if not out.get("ok"):
+        return {"ok": False, "error": out.get("error") or "order failed", "ms": ms}
+    res = {"ok": True, "via": worker, "order_id": out.get("order_id"), "state": out.get("state"),
+           "resting": out.get("resting"), "cost": out.get("cost"), "price_c": out.get("price_c"),
+           "auto_price": True, "priced": why}
+    if out.get("unverified") and deferred is not None:
+        res["resting"] = None
+        res["verify"] = "pending"
+        deferred.append((row["id"], res))
+    elif not out.get("resting"):
+        res["warning"] = f"order sent but not resting (state {out.get('state') or 'unknown'}) — check the app"
+    resolve = {"slug": slug, "synthetic": syn, "rung_line": entry.get("line"), "rung_why": sl.get("why"),
+               "price_c": price, "ask_c": s_ask, "event_title": (pmm or {}).get("event_title"),
+               "chalk_cap_c": sl.get("chalk_c")}
+    stamp.update({"placed_c": price, "placed_why": why})
+    pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), item, resolve, res, contracts,
+                                        extra={"auto_price": stamp})
+    res["pick_id"] = pick_id
+    if warn:
+        res["warning"] = ((res.get("warning") or "") + " · " + warn).strip(" ·")
+    try:
+        _probe_log({"hand_auto_price": True, "pick_id": pick_id, "slug": slug, "price_c": price, "why": why,
+                    "fair_c": ap.get("fair_c"), "touch_c": s_bid, "ask_c": s_ask, "contracts": contracts,
+                    "venue": "POLYMARKET", "label": item.get("label"), "sport": item.get("sport")})
+    except Exception:
+        pass
+    return res
 
 
 def _hand_twin_backfill(sb, now) -> dict:
@@ -23220,9 +23764,18 @@ def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg
                 touch = min(touch, float(dest))
             except (TypeError, ValueError):
                 pass
+        leash_r = leash
+        if isinstance(blob.get("auto_price"), dict):
+            fc = _hand_fair_cap_c(blob, now)
+            if fc is None:
+                return
+            touch = min(touch, fc - _auto_cap_c(blob))
+            leash_r = _AUTO_PRICE_LEASH_C
+            if touch < 1.0:
+                return
         touch = round(_grid_dn(float(touch), _KALSHI_TICK_C), 2)
         anchor = blob.get("anchor_c", blob.get("price_c"))
-        if anchor is not None and touch > float(anchor) + leash + 1e-9:
+        if anchor is not None and touch > float(anchor) + leash_r + 1e-9:
             if not blob.get("chase_hold"):
                 sb.table("bot_picks").update({"signal_blob": {**blob, "chase_hold": {
                     "touch_c": touch, "price_c": blob.get("price_c"), "leash_c": leash,
@@ -23662,6 +24215,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
             stats["pin"] = _hand_pin_tick(sb, now, client)       # Pinnacle fair on every resting bet: now / first / close / the pull
         except Exception as e:
             stats["pin"] = {"err": str(e)[:80]}
+        try:
+            stats["auto"] = _auto_price_tick(sb, client, now)   # THE AUTO PRICE LANE: every sheet rung seated off Pinnacle (Oct 27 2026)
+        except Exception as e:
+            stats["auto"] = {"err": f"{type(e).__name__}: {e}"[:120]}
         _drain()
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
         try:
@@ -28211,7 +28768,9 @@ def _hand_chase_tick(sb, client, now) -> dict:
             if blob.get("pmm_twin_slug"):
                 live.add(blob["pmm_twin_slug"])       # the Polymarket twin rides the tape: the start rule's fallback
             try:
-                _hand_chase_kalshi(sb, r, blob, now, st, leash, thin_pct, thin_off_h, kctx)
+                _hand_chase_kalshi(sb, r, blob, now, st,
+                                   (_AUTO_PRICE_LEASH_C if isinstance(blob.get("auto_price"), dict) else leash),
+                                   thin_pct, thin_off_h, kctx)
             except Exception as e:
                 st["errors"] += 1
                 app.logger.warning("hand chase KALSHI pick %s: %s", r["id"], str(e)[:120])
@@ -28265,10 +28824,20 @@ def _hand_chase_tick(sb, client, now) -> dict:
         cap_c = _hand_rejoin_cap(blob, now, ev, lead_min)   # a hold set before this rule may run past T-30: the read caps it too
         chalk_c = _hand_pick_chalk_c(blob)
         fair_cap = _hand_fair_cap_c(blob, now)          # never climb above Pinnacle fair (Oct 27 2026)
+        auto = isinstance(blob.get("auto_price"), dict)
+        leash_eff = leash
+        if auto:
+            # THE AUTO LANE: no leash — the chase climbs to fair − cap and stops;
+            # with no fresh fair it never climbs at all
+            if fair_cap is None:
+                st["no_fair"] = st.get("no_fair", 0) + 1
+                continue
+            fair_cap = round(fair_cap - _auto_cap_c(blob), 2)
+            leash_eff = _AUTO_PRICE_LEASH_C
         fair_bind = fair_cap is not None and (chalk_c is None or fair_cap < chalk_c)
         if fair_bind:
             chalk_c = fair_cap
-        verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash, cap_c=cap_c, chalk_c=chalk_c)
+        verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash_eff, cap_c=cap_c, chalk_c=chalk_c)
         hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
         thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
         thin_join = None                                # set when the guard retargets us to the rung under a thin touch
@@ -28360,17 +28929,18 @@ def _hand_chase_tick(sb, client, now) -> dict:
                     and (rr is None or rr_age is None or rr_age > _HAND_RERUNG_REFRESH_S or moved_touch)):
                 st["rr_reads"] = st.get("rr_reads", 0) + 1
                 _a0 = float(anchor_c if anchor_c is not None else price_c)
-                _rl = leash if note != "chalk" else max(0.0, min(float(leash), float(chalk_c) - 0.01 - _a0))
+                _rl = leash_eff if note != "chalk" else max(0.0, min(float(leash_eff), float(chalk_c) - 0.01 - _a0))
                 got = _hand_rerung_suggest(client, r, slug, _a0, _rl, now)
                 if got is not None:
                     rr = got
                     moved_touch = True                  # write the fresh suggestion
             if moved_touch or thin_hold or (note == "chalk") != bool((hold or {}).get("chalk_c")):
-                ch = {"touch_c": target, "price_c": price_c, "leash_c": leash, "at": now.isoformat()}
+                ch = {"touch_c": target, "price_c": price_c, "leash_c": leash_eff, "at": now.isoformat()}
                 if note == "chalk":
                     ch["chalk_c"] = chalk_c
                     if fair_bind:
                         ch["fair_c"] = fair_cap
+                        ch["auto"] = auto
                 if rr:
                     ch["rerung"] = rr
                 nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c, "chase_hold": ch}

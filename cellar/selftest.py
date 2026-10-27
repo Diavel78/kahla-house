@@ -4504,6 +4504,55 @@ def test_sheet_seed_pin_picks() -> None:
     check("seed: a seeded pick takes a price verdict", g["spread"]["verdict"] == "play" and g["spread"]["model_verdict"] == "pass", g["spread"].get("pv"))
 
 
+def test_auto_price_lane() -> None:
+    """THE AUTO PRICE LANE (Oct 27 2026): the seat is the higher of the touch
+    and fair − 10, capped at fair − 2, never on the ask, never chalk; the
+    venue is the cheaper seat after fees with Polymarket on a tie; an auto
+    bet is pulled on ONE read the moment it is no longer a lean; the chase
+    has no leash and stops at fair − cap; the flag is off by default."""
+    import app as _app
+    check("auto: off by default", _app.AUTO_PRICE_ENABLED is False)
+    seat = _app._auto_price_seat
+    check("auto: touch 25 / fair 50 → 40, leading", seat(50.0, 25.0, 10, 2, 54.5, 0.5, 60.0) == (40.0, "lead"))
+    check("auto: touch 44 / fair 50 → join 44", seat(50.0, 44.0, 10, 2, 54.5, 0.5, 46.0) == (44.0, "join"))
+    check("auto: touch 49 / fair 50 → 48 under the touch", seat(50.0, 49.0, 10, 2, 54.5, 0.5, 50.0) == (48.0, "under_touch"))
+    check("auto: never on or across the ask", seat(50.0, 25.0, 10, 2, 54.5, 0.5, 40.0)[0] == 39.5)
+    check("auto: a seat at the chalk cap is no seat", seat(70.0, 20.0, 10, 2, 58.33, 0.5, 80.0) == (None, "chalk"))
+    check("auto: no fair, no seat", seat(None, 25.0, 10, 2, 54.5, 0.5, 60.0) == (None, "no_fair"))
+    check("auto: kalshi grid is whole cents", seat(50.3, 25.0, 10, 2, 54.5, 1.0, 60.0)[0] == 40.0)
+    check("auto: no touch at all still seats fair − 10", seat(50.0, None, 10, 2, 54.5, 0.5, None) == (40.0, "lead"))
+    v, d = _app._auto_price_venue({"price_c": 40.0}, {"price_c": 40.0, "fee": None}, 5)
+    check("auto: equal seats → Polymarket (Kalshi's maker fee breaks the tie)", v == "POLYMARKET", d)
+    v, d = _app._auto_price_venue({"price_c": 46.0}, {"price_c": 40.0, "fee": None}, 5)
+    check("auto: the cheaper seat wins", v == "KALSHI" and d["why"] == "cheaper", d)
+    v, d = _app._auto_price_venue(None, {"price_c": 40.0, "fee": None}, 5)
+    check("auto: only one seat → that venue", v == "KALSHI")
+    check("auto: no seat anywhere", _app._auto_price_venue(None, None, 5)[0] is None)
+    blob = {"auto_price": {"cap_c": 2.0}, "order_id": "x", "contracts": 5, "price_c": 48.0}
+    check("auto: a bid at fair − 0.5 is no longer a lean → pulled on one read",
+          _app._hand_fair_pull_plan(blob, 48.0, 48.5, 120.0, pull_c=-1.0, reads=1)[0] == "pull")
+    check("auto: a bid at fair − 1 is still a lean → clear",
+          _app._hand_fair_pull_plan(blob, 48.0, 49.0, 120.0, pull_c=-1.0, reads=1)[0] == "clear")
+    check("auto: a hand bet keeps its 1¢-over, 2-read rule",
+          _app._hand_fair_pull_plan({"order_id": "x", "contracts": 5}, 50.5, 49.0, 120.0)[0] == "count"
+          and _app._hand_fair_pull_plan({"order_id": "x", "contracts": 5}, 49.5, 49.0, 120.0)[0] == "clear")
+    check("auto: the cap reads the stamp", _app._auto_cap_c(blob) == 2.0 and _app._auto_cap_c({"auto_price": {}}) == _app._AUTO_PRICE_CAP_C)
+    # the chase: no leash, the fair cap is the wall
+    v, t, n = _app._hand_chase_plan(40.0, 47.0, 40.0, _app._AUTO_PRICE_LEASH_C, chalk_c=48.0)
+    check("auto chase: climbs 7¢ past the anchor to join the touch", (v, t, n) == ("move", 47.0, "join"))
+    v, t, n = _app._hand_chase_plan(47.0, 49.0, 40.0, _app._AUTO_PRICE_LEASH_C, chalk_c=48.0)
+    check("auto chase: a touch past fair − cap is a hold", (v, n) == ("hold", "chalk"))
+    import inspect as _insp
+    src = _insp.getsource(_app._hand_order_execute)
+    check("auto: the executor routes an auto row before the slip resolve", "_auto_price_execute(" in src and src.index("_auto_price_execute(") < src.index("rs = _bet_sheet_resolve(client, item)"))
+    src = _insp.getsource(_app._hand_orders_tick)
+    check("auto: the scan rides the handbets tick after the pin read", "_auto_price_tick(" in src and src.index("_hand_pin_tick(") < src.index("_auto_price_tick("))
+    src = _insp.getsource(_app._hand_pin_tick)
+    check("auto: the pin tick reads Pinnacle's live feed under the lane", "_pin_live_slate" in src and "pin_rerung" in src)
+    lbl = _app._auto_price_label({"home": "Boston Celtics", "away": "Brooklyn Nets"}, "spread", {"side": "home", "line": -11.5})
+    check("auto: labels", lbl == "Boston Celtics -11.5" and _app._auto_price_label({}, "total", {"side": "under", "line": 221.5}) == "Under 221.5")
+
+
 def test_end_state_rosters() -> None:
     """Oct 6 2026 — the sheets are the product. Tape daemon = batch, grader,
     mirror; money daemon = handbets. The mirror lane carries the dashboard's
@@ -6422,7 +6471,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
