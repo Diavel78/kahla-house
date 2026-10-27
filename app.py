@@ -23181,6 +23181,16 @@ def _hand_switch_cap_ok(blob: dict, r: dict, now, dest_c) -> bool:
     except (TypeError, ValueError):
         ev = None
     cap = _hand_rejoin_cap(blob, now, ev)
+    if isinstance(blob.get("auto_price"), dict):
+        # An AUTO bet's switch lands under fair − cap like every other
+        # climb on the lane (Oct 27 2026): the 2¢ switch leash alone could
+        # seat it AT fair and the next pin read would pull it. No fresh
+        # fair = no switch.
+        fc = _hand_fair_cap_c(blob, now)
+        if fc is None:
+            return False
+        fcap = fc - _auto_cap_c(blob)
+        cap = fcap if cap is None else min(cap, fcap)
     try:
         return cap is None or dest_c is None or float(dest_c) <= cap + 1e-9
     except (TypeError, ValueError):
