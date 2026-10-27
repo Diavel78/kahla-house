@@ -4622,6 +4622,11 @@ def test_auto_price_lane() -> None:
     check("one side: no Pinnacle ML price = the dog → ML", sk("NHL", {"ml": {"side": "home"}}) == "ml")
     import inspect as _insp2
     src2 = _insp2.getsource(_app._auto_price_tick)
+    check("one side: a seat already resting keeps the game's key (no ml ↔ puck churn)",
+          "_have = [mt_ for mt_ in (\"moneyline\", \"spread\") if auto_pend.get((sport, _ev_, mt_))]" in src2
+          and src2.index("if len(_have) == 1:") < src2.index("THE DOUBLED SEAT COMES OFF"))
+    check("one side: the scan prices off _pin_fair_for_item, the pull's own fair",
+          src2.index("_pin_fair_for_item(evs, sport, item, age)") < src2.index("fair_c = round(float(pf[\"prob\"]) * 100.0, 2)"))
     check("one side: the scan skips the other side market and sweeps a doubled seat",
           '_skip("one_side_market")' in src2 and "hand_auto_side_pull" in src2 and src2.index("_auto_price_side_key(") < src2.index("for k in _AUTO_PRICE_KEYS"))
 

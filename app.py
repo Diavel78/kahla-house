@@ -23000,6 +23000,16 @@ def _auto_price_tick(sb, client, now) -> dict:
             g["venue"] = {"at": tq.get("at"), "age_s": int(touch_age), "picks": tq["picks"]}
         _sheet_attach_price(sport, g, now)              # the flip: the price rule names the side
         side_key = _auto_price_side_key(sport, g)
+        # A SEAT ALREADY RESTING KEEPS ITS KEY (Oct 26 2026, NYI @ NSH: the price
+        # rule's ML side flipped with the touch, the key went ml → puck → ml, and
+        # each flip pulled one seat and placed the other — a cancel + create pair
+        # every three minutes). One side market resting = that is the game's key;
+        # the pull rule, not the key, decides when it leaves. Two resting = the
+        # rule picks which one stays.
+        _ev_ = str(g.get("event_name") or "")
+        _have = [mt_ for mt_ in ("moneyline", "spread") if auto_pend.get((sport, _ev_, mt_))]
+        if len(_have) == 1:
+            side_key = "ml" if _have[0] == "moneyline" else ("puck" if sport == "NHL" else "spread")
         # THE DOUBLED SEAT COMES OFF (Oct 26 2026): a resting unfilled AUTO bet on
         # the side market this game does NOT play (the ML beside a spread, the
         # puck line beside a dog's ML) is cancelled through the ordinary path.
@@ -23048,17 +23058,26 @@ def _auto_price_tick(sb, client, now) -> dict:
             if k == "ml" and (pk.get("chalky") or pk.get("longshot")):
                 _skip("ml_chalk_or_longshot")
                 continue
-            pf = pk.get("pin_fair") if isinstance(pk.get("pin_fair"), dict) else None
+            item = {"sport": sport, "away": g.get("away"), "home": g.get("home"),
+                    "event_start": g.get("event_start"), "market_type": mt, "side": pk["side"],
+                    "line": (0.0 if mt == "ml" else pk.get("line")),
+                    "label": _auto_price_label(g, k, pk), "cid": f"auto-{uuid.uuid4().hex[:12]}"}
+            # THE SEAT AND THE PULL READ ONE FAIR (Oct 26 2026, MTL ML seated at 46¢
+            # three times in nine minutes: the scan priced the flipped side off the
+            # sheet's mirrored fair, 48.6, the pin read priced the same bet off
+            # Pinnacle's own price for that side, 46.2, and pulled it a minute later).
+            try:
+                pf = _pin_fair_for_item(evs, sport, item, age)
+            except Exception:
+                pf = None
+            if not pf or pf.get("prob") is None:
+                pf = pk.get("pin_fair") if isinstance(pk.get("pin_fair"), dict) else None
             if not pf or pf.get("prob") is None:
                 st["no_fair"] += 1
                 continue
             st["cands"] += 1
             fair_c = round(float(pf["prob"]) * 100.0, 2)
             chalk_c = _hand_chalk_cap_c(mt)
-            item = {"sport": sport, "away": g.get("away"), "home": g.get("home"),
-                    "event_start": g.get("event_start"), "market_type": mt, "side": pk["side"],
-                    "line": (0.0 if mt == "ml" else pk.get("line")),
-                    "label": _auto_price_label(g, k, pk), "cid": f"auto-{uuid.uuid4().hex[:12]}"}
             bad = _bet_sheet_item_check(item)
             if bad:
                 _skip("item:" + bad[:30])
