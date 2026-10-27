@@ -22957,13 +22957,47 @@ def _auto_price_tick(sb, client, now) -> dict:
     # scan's booked / auto_pend / cooldown keys never matched its own MLB seat
     # — the venue guard caught every re-seat except the one placed in the gap
     # a Kalshi switch left on Polymarket). `_auto_price_ev` strips the date.
-    auto_pend: dict = {}                    # (sport, event_name, mt) -> the pending AUTO pick row
-    for r in prow:
+    auto_pend: dict = {}                    # (sport, event_name, mt) -> the pending AUTO pick row (oldest)
+    auto_dups: list = []                    # newer AUTO picks on a market one already rests on
+    for r in sorted(prow, key=lambda x: int(x.get("id") or 0)):
         b_ = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if isinstance(b_.get("auto_price"), dict):
-            auto_pend[(str(r.get("sport") or "").upper(), _auto_price_ev(r.get("event_name")),
-                       str(r.get("market_type") or ""))] = r
+            k_ = (str(r.get("sport") or "").upper(), _auto_price_ev(r.get("event_name")),
+                  str(r.get("market_type") or ""))
+            if k_ in auto_pend:
+                auto_dups.append(r)
+            else:
+                auto_pend[k_] = r
     st["side_pulled"] = 0
+    # A MARKET SEATED TWICE (Oct 27 2026, the TB ML on Kalshi AND Polymarket):
+    # the older seat is the bet; a newer unfilled AUTO seat on the same
+    # (game, market) is cancelled through the ordinary path.
+    st["dup_pulled"] = 0
+    for pr in auto_dups:
+        if client is None or st["dup_pulled"] >= _AUTO_PRICE_PULL_MAX:
+            break
+        pb = pr.get("signal_blob") if isinstance(pr.get("signal_blob"), dict) else {}
+        try:
+            lead_ = (_parse_iso(pr.get("event_start")) - now).total_seconds() / 60.0
+        except Exception:
+            continue
+        v0, _d0 = _hand_fair_pull_plan(pb, pb.get("price_c"), 0.0, lead_, pull_c=1e9, reads=1)
+        if v0 == "skip":
+            continue
+        st["dup_pulled"] += 1
+        try:
+            out_, code_ = _bet_sheet_cancel_exec(sb, client, pr["id"])
+        except Exception as e:
+            out_, code_ = {"ok": False, "error": str(e)[:120]}, 500
+        try:
+            _probe_log({"hand_auto_dup_pull": True, "pick_id": pr["id"], "at": now.isoformat(), "auto": True,
+                        "sport": pr.get("sport"), "event_name": pr.get("event_name"), "market_type": pr.get("market_type"),
+                        "label": pb.get("label"), "price_c": pb.get("price_c"), "venue": pb.get("venue") or "POLYMARKET",
+                        "kept_pick_id": (auto_pend.get((str(pr.get("sport") or "").upper(), _auto_price_ev(pr.get("event_name")),
+                                                        str(pr.get("market_type") or ""))) or {}).get("id"),
+                        "result": out_, "code": code_})
+        except Exception:
+            pass
     booked = {(str(r.get("sport") or "").upper(), _auto_price_ev(r.get("event_name")),
                {"moneyline": "ml"}.get(str(r.get("market_type") or ""), str(r.get("market_type") or "")))
               for r in prow}
@@ -28049,7 +28083,7 @@ def _hand_game_worker() -> None:
 _SHEET_TOUCH_KEY = "sheet_touch"
 _SHEET_TOUCH_EVERY_S = 1800.0
 _SHEET_TOUCH_MIN_EVERY_S = 300.0
-_SHEET_TOUCH_BUDGET_S = 240.0
+_SHEET_TOUCH_BUDGET_S = 900.0            # was 240 — Oct 27 2026, see _sheet_touch_pass
 _SHEET_TOUCH_HORIZON_H = 7 * 24
 _SHEET_TOUCH_FRESH_S = 2 * 3600          # Vercel drops a blob older than this
 _SHEET_TOUCH_BOOT_WAIT_S = 45.0          # let the sockets seed before the first walk
@@ -28222,13 +28256,24 @@ def _sheet_touch_pass(sb, client, now=None) -> dict:
     games: dict = {}
     st = {"games": 0, "items": 0, "poly": 0, "kalshi": 0, "kept": 0, "partial": False, "sports": {}}
     cache: dict = {}
-    for sport, r, g in _sheet_touch_rows(sb, now):
+    # THE WALK ROTATES (Oct 27 2026, Rob: "no pin quote from noon after on
+    # college football"): nearest-first under a 240s budget read ~38 of 84
+    # games a pass (the venue's 429 waits eat it), the Saturday noon-and-later
+    # slate was never reached, and `kept` only carries a read that once
+    # happened. Now the budget is 900s of the 1800s cadence, and a partial
+    # pass remembers where it stopped (`resume`) so the next pass STARTS
+    # there — every game is read within two passes, the nearest the pass after.
+    rows = _sheet_touch_rows(sb, now)
+    rows = _sheet_touch_rotate(rows, _SHEET_TOUCH_LAST.get("resume"))
+    resume = None
+    for sport, r, g in rows:
         key = f"{sport}|{r.get('event_name')}"
         items = _sheet_touch_items(sport, g)
         if not items:
             continue
         if _time.monotonic() - t0 > _SHEET_TOUCH_BUDGET_S:
             st["partial"] = True
+            resume = resume or key
             if prev.get(key):
                 games[key] = prev[key]
                 st["kept"] += 1
@@ -28271,7 +28316,7 @@ def _sheet_touch_pass(sb, client, now=None) -> dict:
         st["games"] += 1
         st["sports"][sport] = st["sports"].get(sport, 0) + 1
         _time.sleep(0.15)                      # gentle on both venues; the pass is not a race
-    payload = {"at": now_iso, "ms": int((_time.monotonic() - t0) * 1000), **st, "games": games}
+    payload = {"at": now_iso, "ms": int((_time.monotonic() - t0) * 1000), **st, "resume": resume, "games": games}
     try:
         sb.table("lookup_cache").upsert({"key": _SHEET_TOUCH_KEY, "sport": "ANY",
                                          "fetched_at": now_iso, "payload": payload}).execute()
@@ -28286,6 +28331,17 @@ def _sheet_touch_pass(sb, client, now=None) -> dict:
                     st["games"], st["items"], st["poly"], st["kalshi"], st["kept"], payload["ms"],
                     " PARTIAL" if st["partial"] else "")
     return {k: v for k, v in payload.items() if k != "games"}
+
+
+def _sheet_touch_rotate(rows: list, resume) -> list:
+    """Pure. Start the walk at the game the last partial pass stopped on
+    (rows are (sport, r, g) nearest-first); an unknown key = nearest first."""
+    if not resume or not rows:
+        return list(rows)
+    for i, (sport, r, _g) in enumerate(rows):
+        if f"{sport}|{r.get('event_name')}" == resume:
+            return list(rows[i:]) + list(rows[:i])
+    return list(rows)
 
 
 def _sheet_touch_worker() -> None:

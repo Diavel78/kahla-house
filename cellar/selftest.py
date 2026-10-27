@@ -4642,6 +4642,18 @@ def test_auto_price_lane() -> None:
           and "_AUTO_PRICE_SENT[(sport, _ev_, mt_)]" in src2 and 'str(g.get("event_name") or ""), mt' not in src2)
     check("auto scan: no live fair at the rung = no seat (never the sheet's pin_fair)",
           'pk.get("pin_fair")' not in src2 and src2.index("_pin_fair_for_item(evs, sport, item, age)") < src2.index('st["no_fair"] += 1'))
+    check("auto scan: a market seated twice keeps the OLDEST seat and cancels the newer",
+          "hand_auto_dup_pull" in src2 and "sorted(prow, key=lambda x: int(x.get(\"id\") or 0))" in src2
+          and src2.index("hand_auto_dup_pull") < src2.index("for sport, r, g in _sheet_touch_rows"))
+    # THE TOUCH WALK ROTATES (Oct 27 2026, "no pin quote from noon after on college football")
+    rot = _app._sheet_touch_rotate
+    rws = [("NCAAF", {"event_name": "A @ B"}, {}), ("NCAAF", {"event_name": "C @ D"}, {}), ("NHL", {"event_name": "E @ F"}, {})]
+    check("touch walk: a partial pass's resume key leads the next walk, the rest follow in order",
+          [r[1]["event_name"] for r in rot(rws, "NCAAF|C @ D")] == ["C @ D", "E @ F", "A @ B"]
+          and rot(rws, None) == rws and rot(rws, "NBA|X @ Y") == rws and rot([], "x") == [])
+    check("touch walk: the budget is most of the cadence, and a partial pass stamps where it stopped",
+          _app._SHEET_TOUCH_BUDGET_S >= 600 and _app._SHEET_TOUCH_BUDGET_S < _app._SHEET_TOUCH_EVERY_S
+          and '"resume": resume' in _insp2.getsource(_app._sheet_touch_pass))
 
 
 def test_end_state_rosters() -> None:
