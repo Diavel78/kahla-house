@@ -22130,6 +22130,47 @@ _HAND_PIN_EVERY_S = 180.0
 _HAND_PIN_LAST = {"at": 0.0}
 _HAND_PIN_CLOSE_LEAD_MIN = 45.0
 _HAND_PIN_MAX = 80
+# THE FAIR PULL (Oct 27 2026, Rob: "earlier the better" — resting from the
+# morning is safe only if the box takes a bet off the table the moment its
+# bid sits ABOVE Pinnacle fair): a resting, unfilled, pre-game sheet bet
+# whose bid reads more than `hand_fair_pull_c` (1¢) over fair on TWO
+# consecutive pin reads (6 min — one flicker never pulls) is cancelled
+# through the ordinary cancel path (nothing filled → the pick goes, a
+# partial keeps its lot), stamped `hand_fair_pull` with the bet, red-alerted
+# once. Never a live snipe, an in-play bet, a bet already sitting out or
+# mid-cancel, or a lot held in full. Kill switch `machine_flags
+# hand_fair_pull`; `hand_fair_pull_max` (5) pulls a tick.
+_HAND_FAIR_PULL_C = 1.0
+_HAND_FAIR_PULL_READS = 2
+_HAND_FAIR_PULL_MAX = 5
+
+
+def _hand_fair_pull_plan(blob: dict, price_c, fair_c, lead_min, pull_c: float = _HAND_FAIR_PULL_C,
+                         reads: int = _HAND_FAIR_PULL_READS):
+    """Pure. ('pull'|'count'|'clear'|'skip', detail) for one pick at one pin
+    read. `fair_over` on the blob counts consecutive reads above fair."""
+    if lead_min is None or lead_min <= 0:
+        return "skip", "started"
+    if any(blob.get(k) for k in ("live_snipe", "in_play", "line_hold", "poly_cancel_sent",
+                                 "kalshi_move_cancel_sent", "kalshi_cancel_sent", "start_take_window",
+                                 "game_started", "start_blind", "app_adopted")):
+        return "skip", "not_the_box's_to_pull"
+    if not (blob.get("order_id") or blob.get("kalshi_order_id")):
+        return "skip", "no_order"
+    try:
+        c, f = float(blob.get("contracts") or 0), float(blob.get("filled_qty") or 0)
+        if c > 0 and f >= c - 1e-6:
+            return "skip", "held_in_full"
+    except (TypeError, ValueError):
+        pass
+    try:
+        over = float(price_c) - float(fair_c)
+    except (TypeError, ValueError):
+        return "skip", "no_price"
+    if over <= float(pull_c) + 1e-9:
+        return "clear", round(over, 2)
+    n = int(((blob.get("fair_over") or {}).get("n") or 0) if isinstance(blob.get("fair_over"), dict) else 0) + 1
+    return ("pull" if n >= reads else "count"), {"n": n, "over_c": round(over, 2)}
 
 
 def _hand_pin_item(r: dict, blob: dict) -> dict:
@@ -22143,13 +22184,19 @@ def _hand_pin_item(r: dict, blob: dict) -> dict:
             "line": (0.0 if mt == "ml" else line)}
 
 
-def _hand_pin_tick(sb, now) -> dict:
+def _hand_pin_tick(sb, now, client=None) -> dict:
     if _time.monotonic() - _HAND_PIN_LAST["at"] < _HAND_PIN_EVERY_S:
         return {"skip": "cadence"}
     if not _machine_flag("hand_pin_close", True):
         return {"off": True}
     _HAND_PIN_LAST["at"] = _time.monotonic()
-    st = {"seen": 0, "now": 0, "first": 0, "close": 0, "miss": 0, "err": 0}
+    st = {"seen": 0, "now": 0, "first": 0, "close": 0, "miss": 0, "err": 0, "over": 0, "pulled": 0}
+    pull_on = client is not None and _machine_flag("hand_fair_pull", True)
+    try:
+        pull_c = float(_machine_flag_val("hand_fair_pull_c", _HAND_FAIR_PULL_C))
+        pull_max = int(_machine_flag_val("hand_fair_pull_max", _HAND_FAIR_PULL_MAX))
+    except (TypeError, ValueError):
+        pull_c, pull_max = _HAND_FAIR_PULL_C, _HAND_FAIR_PULL_MAX
     lo = (now - timedelta(minutes=15)).isoformat()
     hi = (now + timedelta(hours=_SHEET_TOUCH_HORIZON_H)).isoformat()
     try:
@@ -22200,12 +22247,68 @@ def _hand_pin_tick(sb, now) -> dict:
                     nb["pin_close"] = pf
                     changed = True
                     st["close"] += 1
+            # THE FAIR PULL
+            verdict, det = ("skip", "off")
+            if pull_on:
+                verdict, det = _hand_fair_pull_plan(blob, blob.get("price_c"), pf["fair_c"], lead_min, pull_c)
+            if verdict == "clear" and blob.get("fair_over"):
+                nb.pop("fair_over", None)
+                changed = True
+            elif verdict == "count":
+                nb["fair_over"] = {**det, "at": now.isoformat(), "fair_c": pf["fair_c"]}
+                changed = True
+                st["over"] += 1
             if changed:
                 sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+            if verdict == "pull" and st["pulled"] < pull_max:
+                st["pulled"] += 1
+                out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
+                stamp = {"hand_fair_pull": True, "pick_id": r["id"], "at": now.isoformat(),
+                         "price_c": blob.get("price_c"), "fair_c": pf["fair_c"], "over": det,
+                         "pin": {k: pf.get(k) for k in ("pin_line", "src", "age_min")},
+                         "venue": blob.get("venue") or "POLYMARKET", "result": out, "code": code,
+                         "bet": {"label": blob.get("label"), "side": r.get("side"), "line": blob.get("rung_line"),
+                                 "price_c": blob.get("price_c"), "contracts": blob.get("contracts"),
+                                 "event_name": r.get("event_name"), "event_start": r.get("event_start"),
+                                 "market_type": r.get("market_type"), "sport": r.get("sport"),
+                                 "venue": blob.get("venue") or "POLYMARKET"}}
+                try:
+                    _probe_log(stamp)
+                except Exception:
+                    pass
+                try:
+                    _hand_fair_pull_alert(stamp)
+                except Exception:
+                    pass
         except Exception as e:
             st["err"] += 1
             st["last_err"] = str(e)[:80]
     return st
+
+
+def _hand_fair_pull_alert(stamp: dict) -> None:
+    """One red per pulled bet: PULLED · bid X¢ over Pinnacle fair Y¢."""
+    if not _machine_flag("hand_red_alert", True):
+        return
+    pid = f"{stamp.get('pick_id')}:fair"
+    if pid in _HAND_START_ALERTED:
+        return
+    _HAND_START_ALERTED[pid] = _time.monotonic()
+    bet = stamp.get("bet") if isinstance(stamp.get("bet"), dict) else {}
+    res = stamp.get("result") if isinstance(stamp.get("result"), dict) else {}
+    what = ("deleted — nothing had filled" if res.get("deleted") else
+            f"kept at {res.get('held')} held" if res.get("ok") else f"CANCEL FAILED: {res.get('error')}")
+    text = (f"PULLED · bid {stamp.get('price_c')}¢ sits over Pinnacle fair {stamp.get('fair_c')}¢ "
+            f"({(stamp.get('over') or {}).get('over_c')}¢ over on 2 reads) · {what}")
+    r = {"event_name": bet.get("event_name"), "event_start": bet.get("event_start"),
+         "side": bet.get("side"), "market_type": bet.get("market_type")}
+    blob = {"label": bet.get("label"), "contracts": bet.get("contracts"), "price_c": bet.get("price_c"),
+            "venue": bet.get("venue") or "POLYMARKET"}
+    try:
+        msg = _hand_red_msg(r, blob, text)
+        stamp["alert"] = {"sent": bool(_send_fill_telegram(msg, urgent=True))}
+    except Exception as e:
+        stamp["alert"] = {"sent": False, "err": str(e)[:80]}
 
 
 def _hand_fair_cap_c(blob: dict, now):
@@ -23401,7 +23504,7 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
         except Exception as e:
             stats["twins"] = {"err": str(e)[:80]}
         try:
-            stats["pin"] = _hand_pin_tick(sb, now)               # Pinnacle fair on every resting bet: now / first / close
+            stats["pin"] = _hand_pin_tick(sb, now, client)       # Pinnacle fair on every resting bet: now / first / close / the pull
         except Exception as e:
             stats["pin"] = {"err": str(e)[:80]}
         _drain()

@@ -6336,6 +6336,17 @@ def test_price_rule() -> None:
     check("fair cap: a touch past fair is a hold", v == "hold" and note == "chalk")
     it = _app._hand_pin_item({"event_name": "A @ B", "market_type": "moneyline", "side": "home", "entry_line": None, "sport": "nfl", "event_start": "x"}, {})
     check("pin item: moneyline → ml at line 0", it["market_type"] == "ml" and it["line"] == 0.0 and it["home"] == "B" and it["sport"] == "NFL")
+    P = _app._hand_fair_pull_plan
+    base = {"order_id": "o1", "contracts": 10, "filled_qty": 0, "price_c": 52.0}
+    check("fair pull: under fair clears", P(base, 52.0, 52.5, 120)[0] == "clear")
+    check("fair pull: a cent over is tolerated", P(base, 52.0, 51.2, 120)[0] == "clear")
+    v, d = P(base, 53.0, 51.0, 120)
+    check("fair pull: first read over counts", v == "count" and d["n"] == 1 and abs(d["over_c"] - 2.0) < 1e-6)
+    check("fair pull: second read pulls", P({**base, "fair_over": {"n": 1}}, 53.0, 51.0, 120)[0] == "pull")
+    check("fair pull: never a started game", P({**base, "fair_over": {"n": 1}}, 53.0, 51.0, -1)[0] == "skip")
+    check("fair pull: never a live snipe / in-play / sitting-out bet", all(P({**base, k: {"x": 1}}, 53.0, 51.0, 120)[0] == "skip" for k in ("live_snipe", "in_play", "line_hold", "poly_cancel_sent")))
+    check("fair pull: never a lot held in full", P({**base, "filled_qty": 10}, 53.0, 51.0, 120)[0] == "skip")
+    check("fair pull: nothing resting, nothing to pull", P({**base, "order_id": None}, 53.0, 51.0, 120)[0] == "skip")
 
 
 def main() -> int:
