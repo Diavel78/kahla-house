@@ -2577,17 +2577,23 @@ def api_football_picks_debug():
                     c["no_quote"] += int(pv.get("edge_c") is None)
                     c["flipped"] += int(bool(pv.get("flipped")))
         n = int(request.args.get("n") or 3)
-        sample = []
+        sample, n_up = [], 0
         for g in games:
-            if len(sample) >= n:
-                break
-            blk = {"game": g.get("event_name"), "start": g.get("event_start"), "venue_age_s": (g.get("venue") or {}).get("age_s")}
+            ev = _parse_iso(g.get("event_start")) if g.get("event_start") else None
+            up = bool(ev and ev > now)
+            n_up += int(up)
+            if len(sample) >= n or not up:
+                continue
+            blk = {"game": g.get("event_name"), "start": g.get("event_start"), "venue_age_s": (g.get("venue") or {}).get("age_s"),
+                   "picks": {k: {"side": g[k].get("side"), "line": g[k].get("line"), "model_verdict": g[k].get("model_verdict")}
+                             for k in ("ml", "puck", "spread", "total") if isinstance(g.get(k), dict)},
+                   "pin": bool(g.get("pin"))}
             for k in ("ml", "puck", "spread", "total"):
                 pk = g.get(k)
                 if isinstance(pk, dict) and pk.get("pv"):
                     blk[k] = {kk: pk.get(kk) for kk in ("side", "line", "verdict", "model_verdict", "flipped", "pv", "pin_fair")}
             sample.append(blk)
-        return jsonify({"ok": True, "sport": sport, "games": len(games), "pin_slate": bool(pin_evs),
+        return jsonify({"ok": True, "sport": sport, "games": len(games), "upcoming": n_up, "pin_slate": bool(pin_evs),
                         "thresholds": _price_thresholds(), "counts": counts, "sample": sample})
     if request.args.get("dump"):
         # THE MODEL AUDIT DUMP (Oct 26 2026): every sheet row for a sport /
