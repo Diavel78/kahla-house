@@ -4629,6 +4629,19 @@ def test_auto_price_lane() -> None:
           src2.index("_pin_fair_for_item(evs, sport, item, age)") < src2.index("fair_c = round(float(pf[\"prob\"]) * 100.0, 2)"))
     check("one side: the scan skips the other side market and sweeps a doubled seat",
           '_skip("one_side_market")' in src2 and "hand_auto_side_pull" in src2 and src2.index("_auto_price_side_key(") < src2.index("for k in _AUTO_PRICE_KEYS"))
+    # ONE NAME FOR THE GAME (Oct 27 2026, the TB ML seated twice — the MLB
+    # sheet row carries " · date", the pick does not) and NO SHEET-BLOCK
+    # FALLBACK (ND @ Navy Under 56.5 seated three times in 17 minutes off
+    # the row's hours-old Pinnacle block while the live read had no fair)
+    ev_ = _app._auto_price_ev
+    check("auto scan: the game key strips the MLB date suffix",
+          ev_("Milwaukee Brewers @ Tampa Bay Rays · 2026-10-27") == "Milwaukee Brewers @ Tampa Bay Rays"
+          and ev_("Notre Dame Fighting Irish @ Navy Midshipmen") == "Notre Dame Fighting Irish @ Navy Midshipmen" and ev_(None) == "")
+    check("auto scan: booked, auto_pend, the side pull and the cooldown all key on _auto_price_ev",
+          src2.count("_auto_price_ev(") >= 3 and "bkey = (sport, _ev_, mt)" in src2
+          and "_AUTO_PRICE_SENT[(sport, _ev_, mt_)]" in src2 and 'str(g.get("event_name") or ""), mt' not in src2)
+    check("auto scan: no live fair at the rung = no seat (never the sheet's pin_fair)",
+          'pk.get("pin_fair")' not in src2 and src2.index("_pin_fair_for_item(evs, sport, item, age)") < src2.index('st["no_fair"] += 1'))
 
 
 def test_end_state_rosters() -> None:

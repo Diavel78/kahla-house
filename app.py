@@ -22914,6 +22914,13 @@ def _auto_price_side_key(sport: str, g: dict):
     return "ml"
 
 
+def _auto_price_ev(name) -> str:
+    """Pure. The game name the scan and the pin read both key on — a sheet
+    row's `event_name` may carry " · YYYY-MM-DD" (MLB replays a matchup on
+    consecutive days); the pick's never does."""
+    return str(name or "").split(" · ")[0].strip()
+
+
 def _auto_price_tick(sb, client, now) -> dict:
     """THE SCAN: every upcoming sheet rung with Pinnacle fair and no pending
     sheet bet on its market gets ONE hand_orders create row priced by the
@@ -22945,14 +22952,19 @@ def _auto_price_tick(sb, client, now) -> dict:
     except Exception as e:
         st["gate"] = f"picks: {e}"[:100]
         return st
+    # ONE NAME FOR THE GAME (Oct 27 2026, the TB ML seated twice: an MLB sheet
+    # row's event_name carries " · 2026-10-27" and the pick's does not, so the
+    # scan's booked / auto_pend / cooldown keys never matched its own MLB seat
+    # — the venue guard caught every re-seat except the one placed in the gap
+    # a Kalshi switch left on Polymarket). `_auto_price_ev` strips the date.
     auto_pend: dict = {}                    # (sport, event_name, mt) -> the pending AUTO pick row
     for r in prow:
         b_ = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if isinstance(b_.get("auto_price"), dict):
-            auto_pend[(str(r.get("sport") or "").upper(), str(r.get("event_name") or ""),
+            auto_pend[(str(r.get("sport") or "").upper(), _auto_price_ev(r.get("event_name")),
                        str(r.get("market_type") or ""))] = r
     st["side_pulled"] = 0
-    booked = {(str(r.get("sport") or "").upper(), str(r.get("event_name") or ""),
+    booked = {(str(r.get("sport") or "").upper(), _auto_price_ev(r.get("event_name")),
                {"moneyline": "ml"}.get(str(r.get("market_type") or ""), str(r.get("market_type") or "")))
               for r in prow}
     try:
@@ -23006,7 +23018,7 @@ def _auto_price_tick(sb, client, now) -> dict:
         # every three minutes). One side market resting = that is the game's key;
         # the pull rule, not the key, decides when it leaves. Two resting = the
         # rule picks which one stays.
-        _ev_ = str(g.get("event_name") or "")
+        _ev_ = _auto_price_ev(g.get("event_name"))
         _have = [mt_ for mt_ in ("moneyline", "spread") if auto_pend.get((sport, _ev_, mt_))]
         if len(_have) == 1:
             side_key = "ml" if _have[0] == "moneyline" else ("puck" if sport == "NHL" else "spread")
@@ -23017,7 +23029,7 @@ def _auto_price_tick(sb, client, now) -> dict:
             k_ = "ml" if mt_ == "moneyline" else ("puck" if sport == "NHL" else "spread")
             if k_ == side_key or st["side_pulled"] >= _AUTO_PRICE_PULL_MAX:
                 continue
-            pr = auto_pend.get((sport, str(g.get("event_name") or ""), mt_))
+            pr = auto_pend.get((sport, _ev_, mt_))
             if not pr or client is None:
                 continue
             pb = pr.get("signal_blob") if isinstance(pr.get("signal_blob"), dict) else {}
@@ -23029,7 +23041,7 @@ def _auto_price_tick(sb, client, now) -> dict:
                 out_, code_ = _bet_sheet_cancel_exec(sb, client, pr["id"])
             except Exception as e:
                 out_, code_ = {"ok": False, "error": str(e)[:120]}, 500
-            _AUTO_PRICE_SENT[(sport, str(g.get("event_name") or ""), mt_)] = _time.monotonic()
+            _AUTO_PRICE_SENT[(sport, _ev_, mt_)] = _time.monotonic()
             try:
                 _probe_log({"hand_auto_side_pull": True, "pick_id": pr["id"], "at": now.isoformat(), "auto": True,
                             "sport": sport, "event_name": g.get("event_name"), "market_type": mt_,
@@ -23047,7 +23059,7 @@ def _auto_price_tick(sb, client, now) -> dict:
             if not isinstance(pk, dict) or not pk.get("side"):
                 continue
             mt = "spread" if k == "puck" else k
-            bkey = (sport, str(g.get("event_name") or ""), mt)
+            bkey = (sport, _ev_, mt)
             if bkey in booked:
                 _skip("booked")
                 continue
@@ -23066,12 +23078,17 @@ def _auto_price_tick(sb, client, now) -> dict:
             # three times in nine minutes: the scan priced the flipped side off the
             # sheet's mirrored fair, 48.6, the pin read priced the same bet off
             # Pinnacle's own price for that side, 46.2, and pulled it a minute later).
+            # AND THE SEAT NEVER READS THE SHEET'S BLOCK (Oct 27 2026, ND @ Navy
+            # Under 56.5 seated three times in 17 minutes: the live slate carried
+            # no fair at 56.5 — Pinnacle's main total had moved a full point —
+            # so the pin read pulled it after two misses, and the scan's
+            # fallback to `pk["pin_fair"]`, priced off the sheet row's HOURS-OLD
+            # Pinnacle block, re-seated it the moment the cooldown passed). No
+            # live fair at the rung = no seat, the same answer the pull gives.
             try:
                 pf = _pin_fair_for_item(evs, sport, item, age)
             except Exception:
                 pf = None
-            if not pf or pf.get("prob") is None:
-                pf = pk.get("pin_fair") if isinstance(pk.get("pin_fair"), dict) else None
             if not pf or pf.get("prob") is None:
                 st["no_fair"] += 1
                 continue
