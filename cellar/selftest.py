@@ -4551,6 +4551,24 @@ def test_auto_price_lane() -> None:
     check("auto: the pin tick reads Pinnacle's live feed under the lane", "_pin_live_slate" in src and "pin_rerung" in src)
     lbl = _app._auto_price_label({"home": "Boston Celtics", "away": "Brooklyn Nets"}, "spread", {"side": "home", "line": -11.5})
     check("auto: labels", lbl == "Boston Celtics -11.5" and _app._auto_price_label({}, "total", {"side": "under", "line": 221.5}) == "Under 221.5")
+    # the executor re-fairs a rung the venue moved (FLA @ WPG, Oct 26 2026:
+    # Under 6.5 chalk-stepped to 5.5, seated off the 6.5 fair, pulled a minute later)
+    item = {"sport": "NHL", "away": "Florida Panthers", "home": "Winnipeg Jets", "event_start": "2026-10-28T00:00:00+00:00",
+            "market_type": "total", "side": "under", "line": 6.5, "label": "Under 6.5"}
+    ap = {"fair_c": 56.17, "pin_line": 6.5, "src": "rung"}
+    check("auto refair: the item's own rung keeps the scan's fair", _app._auto_price_refair(None, item, dict(ap), 6.5)[0] == 56.17)
+    _old_ls, _old_pf = _app._pin_live_slate, _app._pin_fair_for_item
+    try:
+        _app._pin_live_slate = lambda sb, sport, now, slates: ([{"x": 1}], 0.5)
+        _app._pin_fair_for_item = lambda evs, sport, it, age=None: ({"fair_c": 45.44, "pin_line": 6.5, "src": "push"} if it.get("line") == 5.5 else None)
+        ap2 = dict(ap)
+        fc, it2 = _app._auto_price_refair(None, item, ap2, 5.5)
+        check("auto refair: a moved rung is faired at the venue's rung and relabelled",
+              fc == 45.44 and it2["line"] == 5.5 and it2["label"] == "Under 5.5" and ap2["fair_c"] == 45.44 and ap2["rerung_from"] == 6.5)
+        fc, why = _app._auto_price_refair(None, item, dict(ap), 7.5)
+        check("auto refair: no fair at the venue's rung = no seat", fc is None and "no fair" in str(why))
+    finally:
+        _app._pin_live_slate, _app._pin_fair_for_item = _old_ls, _old_pf
 
 
 def test_end_state_rosters() -> None:

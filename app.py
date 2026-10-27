@@ -22950,6 +22950,39 @@ def _auto_price_tick(sb, client, now) -> dict:
     return st
 
 
+def _auto_price_refair(sb, item: dict, ap: dict, rung_line, now=None):
+    """The rung the venue resolved is not always the rung the scan priced
+    (Oct 26 2026, 20:42 AZ, the first auto pass: FLA @ WPG Under 6.5 was
+    chalk-stepped to Under 5.5 and seated off the 6.5 fair, 56¢, on a 45¢
+    rung; the next pin read pulled it). A rung that differs from the
+    item's line is re-faired off the live slate AT THAT RUNG; no fair there
+    = no seat. Returns (fair_c, item_at_rung) or (None, reason)."""
+    mt = str(item.get("market_type") or "")
+    try:
+        same = (mt == "ml" or rung_line is None or item.get("line") is None
+                or abs(float(rung_line) - float(item.get("line"))) < 0.01)
+    except (TypeError, ValueError):
+        same = True
+    if same:
+        return ap.get("fair_c"), item
+    now = now or datetime.now(timezone.utc)
+    it2 = {**item, "line": float(rung_line),
+           "label": _auto_price_label({"home": item.get("home"), "away": item.get("away")}, mt,
+                                      {"side": item.get("side"), "line": float(rung_line)})}
+    try:
+        evs, age = _pin_live_slate(sb, str(item.get("sport") or "").upper(), now, {})
+        pf = _pin_fair_for_item(evs, str(item.get("sport") or "").upper(), it2, age) if evs else None
+    except Exception:
+        pf = None
+    if not pf or pf.get("fair_c") is None:
+        return None, f"no fair at the venue's rung {rung_line:g} (asked {item.get('line')})"
+    ap["fair_c"] = pf["fair_c"]
+    ap["pin_line"] = pf.get("pin_line")
+    ap["src"] = pf.get("src")
+    ap["rerung_from"] = item.get("line")
+    return pf["fair_c"], it2
+
+
 def _auto_price_execute(sb, client, row: dict, pl: dict, item: dict, ap: dict, worker: str,
                         deferred, ms: dict, _lap) -> dict:
     """The executor's branch for an auto-price row: the rung off the venue,
@@ -22967,7 +23000,12 @@ def _auto_price_execute(sb, client, row: dict, pl: dict, item: dict, ap: dict, w
         _lap("kalshi")
         if not k_rs.get("ok"):
             return {"ok": False, "error": k_rs.get("reason") or "could not resolve the Kalshi rung"}
-        price, why = _auto_price_seat(ap.get("fair_c"), k_rs.get("touch_c"), cfg["seat_c"], cfg["cap_c"],
+        fair_c, item2 = _auto_price_refair(sb, item, ap, k_rs.get("rung_line"))
+        if fair_c is None:
+            return {"ok": False, "error": item2}
+        item = item2
+        stamp.update({k: ap.get(k) for k in ("fair_c", "pin_line", "src", "rerung_from")})
+        price, why = _auto_price_seat(fair_c, k_rs.get("touch_c"), cfg["seat_c"], cfg["cap_c"],
                                       _hand_chalk_cap_c(item.get("market_type")), 1.0, k_rs.get("ask_c"))
         if price is None:
             return {"ok": False, "error": f"no seat on Kalshi: {why}"}
@@ -22992,7 +23030,12 @@ def _auto_price_execute(sb, client, row: dict, pl: dict, item: dict, ap: dict, w
         return {"ok": False, "error": "book unreadable — try again"}
     s_bid, s_ask = _manual_side_book(book, syn)
     tick = _pmm_tick_c(client, slug)
-    price, why = _auto_price_seat(ap.get("fair_c"), s_bid, cfg["seat_c"], cfg["cap_c"],
+    fair_c, item2 = _auto_price_refair(sb, item, ap, entry.get("line"))
+    if fair_c is None:
+        return {"ok": False, "error": item2}
+    item = item2
+    stamp.update({k: ap.get(k) for k in ("fair_c", "pin_line", "src", "rerung_from")})
+    price, why = _auto_price_seat(fair_c, s_bid, cfg["seat_c"], cfg["cap_c"],
                                   _hand_chalk_cap_c(item.get("market_type")), tick, s_ask)
     if price is None:
         return {"ok": False, "error": f"no seat: {why}"}
@@ -23021,7 +23064,8 @@ def _auto_price_execute(sb, client, row: dict, pl: dict, item: dict, ap: dict, w
         res["warning"] = ((res.get("warning") or "") + " · " + warn).strip(" ·")
     try:
         _probe_log({"hand_auto_price": True, "pick_id": pick_id, "slug": slug, "price_c": price, "why": why,
-                    "fair_c": ap.get("fair_c"), "touch_c": s_bid, "ask_c": s_ask, "contracts": contracts,
+                    "fair_c": fair_c, "rung_line": entry.get("line"), "rerung_from": ap.get("rerung_from"),
+                    "touch_c": s_bid, "ask_c": s_ask, "contracts": contracts,
                     "venue": "POLYMARKET", "label": item.get("label"), "sport": item.get("sport")})
     except Exception:
         pass
