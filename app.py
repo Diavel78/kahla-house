@@ -17448,6 +17448,12 @@ def _hand_red_state(blob: dict, s: dict, started: bool = False, rec=None):
     if resting:
         if hold and rec == "hold":
             return None                    # the model says hold: nothing to do, not red
+        if hold and (hold.get("fair_c") is not None or hold.get("auto") or isinstance(blob.get("auto_price"), dict)):
+            # A bet resting under the Pinnacle fair cap is where the price
+            # rule PUT it (Oct 26 2026, the lane's first ten minutes: 23
+            # "CHALK" reds and two Telegrams on auto bets sitting at fair − 2
+            # under a touch at fair − 1). Nothing for Rob to do, not red.
+            return None
         if hold and hold.get("touch_c") is not None and hold.get("chalk_c") is not None:
             try:
                 tc, cc = float(hold["touch_c"]), float(hold["chalk_c"])
@@ -21552,6 +21558,10 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
             ch = {"touch_c": target, "price_c": price_c, "leash_c": leash, "at": now.isoformat()}
             if note == "chalk":
                 ch["chalk_c"] = chalk_c
+                if fair_cap is not None and abs(float(chalk_c) - float(fair_cap)) < 1e-6:
+                    ch["fair_c"] = fair_cap            # the Pinnacle fair cap, not the chalk cap (page: AT FAIR, amber)
+            if isinstance(blob.get("auto_price"), dict):
+                ch["auto"] = True
             nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c, "chase_hold": ch}
             nb.pop("thin_hold", None)
             sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()

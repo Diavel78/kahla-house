@@ -4569,6 +4569,14 @@ def test_auto_price_lane() -> None:
         check("auto refair: no fair at the venue's rung = no seat", fc is None and "no fair" in str(why))
     finally:
         _app._pin_live_slate, _app._pin_fair_for_item = _old_ls, _old_pf
+    # a fair-cap hold is never red (23 false reds + 2 Telegrams in the lane's first ten minutes)
+    st_ = {"order": {"resting": True, "leaves": 5}, "held": 0}
+    hb = {"order_id": "x", "contracts": 5, "price_c": 48.0, "chase_hold": {"touch_c": 49.0, "chalk_c": 48.0, "fair_c": 48.0, "price_c": 48.0}}
+    check("auto red: a fair-cap hold is not red", _app._hand_red_state(hb, st_) is None)
+    hb2 = {"order_id": "x", "contracts": 5, "price_c": 48.0, "auto_price": {"cap_c": 2.0}, "chase_hold": {"touch_c": 49.0, "chalk_c": 48.0, "price_c": 48.0}}
+    check("auto red: an auto bet's chalk hold is not red", _app._hand_red_state(hb2, st_) is None)
+    hb3 = {"order_id": "x", "contracts": 5, "price_c": 48.0, "chase_hold": {"touch_c": 55.0, "chalk_c": 54.5, "price_c": 48.0}}
+    check("auto red: a hand bet's chalk hold stays red", (_app._hand_red_state(hb3, st_) or (None,))[0] == "chalk")
 
 
 def test_end_state_rosters() -> None:
