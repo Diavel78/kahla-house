@@ -1090,10 +1090,15 @@
             // starred hold: "if the recommendation is to hold it… then it shouldn't be
             // red"): the box stopped chasing, the bet is still a play at his price, and
             // game start chases from it — nothing to do, so amber, not "needs you".
+            // AN AUTO BET UNDER THE CAP IS WHERE THE LANE PUT IT (Oct 26 2026, the lane's
+            // first hour: every auto seat read CHALK / AT FAIR red and the header counted
+            // them as "need you"). The box re-prices it every minute; nothing for Rob to do.
+            if (b.auto && hold && hold.touch_c != null)
+                return { cls: 'rest', short: 'AUTO', detail: pre + rest + ' · under the Pinnacle fair cap' + (hold.chalk_c != null ? ' (' + hold.chalk_c + '¢)' : '') + ' · touch ' + touch + '¢ · the box holds it there and re-prices it every minute' };
             if (hold && hold.touch_c != null && b.read && b.read.rec === 'hold')
                 return { cls: 'rest', short: 'HOLD', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + (hold.chalk_c != null ? ', at or past the ' + hold.chalk_c + '¢ ' + (hold.fair_c != null ? 'Pinnacle fair cap' : 'chalk cap') : past) + ', so the box stopped chasing — ' + recShort(b, rr) };
             if (hold && hold.touch_c != null && hold.chalk_c != null)
-                return { cls: 'warn', short: hold.fair_c != null ? 'AT FAIR' : 'CHALK', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, at or past the ' + hold.chalk_c + '¢ ' + (hold.fair_c != null ? 'Pinnacle fair cap' : 'chalk cap') + ', so the box stopped chasing' + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') : ' — ' + (b.read ? recShort(b, null) : 'no cheaper rung yet — hold or cancel')) };
+                return { cls: hold.fair_c != null ? 'rest' : 'warn', short: hold.fair_c != null ? 'AT FAIR' : 'CHALK', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, at or past the ' + hold.chalk_c + '¢ ' + (hold.fair_c != null ? 'Pinnacle fair cap' : 'chalk cap') + ', so the box stopped chasing' + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') : ' — ' + (b.read ? recShort(b, null) : 'no cheaper rung yet — hold or cancel')) };
             if (hold && hold.touch_c != null && rr)
                 return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it, re-peg it or cancel') };
             if (hold && hold.touch_c != null)
@@ -1233,7 +1238,7 @@
         return (s && b.side && s.side !== b.side) ? s : null;
     }
     function betStrip(b, withGame, flip) {
-        const st = betState(b), loud = flip && !b.app;
+        const st = betState(b), loud = flip && !b.app && !b.auto;   // an auto bet re-seats on the price rule's side by itself
         const cls = loud && st.cls === 'rest' && !(b.read && b.read.rec === 'hold') ? 'warn' : st.cls;
         // THE FLIP (Rob, Oct 25 2026: "You made a suggestion but don't give me the
         // option?"): the strip names the model's side; the action sheet offers it.
