@@ -177,6 +177,11 @@
         .pill { font-size: 12px; font-weight: 700; border-radius: 6px; padding: 2px 8px; letter-spacing: .3px; }
         .pill.play { background: #8EE4AF; color: #0D1016; }
         .pill.lean { background: #FCE38A; color: #0D1016; }
+        /* THE PRICE RULE (Oct 27 2026): the verdict is the venue bid vs Pinnacle fair */
+        .pv { font-size: 11px; color: var(--muted, #8a93a6); margin-left: 6px; white-space: nowrap; }
+        .pv.pv-on { color: #7fd48a; }
+        .pv.pv-no { color: #c9a24a; }
+        .pv.pv-flip { color: #e0a86b; }
         .pill.pass { border: 1px solid var(--line2); color: var(--text3); padding: 1px 7px; }
         .mk-m { font-size: 15px; color: var(--text2); }
         .mk-m .dim { color: var(--text3); }
@@ -496,6 +501,7 @@
     function gradeMark(g, key, sub) {
         let r = g.grade && g.grade[key];
         if (sub) r = r && r[sub];
+        else if (g[key] && g[key].grade) r = g[key].grade;     // the pick's OWN side (a flipped pick grades on what it says)
         if (r === 'win') return ' <span class="gr gr-win" title="won">✅</span>';
         if (r === 'loss') return ' <span class="gr gr-loss" title="lost">❌</span>';
         if (r === 'push') return ' <span class="gr gr-push" title="push">➖</span>';
@@ -1085,9 +1091,9 @@
             // red"): the box stopped chasing, the bet is still a play at his price, and
             // game start chases from it — nothing to do, so amber, not "needs you".
             if (hold && hold.touch_c != null && b.read && b.read.rec === 'hold')
-                return { cls: 'rest', short: 'HOLD', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + (hold.chalk_c != null ? ', at or past the ' + hold.chalk_c + '¢ chalk cap' : past) + ', so the box stopped chasing — ' + recShort(b, rr) };
+                return { cls: 'rest', short: 'HOLD', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + (hold.chalk_c != null ? ', at or past the ' + hold.chalk_c + '¢ ' + (hold.fair_c != null ? 'Pinnacle fair cap' : 'chalk cap') : past) + ', so the box stopped chasing — ' + recShort(b, rr) };
             if (hold && hold.touch_c != null && hold.chalk_c != null)
-                return { cls: 'warn', short: 'CHALK', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, at or past the ' + hold.chalk_c + '¢ chalk cap, so the box stopped chasing' + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') : ' — ' + (b.read ? recShort(b, null) : 'no cheaper rung yet — hold or cancel')) };
+                return { cls: 'warn', short: hold.fair_c != null ? 'AT FAIR' : 'CHALK', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, at or past the ' + hold.chalk_c + '¢ ' + (hold.fair_c != null ? 'Pinnacle fair cap' : 'chalk cap') + ', so the box stopped chasing' + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') : ' — ' + (b.read ? recShort(b, null) : 'no cheaper rung yet — hold or cancel')) };
             if (hold && hold.touch_c != null && rr)
                 return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it, re-peg it or cancel') };
             if (hold && hold.touch_c != null)
@@ -1745,10 +1751,22 @@
     function loadBetsRender() { if (_lastBetsPayload) renderBets(_lastBetsPayload); }
     // ---------- one block per market: label · verdict · the model, then ONE
     // button on the model's side (or, on a final, the pick and its grade).
+    // THE PRICE RULE (Rob, Oct 27 2026: "stop using our model to pick sides. Use
+    // Pinnacle as the model, and bet price"): the badge is the price verdict —
+    // the venue's bid on this side vs Pinnacle's devigged fair at this rung, in
+    // cents. No quote = PASS, and the line says why.
+    function priceTxt(pv, p) {
+        if (!pv) return '';
+        if (pv.edge_c == null) return ' <span class="pv pv-no" title="no usable venue quote on this rung: ' + esc(pv.why || 'no quote') + '">no price (' + esc(String(pv.why || 'no quote').split(',')[0]) + ')</span>';
+        const r1 = x => Math.round(Number(x) * 10) / 10, e = r1(pv.edge_c);
+        return ' <span class="pv' + (e >= 0.5 ? ' pv-on' : '') + (pv.flipped ? ' pv-flip' : '') + '" title="' + esc(pv.venue) + ' bid ' + r1(pv.cost_c) + '¢ on this side vs Pinnacle fair ' + r1(pv.fair_c) + '¢ at this rung' + (pv.opp && pv.opp.edge_c != null ? '; other side ' + (pv.opp.edge_c >= 0 ? '+' : '') + r1(pv.opp.edge_c) + '¢' : '') + '">'
+             + esc(pv.venue) + ' ' + r1(pv.cost_c) + '¢ vs fair ' + r1(pv.fair_c) + '¢ · ' + (e >= 0 ? '+' : '') + e + '¢'
+             + (pv.flipped && p && p.model ? ' · model liked ' + esc(p.model.team || p.model.side || 'the other side') : '') + '</span>';
+    }
     function mkRow(label, pick, modelHtml, body) {
         const v = pick ? (pick.verdict || 'pass') : null;
         return '<div class="mk' + (v === 'pass' ? ' pass' : '') + '"><div class="mk-h"><span class="mk-l">' + label + '</span>'
-             + (v ? verdictBadge(v) : '') + (modelHtml ? '<span class="mk-m">' + modelHtml + '</span>' : '') + '</div>'
+             + (v ? verdictBadge(v) : '') + (pick && pick.pv ? priceTxt(pick.pv, pick) : '') + (modelHtml ? '<span class="mk-m">' + modelHtml + '</span>' : '') + '</div>'
              + (body || '') + '</div>';
     }
     function edgeTxt(p, pts) {
@@ -1901,13 +1919,14 @@
               ' · lines/model updated ' + ago(d.lines_updated_at);
 
         _games = d.games.slice().sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
+        _priceRule = !!d.price_rule;                      // the verdicts on this sheet are price verdicts (Oct 27 2026)
         _games.forEach((g, i) => { g._gi = i; });
         renderGames();
     }
 
     // The search bar (Rob, Oct 3 2026) filters the loaded sheet client-side:
     // every typed word must appear in either team's full or short name.
-    let _games = [];
+    let _games = [], _priceRule = false;
     function gameMatches(g, words) {
         if (!words.length) return true;
         const hay = [g.away, g.home, g.away_short, g.home_short, shortTeam(g.away), shortTeam(g.home)]
@@ -2001,6 +2020,17 @@
     function gamePlays(g) {
         const out = [], push = x => { if (x) out.push(x); };
         const lineK = _sport === 'NHL' ? 'puck' : (_sport === 'NBA' || _sport === 'MLB') ? 'spread' : null;
+        if (_priceRule) {
+            // THE PRICE RULE: every market stands on its own price verdict — an ML
+            // under fair and its line under fair are both bets; the chalk /
+            // longshot rules still keep a −140 ML or a +200 dog off the slip.
+            ['ml', lineK || 'spread', 'total'].forEach(k => {
+                const p = g[k];
+                if (!p || (k === 'ml' && (p.chalky || p.longshot))) return;
+                push(pickSpec(g, k));
+            });
+            return out;
+        }
         if (lineK) {
             const ml = g.ml, isPick = ml && ml.side && (ml.verdict === 'play' || ml.verdict === 'lean');
             if (isPick && !ml.chalky && !ml.longshot) push(pickSpec(g, 'ml'));

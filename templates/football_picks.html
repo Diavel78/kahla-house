@@ -173,6 +173,11 @@
         .pill { font-size: 12px; font-weight: 700; border-radius: 6px; padding: 2px 8px; letter-spacing: .3px; }
         .pill.play { background: #8EE4AF; color: #0D1016; }
         .pill.lean { background: #FCE38A; color: #0D1016; }
+        /* THE PRICE RULE (Oct 27 2026): the verdict is the venue bid vs Pinnacle fair */
+        .pv { font-size: 11px; color: var(--muted, #8a93a6); margin-left: 6px; white-space: nowrap; }
+        .pv.pv-on { color: #7fd48a; }
+        .pv.pv-no { color: #c9a24a; }
+        .pv.pv-flip { color: #e0a86b; }
         .pill.pass { border: 1px solid var(--line2); color: var(--text3); padding: 1px 7px; }
         .mk-m { font-size: 15px; color: var(--text2); }
         .mk-m .dim { color: var(--text3); }
@@ -353,6 +358,7 @@
     function gradeMark(g, key, sub) {
         let r = g.grade && g.grade[key];
         if (sub) r = r && r[sub];
+        else if (g[key] && g[key].grade) r = g[key].grade;     // the pick's OWN side (a flipped pick grades on what it says)
         if (r === 'win') return ' <span class="gr gr-win" title="won">✅</span>';
         if (r === 'loss') return ' <span class="gr gr-loss" title="lost">❌</span>';
         if (r === 'push') return ' <span class="gr gr-push" title="push">➖</span>';
@@ -459,10 +465,22 @@
     // the model's side (dashed and quiet on a PASS); on a final, its ✅/❌.
     function clk(iso) { return fmtClock(iso).replace(' AM', 'a').replace(' PM', 'p'); }
     function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]); }
+    // THE PRICE RULE (Rob, Oct 27 2026: "stop using our model to pick sides. Use
+    // Pinnacle as the model, and bet price"): the badge is the price verdict —
+    // the venue's bid on this side vs Pinnacle's devigged fair at this rung, in
+    // cents. No quote = PASS, and the line says why.
+    function priceTxt(pv, p) {
+        if (!pv) return '';
+        if (pv.edge_c == null) return ' <span class="pv pv-no" title="no usable venue quote on this rung: ' + esc(pv.why || 'no quote') + '">no price (' + esc(String(pv.why || 'no quote').split(',')[0]) + ')</span>';
+        const r1 = x => Math.round(Number(x) * 10) / 10, e = r1(pv.edge_c);
+        return ' <span class="pv' + (e >= 0.5 ? ' pv-on' : '') + (pv.flipped ? ' pv-flip' : '') + '" title="' + esc(pv.venue) + ' bid ' + r1(pv.cost_c) + '¢ on this side vs Pinnacle fair ' + r1(pv.fair_c) + '¢ at this rung' + (pv.opp && pv.opp.edge_c != null ? '; other side ' + (pv.opp.edge_c >= 0 ? '+' : '') + r1(pv.opp.edge_c) + '¢' : '') + '">'
+             + esc(pv.venue) + ' ' + r1(pv.cost_c) + '¢ vs fair ' + r1(pv.fair_c) + '¢ · ' + (e >= 0 ? '+' : '') + e + '¢'
+             + (pv.flipped && p && p.model ? ' · model liked ' + esc(p.model.team || p.model.side || 'the other side') : '') + '</span>';
+    }
     function mkRow(label, pick, modelHtml, body) {
         const v = pick ? (pick.verdict || 'pass') : null;
         return '<div class="mk' + (v === 'pass' ? ' pass' : '') + '"><div class="mk-h"><span class="mk-l">' + label + '</span>'
-             + (v ? verdictBadge(v) : '') + (modelHtml ? '<span class="mk-m">' + modelHtml + '</span>' : '') + '</div>'
+             + (v ? verdictBadge(v) : '') + (pick && pick.pv ? priceTxt(pick.pv, pick) : '') + (modelHtml ? '<span class="mk-m">' + modelHtml + '</span>' : '') + '</div>'
              + (body || '') + '</div>';
     }
     function edgeTxt(p, pts) {

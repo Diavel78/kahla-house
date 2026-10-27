@@ -1238,6 +1238,246 @@ def _sheet_attach_pin_fair(sport: str, g: dict, slate=None) -> None:
             pk["pin_fair"] = pf
 
 
+# THE PRICE RULE (Oct 27 2026, Rob after the Oct 26 audit — sheet spread
+# picks 47.6% over 397, the model 12.2 pts off the final vs Pinnacle's
+# 11.4 on the same games, no edge gradient, the market never moving our
+# way; "stop using our model to pick sides. Use Pinnacle as the model, and
+# bet price"): the verdict on every UPCOMING sheet pick, every sport, is
+# the VENUE PRICE against PINNACLE'S DEVIGGED FAIR AT THE RUNG. A rung is
+# a PLAY when a maker can rest at least _PRICE_PLAY_C under fair on
+# Polymarket or Kalshi (Kalshi after its maker fee), a LEAN at
+# _PRICE_LEAN_C (1¢ — an uncrossed book always leaves one side a hair
+# under fair, so a lean under a cent is noise), else PASS. The model's own verdict survives as
+# `model_verdict` and breaks ties only: both sides of a market under fair
+# → the model's side. No venue quote, or a stale one, is a PASS that says
+# so (`pv.why`) — nothing else makes a bet. Flags price_play_c /
+# price_lean_c override. A final keeps its stored model verdict (the
+# touch quotes upcoming games only); the four-week answer is the CLV block
+# on /api/bet-sheets/fill-audit, not the sheet's record line.
+_PRICE_PLAY_C = 2.0
+_PRICE_LEAN_C = 1.0
+_PRICE_RULE_SPORTS = ("NFL", "NCAAF", "NHL", "NBA", "MLB")
+
+
+def _price_thresholds():
+    try:
+        play = float(_machine_flag_val("price_play_c", _PRICE_PLAY_C))
+    except (TypeError, ValueError):
+        play = _PRICE_PLAY_C
+    try:
+        lean = float(_machine_flag_val("price_lean_c", _PRICE_LEAN_C))
+    except (TypeError, ValueError):
+        lean = _PRICE_LEAN_C
+    return play, min(lean, play)
+
+
+def _price_verdict(fair_prob, poly, kalshi, mt: str, line, qty: int = 10,
+                   play_c: float = _PRICE_PLAY_C, lean_c: float = _PRICE_LEAN_C) -> dict:
+    """Pure. One market's price verdict. `fair_prob` = Pinnacle's devigged
+    probability for the PICK's side at its rung; `poly`/`kalshi` = the sheet
+    touch's quotes for that side ({bid, ask, line, fee...} or {why}). A
+    venue counts only at the pick's rung (an ml always does). The maker's
+    cost = the bid (Polymarket charges no maker fee; Kalshi's is added per
+    contract). The OTHER side's cost at the same market = 100 − ask (+ fee),
+    its fair = 100 − fair. Returns {fair_c, venue, cost_c, bid_c, ask_c,
+    edge_c, verdict, why, opp{venue, cost_c, edge_c, verdict}}; with no
+    usable quote verdict 'pass' and `why` names it."""
+    out = {"fair_c": None, "venue": None, "cost_c": None, "bid_c": None, "ask_c": None,
+           "edge_c": None, "verdict": "pass", "why": None, "opp": None}
+    try:
+        fp = float(fair_prob)
+    except (TypeError, ValueError):
+        out["why"] = "no_pin_fair"
+        return out
+    if not 0.0 < fp < 1.0:
+        out["why"] = "no_pin_fair"
+        return out
+    fair_c = round(fp * 100.0, 2)
+    out["fair_c"] = fair_c
+
+    def _fee(venue, price_c, q):
+        if venue != "Kalshi" or price_c is None:
+            return 0.0
+        try:
+            import kalshi_venue as _kv
+            fee = q.get("fee") if isinstance(q.get("fee"), dict) else None
+            return float(_kv.order_fee_c("KALSHI", "rest", price_c, qty, fee)) / float(qty)
+        except Exception:
+            return 0.0
+
+    def _v(v):
+        return "play" if v >= play_c - 1e-9 else "lean" if v >= lean_c - 1e-9 else "pass"
+    seats, opps, whys = [], [], []
+    for name, q in (("Poly", poly), ("Kalshi", kalshi)):
+        if not isinstance(q, dict):
+            continue
+        if q.get("bid") is None:
+            whys.append(f"{name.lower()}:{q.get('why') or 'no_bid'}")
+            continue
+        try:
+            bid = float(q["bid"])
+            ask = float(q["ask"]) if q.get("ask") is not None else None
+        except (TypeError, ValueError):
+            whys.append(f"{name.lower()}:bad_quote")
+            continue
+        if mt != "ml" and q.get("line") is not None and line is not None:
+            try:
+                if abs(float(q["line"]) - float(line)) > 0.01:
+                    whys.append(f"{name.lower()}:rung_differs")
+                    continue
+            except (TypeError, ValueError):
+                pass
+        cost = round(bid + _fee(name, bid, q), 2)
+        seats.append((round(fair_c - cost, 2), name, cost, bid, ask))
+        if ask is not None and 0.0 < ask < 100.0:
+            oc = round((100.0 - ask) + _fee(name, 100.0 - ask, q), 2)
+            opps.append((round((100.0 - fair_c) - oc, 2), name, oc))
+    if not seats:
+        out["why"] = ",".join(whys) or "no_quote"
+        return out
+    seats.sort(key=lambda t: -t[0])
+    e, name, cost, bid, ask = seats[0]
+    out.update({"venue": name, "cost_c": cost, "bid_c": bid, "ask_c": ask, "edge_c": e, "verdict": _v(e)})
+    if opps:
+        opps.sort(key=lambda t: -t[0])
+        oe, oname, oc = opps[0]
+        out["opp"] = {"venue": oname, "cost_c": oc, "edge_c": oe, "verdict": _v(oe)}
+    return out
+
+
+def _sheet_grade_pick(g: dict, key: str, pick: dict):
+    """Pure. 'win'|'loss'|'push'|None for a pick's OWN side and rung off the
+    game's final (`grade.final`) — a flipped pick is graded on what it
+    says, not on the model side the box stamped."""
+    f = ((g.get("grade") or {}).get("final") or {}) if isinstance(g.get("grade"), dict) else {}
+    if not isinstance(pick, dict) or f.get("home") is None or f.get("away") is None:
+        return None
+    try:
+        hs, aws = float(f["home"]), float(f["away"])
+    except (TypeError, ValueError):
+        return None
+    side = pick.get("side")
+    if key == "ml":
+        if side not in ("home", "away"):
+            return None
+        if hs == aws:
+            return "push"
+        return "win" if (hs > aws) == (side == "home") else "loss"
+    try:
+        ln = float(pick.get("line"))
+    except (TypeError, ValueError):
+        return None
+    if key == "total":
+        t = hs + aws
+        if side not in ("over", "under") or t == ln:
+            return "push" if t == ln else None
+        return "win" if (t > ln) == (side == "over") else "loss"
+    if side not in ("home", "away"):
+        return None
+    m = (hs - aws if side == "home" else aws - hs) + ln
+    return "win" if m > 0 else "loss" if m < 0 else "push"
+
+
+def _sheet_flip_pick(g: dict, key: str, pick: dict, pv: dict) -> dict:
+    """Pure. The OTHER side of a sheet market as a pick dict, when the price
+    rule bets it and the model's side is not under fair: side, line and
+    team mirrored, Pinnacle's fair mirrored, the model's read kept under
+    `model` so the card can say the model liked the other side."""
+    side = pick.get("side")
+    opp = {"home": "away", "away": "home", "over": "under", "under": "over"}.get(side)
+    ln = pick.get("line")
+    try:
+        nl = (None if ln is None else (float(ln) if key == "total" else -float(ln)))
+    except (TypeError, ValueError):
+        nl = None
+    pf = pick.get("pin_fair") if isinstance(pick.get("pin_fair"), dict) else None
+    npf = None
+    if pf and pf.get("prob") is not None:
+        try:
+            q = 1.0 - float(pf["prob"])
+            npf = {**pf, "prob": round(q, 4), "american": _american_from_p(q),
+                   "pin_line": (None if pf.get("pin_line") is None else
+                                (pf["pin_line"] if key == "total" else -float(pf["pin_line"])))}
+        except (TypeError, ValueError):
+            npf = None
+    out = {**pick, "side": opp, "line": nl, "team": g.get(opp) if opp in ("home", "away") else pick.get("team"),
+           "price": None, "fair": None, "pin_fair": npf,
+           "model": {"side": side, "line": ln, "verdict": pick.get("model_verdict", pick.get("verdict")),
+                     "team": pick.get("team")},
+           "flipped": True}
+    for k in ("edge_pts", "edge_pp"):
+        if isinstance(pick.get(k), (int, float)):
+            out[k] = round(-pick[k], 2)
+    for k in ("chalky", "longshot", "ladder", "fair_market", "market_line"):
+        out.pop(k, None)
+    if key in ("spread", "puck") and out.get("line") is not None:
+        out["market_line"] = out["line"]
+    return out
+
+
+def _sheet_attach_price(sport: str, g: dict, now) -> None:
+    """THE PRICE RULE on one sheet game: each pick block gets `pv` (the
+    price verdict), `model_verdict` (the model's), and — upcoming games only
+    — its `verdict` becomes the price's; a market whose other side is the
+    only one under fair is REPLACED by that side (`flipped`). The puck line
+    never flips (Rob never bets a dog +1.5). Every pick also gets `grade`
+    off the final for its own side. Never raises."""
+    if not isinstance(g, dict):
+        return
+    try:
+        ev = _parse_iso(g.get("event_start")) if g.get("event_start") else None
+        upcoming = bool(ev and ev > now)
+    except Exception:
+        upcoming = False
+    play_c, lean_c = _price_thresholds()
+    vp = ((g.get("venue") or {}).get("picks") or {}) if isinstance(g.get("venue"), dict) else {}
+    age_s = (g.get("venue") or {}).get("age_s") if isinstance(g.get("venue"), dict) else None
+    for key, mt in (("ml", "ml"), ("puck", "spread"), ("spread", "spread"), ("total", "total")):
+        pk = g.get(key)
+        if not isinstance(pk, dict):
+            continue
+        pk["model_verdict"] = pk.get("verdict")
+        try:
+            gr = _sheet_grade_pick(g, key, pk)
+            if gr:
+                pk["grade"] = gr
+        except Exception:
+            pass
+        if not upcoming or not pk.get("side"):
+            continue
+        q = vp.get(key) if isinstance(vp.get(key), dict) else None
+        pf = pk.get("pin_fair") if isinstance(pk.get("pin_fair"), dict) else None
+        try:
+            pv = _price_verdict((pf or {}).get("prob"), (q or {}).get("poly"), (q or {}).get("kalshi"),
+                                mt, pk.get("line"), play_c=play_c, lean_c=lean_c)
+        except Exception as e:
+            pv = {"verdict": "pass", "why": f"err: {e}"[:60], "edge_c": None, "fair_c": None, "opp": None}
+        if q is None and pv.get("why") is None:
+            pv["why"] = "no_quote"
+        pv["age_s"] = age_s
+        pv["rec"] = "side"
+        opp = pv.get("opp") if isinstance(pv.get("opp"), dict) else None
+        if (key != "puck" and opp and opp.get("verdict") != "pass" and pv.get("verdict") == "pass"):
+            # only the other side rests under fair → the price bets it
+            npk = _sheet_flip_pick(g, key, pk, pv)
+            npv = {**pv, "venue": opp.get("venue"), "cost_c": opp.get("cost_c"), "edge_c": opp.get("edge_c"),
+                   "verdict": opp.get("verdict"), "rec": "opp", "flipped": True,
+                   "fair_c": (round(100.0 - float(pv["fair_c"]), 2) if pv.get("fair_c") is not None else None),
+                   "opp": {"venue": pv.get("venue"), "cost_c": pv.get("cost_c"), "edge_c": pv.get("edge_c"),
+                           "verdict": pv.get("verdict")}}
+            npk["pv"] = npv
+            npk["verdict"] = npv["verdict"]
+            try:
+                gr = _sheet_grade_pick(g, key, npk)
+                npk["grade"] = gr
+            except Exception:
+                pass
+            g[key] = npk
+            continue
+        pk["pv"] = pv
+        pk["verdict"] = pv.get("verdict") or "pass"
+
+
 def _pin_sheet_slate(sb, sport: str, now, slates: dict):
     """One Pinnacle slate per sport per request: the cached slate when it is
     under _PIN_QUOTE_FRESH_MIN old, else Pinnacle's own feed (`_pin_slate(
@@ -2098,9 +2338,14 @@ def api_football_picks():
             built_at = b
     _sheet_attach_tv(sport, games)
     _sheet_attach_venue(sb, sport, games)    # the box's Poly/Kalshi bids per pick, one DB read (Oct 26 2026)
+    _now = datetime.now(timezone.utc)
+    for g in games:
+        _sheet_attach_price(sport, g, _now)     # THE PRICE RULE: venue bid vs Pinnacle fair decides (Oct 27 2026)
+    _play_c, _lean_c = _price_thresholds()
     return jsonify({
         "ok": True, "sport": sport, "week_key": wk.get("week_key"),
         "games": games,
+        "price_rule": {"play_c": _play_c, "lean_c": _lean_c},
         "venue_at": next((g["venue"].get("at") for g in games if isinstance(g.get("venue"), dict)), None),
         "pdf_url": _pub_url(wk.get("friday_pdf_path") or wk.get("pdf_path")),
         "picks_pdf_url": _pub_url(wk.get("picks_pdf_path")),
@@ -2297,6 +2542,53 @@ def api_football_picks_debug():
     if not sb:
         out["error"] = "get_supabase() returned None"
         return jsonify(out)
+    if request.args.get("price"):
+        # THE PRICE RULE, READ FROM A SANDBOX (Oct 27 2026): the sheet API is
+        # Firebase-gated, so this runs its pipeline for one sport and returns
+        # the verdict counts + the first few upcoming games' pick blocks.
+        sport = (request.args.get("sport") or "NCAAF").upper()
+        try:
+            wk = (sb.table("football_sheet_weeks").select("week_key").eq("sport", sport)
+                  .order("week_key", desc=True).limit(1).execute().data or [])
+            rows = (sb.table("football_sheets").select("market_id,event_name,event_start,tier,data_blob")
+                    .eq("week_key", wk[0]["week_key"]).eq("sport", sport)
+                    .gte("event_start", (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat())
+                    .order("event_start").limit(60).execute().data or []) if wk else []
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:200]})
+        now = datetime.now(timezone.utc)
+        games = []
+        pin_evs = _pin_sheet_slate(sb, sport, now, {})[0] if rows else None
+        for r in rows:
+            g = (_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport == "NBA"
+                 else _sheet_game_mlb(r) if sport == "MLB" else _sheet_game_football(r))
+            _sheet_attach_pin_fair(sport, g, pin_evs)
+            games.append(g)
+        _sheet_attach_venue(sb, sport, games)
+        counts: dict = {}
+        for g in games:
+            _sheet_attach_price(sport, g, now)
+            for k in ("ml", "puck", "spread", "total"):
+                pk = g.get(k)
+                if isinstance(pk, dict) and pk.get("pv"):
+                    pv = pk["pv"]
+                    c = counts.setdefault(k, {"play": 0, "lean": 0, "pass": 0, "no_quote": 0, "flipped": 0})
+                    c[pv.get("verdict") or "pass"] += 1
+                    c["no_quote"] += int(pv.get("edge_c") is None)
+                    c["flipped"] += int(bool(pv.get("flipped")))
+        n = int(request.args.get("n") or 3)
+        sample = []
+        for g in games:
+            if len(sample) >= n:
+                break
+            blk = {"game": g.get("event_name"), "start": g.get("event_start"), "venue_age_s": (g.get("venue") or {}).get("age_s")}
+            for k in ("ml", "puck", "spread", "total"):
+                pk = g.get(k)
+                if isinstance(pk, dict) and pk.get("pv"):
+                    blk[k] = {kk: pk.get(kk) for kk in ("side", "line", "verdict", "model_verdict", "flipped", "pv", "pin_fair")}
+            sample.append(blk)
+        return jsonify({"ok": True, "sport": sport, "games": len(games), "pin_slate": bool(pin_evs),
+                        "thresholds": _price_thresholds(), "counts": counts, "sample": sample})
     if request.args.get("dump"):
         # THE MODEL AUDIT DUMP (Oct 26 2026): every sheet row for a sport /
         # week list as _sheet_audit_row records. Read-only.
@@ -4583,6 +4875,74 @@ def _audit_usd(res, qty, price_c):
     return round(qty * (1.0 - p), 2) if res == "win" else round(-qty * p, 2) if res == "loss" else 0.0
 
 
+def _audit_clv(rows: list) -> dict:
+    """Pure. CLOSING LINE VALUE on sheet bets (Oct 27 2026): per bet, the
+    price paid vs Pinnacle's devigged fair at the rung at bet time
+    (`pin_bet`, else the box's first read `pin_first`) and at close
+    (`pin_close`). edge_c = fair at bet − price; clv_c = fair at close −
+    price; both positive = cheaper than the sharpest book. Buckets by the
+    edge at bet so the rule's own threshold is measured: ≥2¢ (PLAY), 0.5-2¢
+    (LEAN), 0-0.5¢, above fair. Rows carry status/qty/price for the record."""
+    def B():
+        return {"n": 0, "win": 0, "loss": 0, "push": 0, "clv_sum": 0.0, "edge_sum": 0.0, "usd": 0.0, "clv_pos": 0}
+    out = {"all": B(), "by_sport": {}, "by_edge_at_bet": {}, "by_origin": {},
+           "stamped": {"rows": 0, "bet": 0, "close": 0, "both": 0}, "rows": []}
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        price = b.get("price_c")
+        if price is None:
+            continue
+        out["stamped"]["rows"] += 1
+        pb = b.get("pin_bet") if isinstance(b.get("pin_bet"), dict) else (b.get("pin_first") if isinstance(b.get("pin_first"), dict) else None)
+        pc = b.get("pin_close") if isinstance(b.get("pin_close"), dict) else None
+        out["stamped"]["bet"] += int(bool(pb))
+        out["stamped"]["close"] += int(bool(pc))
+        if not (pb and pc):
+            continue
+        try:
+            price = float(price)
+            edge = round(float(pb["fair_c"]) - price, 2)
+            clv = round(float(pc["fair_c"]) - price, 2)
+        except (TypeError, ValueError, KeyError):
+            continue
+        out["stamped"]["both"] += 1
+        st = r.get("status")
+        res = {"won": "win", "lost": "loss", "push": "push"}.get(st)
+        try:
+            qty = float(b.get("filled_qty") or b.get("contracts") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        usd = _audit_usd(res, qty, price) if res else None
+        bucket = (">=2c" if edge >= 2.0 else "0.5-2c" if edge >= 0.5 else "0-0.5c" if edge >= 0 else "above_fair")
+        origin = ("in_play" if b.get("in_play") else "app" if b.get("app_adopted") else "sheet")
+        sp = str(r.get("sport") or "").upper()
+        for bk in (out["all"], out["by_sport"].setdefault(sp, B()), out["by_edge_at_bet"].setdefault(bucket, B()),
+                   out["by_origin"].setdefault(origin, B())):
+            bk["n"] += 1
+            bk["clv_sum"] = round(bk["clv_sum"] + clv, 2)
+            bk["edge_sum"] = round(bk["edge_sum"] + edge, 2)
+            bk["clv_pos"] += int(clv > 0)
+            if res:
+                bk[res] += 1
+            if isinstance(usd, (int, float)):
+                bk["usd"] = round(bk["usd"] + usd, 2)
+        out["rows"].append({"id": r.get("id"), "sport": sp, "game": r.get("event_name"), "label": b.get("label"),
+                            "price_c": price, "fair_bet_c": pb.get("fair_c"), "fair_close_c": pc.get("fair_c"),
+                            "edge_c": edge, "clv_c": clv, "res": res, "usd": usd, "origin": origin,
+                            "bet_src": "bet" if b.get("pin_bet") else "first"})
+    def _fin(bk):
+        n = bk["n"] or 1
+        bk["clv_mean_c"] = round(bk["clv_sum"] / n, 2)
+        bk["edge_mean_c"] = round(bk["edge_sum"] / n, 2)
+        bk["clv_pos_pct"] = round(100.0 * bk["clv_pos"] / n, 1)
+        return bk
+    _fin(out["all"])
+    for d in (out["by_sport"], out["by_edge_at_bet"], out["by_origin"]):
+        for k in d:
+            _fin(d[k])
+    return out
+
+
 @app.route("/api/bet-sheets/fill-audit")
 def api_bet_sheets_fill_audit():
     """READ-ONLY (shared-secret, site-curl). Rob, Oct 18 2026: "your model
@@ -4758,7 +5118,19 @@ def api_bet_sheets_fill_audit():
         out["sheet_record"] = srec
     except Exception as e:
         out["sheet_record_err"] = str(e)[:160]
+    # ---- CLV (Oct 27 2026): the four-week answer — price paid vs Pinnacle fair at bet and at close
+    try:
+        crows = (_sb_paged(lambda: sb.table("bot_picks").select("id,sport,event_name,event_start,status,signal_blob")
+                           .eq("signal_blob->>bet_sheet", "true").gte("event_start", since.isoformat()),
+                           max_pages=10) or [])
+        clv = _audit_clv(crows)
+        clv_rows = clv.pop("rows")
+        out["clv"] = clv
+    except Exception as e:
+        out["clv_err"] = str(e)[:160]
+        clv_rows = []
     if request.args.get("rows"):
+        out["clv_rows"] = clv_rows
         out["filled_rows"] = frows
         out["missed_rows"] = mrows
     return jsonify(out)
@@ -15674,6 +16046,65 @@ def _pin_quote_from_events(events, item: dict, age_min=None) -> dict | None:
     return out
 
 
+def _pin_block_from_events(events, away, home, start=None) -> dict | None:
+    """Pinnacle's main-line block for one game off a TOA-shaped slate, in
+    `_sheet_pin_block`'s shape (spread_home + both prices, total + both,
+    ml both) — the same read box_sheets.line_hook makes for the football
+    sheet, for any sport. None when the game is not on the slate."""
+    if not events:
+        return None
+
+    def _px(o):
+        try:
+            return int(round(float(o.get("price")))) if o and o.get("price") is not None else None
+        except (TypeError, ValueError):
+            return None
+    try:
+        sp = _pin_line_from_events(events, away, home, "spread", book="pinnacle", start=start)
+        tt = _pin_line_from_events(events, away, home, "total", book="pinnacle", start=start)
+        ph, pa = _pin_outcomes(events, away, home, "spreads", "home", book="pinnacle", start=start)
+        ov, un = _pin_outcomes(events, away, home, "totals", "over", book="pinnacle", start=start)
+        mh, ma = _pin_outcomes(events, away, home, "h2h", "home", book="pinnacle", start=start)
+    except Exception:
+        return None
+    out = {"spread_home": sp, "total": tt, "src": "pinnacle",
+           "spread_home_odds": _px(ph), "spread_away_odds": _px(pa),
+           "over_odds": _px(ov), "under_odds": _px(un), "ml_home": _px(mh), "ml_away": _px(ma)}
+    if all(out[k] is None for k in ("spread_home_odds", "over_odds", "ml_home")):
+        return None
+    return out
+
+
+def _pin_fair_for_item(events, sport: str, item: dict, age_min=None) -> dict | None:
+    """Pinnacle's devigged fair for one bet (sport/away/home/event_start/
+    market_type/side/line) off a slate: its own two prices at the rung when
+    the alternate ladder carries it, else the main line devigged and
+    carried to the rung by the push rate (`_pin_fair_at_rung`). {fair_c,
+    prob, american, pin_line, src, push, age_min, line} or None. The stamp
+    every sheet bet carries at bet time and at close (Oct 27 2026)."""
+    mt = str(item.get("market_type") or "")
+    mt = "ml" if mt == "moneyline" else mt
+    side = str(item.get("side") or "")
+    rung = None
+    if mt in ("spread", "total"):
+        try:
+            rp = _pin_rung_prices(events, item.get("away"), item.get("home"), mt, side, item.get("line"),
+                                  start=item.get("event_start"))
+            rung = rp if rp and rp[0] is not None else None
+        except Exception:
+            rung = None
+    try:
+        block = _pin_block_from_events(events, item.get("away"), item.get("home"), item.get("event_start"))
+        pf = _pin_fair_at_rung(sport, mt, {"side": side, "line": item.get("line")}, block, rung=rung)
+    except Exception:
+        return None
+    if not pf or pf.get("prob") is None:
+        return None
+    return {"fair_c": round(float(pf["prob"]) * 100.0, 2), "prob": pf["prob"], "american": pf.get("american"),
+            "pin_line": pf.get("pin_line"), "src": pf.get("src"), "push": pf.get("push"),
+            "age_min": (round(float(age_min), 1) if age_min is not None else None), "line": item.get("line")}
+
+
 def _bet_sheet_pin_quote(sb, item: dict, now, slates: dict) -> dict | None:
     """Pinnacle's quote for a slip item (= Bet105's, see _sheet_pin_block).
     One slate per sport per request: the cached slate when it is under
@@ -16326,6 +16757,23 @@ def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int, 
                          "pmm_twin_slug": rs.get("pmm_twin_slug"),
                          "pmm_twin_synthetic": rs.get("pmm_twin_synthetic"),
                          "poly_quote_c": rs.get("poly_quote_c")})
+        # PINNACLE AT BET TIME (Oct 27 2026): the fair this bet is measured
+        # against from now on — `pin_bet` + the edge at placement. A miss
+        # never costs the pick; the box's pin tick stamps `pin_first` later.
+        try:
+            _now = datetime.now(timezone.utc)
+            _evs, _age = _pin_sheet_slate(sb, sport, _now, {})
+            _pin_item = {"sport": sport, "away": it.get("away"), "home": it.get("home"),
+                         "event_start": it.get("event_start"), "market_type": mt, "side": it.get("side"),
+                         "line": (rs.get("rung_line") if rs.get("rung_line") is not None else it.get("line"))}
+            _pb = _pin_fair_for_item(_evs, sport, _pin_item, _age) if _evs else None
+            if _pb:
+                _pb["at"] = _now.isoformat()
+                blob["pin_bet"] = _pb
+                if price_c is not None:
+                    blob["price_edge_c"] = round(float(_pb["fair_c"]) - float(price_c), 2)
+        except Exception as e:
+            blob["pin_bet_miss"] = str(e)[:80]
         if extra:
             blob.update(extra)
         row = {"asked_by": uid, "query_text": "bet sheet",
@@ -21670,6 +22118,114 @@ def _hand_twin_item(r: dict, blob: dict) -> dict | None:
             "market_type": mt, "side": r.get("side"), "line": (0 if mt == "ml" else line)}
 
 
+# PINNACLE ON EVERY RESTING BET (Oct 27 2026): every ~3 min the box prices
+# each pending sheet bet against Pinnacle's own feed — `pin_now` (the chase
+# cap at fair, below), `pin_first` when the bet never got a bet-time stamp
+# (an app bet, a pre-rule bet), and `pin_close` = the last read inside
+# _HAND_PIN_CLOSE_LEAD_MIN of the start, the closing fair the CLV audit
+# grades against. One slate per sport per tick (`_pin_sheet_slate`: the
+# cached slate under 20 min, else Pinnacle's free feed). Kill switch
+# `machine_flags hand_pin_close`.
+_HAND_PIN_EVERY_S = 180.0
+_HAND_PIN_LAST = {"at": 0.0}
+_HAND_PIN_CLOSE_LEAD_MIN = 45.0
+_HAND_PIN_MAX = 80
+
+
+def _hand_pin_item(r: dict, blob: dict) -> dict:
+    """Pure. A pending pick → the item `_pin_fair_for_item` prices."""
+    aw, _, hm = str(r.get("event_name") or "").split(" · ")[0].partition(" @ ")
+    mt = str(r.get("market_type") or "")
+    mt = "ml" if mt == "moneyline" else mt
+    line = blob.get("rung_line") if blob.get("rung_line") is not None else r.get("entry_line")
+    return {"sport": str(r.get("sport") or "").upper(), "away": aw, "home": hm,
+            "event_start": r.get("event_start"), "market_type": mt, "side": r.get("side"),
+            "line": (0.0 if mt == "ml" else line)}
+
+
+def _hand_pin_tick(sb, now) -> dict:
+    if _time.monotonic() - _HAND_PIN_LAST["at"] < _HAND_PIN_EVERY_S:
+        return {"skip": "cadence"}
+    if not _machine_flag("hand_pin_close", True):
+        return {"off": True}
+    _HAND_PIN_LAST["at"] = _time.monotonic()
+    st = {"seen": 0, "now": 0, "first": 0, "close": 0, "miss": 0, "err": 0}
+    lo = (now - timedelta(minutes=15)).isoformat()
+    hi = (now + timedelta(hours=_SHEET_TOUCH_HORIZON_H)).isoformat()
+    try:
+        rows = (sb.table("bot_picks")
+                .select("id,sport,event_name,event_start,market_type,side,entry_line,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .gte("event_start", lo).lte("event_start", hi)
+                .order("event_start").limit(_HAND_PIN_MAX).execute().data) or []
+    except Exception as e:
+        return {"err": str(e)[:80]}
+    slates: dict = {}
+    for r in rows:
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        st["seen"] += 1
+        try:
+            ev = _parse_iso(r.get("event_start"))
+            lead_min = (ev - now).total_seconds() / 60.0 if ev else None
+            item = _hand_pin_item(r, blob)
+            events, age = _pin_sheet_slate(sb, item["sport"], now, slates)
+            pf = _pin_fair_for_item(events, item["sport"], item, age) if events else None
+            if not pf:
+                st["miss"] += 1
+                continue
+            pf["at"] = now.isoformat()
+            pf["lead_min"] = round(lead_min, 1) if lead_min is not None else None
+            nb = dict(blob)
+            changed = False
+            old = blob.get("pin_now") if isinstance(blob.get("pin_now"), dict) else {}
+            try:
+                old_age = (now - _parse_iso(old.get("at"))).total_seconds() if old.get("at") else 1e9
+            except Exception:
+                old_age = 1e9
+            try:
+                moved = abs(float(old.get("fair_c")) - float(pf["fair_c"])) >= 0.3
+            except (TypeError, ValueError):
+                moved = True
+            if moved or old_age > 1200:
+                nb["pin_now"] = pf
+                changed = True
+                st["now"] += 1
+            if not blob.get("pin_bet") and not blob.get("pin_first"):
+                nb["pin_first"] = pf
+                changed = True
+                st["first"] += 1
+            if lead_min is not None and lead_min <= _HAND_PIN_CLOSE_LEAD_MIN:
+                oc = blob.get("pin_close") if isinstance(blob.get("pin_close"), dict) else {}
+                if oc.get("fair_c") != pf["fair_c"] or oc.get("pin_line") != pf.get("pin_line"):
+                    nb["pin_close"] = pf
+                    changed = True
+                    st["close"] += 1
+            if changed:
+                sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+        except Exception as e:
+            st["err"] += 1
+            st["last_err"] = str(e)[:80]
+    return st
+
+
+def _hand_fair_cap_c(blob: dict, now):
+    """The chase's cap at Pinnacle fair (Oct 27 2026): `pin_now.fair_c` when
+    the box read it inside 30 min; None otherwise, or under the kill switch
+    `machine_flags hand_fair_cap`. The chase never climbs a bet above the
+    sharpest number — a touch past fair is a HOLD, never a join."""
+    if not _machine_flag("hand_fair_cap", True):
+        return None
+    pn = blob.get("pin_now") if isinstance(blob.get("pin_now"), dict) else None
+    if not pn or pn.get("fair_c") is None:
+        return None
+    try:
+        if (now - _parse_iso(pn.get("at"))).total_seconds() > 1800:
+            return None
+        return round(float(pn["fair_c"]), 2)
+    except Exception:
+        return None
+
+
 def _hand_twin_backfill(sb, now) -> dict:
     """THE TWIN BACKFILL (Oct 18 2026): the venue switch and the Kalshi
     socket both key on `kalshi_twin_ticker`, which only PLACEMENT stamped —
@@ -22844,6 +23400,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
             stats["twins"] = _hand_twin_backfill(sb, now)        # Kalshi twins for pre-lane bets → watch set + switch
         except Exception as e:
             stats["twins"] = {"err": str(e)[:80]}
+        try:
+            stats["pin"] = _hand_pin_tick(sb, now)               # Pinnacle fair on every resting bet: now / first / close
+        except Exception as e:
+            stats["pin"] = {"err": str(e)[:80]}
         _drain()
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
         try:
@@ -27443,6 +28003,10 @@ def _hand_chase_tick(sb, client, now) -> dict:
                 app.logger.warning("hand venue switch (poly→kalshi) pick %s: %s", r["id"], str(e)[:120])
         cap_c = _hand_rejoin_cap(blob, now, ev, lead_min)   # a hold set before this rule may run past T-30: the read caps it too
         chalk_c = _hand_pick_chalk_c(blob)
+        fair_cap = _hand_fair_cap_c(blob, now)          # never climb above Pinnacle fair (Oct 27 2026)
+        fair_bind = fair_cap is not None and (chalk_c is None or fair_cap < chalk_c)
+        if fair_bind:
+            chalk_c = fair_cap
         verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash, cap_c=cap_c, chalk_c=chalk_c)
         hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
         thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
@@ -27544,6 +28108,8 @@ def _hand_chase_tick(sb, client, now) -> dict:
                 ch = {"touch_c": target, "price_c": price_c, "leash_c": leash, "at": now.isoformat()}
                 if note == "chalk":
                     ch["chalk_c"] = chalk_c
+                    if fair_bind:
+                        ch["fair_c"] = fair_cap
                 if rr:
                     ch["rerung"] = rr
                 nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c, "chase_hold": ch}
