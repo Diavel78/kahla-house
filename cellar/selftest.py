@@ -4577,6 +4577,29 @@ def test_auto_price_lane() -> None:
     check("auto red: an auto bet's chalk hold is not red", _app._hand_red_state(hb2, st_) is None)
     hb3 = {"order_id": "x", "contracts": 5, "price_c": 48.0, "chase_hold": {"touch_c": 55.0, "chalk_c": 54.5, "price_c": 48.0}}
     check("auto red: a hand bet's chalk hold stays red", (_app._hand_red_state(hb3, st_) or (None,))[0] == "chalk")
+    # a move in flight beats a reconcile red from the gap (pick 199975, Oct 26 2026)
+    hb4 = {"order_id": "x", "contracts": 5, "price_c": 49.5, "poly_cancel_sent": {"at": "2026-10-27T04:52:36+00:00", "to": "KALSHI"},
+           "recon": {"red": [{"code": "dead_order", "msg": "dead"}]}}
+    check("red: a pick mid-switch is never CHECK ME", _app._hand_red_state(hb4, {"order": {}, "held": 0}) is None)
+    hb5 = {"order_id": "x", "contracts": 5, "price_c": 49.5, "recon": {"red": [{"code": "dead_order", "msg": "dead"}]}}
+    check("red: a reconcile red with no move in flight stays CHECK ME", (_app._hand_red_state(hb5, {"order": {}, "held": 0}) or (None,))[0] == "check_me")
+    # the pin tick's write merges its delta onto the CURRENT blob
+    class _SB:
+        def __init__(s_): s_.w = None
+        def table(s_, n): return s_
+        def select(s_, *a, **k): return s_
+        def eq(s_, *a): return s_
+        def single(s_): return s_
+        def update(s_, d): s_.w = d; return s_
+        def execute(s_):
+            class R: data = {"id": 1, "signal_blob": {"bet_sheet": True, "price_c": 49.5, "poly_cancel_sent": {"to": "KALSHI"}, "old": 1}}
+            return R()
+    sbm = _SB()
+    stale = {"price_c": 49.5, "old": 1, "fair_over": {"n": 1}}
+    _app._blob_write_merged(sbm, 1, stale, {"price_c": 49.5, "old": 1, "pin_now": {"fair_c": 50.0}})
+    w = sbm.w["signal_blob"]
+    check("blob merge: the delta lands, the marker another tick wrote survives, the dropped key goes",
+          w.get("pin_now") == {"fair_c": 50.0} and w.get("poly_cancel_sent") == {"to": "KALSHI"} and "fair_over" not in w and w.get("old") == 1)
     # ONE SIDE MARKET PER GAME (Rob, Oct 26 2026: "That's way too much risk")
     sk = _app._auto_price_side_key
     check("one side: football and NBA play the spread",

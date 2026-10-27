@@ -17440,6 +17440,9 @@ def _hand_red_state(blob: dict, s: dict, started: bool = False, rec=None):
         held = float(s.get("held") or 0)
     except (TypeError, ValueError):
         held = 0.0
+    for k in ("poly_cancel_sent", "kalshi_cancel_sent", "kalshi_move_cancel_sent"):
+        if isinstance(blob.get(k), dict):
+            return None                    # the box is mid-move; a reconcile red from the gap is not Rob's
     recon = blob.get("recon") if isinstance(blob.get("recon"), dict) else None
     reds = [f for f in (recon or {}).get("red") or [] if isinstance(f, dict)]
     if reds:
@@ -22380,6 +22383,32 @@ def _hand_pin_item(r: dict, blob: dict) -> dict:
             "line": (0.0 if mt == "ml" else line)}
 
 
+def _blob_write_merged(sb, pick_id, blob: dict, nb: dict) -> None:
+    """Write a tick's CHANGES onto the pick's CURRENT blob, not onto the copy
+    the tick read at its start (Oct 26 2026, pick 199975: the pin read
+    walked 150 picks for ~40s; a venue switch wrote `poly_cancel_sent`
+    mid-walk; the pin tick's {**stale, pin_now} write clobbered it; the
+    reconcile read a dead order with no box record and CHECK ME went to
+    Rob's phone 24s after the switch had completed). The delta = keys the
+    tick set or changed, plus keys it dropped; everything else is whatever
+    is on the row NOW. Falls back to the plain write when the re-read fails."""
+    try:
+        _r2, cur = _bet_sheet_pick(sb, pick_id)
+    except Exception:
+        cur = None
+    if not isinstance(cur, dict):
+        sb.table("bot_picks").update({"signal_blob": nb}).eq("id", pick_id).execute()
+        return
+    out = dict(cur)
+    for k, v in nb.items():
+        if k not in blob or blob.get(k) != v:
+            out[k] = v
+    for k in blob:
+        if k not in nb:
+            out.pop(k, None)
+    sb.table("bot_picks").update({"signal_blob": out}).eq("id", pick_id).execute()
+
+
 def _hand_pin_tick(sb, now, client=None) -> dict:
     auto_on = _auto_price_on()
     every = min(_HAND_PIN_EVERY_S, _AUTO_PRICE_EVERY_S) if auto_on else _HAND_PIN_EVERY_S   # the 60-second read (Oct 27 2026)
@@ -22448,7 +22477,7 @@ def _hand_pin_tick(sb, now, client=None) -> dict:
                         except Exception:
                             pass
                     else:
-                        sb.table("bot_picks").update({"signal_blob": {**blob, "fair_miss": {"n": n_miss, "at": now.isoformat()}}}).eq("id", r["id"]).execute()
+                        _blob_write_merged(sb, r["id"], blob, {**blob, "fair_miss": {"n": n_miss, "at": now.isoformat()}})
                 continue
             pf["at"] = now.isoformat()
             pf["lead_min"] = round(lead_min, 1) if lead_min is not None else None
@@ -22524,7 +22553,7 @@ def _hand_pin_tick(sb, now, client=None) -> dict:
                 changed = True
                 st["over"] += 1
             if changed:
-                sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+                _blob_write_merged(sb, r["id"], blob, nb)
             if verdict == "pull" and st["pulled"] < pull_max:
                 st["pulled"] += 1
                 out, code = _bet_sheet_cancel_exec(sb, client, r["id"])
@@ -23747,7 +23776,7 @@ def _hand_switch_poly_complete(sb, client, r: dict, blob: dict, now, st: dict, k
     # Kalshi has no seat inside the leash: back onto Polymarket at its seat
     back, _h2 = _manual_order_place(client, slug, syn, p_seat, qty, r.get("event_start"), book=bk, verify="fresh",
                                     expect=_hand_expect(r))
-    nb = {k: v for k, v in blob.items() if k not in ("poly_cancel_sent", "chase_hold", "thin_hold")}
+    nb = {k: v for k, v in blob.items() if k not in ("poly_cancel_sent", "chase_hold", "thin_hold", "recon")}
     if back.get("ok") and back.get("order_id"):
         nb.update({"order_id": back["order_id"], "price_c": p_seat, "contracts": qty})
         stamp["result"] = "back_on_poly"
