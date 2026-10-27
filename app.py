@@ -2557,13 +2557,20 @@ def api_football_picks_debug():
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)[:200]})
         now = datetime.now(timezone.utc)
-        games = []
+        games, raw_by_id = [], {}
         pin_evs = _pin_sheet_slate(sb, sport, now, {})[0] if rows else None
         for r in rows:
             g = (_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport == "NBA"
                  else _sheet_game_mlb(r) if sport == "MLB" else _sheet_game_football(r))
             _sheet_attach_pin_fair(sport, g, pin_evs)
             games.append(g)
+            if request.args.get("raw"):
+                blob = r.get("data_blob") if isinstance(r.get("data_blob"), dict) else {}
+                raw_by_id[r.get("market_id")] = {
+                    "blob_keys": sorted(blob.keys())[:40], "lines": blob.get("lines"),
+                    "picks": blob.get("picks"), "model_keys": sorted((blob.get("model") or {}).keys())[:30]
+                    if isinstance(blob.get("model"), dict) else None,
+                    "built_at": blob.get("built_at") or (blob.get("game") or {}).get("built_at")}
         _sheet_attach_venue(sb, sport, games)
         counts: dict = {}
         for g in games:
@@ -2588,6 +2595,8 @@ def api_football_picks_debug():
                    "picks": {k: {"side": g[k].get("side"), "line": g[k].get("line"), "model_verdict": g[k].get("model_verdict")}
                              for k in ("ml", "puck", "spread", "total") if isinstance(g.get(k), dict)},
                    "pin": bool(g.get("pin"))}
+            if raw_by_id:
+                blk["raw"] = raw_by_id.get(g.get("market_id"))
             for k in ("ml", "puck", "spread", "total"):
                 pk = g.get(k)
                 if isinstance(pk, dict) and pk.get("pv"):
