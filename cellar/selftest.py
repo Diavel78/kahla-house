@@ -4020,6 +4020,8 @@ def test_hand_red_alert() -> None:
           _app._hand_red_state({"bet_sheet": True, "price_c": 50.0}, {"order": {"resting": False, "unread": True}, "held": 0.0, "held_unknown": True}) is None
           and _app._hand_red_state({"bet_sheet": True, "price_c": 50.0}, {"order": {"resting": False}, "held": 0.0, "held_unknown": False}) is not None)
     _tick = _ri.getsource(_app._hand_red_alert_tick)
+    check("bet sheets feed: the box strip stays usable across a slow handbets tick (no Vercel venue walk)",
+          _app._HAND_STATUS_FRESH_S >= 180.0)
     check("red alert: the tick stands down on a strip whose venue reads failed",
           'if st.get("venue_ok") is False:' in _tick and _tick.index('venue_unread') < _tick.index('for r in picks:'))
 

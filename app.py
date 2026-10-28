@@ -17292,7 +17292,13 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
 
 
 _HAND_STATUS_KEY = "bet_sheet_status"
-_HAND_STATUS_FRESH_S = 45.0
+# THE BOX'S STRIP IS GOOD FOR 4 MINUTES (Oct 27 2026, the slow, red Bet Sheets
+# evening): the handbets tick ran 80-100s with games live, the strip publishes
+# once a tick, so at 45s the blob read "stale" for half of every tick and
+# /api/bet-sheets/mine fell back to a full venue walk on Vercel — 90-second
+# requests and six out-of-memory kills in an hour. The box's socket-fed strip
+# a few minutes old beats that walk every time; the page prints its age.
+_HAND_STATUS_FRESH_S = 240.0
 
 
 def _hand_status_publish(sb, client) -> dict:
