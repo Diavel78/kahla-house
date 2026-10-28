@@ -17056,6 +17056,8 @@ def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int, 
                 "rung_why": rs.get("rung_why"), "label": it.get("label"), "sport": sport,
                 "placed_via": out.get("via"),
                 "placed_at": datetime.now(timezone.utc).isoformat()}
+        if it.get("vs_model"):
+            blob["vs_model"] = True        # bet against the sheet on purpose (the ⇄ Other side button)
         if rs.get("venue_pick"):
             blob["venue_pick"] = rs["venue_pick"]
         if rs.get("kalshi_twin_ticker") and not kalshi:
@@ -25267,6 +25269,7 @@ def api_bet_sheets_mine():
             "venue_pick": blob.get("venue_pick"),
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
             "auto": bool(blob.get("auto_price")),      # the page's AUTO state (amber, never "need you")
+            "vs_model": bool(blob.get("vs_model")),    # bet against the model on purpose — never MODEL FLIPPED
             "live_snipe": bool(blob.get("live_snipe")),
             "getlive_from": blob.get("getlive_from"),
             # NO "PULLED · back ~" ON A FULL LOT (Oct 24 2026, BC@GT O 49.5: the pull's cancel raced

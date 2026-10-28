@@ -304,6 +304,10 @@
         /* TAP AND GO (Oct 24 2026, Rob: "I tap my credit card, I take my shit and I leave… to me it looks instant"):
            a sent bet leaves the slip at once; its card button reads "sending…" until the box has it resting. */
         .bb.st-send { background: var(--a-bg); border: 2px dashed var(--a-bd); color: var(--a-tx); }
+        .gh .gm .invb { font-size: 12px; font-weight: 600; color: var(--text2); background: transparent; border: 1px solid var(--line2); border-radius: 5px; padding: 1px 7px; margin-left: 6px; vertical-align: 3px; white-space: nowrap; cursor: pointer; font-family: inherit; }
+        .gh .gm .invb.on { color: var(--blue); border-color: var(--blue); }
+        .bb.inv:not([class*="st-"]):not(.in) { border-style: dashed; border-color: var(--line2); background: transparent; }
+        .bb .vsm { display: block; font-size: 11px; font-weight: 600; color: var(--text3); letter-spacing: .03em; margin-top: 2px; }
         .bb.st-send .bs { color: var(--a-tx); }
         .slip-h .sendchip { color: var(--text3); font-size: 13px; font-family: var(--mono); }
         .slip-h .sendchip.bad { color: var(--r-tx); font-weight: 700; }
@@ -696,8 +700,9 @@
             if (!live && g.event_start && new Date(g.event_start).getTime() <= Date.now()) {
                 toast(g._limbo ? 'Past the listed time, but the makers are still quoting — the box is waiting for the drop. Bet it from Live once it starts.' : 'Game is over', true); return;
             }
+            const ms = _modelSide[gi + '|' + mt], vs = !!(ms && ms !== side);
             _slip.push({ key, sport: _sport, away: g.away, home: g.home, event_start: g.event_start,
-                         market_type: mt, side, line, label, game: shortTeam(g.away) + ' @ ' + shortTeam(g.home), ...(live ? { live: true } : {}) });
+                         market_type: mt, side, line, label, game: shortTeam(g.away) + ' @ ' + shortTeam(g.home), ...(live ? { live: true } : {}), ...(vs ? { vs_model: true } : {}) });
             autoOpenSlip();
         }
         saveSlip(); renderSlip();
@@ -1173,12 +1178,32 @@
     // filled, red needs you; dashed + quiet on a PASS. Empty → tap adds it
     // to the slip; holding a bet → tap opens its action sheet.
     let _btnIds = {}, _btnSides = {}, _inflKeys = {}, _inflOps = {};
-    function pickBtn(gi, g, mt, side, line, label, verdict, price, vq) {
+    // THE OTHER SIDE (Rob, Oct 28 2026: "a button next to the TV channel that
+    // shows me inverse options… just in case"): ⇄ on a card draws the opposite
+    // bet under every market's model button. A bet placed there is stamped
+    // vs_model, so it is never read as MODEL FLIPPED.
+    let _inv = {}, _modelSide = {};
+    function invKey(g) { return _sport + '|' + g.event_name + '|' + g.event_start; }
+    function invOn(g) { return !!_inv[invKey(g)] || allBetsOnGame(g).some(b => b.vs_model); }
+    function toggleInv(gi) { const g = _games[gi]; if (!g) return; const k = invKey(g); _inv[k] = !_inv[k]; renderGames(); }
+    function invChip(g) {
+        return '<button class="invb' + (invOn(g) ? ' on' : '') + '" title="show the other side of every market" onclick="event.stopPropagation();toggleInv(' + g._gi + ')">⇄ ' + (invOn(g) ? 'Hide other side' : 'Other side') + '</button>';
+    }
+    function mirrorQ(q, mt) {
+        if (!q) return q;
+        const one = x => x ? { ...x, bid: x.ask != null ? 100 - Number(x.ask) : null, ask: x.bid != null ? 100 - Number(x.bid) : null,
+                               line: (mt === 'spread' && x.line != null) ? -Number(x.line) : x.line, chalk: false } : x;
+        return { poly: one(q.poly), kalshi: one(q.kalshi), age_s: q.age_s };
+    }
+    function pickBtn(gi, g, mt, side, line, label, verdict, price, vq, inv) {
         if (line === null || line === undefined || !side) return '';
-        _btnSides[mt] = { side: side, label: label };       // this card's model side per market
+        if (!inv) {
+            _btnSides[mt] = { side: side, label: label };   // this card's model side per market
+            _modelSide[gi + '|' + mt] = side;
+        }
         const key = slipKey(g, mt, side), on = inSlip(key), mine = myBetOn(g, mt, side);
         const args = [JSON.stringify(key), JSON.stringify(mt), JSON.stringify(side), Number(line), JSON.stringify(label), gi].join(',');
-        let cls = 'bb' + (verdict === 'pass' ? ' pass' : ''), sub = '', click;
+        let cls = 'bb' + (inv ? ' inv' : verdict === 'pass' ? ' pass' : ''), sub = '', click;
         const OPV = { repeg: 're-pegging…', cancel: 'cancelling…', rerung: 'moving to the new line…', live: 'moving to live…', flip: 'flipping to the other side…' };
         if (mine) {
             _btnIds[mine.id] = 1;
@@ -1196,7 +1221,7 @@
             click = 'toggleSide(' + args + ')';
         }
         const pr = price != null ? ' <span class="pr">' + amPct(price) + '</span>' : '';   // the sheet's book price, American / %
-        return '<button class="' + cls + '" data-k="' + esc(key) + '" onclick=\'' + click.replace(/'/g, '&#39;') + '\'><span class="bl">' + esc(label) + pr + '</span>' + venueLine(vq, mt, line) + sub + '</button>';
+        return '<button class="' + cls + '" data-k="' + esc(key) + '" onclick=\'' + click.replace(/'/g, '&#39;') + '\'><span class="bl">' + esc(label) + pr + '</span>' + (inv ? '<span class="vsm">AGAINST THE MODEL</span>' : '') + venueLine(vq, mt, line) + sub + '</button>';
     }
     // THE SHEET TOUCH (Rob, Oct 26 2026: "CGY ML +133 is from hours ago… can't we
     // just update the button… with Poly numbers??"): the box quotes every pick on
@@ -1238,7 +1263,7 @@
         return (s && b.side && s.side !== b.side) ? s : null;
     }
     function betStrip(b, withGame, flip) {
-        const st = betState(b), loud = flip && !b.app && !b.auto;   // an auto bet re-seats on the price rule's side by itself
+        const st = betState(b), loud = flip && !b.app && !b.auto && !b.vs_model;   // an auto bet re-seats on the price rule's side by itself; a vs_model bet was bet against it on purpose
         const cls = loud && st.cls === 'rest' && !(b.read && b.read.rec === 'hold') ? 'warn' : st.cls;
         // THE FLIP (Rob, Oct 25 2026: "You made a suggestion but don't give me the
         // option?"): the strip names the model's side; the action sheet offers it.
@@ -1787,9 +1812,27 @@
         if (up) {
             const vp = ((g.venue || {}).picks || {})[gradeKey];
             const vq = vp ? { poly: vp.poly, kalshi: vp.kalshi, age_s: g.venue.age_s } : null;
-            return pickBtn(g._gi, g, mt, p.side, line, label, p.verdict, price, vq);
+            return pickBtn(g._gi, g, mt, p.side, line, label, p.verdict, price, vq) + invBody(g, mt, p, line, gradeKey);
         }
         return p.verdict !== 'pass' ? '<div class="mk-x">' + esc(label) + (gradeKey === 'puck' ? puckGrade(g, p) : gradeMark(g, gradeKey)) + '</div>' : '';
+    }
+    // the opposite bet under the model's button (⇄ on the card). The puck line
+    // has none — Rob never bets a dog +1.5; the dog's bet is its ML.
+    function invBody(g, mt, p, line, gradeKey) {
+        if (!invOn(g) || !p || !p.side || line == null || gradeKey === 'puck') return '';
+        let side, oline = Number(line), label;
+        if (mt === 'total') { side = p.side === 'over' ? 'under' : 'over'; label = (side === 'over' ? 'Over ' : 'Under ') + oline; }
+        else {
+            side = p.side === 'home' ? 'away' : 'home';
+            if (mt === 'ml') { oline = 0; label = nameOf(g, side) + ' ML'; }
+            else { oline = -Number(line); label = nameOf(g, side) + ' ' + sgn(oline, 1); }
+        }
+        const vp = ((g.venue || {}).picks || {})[gradeKey];
+        const vq = vp ? mirrorQ({ poly: vp.poly, kalshi: vp.kalshi, age_s: g.venue.age_s }, mt) : null;
+        const L = g.line || {};
+        const price = mt === 'ml' ? L['ml_' + side] : null;
+        _modelSide[g._gi + '|' + mt] = p.side;          // set even when the model's own button is hidden (a chalky ML)
+        return pickBtn(g._gi, g, mt, side, oline, label, 'pass', price, vq, true);
     }
     // The box's grader doesn't grade the puck line; read it off the final.
     function puckGrade(g, p) {
@@ -1850,9 +1893,9 @@
         else if (!p && L.ml_away != null && L.ml_home != null) mdl = nameOf(g, 'away') + ' ' + am(L.ml_away) + ' · ' + nameOf(g, 'home') + ' ' + am(L.ml_home) + (mdl ? ' · ' + mdl : '');
         if (!p && !mdl) return '';
         let body = mkBody(g, up, 'ml', p, 0, p && p.side ? nameOf(g, p.side) + ' ML' : '', 'ml', p ? (p.price != null ? p.price : L['ml_' + p.side]) : null);
-        if (p && p.chalky && up) body = '<div class="mk-note">Too chalky to bet at ' + am(p.price) + ' — ' + (_sport === 'NHL' ? 'see the puck line' : _sport === 'MLB' ? 'see the run line' : 'see the spread') + '.</div>';
+        if (p && p.chalky && up) body = '<div class="mk-note">Too chalky to bet at ' + am(p.price) + ' — ' + (_sport === 'NHL' ? 'see the puck line' : _sport === 'MLB' ? 'see the run line' : 'see the spread') + '.</div>' + invBody(g, 'ml', p, 0, 'ml');
         // THE LONGSHOT RULE (Rob, Oct 24 2026: "these fucking dogs instead of spreads on NBA???"): a dog at +200 or longer is not the bet — the line pick carries the lean
-        else if (p && p.longshot && up) body = '<div class="mk-note">' + am(p.price) + ' is a longshot — the dog\'s bet is ' + (_sport === 'MLB' ? 'the run line' : 'the spread') + '.</div>';
+        else if (p && p.longshot && up) body = '<div class="mk-note">' + am(p.price) + ' is a longshot — the dog\'s bet is ' + (_sport === 'MLB' ? 'the run line' : 'the spread') + '.</div>' + invBody(g, 'ml', p, 0, 'ml');
         return mkRow('ML', p, mdl + edgeTxt(p, false) + pinTxt(g, 'ml', p ? p.side : null), body);
     }
     // NBA spread (Hoops IQ: lean-capped, like the total)
@@ -2168,7 +2211,7 @@
         let summ = '';
         if (bs.length) {
             const n = { fill: 0, rest: 0, warn: 0 };
-            bs.forEach(b => { const c = betState(b).cls; n[flips[b.id] && !b.app && !b.auto && c === 'rest' && !(b.read && b.read.rec === 'hold') ? 'warn' : c]++; });
+            bs.forEach(b => { const c = betState(b).cls; n[flips[b.id] && !b.app && !b.auto && !b.vs_model && c === 'rest' && !(b.read && b.read.rec === 'hold') ? 'warn' : c]++; });
             summ = n.warn ? '<span class="gs warn">' + n.warn + ' need' + (n.warn === 1 ? 's' : '') + ' you</span>'
                  : '<span class="gs">' + [n.fill ? n.fill + ' filled' : '', n.rest ? n.rest + ' resting' : ''].filter(Boolean).join(' · ') + '</span>';
         }
@@ -2192,7 +2235,7 @@
         if (modelScore(g)) subs.push(modelScore(g));
         return '<div class="gc' + ((isUp || liveMode) ? '' : ' done') + '"><div class="gh"><div><div class="gt">'
              + (isUp ? '' : fmtTime(g.event_start).split(',')[0] + ' ') + clk(g.event_start) + '</div>'
-             + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + tvChip(g) + '</div></div>' + summ + '</div>'
+             + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + tvChip(g) + ((isUp || liveMode) ? invChip(g) : '') + '</div></div>' + summ + '</div>'
              + (subs.length ? '<div class="gsub">' + subs.join('') + '</div>' : '')
              + mk + extra.map(b => betStrip(b, false, flips[b.id])).join('') + '</div>';
     }
