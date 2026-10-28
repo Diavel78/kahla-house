@@ -3923,10 +3923,16 @@ def test_hand_red_alert() -> None:
         def __init__(self, code, body): self.status_code, self._b, self.text = code, body, str(body)
         def json(self): return self._b
     calls = []
-    old_post, old_creds = _app._http.post, _app._tg_creds
+    old_post, old_creds, old_mf = _app._http.post, _app._tg_creds, _app._machine_flag
     _app._tg_creds = lambda: ("t", "c", "env")
+    # the LIVE telegram_off flag must not decide this test (Oct 28 2026: on
+    # the box it is on, nothing posted, and calls[-1] crashed the selftest)
+    _app._machine_flag = lambda k, default=None: True if k == "telegram_off" else default
     try:
         _app._http.post = lambda url, json=None, timeout=None: calls.append(json) or _R(200, {"ok": True})
+        check("telegram_off: nothing is posted, the send reads as handled",
+              _app._tg_send_now("🔴 x") is True and not calls)
+        _app._machine_flag = lambda k, default=None: False if k == "telegram_off" else default
         check("sender: 200 → True, plain-text payload", _app._tg_send_now("🔴 x") is True and calls[-1].get("text") == "🔴 x"
               and "parse_mode" not in calls[-1])
         _app._http.post = lambda url, json=None, timeout=None: _R(400, {"ok": False, "description": "Bad Request: chat not found"})
@@ -3937,7 +3943,7 @@ def test_hand_red_alert() -> None:
         check("sender: a transport error → False with the exception recorded",
               _app._tg_send_now("🔴 x") is False and "CERTIFICATE_VERIFY_FAILED" in str(_app._TG_LAST_ERR.get("err")))
     finally:
-        _app._http.post, _app._tg_creds = old_post, old_creds
+        _app._http.post, _app._tg_creds, _app._machine_flag = old_post, old_creds, old_mf
 
     # THE GAME-START CANCEL ALERT (Rob, Oct 22 2026: "I wanted the bet at the
     # start, it didn't fill and cancelled, that's it… it doesn't cancel until
