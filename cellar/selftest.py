@@ -4557,8 +4557,13 @@ def test_sheet_seed_pin_picks() -> None:
           and next(i for i in items if i["k"] == "spread")["line"] == -2.5)
     g["venue"] = {"age_s": 30, "picks": {"spread": {"poly": {"bid": 49.0, "ask": 51.0, "line": -2.5}}}}
     g["spread"]["pin_fair"] = {"prob": 0.53}
-    _app._sheet_attach_price("NBA", g, now)
-    check("seed: a seeded pick takes a price verdict", g["spread"]["verdict"] == "play" and g["spread"]["model_verdict"] == "pass", g["spread"].get("pv"))
+    _old_on = _app._price_rule_on
+    try:
+        _app._price_rule_on = lambda: True
+        _app._sheet_attach_price("NBA", g, now)
+    finally:
+        _app._price_rule_on = _old_on
+    check("seed: a seeded pick takes a price verdict (price rule on)", g["spread"]["verdict"] == "play" and g["spread"]["model_verdict"] == "pass", g["spread"].get("pv"))
 
 
 def test_auto_price_lane() -> None:
@@ -6608,6 +6613,26 @@ def test_price_rule() -> None:
     one under fair, a pick grades on its own side, the CLV audit sums."""
     import app as _app
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    # BACK TO THE MODEL (Oct 28 2026): with the rule off the model's verdict and
+    # side stand, nothing flips, and `pv` still shows the venue vs Pinnacle fair
+    _old_on = _app._price_rule_on
+    check("price rule: code default is OFF (the model decides)", _app.PRICE_RULE_ENABLED is False)
+    _app._price_rule_on = lambda: False
+    try:
+        _n0 = _dt.now(_tz.utc)
+        _g0 = {"event_name": "A @ B", "away": "A", "home": "B", "event_start": (_n0 + _td(hours=5)).isoformat(),
+               "total": {"side": "over", "line": 44.5, "verdict": "lean", "edge_pts": 1.0,
+                         "pin_fair": {"prob": 0.50, "american": 100, "pin_line": 44.5, "src": "line"}},
+               "venue": {"age_s": 60, "picks": {"total": {"poly": {"bid": 51.0, "ask": 53.0, "line": 44.5}, "kalshi": None}}}}
+        _app._sheet_attach_price("NFL", _g0, _n0)
+        _t0 = _g0["total"]
+        check("model mode: the model's side and verdict stand, no flip",
+              _t0["side"] == "over" and _t0["verdict"] == "lean" and not _t0.get("flipped"), str(_t0))
+        check("model mode: the actual vs fair line still rides the pick",
+              _t0["pv"]["cost_c"] == 51.0 and abs(_t0["pv"]["fair_c"] - 50.0) < 1e-6 and _t0["pv"].get("info"), str(_t0.get("pv")))
+    finally:
+        _app._price_rule_on = _old_on
+    _app._price_rule_on = lambda: True      # everything below is the price rule itself
     # THE QUOTE FOLLOWS THE PICK'S SIDE (Oct 27 2026, DEN @ NOP ML read a 31¢
     # PLAY: the worker quoted Denver, a re-price swapped the pick to New Orleans)
     _q = {"mt": "ml", "side": "away", "line": 0.0, "poly": {"bid": 65.0, "ask": 66.0, "line": 0.0},
@@ -6708,6 +6733,7 @@ def test_price_rule() -> None:
     check("flip: the +468 dog is marked longshot, not chalk", m.get("longshot") is True and not m.get("chalky"))
     vq = gf["venue"]["picks"]["ml"]
     check("flip: the venue line is mirrored to the new side", vq["poly"]["bid"] == 15.0 and vq["poly"]["ask"] == 16.0 and vq["poly"]["chalk"] is False and vq["kalshi"]["bid"] == 15.0)
+    _app._price_rule_on = _old_on
 
 
 def main() -> int:

@@ -1397,6 +1397,20 @@ _PRICE_LEAN_C = 1.0
 _PRICE_RULE_SPORTS = ("NFL", "NCAAF", "NHL", "NBA", "MLB")
 
 
+# BACK TO THE MODEL (Oct 28 2026, Rob after the auto lane's 5-13 start: "I
+# don't want to autobet anymore… I want to go back to the model, and I love
+# you showing me the actual and fair odds"). Off = the model's verdict and
+# side stand (no flip); every upcoming pick still carries `pv` — the venue's
+# bid on the MODEL's side against Pinnacle's devigged fair at the rung — so
+# the card keeps "Poly 48¢ vs fair 50¢". `machine_flags price_rule`=true
+# restores the Oct 27 price rule.
+PRICE_RULE_ENABLED = False
+
+
+def _price_rule_on() -> bool:
+    return bool(_machine_flag("price_rule", PRICE_RULE_ENABLED))
+
+
 def _price_thresholds():
     try:
         play = float(_machine_flag_val("price_play_c", _PRICE_PLAY_C))
@@ -1634,6 +1648,7 @@ def _sheet_attach_price(sport: str, g: dict, now) -> None:
     except Exception:
         upcoming = False
     play_c, lean_c = _price_thresholds()
+    rule_on = _price_rule_on()
     vp = ((g.get("venue") or {}).get("picks") or {}) if isinstance(g.get("venue"), dict) else {}
     age_s = (g.get("venue") or {}).get("age_s") if isinstance(g.get("venue"), dict) else None
     for key, mt in (("ml", "ml"), ("puck", "spread"), ("spread", "spread"), ("total", "total")):
@@ -1665,6 +1680,10 @@ def _sheet_attach_price(sport: str, g: dict, now) -> None:
             pv["why"] = "no_quote"
         pv["age_s"] = age_s
         pv["rec"] = "side"
+        if not rule_on:
+            pv["info"] = True               # actual vs fair, shown; the model's verdict stands
+            pk["pv"] = pv
+            continue
         opp = pv.get("opp") if isinstance(pv.get("opp"), dict) else None
         if (key != "puck" and opp and opp.get("verdict") != "pass" and pv.get("verdict") == "pass"):
             # only the other side rests under fair → the price bets it
