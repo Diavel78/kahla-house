@@ -3053,6 +3053,28 @@ def test_hand_start_plan() -> None:
     assert _app._hand_tif_params(g)["goodTillTime"] == g
     print("  PASS  hand start-cancel planner + no-expiry (GTC) hand orders")
 
+    # THE BASELINE CAN'T BE EVICTED (Oct 27 2026, SAC @ SA O 230.5 on Kalshi, no twin)
+    from collections import deque as _dq
+    _app.TAPE_BASE.pop("k:TEST", None)
+    t0 = 1_800_000_000.0
+    for k in range(60):                                   # 10 min of a 300k book before the start
+        _app._tape_base_note("k:TEST", t0 - 600 + k * 10, 300000.0)
+    tape = _dq(maxlen=900)
+    for k in range(900):                                  # the deque holds ONLY post-start frames (evicted)
+        tape.append((t0 + 30 + k * 0.05, 50.0, 400.0, 51.0, 400.0))
+    sm = _app._start_samples("k:TEST", tape, t0)
+    now = t0 + 30 + 899 * 0.05 + 1
+    check("start rule: an evicted tape alone reads no_baseline",
+          _app._hand_start_plan(list(tape), t0, now, 95.0)[0] == "no_baseline")
+    check("start rule: the 10s buckets keep the pre-start book, so the drop is seen",
+          _app._hand_start_plan(sm, t0, now, 95.0)[0] == "started")
+    check("start rule: a bucket straddling the start is never baseline",
+          all(r[0] + _app._TAPE_BASE_BUCKET_S <= t0 for r in sm if r[1] is None))
+    _app.TAPE_BASE.pop("k:TEST", None)
+    import inspect as _ib
+    src_ = _ib.getsource(_app)
+    check("start rule: all three start-plan call sites read _start_samples",
+          src_.count("_hand_start_plan(_start_samples(") == 3 and "_hand_start_plan(list(" not in src_)
 
 def test_hand_chase_plan() -> None:
     """The hand-bet chase (Oct 4 2026): JOIN the touch, only UP, and a

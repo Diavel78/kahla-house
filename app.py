@@ -18104,6 +18104,7 @@ def _touch_tape_record(slug: str, bids: list, asks: list) -> None:
         if dq is None:
             dq = TOUCH_TAPE[slug] = _deque(maxlen=_TOUCH_TAPE_MAX)
         dq.append(row)
+        _tape_base_note("p:" + slug, row[0], (row[2] or 0.0) + (row[4] or 0.0))
     except Exception:
         pass
 
@@ -18279,6 +18280,45 @@ _HAND_START_DROP_PCT = 95.0
 _HAND_START_BASE_S = 90.0          # pre-start window the baseline high comes from
 _HAND_START_BASE_FALLBACK_S = 600.0
 _HAND_START_CARRY_S = 3600.0        # the newest frame this old before the window is the book at its open
+# THE BASELINE CAN'T BE EVICTED (Oct 27 2026, Sacramento @ San Antonio O 230.5 on
+# Kalshi, no Polymarket twin: the tape keeps the last 900 frames, a busy NBA
+# total's socket fills that in about a minute around tip-off, so by the first
+# handbets tick after the start (ticks ran 80-100s that evening) every frame
+# from before the start was gone, the rule read `no_baseline` forever, and the
+# bet rested into the second quarter as BOX CAN'T SEE GAME START). Every tape
+# frame also folds into a 10-second bucket of the touch size (max of bid + ask),
+# kept an hour per market; the start rule reads those buckets for the pre-start
+# window, the tape itself for everything after the start.
+_TAPE_BASE_BUCKET_S = 10.0
+_TAPE_BASE_MAX = 400                  # 400 × 10s ≈ 66 min ≥ _HAND_START_CARRY_S
+TAPE_BASE: dict = {}                  # "k:<ticker>" / "p:<slug>" → deque [[bucket_ts, None, q, None, 0.0], …]
+
+
+def _tape_base_note(key: str, ts: float, q) -> None:
+    """Fold one frame's touch size into its 10s bucket. Never raises."""
+    try:
+        if ts is None or q is None:
+            return
+        b = float(ts) - (float(ts) % _TAPE_BASE_BUCKET_S)
+        dq = TAPE_BASE.get(key)
+        if dq is None:
+            dq = TAPE_BASE[key] = _deque(maxlen=_TAPE_BASE_MAX)
+        if dq and dq[-1][0] == b:
+            if float(q) > dq[-1][2]:
+                dq[-1][2] = float(q)
+        else:
+            dq.append([b, None, float(q), None, 0.0])
+    except Exception:
+        pass
+
+
+def _start_samples(key: str, tape, start_ts: float) -> list:
+    """Pure-ish. The start rule's samples: the 10s buckets that END before the
+    start (the pre-start book, never evicted) + the tape's own frames."""
+    pre = [r for r in list(TAPE_BASE.get(key) or []) if r[0] + _TAPE_BASE_BUCKET_S <= start_ts]
+    rows = pre + [r for r in list(tape or []) if r and r[0] is not None]
+    rows.sort(key=lambda r: r[0])
+    return rows
 _HAND_START_FRAMES = 2             # consecutive post-start samples under the line
 _HAND_START_STALE_S = 90.0         # the newest sample must be this fresh
 # 90% OFF THE PRE-START HIGH (Oct 12 2026, Ottawa @ New Jersey, Rob: "the
@@ -19038,7 +19078,7 @@ def _hand_start_tick(sb, client, now) -> dict:
             except (TypeError, ValueError):
                 _d = _HAND_START_DROP_PCT_SPORT.get(_sp, drop)
             _d = max(drop, _d)
-            verdict, base, cur, seen = _hand_start_plan(list(TOUCH_TAPE.get(slug) or []), start_ts, now_ts, _d)
+            verdict, base, cur, seen = _hand_start_plan(_start_samples("p:" + slug, TOUCH_TAPE.get(slug), start_ts), start_ts, now_ts, _d)
         if verdict != "started":
             st["wait" if verdict in ("wait", "pre") else "no_baseline"] += 1
             if (verdict == "no_baseline" and now_ts - start_ts > 120.0
@@ -20979,6 +21019,7 @@ def _kalshi_hand_book(ticker: str, fresh: bool = False, record: bool = True):
             if dq is None:
                 dq = KALSHI_TAPE[ticker] = _deque(maxlen=_KALSHI_TAPE_MAX)
             dq.append(row)
+            _tape_base_note("k:" + ticker, row[0], (row[2] or 0.0) + (row[4] or 0.0))
     return book, ob
 
 
@@ -21961,10 +22002,10 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
     if now_ts >= start_ts - 1200.0 and not _kalshi_ws_fresh(ticker):
         _kalshi_hand_book(ticker, fresh=True)           # REST sample through the start window only while the socket is dark
     tape_src = "kalshi"
-    verdict, base, cur, seen = _hand_start_plan(list(KALSHI_TAPE.get(ticker) or []), start_ts, now_ts, _d)
+    verdict, base, cur, seen = _hand_start_plan(_start_samples("k:" + ticker, KALSHI_TAPE.get(ticker), start_ts), start_ts, now_ts, _d)
     twin = blob.get("pmm_twin_slug")
     if verdict == "no_baseline" and twin:
-        v2 = _hand_start_plan(list(TOUCH_TAPE.get(twin) or []), start_ts, now_ts, _d)
+        v2 = _hand_start_plan(_start_samples("p:" + twin, TOUCH_TAPE.get(twin), start_ts), start_ts, now_ts, _d)
         if v2[0] != "no_baseline":
             verdict, base, cur, seen = v2
             tape_src = "poly_twin"
@@ -23957,6 +23998,7 @@ def _kalshi_tape_record(ticker: str, ob: dict) -> None:
             if dq is None:
                 dq = KALSHI_TAPE[ticker] = _deque(maxlen=_KALSHI_TAPE_MAX)
             dq.append(row)
+            _tape_base_note("k:" + ticker, row[0], (row[2] or 0.0) + (row[4] or 0.0))
         _hand_live_frame(ticker)                     # the live chase runs on Kalshi's socket too
     except Exception:
         pass
