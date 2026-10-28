@@ -24611,6 +24611,11 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
             stats["auto"] = {"err": f"{type(e).__name__}: {e}"[:120]}
         _drain()
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
+        # THE DASHBOARD'S ORDERS SNAPSHOT (Oct 28 2026): only the retired repeg
+        # lap wrote venue_orders_cache, so with handbets alone it went stale and
+        # every /api/my-orders poll fell to orders.list + a market read per total
+        # (~45 venue reads a load). The mirror writes it here now, every 45 s.
+        stats["orders_cache"] = _orders_cache_write(sb)
         try:
             stats["tape"] = _touch_tape_publish(sb)
         except Exception as e:
@@ -46379,15 +46384,11 @@ def api_my_orders():
             if team_name and outcome and re.search(r"[0-9]", outcome):
                 pick = f"{team_name} {outcome}"
             elif outcome.lower() in ("over", "under"):
-                try:
-                    md_raw = fetch_market(client, slug)
-                    md_full = md_raw.get("market", md_raw) if isinstance(md_raw, dict) else {}
-                    question = md_full.get("question", "")
-                    total_match = re.search(r"(\d+\.?\d*)", question)
-                    if total_match:
-                        pick = f"{outcome} {total_match.group(1)}"
-                except Exception:
-                    pass
+                # the line off the slug (…-total-45pt5 / …-232pt5), never a
+                # venue read per order — the snapshot builder's rule
+                _tm = re.search(r"-total-(\d+)(?:pt(\d))?", slug) or re.search(r"-(\d+)pt(\d)$", slug)
+                if _tm:
+                    pick = f"{outcome} {_tm.group(1)}" + (f".{_tm.group(2)}" if _tm.group(2) else "")
             elif team_name:
                 pick = team_name
 

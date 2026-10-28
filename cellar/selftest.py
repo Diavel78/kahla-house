@@ -5381,6 +5381,10 @@ def test_bet_sheet_reads() -> None:
           and [q["in"][0] for q in _fsb2.log] == ["market_id", "event_name"], str(_fsb2.log))
     check("the per-game fallback reads the slim model parts, not the whole blob",
           'select("data_blob")' not in _insp.getsource(_app._bs_sheet_blob))
+    check("the handbets tick writes the dashboard's orders snapshot",
+          "_orders_cache_write(sb)" in _insp.getsource(_app._hand_orders_tick))
+    check("/api/my-orders' venue fallback reads no market per order",
+          "fetch_market(" not in _insp.getsource(_app.api_my_orders))
     check("the reads loop prefetches", "_bs_sheet_blobs_prefetch(sb, out, cache)" in _insp.getsource(_app._bet_sheet_reads))
     check("/mine logs its phase clock when slow",
           "bet sheets mine slow" in _insp.getsource(_app.api_bet_sheets_mine))
