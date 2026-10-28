@@ -15,6 +15,10 @@ on:
         description: "Extra query params appended AFTER the key, e.g. 'dry=1&sport=mlb' (no leading &)."
         required: false
         type: string
+      full:
+        description: "Set to 1 to print the WHOLE response, folded into 50,000-char lines (default: first 60,000 chars only)."
+        required: false
+        type: string
       repeat:
         description: "Call the endpoint this many times, 6s apart (default 1). For endpoints that work a bounded batch per invocation."
         required: false
@@ -47,9 +51,15 @@ jobs:
           [ "$N" -gt 40 ] && N=40
           for i in $(seq 1 "$N"); do
             [ "$N" -gt 1 ] && echo "=== pass $i/$N ==="
-            curl -sSL --max-time 120 \
-              "https://www.thekahlahouse.com/${{ inputs.path }}?key=${KEY}${Q}" \
-              | head -c 60000
+            if [ "${{ inputs.full }}" = "1" ]; then
+              curl -sSL --max-time 120 \
+                "https://www.thekahlahouse.com/${{ inputs.path }}?key=${KEY}${Q}" \
+                | fold -w 50000
+            else
+              curl -sSL --max-time 120 \
+                "https://www.thekahlahouse.com/${{ inputs.path }}?key=${KEY}${Q}" \
+                | head -c 60000
+            fi
             echo
             [ "$i" -lt "$N" ] && sleep 6
           done
