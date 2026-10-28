@@ -5385,6 +5385,35 @@ def api_bet_sheets_fill_audit():
     return jsonify(out)
 
 
+def _auto_cancel_cands(rows: list, now) -> list:
+    """AUTO LANE OFF (Oct 28 2026, Rob: "I don't want to autobet anymore…
+    cancel them all"): every pending pre-game AUTO pick with an order still
+    resting on either venue — never a live snipe, never a lot held in full.
+    A partial fill is cancelled too; the cancel path keeps the held part."""
+    out = []
+    for r in rows or []:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if r.get("status") != "pending" or not isinstance(b.get("auto_price"), dict):
+            continue
+        if isinstance(b.get("live_snipe"), dict) or b.get("in_play"):
+            continue
+        try:
+            if _parse_iso(r.get("event_start")) <= now:
+                continue
+        except Exception:
+            continue
+        oid = b.get("kalshi_order_id") if _kalshi_pick(b) else b.get("order_id")
+        if not oid:
+            continue
+        try:
+            if float(b.get("filled_qty") or 0) >= float(b.get("contracts") or 0) > 0:
+                continue
+        except (TypeError, ValueError):
+            pass
+        out.append(r)
+    return out
+
+
 @app.route("/api/bet-sheets/picks")
 def api_bet_sheets_picks():
     """READ-ONLY (shared-secret, site-curl): every bot_picks row on a slug
@@ -5398,6 +5427,50 @@ def api_bet_sheets_picks():
         return jsonify({"ok": False, "error": "forbidden"}), 403
     slug = (request.args.get("slug") or "").strip()
     out: dict = {"ok": True, "slug": slug}
+    if request.args.get("auto_cancel"):
+        # ?auto_cancel=1 → the unfilled AUTO seats a cancel sweep would take;
+        # &apply=1 queues one ordinary `cancel` row per bet for the box (the
+        # only place hand orders are written — the venue geo-checks Vercel).
+        try:
+            sb_ = get_supabase()
+            now_ = datetime.now(timezone.utc)
+            rows_ = (sb_.table("bot_picks").select("id,sport,event_name,event_start,market_type,side,status,asked_by,signal_blob")
+                     .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                     .gte("event_start", now_.isoformat()).limit(500).execute().data) or []
+            cands = _auto_cancel_cands(rows_, now_)
+            busy: set = set()
+            try:
+                for q_ in (sb_.table("hand_orders").select("pick_id").in_("state", ["pending", "claimed"])
+                           .limit(500).execute().data) or []:
+                    if q_.get("pick_id"):
+                        busy.add(int(q_["pick_id"]))
+            except Exception:
+                pass
+            ac = {"cands": len(cands), "queued": 0, "skipped_busy": 0, "errors": [], "rows": []}
+            for r_ in cands:
+                b_ = r_["signal_blob"]
+                ac["rows"].append({"id": r_["id"], "sport": r_.get("sport"), "event": r_.get("event_name"),
+                                   "label": b_.get("label"), "venue": b_.get("venue") or "POLYMARKET",
+                                   "price_c": b_.get("price_c"), "filled": b_.get("filled_qty")})
+                if not request.args.get("apply"):
+                    continue
+                if int(r_["id"]) in busy:
+                    ac["skipped_busy"] += 1
+                    continue
+                try:
+                    _hand_order_enqueue(sb_, {"op": "cancel", "pick_id": r_["id"], "slug": b_.get("pmm_slug"),
+                                              "synthetic": bool(b_.get("pmm_synthetic")), "order_id": b_.get("order_id"),
+                                              "payload": {"asked_by": r_.get("asked_by"), "src": "auto_cancel_all"}})
+                    ac["queued"] += 1
+                except Exception as e:
+                    ac["errors"].append(f"{r_['id']}: {e}"[:120])
+            if request.args.get("apply"):
+                _probe_log({"hand_auto_cancel_all": True, "at": now_.isoformat(), "cands": ac["cands"],
+                            "queued": ac["queued"], "skipped_busy": ac["skipped_busy"], "errors": ac["errors"][:10]})
+            out["auto_cancel"] = ac
+        except Exception as e:
+            out["auto_cancel_err"] = str(e)[:200]
+        return jsonify(out)
     ids_q = [int(x) for x in re.findall(r"\d+", request.args.get("ids") or "")][:20]
     if ids_q:                                          # ?ids=199717 → the picks' FULL blobs (read-only)
         try:

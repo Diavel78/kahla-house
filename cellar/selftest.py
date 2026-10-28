@@ -4705,6 +4705,24 @@ def test_auto_price_lane() -> None:
     check("touch walk: the budget is most of the cadence, and a partial pass stamps where it stopped",
           _app._SHEET_TOUCH_BUDGET_S >= 600 and _app._SHEET_TOUCH_BUDGET_S < _app._SHEET_TOUCH_EVERY_S
           and '"resume": resume' in _insp2.getsource(_app._sheet_touch_pass))
+    # AUTO LANE OFF (Oct 28 2026): the cancel-all sweep takes only resting, pre-game AUTO seats
+    from datetime import datetime as _dta, timezone as _tza, timedelta as _tda
+    _na = _dta.now(_tza.utc)
+    _fut, _past = (_na + _tda(hours=5)).isoformat(), (_na - _tda(hours=1)).isoformat()
+    _ap = {"fair_c": 50}
+    _rows = [
+        {"id": 1, "status": "pending", "event_start": _fut, "signal_blob": {"auto_price": _ap, "order_id": "o1", "contracts": 5}},
+        {"id": 2, "status": "pending", "event_start": _fut, "signal_blob": {"order_id": "o2", "contracts": 5}},
+        {"id": 3, "status": "pending", "event_start": _past, "signal_blob": {"auto_price": _ap, "order_id": "o3", "contracts": 5}},
+        {"id": 4, "status": "pending", "event_start": _fut, "signal_blob": {"auto_price": _ap, "order_id": None, "contracts": 5, "filled_qty": 5}},
+        {"id": 5, "status": "pending", "event_start": _fut, "signal_blob": {"auto_price": _ap, "venue": "KALSHI", "kalshi_ticker": "KX-1",
+                                                                             "kalshi_order_id": "k5", "contracts": 5, "filled_qty": 2}},
+        {"id": 6, "status": "pending", "event_start": _fut, "signal_blob": {"auto_price": _ap, "order_id": "o6", "contracts": 5,
+                                                                             "live_snipe": {"auto": True}}},
+    ]
+    _got = sorted(r["id"] for r in _app._auto_cancel_cands(_rows, _na))
+    check("auto cancel-all: resting pre-game auto seats only (a partial fill included, hand bets/started/held/live never)",
+          _got == [1, 5], str(_got))
 
 
 def test_end_state_rosters() -> None:
