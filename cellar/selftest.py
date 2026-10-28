@@ -5364,6 +5364,23 @@ def test_bet_sheet_reads() -> None:
           (_cache.get(("NFL", "m2", "C @ D")) or {}).get("friday", {}).get("model") == {"win_prob_home": 0.7})
     check("prefetch: _bs_sheet_blob answers from the cache",
           _app._bs_sheet_blob(None, "NHL", "m1", "A @ B", _cache) == _cache[("NHL", "m1", "A @ B")])
+    # the Oct 28 OOM: the bet's market id is not the sheet row's — the name batch catches it,
+    # and a game with no sheet row by either key is cached None (no per-game full read)
+    _fsb2 = _SB(_rows)
+    _out2 = [{"status": "pending", "started": False, "order": {"resting": True}, "sport": "NHL",
+              "market_id": "mX", "event_name": "A @ B"},
+             {"status": "pending", "started": False, "order": {"resting": True}, "sport": "NHL",
+              "market_id": "mY", "event_name": "Z @ Q"}]
+    _cache2: dict = {}
+    _app._bs_sheet_blobs_prefetch(_fsb2, _out2, _cache2)
+    check("prefetch: a market-id miss is found by event name",
+          (_cache2.get(("NHL", "mX", "A @ B")) or {}).get("model") == {"win_home": 0.6}, str(_cache2))
+    check("prefetch: no sheet row by either key caches None",
+          ("NHL", "mY", "Z @ Q") in _cache2 and _cache2[("NHL", "mY", "Z @ Q")] is None)
+    check("prefetch: two batches, never a per-game read", len(_fsb2.log) == 2
+          and [q["in"][0] for q in _fsb2.log] == ["market_id", "event_name"], str(_fsb2.log))
+    check("the per-game fallback reads the slim model parts, not the whole blob",
+          'select("data_blob")' not in _insp.getsource(_app._bs_sheet_blob))
     check("the reads loop prefetches", "_bs_sheet_blobs_prefetch(sb, out, cache)" in _insp.getsource(_app._bet_sheet_reads))
     check("/mine logs its phase clock when slow",
           "bet sheets mine slow" in _insp.getsource(_app.api_bet_sheets_mine))

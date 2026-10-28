@@ -25286,6 +25286,19 @@ def _bs_ncdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
+# ONLY the model parts the read prices off — a football data_blob is the
+# whole sheet card (lines, tape, narrative); the full read is what OOM'd /mine.
+_BS_SLIM_SEL = ("week_key,market_id,event_name,model:data_blob->model,"
+                "fmodel:data_blob->friday->model,meta:data_blob->model_meta")
+
+
+def _bs_slim_blob(r: dict) -> dict:
+    blob = {"model": r.get("model") or {}, "model_meta": r.get("meta") or {}}
+    if r.get("fmodel"):
+        blob["friday"] = {"model": r.get("fmodel")}
+    return blob
+
+
 def _bs_sheet_blob(sb, sport: str, market_id, event_name, cache: dict):
     """The newest sheet row's data_blob for one game (market id first —
     MLB names carry the date; else the event name)."""
@@ -25297,11 +25310,11 @@ def _bs_sheet_blob(sb, sport: str, market_id, event_name, cache: dict):
         for col, val in (("market_id", market_id), ("event_name", event_name)):
             if not val:
                 continue
-            rows = (sb.table("football_sheets").select("data_blob")
+            rows = (sb.table("football_sheets").select(_BS_SLIM_SEL)
                     .eq("sport", sport).eq(col, val)
                     .order("week_key", desc=True).limit(1).execute().data) or []
             if rows:
-                blob = rows[0].get("data_blob")
+                blob = _bs_slim_blob(rows[0])
                 break
     except Exception:
         blob = None
@@ -25581,34 +25594,44 @@ def _bs_sheet_blobs_prefetch(sb, out: list, cache: dict) -> int:
             continue
         want.setdefault(sport, {})[(b.get("market_id") or "", b.get("event_name") or "")] = True
     n = 0
-    sel = ("week_key,market_id,event_name,model:data_blob->model,"
-           "fmodel:data_blob->friday->model,meta:data_blob->model_meta")
+
+    def _read(sport, col, vals, found):
+        nonlocal n
+        ok = True
+        for i in range(0, len(vals), 80):
+            try:
+                rows = (sb.table("football_sheets").select(_BS_SLIM_SEL).eq("sport", sport)
+                        .in_(col, vals[i:i + 80]).order("week_key", desc=True)
+                        .limit(1000).execute().data) or []
+            except Exception:
+                ok, rows = False, []
+            n += len(rows)
+            for r in rows:
+                k = r.get(col)
+                if k is None or k in found:
+                    continue                     # newest week first: keep the first seen
+                found[k] = _bs_slim_blob(r)
+        return ok
+
     for sport, keys in want.items():
-        ids = sorted({mid for mid, _ in keys if mid})
-        names = sorted({ev for mid, ev in keys if ev and not mid})
         found_mid: dict = {}
         found_ev: dict = {}
-        for col, vals, found in (("market_id", ids, found_mid), ("event_name", names, found_ev)):
-            for i in range(0, len(vals), 80):
-                try:
-                    rows = (sb.table("football_sheets").select(sel).eq("sport", sport)
-                            .in_(col, vals[i:i + 80]).order("week_key", desc=True)
-                            .limit(1000).execute().data) or []
-                except Exception:
-                    rows = []
-                n += len(rows)
-                for r in rows:
-                    k = r.get(col)
-                    if k is None or k in found:
-                        continue                 # newest week first: keep the first seen
-                    blob = {"model": r.get("model") or {}, "model_meta": r.get("meta") or {}}
-                    if r.get("fmodel"):
-                        blob["friday"] = {"model": r.get("fmodel")}
-                    found[k] = blob
+        ok = _read(sport, "market_id", sorted({mid for mid, _ in keys if mid}), found_mid)
+        # THE MISS THAT KEPT /mine OOMing (Oct 28 2026, 7:21 AM AZ): a bet's
+        # market_id is often not the sheet row's (app-adopted / minted rows,
+        # NHL+NBA duplicates), the market-id batch found nothing, and every
+        # such game fell to the per-game read. Name the misses in a second batch.
+        ok = _read(sport, "event_name",
+                   sorted({ev for mid, ev in keys if ev and mid not in found_mid}),
+                   found_ev) and ok
         for mid, ev in keys:
-            blob = found_mid.get(mid) if mid else found_ev.get(ev)
+            blob = found_mid.get(mid) if mid else None
+            if blob is None:
+                blob = found_ev.get(ev)
             if blob is not None:
                 cache[(sport, mid, ev)] = blob
+            elif ok:
+                cache[(sport, mid, ev)] = None   # no sheet row by either key: nothing to price
     return n
 
 
