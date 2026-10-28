@@ -5314,6 +5314,55 @@ def test_bet_sheet_reads() -> None:
     print("bet sheets: the model's read on a moved line")
     import app as _app
     import inspect as _insp
+    # ONE QUERY PER SPORT (Oct 27 2026, /mine 18-24 s + OOM with ~140 resting
+    # auto bets): the prefetch fills _bs_sheet_blob's cache keys with only the
+    # model parts, newest week first, and the reads loop uses it.
+    class _Q:
+        def __init__(self, log, rows):
+            self.log, self.rows, self.f = log, rows, {}
+        def select(self, s): self.f["sel"] = s; return self
+        def eq(self, k, v): self.f[k] = v; return self
+        def in_(self, k, v): self.f["in"] = (k, list(v)); return self
+        def order(self, *a, **k): return self
+        def limit(self, n): return self
+        def execute(self):
+            self.log.append(dict(self.f))
+            col, vals = self.f["in"]
+            data = [r for r in self.rows if r["sport"] == self.f.get("sport") and r.get(col) in vals]
+            return type("R", (), {"data": data})()
+    class _SB:
+        def __init__(self, rows): self.log, self.rows = [], rows
+        def table(self, t): return _Q(self.log, self.rows)
+    _rows = [{"sport": "NHL", "week_key": "2026-10-26", "market_id": "m1", "event_name": "A @ B",
+              "model": {"win_home": 0.6}, "fmodel": None, "meta": {}},
+             {"sport": "NHL", "week_key": "2026-10-19", "market_id": "m1", "event_name": "A @ B",
+              "model": {"win_home": 0.1}, "fmodel": None, "meta": {}},
+             {"sport": "NFL", "week_key": "2026-10-26", "market_id": "m2", "event_name": "C @ D",
+              "model": {}, "fmodel": {"win_prob_home": 0.7}, "meta": {}}]
+    _fsb = _SB(_rows)
+    _out = [{"status": "pending", "started": False, "order": {"resting": True}, "sport": "NHL",
+             "market_id": "m1", "event_name": "A @ B"},
+            {"status": "pending", "started": False, "order": {"resting": True}, "sport": "NHL",
+             "market_id": "m1", "event_name": "A @ B"},
+            {"status": "pending", "started": False, "order": {"resting": True}, "sport": "NFL",
+             "market_id": "m2", "event_name": "C @ D"},
+            {"status": "pending", "started": True, "order": {"resting": True}, "sport": "NBA",
+             "market_id": "m9", "event_name": "E @ F"}]
+    _cache: dict = {}
+    _app._bs_sheet_blobs_prefetch(_fsb, _out, _cache)
+    check("prefetch: one query per sport, started games skipped", len(_fsb.log) == 2
+          and {q["sport"] for q in _fsb.log} == {"NHL", "NFL"}, str(_fsb.log))
+    check("prefetch: selects the model parts, never the whole data_blob",
+          all("data_blob->model" in q["sel"] and "data_blob," not in q["sel"] + "," for q in _fsb.log))
+    check("prefetch: the newest week wins", _cache.get(("NHL", "m1", "A @ B"), {}).get("model") == {"win_home": 0.6},
+          str(_cache))
+    check("prefetch: friday.model rides through for football",
+          (_cache.get(("NFL", "m2", "C @ D")) or {}).get("friday", {}).get("model") == {"win_prob_home": 0.7})
+    check("prefetch: _bs_sheet_blob answers from the cache",
+          _app._bs_sheet_blob(None, "NHL", "m1", "A @ B", _cache) == _cache[("NHL", "m1", "A @ B")])
+    check("the reads loop prefetches", "_bs_sheet_blobs_prefetch(sb, out, cache)" in _insp.getsource(_app._bet_sheet_reads))
+    check("/mine logs its phase clock when slow",
+          "bet sheets mine slow" in _insp.getsource(_app.api_bet_sheets_mine))
     # football: the sheet's ECU@UAB shape — model total 49.6 (cal), stay O 47.5
     # @ 52¢ vs move O 48.5 @ 49¢; snapshot fit = identity, sd 13.
     snap = {"params": {"total_fit": {"alpha": 0.0, "beta": 1.0, "sd": 13.0, "mean": 0.0},

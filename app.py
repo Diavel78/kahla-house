@@ -24947,6 +24947,14 @@ def api_bet_sheets_mine():
     if sb is None:
         return jsonify({"ok": False, "error": "database unavailable"}), 503
     now = datetime.now(timezone.utc)
+    _t0 = _time.monotonic()
+    _ms: dict = {}
+
+    def _lap(name):
+        nonlocal _t0
+        t = _time.monotonic()
+        _ms[name] = int((t - _t0) * 1000)
+        _t0 = t
     # market_id IS LOAD-BEARING (Oct 16 2026, the Cleveland ML): MLB cards
     # carry the AZ date in their event_name, so the page can match a bet to
     # its card ONLY by market id — and this select used to leave it out.
@@ -24973,7 +24981,9 @@ def api_bet_sheets_mine():
         return jsonify({"ok": False, "error": f"picks read failed: {e}"}), 500
     # THE BOX'S BLOB FIRST (Oct 3 2026): sockets → memory → one DB row;
     # Vercel calls the venue only when the box has not published in 45s.
+    _lap("picks")
     box = _hand_status_read(sb)
+    _lap("box")
     box_rows = (box or {}).get("rows") or {}
     orders_by_id, positions, venue_ok = {}, {}, True
     client = None
@@ -25028,6 +25038,7 @@ def api_bet_sheets_mine():
                     rows.pop(f["id"], None)
     except Exception as e:
         app.logger.warning("bet sheets: dust fold: %s", str(e)[:120])
+    _lap("venue_fold")
     for r in sorted(rows.values(), key=lambda x: x.get("event_start") or ""):
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if r.get("status") == "void" and isinstance(blob.get("dust_fold"), dict):
@@ -25181,23 +25192,33 @@ def api_bet_sheets_mine():
                          if isinstance(blob.get("live_snipe"), dict) and blob["live_snipe"].get("until") else {})},
             "line_hold": (bx.get("line_hold") if bx is not None else blob.get("line_hold")),
         })
+    _lap("rows")
     try:
         _bet_sheet_live_enrich(out, now)
     except Exception as e:
         app.logger.warning("bet sheet live enrich: %s", e)
+    _lap("live")
     try:
         _bet_sheet_reads(sb, out)
     except Exception as e:
         app.logger.warning("bet sheet reads: %s", e)
+    _lap("reads")
     try:
         missed = _bet_sheet_missed(sb, now, out)
     except Exception as e:
         app.logger.warning("bet sheet missed list: %s", e)
         missed = []
+    _lap("missed")
     try:
         tape_dark = _touch_tape_dark(sb)
     except Exception:
         tape_dark = None
+    _lap("tape")
+    _tot = sum(_ms.values())
+    if _tot > 4000:
+        # the phase clock, in the Vercel log, whenever a poll is slow — the
+        # read that tells the next slow night which step it is
+        app.logger.warning("bet sheets mine slow %dms n=%d %s", _tot, len(out), _ms)
     try:
         _live_c = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
     except (TypeError, ValueError):
@@ -25205,7 +25226,7 @@ def api_bet_sheets_mine():
     return jsonify({"ok": True, "bets": out, "missed": missed, "venue_ok": venue_ok, "tape_dark": tape_dark,
                     "dust_folded": dust_folded,
                     "live_snipe_c": _live_c,
-                    "src": ("box" if box is not None else "vercel"),
+                    "src": ("box" if box is not None else "vercel"), "ms": _ms,
                     "box_age_s": (box or {}).get("age_s"), "at": now.isoformat()})
 
 
@@ -25516,6 +25537,58 @@ def _bs_recommend(stay, move, live=None, hold=None, flip=None):
     return "live" if _ok(live) else "cancel"
 
 
+def _bs_sheet_blobs_prefetch(sb, out: list, cache: dict) -> int:
+    """ONE QUERY PER SPORT, NOT ONE PER GAME (Oct 27 2026, Rob at 9:38 PM:
+    "Slow as fuck"): the auto lane rests ~140 pre-game bets, and
+    _bet_sheet_reads asked _bs_sheet_blob for each game's WHOLE data_blob —
+    ~80 reads through the tunnel at ~250 ms each and every football blob held
+    in memory at once: /mine ran 18-24 s a poll and Vercel OOM'd. This reads
+    only the model parts the read prices off (model, friday.model,
+    model_meta), batched by market id, newest week first, into the same
+    cache keys _bs_sheet_blob uses. A game it misses falls through to the
+    old per-game read. Returns the rows read."""
+    want: dict = {}
+    for b in out:
+        if b.get("status") != "pending" or b.get("started"):
+            continue
+        if not (b.get("order") or {}).get("resting"):
+            continue
+        sport = (b.get("sport") or "").upper()
+        if not sport:
+            continue
+        want.setdefault(sport, {})[(b.get("market_id") or "", b.get("event_name") or "")] = True
+    n = 0
+    sel = ("week_key,market_id,event_name,model:data_blob->model,"
+           "fmodel:data_blob->friday->model,meta:data_blob->model_meta")
+    for sport, keys in want.items():
+        ids = sorted({mid for mid, _ in keys if mid})
+        names = sorted({ev for mid, ev in keys if ev and not mid})
+        found_mid: dict = {}
+        found_ev: dict = {}
+        for col, vals, found in (("market_id", ids, found_mid), ("event_name", names, found_ev)):
+            for i in range(0, len(vals), 80):
+                try:
+                    rows = (sb.table("football_sheets").select(sel).eq("sport", sport)
+                            .in_(col, vals[i:i + 80]).order("week_key", desc=True)
+                            .limit(1000).execute().data) or []
+                except Exception:
+                    rows = []
+                n += len(rows)
+                for r in rows:
+                    k = r.get(col)
+                    if k is None or k in found:
+                        continue                 # newest week first: keep the first seen
+                    blob = {"model": r.get("model") or {}, "model_meta": r.get("meta") or {}}
+                    if r.get("fmodel"):
+                        blob["friday"] = {"model": r.get("fmodel")}
+                    found[k] = blob
+        for mid, ev in keys:
+            blob = found_mid.get(mid) if mid else found_ev.get(ev)
+            if blob is not None:
+                cache[(sport, mid, ev)] = blob
+    return n
+
+
 def _bet_sheet_reads(sb, out: list, cache: dict = None) -> None:
     """Stamp `read` on every pre-game resting bet the box stopped chasing
     (manual re-peg or line moved): {hold, stay, move, live, flip, rec} — and
@@ -25525,6 +25598,10 @@ def _bet_sheet_reads(sb, out: list, cache: dict = None) -> None:
     while the OTHER side of the same market reads one at its touch gets
     {hold, flip, rec: flip}, and the page offers the flip."""
     cache = cache if isinstance(cache, dict) else {}
+    try:
+        _bs_sheet_blobs_prefetch(sb, out, cache)
+    except Exception as e:
+        app.logger.warning("bet sheet reads prefetch: %s", str(e)[:120])
     for b in out:
         if b.get("status") != "pending" or b.get("started"):
             continue
