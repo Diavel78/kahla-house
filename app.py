@@ -51715,6 +51715,13 @@ def _tg_send_now(text):
     would 400 on it. The last failure is kept in `_TG_LAST_ERR` so the
     caller's stamp can say WHY a send failed. Almost nothing should call
     this directly — go through _send_fill_telegram instead."""
+    # TELEGRAM IS OFF (Rob, Oct 27 2026: "You stop sending me notifications
+    # on telegram all day every day"): `machine_flags telegram_off` silences
+    # EVERY message — this is the one function that posts. True = "sent", so
+    # no caller retries into a queue. Only Rob turns it back on.
+    if _machine_flag("telegram_off", False):
+        _TG_LAST_ERR.update({"err": "telegram_off", "at": _time.time()})
+        return True
     token, chat_id, _src = _tg_creds()
     if not token or not chat_id:
         _TG_LAST_ERR.update({"err": "no_creds", "at": _time.time()})

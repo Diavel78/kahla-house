@@ -3834,6 +3834,10 @@ def test_hand_red_alert() -> None:
     bets, I need an alert. That's it, no other alerts"): the box mirrors the
     page's red states, pings once per red, and the sender drops every other
     message."""
+    import inspect as _insp_tg
+    import app as _app_tg
+    check("telegram_off: the raw sender checks the master switch first",
+          "telegram_off" in _insp_tg.getsource(_app_tg._tg_send_now).split("_tg_creds()")[0])
     print("bet sheets: the red alert")
     import app as _app
     import inspect as _insp
