@@ -6577,6 +6577,27 @@ def test_price_rule() -> None:
     one under fair, a pick grades on its own side, the CLV audit sums."""
     import app as _app
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    # THE QUOTE FOLLOWS THE PICK'S SIDE (Oct 27 2026, DEN @ NOP ML read a 31¢
+    # PLAY: the worker quoted Denver, a re-price swapped the pick to New Orleans)
+    _q = {"mt": "ml", "side": "away", "line": 0.0, "poly": {"bid": 65.0, "ask": 66.0, "line": 0.0},
+          "kalshi": {"bid": 64.0, "ask": 66.0, "line": 0.0}}
+    _m = _app._sheet_q_for_side(_q, "home", "ml", "ml")
+    check("side: a quote for the other side is mirrored", _m["poly"]["bid"] == 34.0 and _m["poly"]["ask"] == 35.0
+          and _m["kalshi"]["bid"] == 34.0 and _m["side"] == "home" and _m.get("side_mirrored"), str(_m))
+    check("side: the same side passes through untouched", _app._sheet_q_for_side(_q, "away", "ml", "ml") is _q)
+    _sq = {"side": "home", "poly": {"bid": 48.0, "ask": 50.0, "line": -5.5}, "kalshi": None}
+    _sm = _app._sheet_q_for_side(_sq, "away", "spread", "spread")
+    check("side: a spread quote mirrors its line", _sm["poly"]["line"] == 5.5 and _sm["poly"]["bid"] == 50.0)
+    _g = {"event_start": (_dt.now(_tz.utc) + _td(hours=20)).isoformat(),
+          "ml": {"side": "home", "verdict": "pass", "pin_fair": {"prob": 0.3486}},
+          "venue": {"age_s": 60, "picks": {"ml": _q}}}
+    _app._sheet_attach_price("NBA", _g, _dt.now(_tz.utc))
+    _pv = _g["ml"].get("pv") or {}
+    check("side: attach prices the pick against its own side's book, no phantom 31¢ edge",
+          _pv.get("edge_c") is not None and abs(float(_pv["edge_c"])) < 2.0, str(_pv))
+    import inspect as _insp_q
+    check("side: the auto scan turns the worker's quote to the pick's side",
+          "_sheet_q_for_side(vq" in _insp_q.getsource(_app._auto_price_tick))
     pv = _app._price_verdict(0.52, {"bid": 49.0, "ask": 51.0, "line": -2.5}, None, "spread", -2.5)
     check("price: poly bid under fair is a PLAY", pv["verdict"] == "play" and abs(pv["edge_c"] - 3.0) < 1e-6 and pv["venue"] == "Poly")
     check("price: other side priced off the ask", pv["opp"] and abs(pv["opp"]["edge_c"] - (48.0 - 49.0)) < 1e-6 and pv["opp"]["verdict"] == "pass")

@@ -1602,6 +1602,23 @@ def _sheet_mirror_quote(q: dict, mt: str, key: str) -> dict:
     return out
 
 
+def _sheet_q_for_side(q, pick_side, mt: str, key: str):
+    """Pure. The touch worker's quote turned to the PICK's side (Oct 27 2026,
+    Denver @ New Orleans ML reading a 31¢ PLAY): the worker quotes the side
+    its own copy of the sheet named, up to 30 min ago, and a sheet re-price
+    in between can swap the model's side — the API then priced New Orleans
+    against Denver's 65¢ book. A quote stamped with the other side is
+    mirrored (_sheet_mirror_quote); no side on the quote = unchanged."""
+    if not isinstance(q, dict) or not q.get("side") or not pick_side:
+        return q
+    if str(q.get("side")) == str(pick_side):
+        return q
+    out = _sheet_mirror_quote(q, mt, key)
+    out["side"] = pick_side
+    out["side_mirrored"] = True
+    return out
+
+
 def _sheet_attach_price(sport: str, g: dict, now) -> None:
     """THE PRICE RULE on one sheet game: each pick block gets `pv` (the
     price verdict), `model_verdict` (the model's), and — upcoming games only
@@ -1633,6 +1650,11 @@ def _sheet_attach_price(sport: str, g: dict, now) -> None:
         if not upcoming or not pk.get("side"):
             continue
         q = vp.get(key) if isinstance(vp.get(key), dict) else None
+        if q is not None:
+            q2 = _sheet_q_for_side(q, pk.get("side"), mt, key)
+            if q2 is not q and isinstance(vp, dict):
+                vp[key] = q2               # the card's venue line follows the pick's side too
+            q = q2
         pf = pk.get("pin_fair") if isinstance(pk.get("pin_fair"), dict) else None
         try:
             pv = _price_verdict((pf or {}).get("prob"), (q or {}).get("poly"), (q or {}).get("kalshi"),
@@ -23198,6 +23220,7 @@ def _auto_price_tick(sb, client, now) -> dict:
             flipped = bool(pk.get("flipped"))
             pq = kq = None
             if vq and not flipped:
+                vq = _sheet_q_for_side(vq, pk.get("side"), mt, k)
                 pq, kq = vq.get("poly"), vq.get("kalshi")
             if not (pq and pq.get("bid") is not None):
                 try:
