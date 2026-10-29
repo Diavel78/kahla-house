@@ -29069,6 +29069,53 @@ def api_line_tape():
                     "markets": _line_tape_series(sport, rows)})
 
 
+@app.route("/api/line-tape/probe")
+def api_line_tape_probe():
+    """READ-ONLY, shared-secret (the site-curl bridge): the line tape from a
+    session that cannot log in. No event → per-game row counts by source over
+    the last `hours` (default 3); &sport=&event= → that game's series with the
+    count of Pinnacle points that carry a fair, plus the newest raw rows."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "no db"}), 503
+    sport = str(request.args.get("sport") or "").upper()
+    ev = request.args.get("event")
+    try:
+        hours = max(1, min(240, int(request.args.get("hours") or 3)))
+    except (TypeError, ValueError):
+        hours = 3
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    try:
+        if not ev:
+            def q():
+                b = sb.table("line_tape").select("sport,event_name,src,mt").gte("at", since)
+                return b.eq("sport", sport) if sport else b
+            rows = _sb_paged(q, 30)
+            games: dict = {}
+            for r in rows:
+                k = f"{r['sport']}|{r['event_name']}"
+                d = games.setdefault(k, {})
+                kk = f"{r['src']}:{r['mt']}"
+                d[kk] = d.get(kk, 0) + 1
+            return jsonify({"ok": True, "n": len(rows), "games": games})
+        rows = _sb_paged(lambda: (sb.table("line_tape")
+                                  .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_start")
+                                  .eq("sport", sport).eq("event_name", ev).gte("at", since).order("at")), 20)
+        ser = _line_tape_series(sport, rows)
+        summ = {mt: {"poly": len(m["poly"]), "kalshi": len(m["kalshi"]), "pin": len(m["pin"]),
+                     "pin_with_fair": sum(1 for p in m["pin"] if p[4] is not None),
+                     "pin_last": (m["pin"][-1] if m["pin"] else None),
+                     "poly_last": (m["poly"][-1] if m["poly"] else None),
+                     "kalshi_last": (m["kalshi"][-1] if m["kalshi"] else None)} for mt, m in ser.items()}
+        return jsonify({"ok": True, "n": len(rows), "summary": summ, "tail": rows[-30:]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}), 502
+
+
 def _sheet_attach_venue(sb, sport: str, games: list) -> None:
     """VERCEL'S HALF: one lookup_cache read, the box's latest venue quotes
     stamped onto each game as `venue {at, age_s, picks{k: {mt, side, line,
