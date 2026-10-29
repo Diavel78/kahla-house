@@ -17792,12 +17792,6 @@ def _hand_start_cancel_alert(stamp: dict) -> None:
     try:
         if not _machine_flag("hand_red_alert", True):
             return
-        # THE GAME-START PINGS HAVE THEIR OWN SWITCH, OFF (Oct 29 2026, Rob turning
-        # the red alert back on: "the red light is probably all I needed… turn
-        # back on the Needs you") — NOT FILLED / CHASING / CANCELLED fired all
-        # slate long and were the noise he shut Telegram off for (Oct 27).
-        if not _machine_flag("hand_start_alert", False):
-            return
         # once per pick AND per moment: the chase hand-off at the window's end
         # and the chase's own end an hour later are two different pings
         pid = str(stamp.get("pick_id") or "")
@@ -17809,6 +17803,12 @@ def _hand_start_cancel_alert(stamp: dict) -> None:
         if not ct:
             return
         code, text = ct
+        # CANCELLED YES, CHASING NO (Oct 29 2026, Rob: "I just want cancelled, and
+        # needs you… I don't want a fucking message for chasing") — the chase
+        # hand-off is silent; every cancel (not filled, partial, dust, the chase's
+        # hour up, a failed cancel) still sends. `hand_start_chase_alert` restores it.
+        if code == "start_chase" and not _machine_flag("hand_start_chase_alert", False):
+            return
         bet = stamp.get("bet") if isinstance(stamp.get("bet"), dict) else {}
         kalshi = str(stamp.get("venue") or bet.get("venue") or "").upper() == "KALSHI"
         r = {"event_name": bet.get("event_name"), "event_start": bet.get("event_start"),

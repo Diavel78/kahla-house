@@ -3861,8 +3861,10 @@ def test_hand_red_alert() -> None:
           F(rr, {}, {"order": {"resting": False}}, under) is None and F(rr, {}, rest, under, rec="hold") is None)
     check("flip red: the model on the bet's own side is not",
           F(rr, {}, rest, {"side": "over", "label": "Over 77.5"}) is None)
-    check("the game-start pings have their own switch, default off",
-          '_machine_flag("hand_start_alert", False)' in _insp.getsource(_app._hand_start_cancel_alert))
+    check("the chase hand-off is silent, cancels still send (Rob: cancelled yes, chasing no)",
+          'code == "start_chase" and not _machine_flag("hand_start_chase_alert", False)'
+          in _insp.getsource(_app._hand_start_cancel_alert)
+          and "hand_start_alert\"" not in _insp.getsource(_app._hand_start_cancel_alert))
     R = _app._hand_red_state
     resting = {"order": {"resting": True, "leaves": 5, "price_c": 44.0}, "held": 0.0, "touch_c": 45.5, "outbid": True}
     off = {"order": {"resting": False}, "held": 0.0}
@@ -4024,7 +4026,7 @@ def test_hand_red_alert() -> None:
     # the sender: one ping per pick, the outcome rides the stamp, a failed send queues
     sent = []
     old_send, old_flag = _app._send_fill_telegram, _app._machine_flag
-    _app._machine_flag = lambda name, default=None: True if name == "hand_start_alert" else default
+    _app._machine_flag = lambda name, default=None: True if name == "hand_start_chase_alert" else default
     _app._HAND_START_ALERTED.clear(); _app._HAND_START_ALERT_Q.clear()
     try:
         _app._send_fill_telegram = lambda msg, urgent=False: sent.append(msg) or True
