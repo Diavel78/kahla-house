@@ -29560,6 +29560,115 @@ def api_line_tape_ladder():
                                                  a.get("away") or "", a.get("home") or "", a.get("start") or "", mt)})
 
 
+_VENUE_HZ_MON = {m: i + 1 for i, m in enumerate(
+    ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT",
+     "NOV", "DEC"])}
+
+
+@app.route("/api/venue/horizon")
+def api_venue_horizon():
+    """READ-ONLY, shared-secret: HOW FAR OUT EACH VENUE LISTS GAMES (Oct 29
+    2026, before building the pre-Pinnacle chart). Per sport: Polymarket's
+    open game events (slug `<tag>-<a>-<b>-YYYY-MM-DD`) and Kalshi's open
+    game-series events, counted per Arizona date, with the furthest listed
+    game. `&sport=` narrows to one sport."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    import pmm_markets as _pm
+    import kalshi_venue as _kv
+    az = ZoneInfo("America/Phoenix")
+    now = datetime.now(timezone.utc)
+    only = str(request.args.get("sport") or "").upper()
+    sports = [x for x in ("NFL", "NCAAF", "NBA", "NHL", "MLB", "CBB")
+              if not only or x == only]
+    out = {"ok": True, "now_az": now.astimezone(az).isoformat(), "sports": {}}
+    client = None
+    try:
+        client = get_client()
+    except Exception as e:
+        out["poly_error"] = repr(e)[:200]
+    game_re = re.compile(r"^[a-z]+-([a-z0-9]+)-([a-z0-9]+)-(\d{4}-\d{2}-\d{2})$")
+    for sp in sports:
+        row = {}
+        # Polymarket
+        pd, pmax, perr, other = {}, None, None, 0
+        tags = [_pm._SPORT_TAG_SLUG.get(sp)] + list(_pm._SPORT_TAG_FALLBACKS.get(sp, []))
+        seen = set()
+        for tag in [t for t in tags if t]:
+            if client is None:
+                break
+            for pg in range(10):
+                try:
+                    resp = client.events.list({"tagSlug": tag, "closed": False,
+                                               "limit": 100, "offset": pg * 100})
+                except Exception as e:
+                    perr = repr(e)[:200]
+                    break
+                page = (resp.get("events") if isinstance(resp, dict)
+                        else getattr(resp, "events", None)) or []
+                fresh = 0
+                for ev in page:
+                    g = (lambda k: ev.get(k) if isinstance(ev, dict) else getattr(ev, k, None))
+                    sl = g("slug") or ""
+                    if sl in seen:
+                        continue
+                    seen.add(sl)
+                    fresh += 1
+                    m = game_re.match(sl)
+                    if not m:
+                        other += 1
+                        continue
+                    st = None
+                    try:
+                        st = datetime.fromisoformat(str(g("startTime")).replace("Z", "+00:00"))
+                    except Exception:
+                        pass
+                    if st is not None and st < now - timedelta(hours=6):
+                        continue
+                    d = (st.astimezone(az).date().isoformat() if st else m.group(3))
+                    pd[d] = pd.get(d, 0) + 1
+                    if st and (pmax is None or st > pmax[0]):
+                        pmax = (st, sl)
+                if len(page) < 100 or not fresh:
+                    break
+        row["poly"] = {
+            "by_day_az": dict(sorted(pd.items())),
+            "games": sum(pd.values()),
+            "furthest": pmax[1] if pmax else None,
+            "furthest_h": round((pmax[0] - now).total_seconds() / 3600, 1) if pmax else None,
+            "non_game_events": other, "error": perr}
+        # Kalshi
+        kd, kmax, kerr = {}, None, None
+        ser = _KALSHI_SERIES.get(sp) if sp != "CBB" else "KXNCAAMBGAME"
+        if ser:
+            try:
+                res = _kv.events(ser, max_pages=10, ttl_s=0)
+                kerr = res.get("error")
+                for e in res.get("events") or []:
+                    tk = str(e.get("event_ticker") or "")
+                    m = re.search(r"-(\d{2})([A-Z]{3})(\d{2})", tk)
+                    if not m or m.group(2) not in _VENUE_HZ_MON:
+                        continue
+                    try:
+                        d = datetime(2000 + int(m.group(1)), _VENUE_HZ_MON[m.group(2)],
+                                     int(m.group(3))).date()
+                    except ValueError:
+                        continue
+                    kd[d.isoformat()] = kd.get(d.isoformat(), 0) + 1
+                    if kmax is None or d > kmax[0]:
+                        kmax = (d, tk)
+            except Exception as e:
+                kerr = repr(e)[:200]
+        row["kalshi"] = {
+            "series": ser, "by_day_et": dict(sorted(kd.items())),
+            "games": sum(kd.values()),
+            "furthest": kmax[1] if kmax else None, "error": kerr}
+        out["sports"][sp] = row
+    return jsonify(out)
+
+
 @app.route("/api/line-tape/probe")
 def api_line_tape_probe():
     """READ-ONLY, shared-secret (the site-curl bridge): the line tape from a
