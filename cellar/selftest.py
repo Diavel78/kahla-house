@@ -6438,6 +6438,23 @@ def test_kalshi_venue_math() -> None:
     import kalshi_venue as kv
     from datetime import datetime as _dt, timezone as _tz
     BEFORE, AFTER = _dt(2026, 10, 18, 12, tzinfo=_tz.utc), _dt(2026, 10, 20, 12, tzinfo=_tz.utc)
+    # THE TWO LA TEAMS (Oct 28 2026): Kalshi writes 'Los Angeles L' / 'Los
+    # Angeles C'; ESPN writes 'LA Clippers'. The Clippers never matched and
+    # 'angeles' matched the Lakers to either team.
+    TM = kv.team_mentioned
+    check("kalshi: 'Los Angeles C' is the Clippers, not the Lakers",
+          TM("Los Angeles C wins", "LA Clippers") and not TM("Los Angeles C wins", "Los Angeles Lakers"))
+    check("kalshi: 'Los Angeles L' is the Lakers", TM("Los Angeles L wins", "Los Angeles Lakers"))
+    check("kalshi: a single-team city still matches on the city ('New York' = the Knicks)",
+          TM("New York wins", "New York Knicks") and TM("Los Angeles wins", "Los Angeles Kings"))
+    ev = [{"event_ticker": "KXNBAGAME-26OCT28LALLAC", "title": "Los Angeles L at Los Angeles C"}]
+    check("kalshi: the Lakers @ Clippers event is found from ESPN's names",
+          (kv.pick_event_row(ev, "Los Angeles Lakers", "LA Clippers", None) or {}).get("event_ticker")
+          == "KXNBAGAME-26OCT28LALLAC")
+    c = kv.classify({"title": "Los Angeles C wins", "yes_sub_title": "Los Angeles C"},
+                    "Los Angeles Lakers", "LA Clippers")
+    check("kalshi: 'Los Angeles C wins' reads as the HOME (Clippers) side",
+          (c or {}).get("team_side") == "home", str(c))
     MK = {"fee_type": "quadratic_with_maker_fees", "maker": True, "maker_ratio": 0.25, "mult": 1.0}
     NOMK = {"fee_type": "quadratic", "maker": False, "maker_ratio": 0.0, "mult": 1.0}
     # fees per contract at 50¢, off the venues' own schedules (Oct 18 2026):

@@ -723,16 +723,41 @@ def _tokens(name: str) -> set:
     return {t for t in team_key(name).split() if t and t not in _STOP}
 
 
+# Cities with two teams in one league. Kalshi writes those teams as the city
+# plus an initial ('Los Angeles L' / 'Los Angeles C', Oct 28 2026), so the
+# city's words prove nothing about WHICH team a text names.
+_SHARED_CITIES = ("los angeles", "new york")
+
+
+def _team_long_key(team: str) -> str:
+    """team_key with ESPN's 'LA ' prefix spelled out ('LA Clippers' →
+    'los angeles clippers'), the way Kalshi and Pinnacle write it."""
+    k = team_key(team)
+    return "los angeles " + k[3:] if k.startswith("la ") else k
+
+
 def team_mentioned(text: str, team: str) -> bool:
     """Loose team match: the whole key, or the team's distinctive tokens
     (both 'Nebraska' and 'Nebraska Cornhuskers' find 'Nebraska at Oregon').
     One-token names need the token itself; multi-token names need any
-    non-stop token of 4+ letters."""
+    non-stop token of 4+ letters. When a text writes a shared city in
+    Kalshi's city-plus-initial form ('Los Angeles C' = the Clippers), the
+    city proves nothing: only our initial or our mascot names us."""
     tx = " " + team_key(text) + " "
-    k = team_key(team)
+    k = _team_long_key(team)
     if k and f" {k} " in tx:
         return True
-    toks = [t for t in _tokens(team) if len(t) >= 4]
+    words = k.split()
+    city = next((c for c in _SHARED_CITIES if k.startswith(c + " ")), None)
+    if city and len(words) > len(city.split()) and re.search(rf" {city} [a-z]{{1,2}} ", tx):
+        # the text uses the initial form ('Los Angeles C'): only OUR initial
+        # or our mascot names us. A text without it ('New York wins' — Kalshi's
+        # Knicks, Brooklyn is 'Brooklyn') still matches on the city below.
+        mascot = words[-1]
+        if f" {city} {mascot[0]} " in tx:
+            return True
+        return len(mascot) >= 4 and f" {mascot} " in tx
+    toks = [t for t in _tokens(k) if len(t) >= 4]
     return any(f" {t} " in tx for t in toks)
 
 
