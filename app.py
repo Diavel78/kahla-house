@@ -6146,7 +6146,8 @@ def api_bet_sheets_picks():
     keep = ("contracts", "price_c", "anchor_c", "order_id", "app_adopted", "manual_web_bet",
             "filled", "filled_qty", "placed_via", "adopted_at", "placed_at", "entry_src",
             "in_play", "live_snipe", "pmm_synthetic", "label", "line_rejoins", "amended",
-            "chase_hold", "thin_hold", "line_hold", "rejoin_hold", "rerung_from")
+            "chase_hold", "thin_hold", "line_hold", "rejoin_hold", "rerung_from",
+            "vs_model", "venue_pick", "venue", "kalshi_twin_ticker", "kalshi_twin_line")
     if slug:
         try:
             rows = (sb.table("bot_picks")
