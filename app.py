@@ -28516,6 +28516,7 @@ def _line_tape_venue_rungs(picks: dict) -> dict:
 # chart can price every book AT ONE LINE. A book that lists the line plots
 # its own price; one that doesn't is carried there from its nearest rungs by
 # its gap to Pinnacle on those rungs (`_ladder_equiv_at`). ──
+_LADDER_NOPICK_AT: dict = {}   # sheet game key -> monotonic time of its last no-pick ladder read
 _LADDER_LAST: dict = {}            # (sport, event, src, mt) → {line: value}
 _LADDER_WIDTH = 5.0                # rungs kept: within ±5 points of the center line
 _LADDER_STATS: dict = {"rows": 0, "errors": 0, "last_error": None}
@@ -28642,6 +28643,94 @@ def _ladder_touch_rows(sport: str, ev: str, g: dict, picks: dict, pmm: dict, at:
             if klad:
                 out += _ladder_rows(sport, ev, "kalshi", k, klad, at, ctr, _LADDER_LAST)
     return out
+
+
+def _ladder_mid_line(ladder: dict):
+    """Pure. The rung a book prices nearest 50/50 (its own main line): the
+    bid/ask mid closest to 50¢. None on an empty ladder."""
+    best = None
+    for ln, v in (ladder or {}).items():
+        bd, ak = (list(v) + [None, None])[:2]
+        vals = [float(x) for x in (bd, ak) if x is not None]
+        if not vals:
+            continue
+        d = abs(sum(vals) / len(vals) - 50.0)
+        if best is None or d < best[0] - 1e-9:
+            best = (d, float(ln))
+    return best[1] if best else None
+
+
+def _kalshi_game_event(sport: str, away, home, start, mt: str):
+    """The Kalshi EVENT ticker for one game's full-game market of type `mt`
+    (spread / total): the resolver's event-first walk without a rung.
+    None when no series names the game."""
+    import kalshi_venue as _kv
+    for series in _kv.discover_series(sport, mt):
+        evs = _kv.events(series)
+        row = (_kv.pick_event_row(evs.get("events") or [], away, home, start)
+               if evs.get("events") else None)
+        if row is not None and row.get("event_ticker"):
+            return row["event_ticker"]
+    return None
+
+
+def _ladder_nopick_rows(client, sport: str, r: dict, g: dict, cache: dict, at: str,
+                        max_age_s: float = 600.0) -> list:
+    """NO PINNACLE LINE YET (Oct 29 2026, Rob: "what are we going to do on
+    sports where we don't have a pinnacle line yet?"): a sheet game with no
+    pick still gets its ladders recorded off both venues — one Polymarket
+    lookup, one Kalshi event read per market — each centred on that book's
+    own 50/50 rung. When Pinnacle posts, the picks seed and the walk takes
+    the ordinary path; this history is what the venues did before it."""
+    ev = r.get("event_name")
+    away, home, start = g.get("away"), g.get("home"), g.get("event_start")
+    ck = (sport, str(away), str(home), str(start))
+    pmm = cache.get(ck)
+    if pmm is None:
+        if not _bet_sheet_wait_rl(25.0):
+            return []
+        try:
+            import pmm_markets as _pm
+            pmm = _pm.lookup(client, sport, away, home, start, want_props=False,
+                             max_age_s=max_age_s) or {}
+        except Exception:
+            pmm = {}
+        cache[ck] = pmm
+    out = []
+    for src_mt in ("spread", "total"):
+        k = "total" if src_mt == "total" else ("puck" if sport == "NHL" else "spread")
+        lad = _ladder_poly(pmm.get(src_mt), k) if pmm else {}
+        klad = {}
+        try:
+            et = _kalshi_game_event(sport, away, home, start, src_mt)
+            if et:
+                import kalshi_venue as _kv
+                klad = _ladder_kalshi(_kv.event_markets(et).get("markets") or [], k, away, home)
+        except Exception:
+            klad = {}
+        # centre on POLYMARKET's 50/50 rung (Rob: Kalshi's few rungs wander);
+        # no Poly ladder → Kalshi's whole (short) ladder, uncentred
+        ctr = _ladder_mid_line(lad)
+        if lad:
+            out += _ladder_rows(sport, ev, "poly", k, lad, at, ctr, _LADDER_LAST)
+        if klad:
+            out += _ladder_rows(sport, ev, "kalshi", k, klad, at, ctr, _LADDER_LAST)
+    # the moneyline: one rung, the home side, through the walk's own readers
+    tape = []
+    it = {"k": "ml", "sport": sport, "away": away, "home": home, "event_start": start,
+          "market_type": "ml", "side": "home", "line": 0.0}
+    try:
+        pq = _sheet_touch_poly(client, it, cache, max_age_s=max_age_s)
+    except Exception:
+        pq = {}
+    try:
+        kq = _sheet_touch_kalshi(it)
+    except Exception:
+        kq = {}
+    tape = _line_tape_venue_rows(sport, ev, r.get("market_id"), r.get("event_start"),
+                                 {"ml": {"mt": "ml", "side": "home", "line": 0.0,
+                                         "poly": pq, "kalshi": kq}}, at)
+    return out, tape
 
 
 def _ladder_write(sb, rows: list) -> int:
@@ -29149,9 +29238,24 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
     for sport, r, g in rows:
         key = f"{sport}|{r.get('event_name')}"
         items = _sheet_touch_items(sport, g)
-        if not items:
-            continue
         due_s = _sheet_touch_due_s(r.get("event_start"), now, far_s)
+        if not items:
+            # no pick = Pinnacle has not posted; the venues may have — record them
+            last = _LADDER_NOPICK_AT.get(key)
+            if (last is None or _time.monotonic() - last >= due_s - 5.0) \
+                    and _time.monotonic() - t0 <= _SHEET_TOUCH_BUDGET_S:
+                _LADDER_NOPICK_AT[key] = _time.monotonic()
+                try:
+                    lr, tr = _ladder_nopick_rows(client, sport, r, g, cache, now_iso,
+                                                 max_age_s=min(600.0, max(60.0, due_s * 0.8)))
+                    ladder += lr
+                    tape += tr
+                    st["nopick"] = st.get("nopick", 0) + 1
+                except Exception as e:
+                    _LADDER_STATS["errors"] += 1
+                    _LADDER_STATS["last_error"] = f"nopick: {e}"[:120]
+                _time.sleep(0.15)
+            continue
         pg = prev.get(key) if isinstance(prev.get(key), dict) else None
         if pg and pg.get("at"):
             try:
@@ -29453,9 +29557,21 @@ def _ladder_payload(lrows: list, markets: dict, want_mt=None, want_line=None) ->
                     break
         if anchor is None:
             pins = [r for r in rs if r.get("src") == "pin" and r.get("line") is not None]
-            if not pins:
+            if pins:
+                anchor = float(pins[-1]["line"])
+        if anchor is None:
+            # no Pinnacle yet: POLYMARKET's 50/50 rung (newest read per rung);
+            # Kalshi's only when Poly records nothing for the market
+            for src in ("poly", "kalshi"):
+                cur: dict = {}
+                for r in rs:
+                    if r.get("src") == src and r.get("line") is not None:
+                        cur[round(float(r["line"]), 2)] = (r.get("bid_c"), r.get("ask_c"))
+                anchor = _ladder_mid_line(cur)
+                if anchor is not None:
+                    break
+            if anchor is None:
                 continue
-            anchor = float(pins[-1]["line"])
         lines = sorted({round(float(r["line"]), 2) for r in rs if r.get("line") is not None
                         and abs(float(r["line"]) - anchor) <= 3.0 + 1e-9})
         out[mt] = {"anchor": anchor, "rungs": lines, **_ladder_series(rs, anchor)}

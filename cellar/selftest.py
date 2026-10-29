@@ -6852,6 +6852,23 @@ def test_line_tape() -> None:
     pay2 = _app._ladder_payload([{"at": t0, "src": "pin", "mt": "spread", "line": -19.5, "p_home": -110, "p_away": -104}],
                                 {}, "spread", "-20.5")
     check("ladder: an asked line wins", pay2["spread"]["anchor"] == -20.5)
+    M = _app._ladder_mid_line
+    check("ladder: the 50/50 rung is the mid nearest 50", M({-2.5: (55, 56), -3.5: (49, 50.5), -4.5: (44, 45)}) == -3.5)
+    check("ladder: empty ladder has no 50/50 rung", M({}) is None and M({1.5: (None, None)}) is None)
+    tn = "2026-10-29T10:00:00+00:00"
+    nop = [{"at": tn, "src": "poly", "mt": "spread", "line": -3.5, "bid_c": 49, "ask_c": 50},
+           {"at": tn, "src": "poly", "mt": "spread", "line": -2.5, "bid_c": 55, "ask_c": 56},
+           {"at": tn, "src": "kalshi", "mt": "spread", "line": -6.5, "bid_c": 49, "ask_c": 51}]
+    payn = _app._ladder_payload(nop, {})
+    check("ladder: no Pinnacle → anchor at Polymarket's 50/50 rung, never Kalshi's",
+          payn.get("spread", {}).get("anchor") == -3.5, str(payn))
+    payk = _app._ladder_payload(nop[2:], {})
+    check("ladder: Kalshi anchors only when Poly records nothing", payk.get("spread", {}).get("anchor") == -6.5)
+    nsrc = inspect.getsource(_app._ladder_nopick_rows)
+    check("ladder: a pickless game's ladder centres on Poly only",
+          "ctr = _ladder_mid_line(lad)" in nsrc and "_ladder_mid_line(klad)" not in nsrc)
+    check("ladder: the walk records pickless (no-Pinnacle) games",
+          "_ladder_nopick_rows(" in inspect.getsource(_app._sheet_touch_pass))
     src = inspect.getsource(_app._sheet_touch_pass)
     check("ladder: the walk records Poly + Kalshi ladders", "_ladder_touch_rows(" in src and "_ladder_write(sb, ladder)" in src)
     check("ladder: the Pinnacle minute records its alternate ladder", "_ladder_pin(" in inspect.getsource(_app._line_tape_pin_tick))
