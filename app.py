@@ -29122,6 +29122,94 @@ def api_line_tape():
                     "markets": _line_tape_series(sport, rows)})
 
 
+def _venue_ladders(client, sport: str, away: str, home: str, start: str, mt: str, now=None) -> dict:
+    """Every rung each venue lists for one game's market (spread / total),
+    in the HOME / OVER orientation: {poly: [{line, bid, ask, slug}], kalshi:
+    [{line, bid, ask, ticker}], pin: [{line, p_home, p_away, main}]}.
+    Read-only; the building block of the full-ladder tape."""
+    now = now or datetime.now(timezone.utc)
+    out: dict = {"poly": [], "kalshi": [], "pin": [], "errors": {}}
+    try:
+        import pmm_markets as _pm
+        pmm = _pm.lookup(client, sport, away, home, start, want_props=False, max_age_s=60) or {}
+        seen = set()
+        for e in (pmm.get(mt) or []):
+            side = str(e.get("side") or "")
+            ln, bd, ak = _line_tape_canon(mt, side, e.get("line"), _entry_bid_c(e), _entry_ask_c(e))
+            k = (ln, e.get("slug"))
+            if k in seen:
+                continue
+            seen.add(k)
+            out["poly"].append({"line": ln, "bid": bd, "ask": ak, "slug": e.get("slug"),
+                                "side_read": side, "synthetic": bool(e.get("synthetic"))})
+    except Exception as e:
+        out["errors"]["poly"] = f"{type(e).__name__}: {e}"[:160]
+    try:
+        import kalshi_venue as _kv
+        for series in _kv.discover_series(sport, mt):
+            evs = _kv.events(series)
+            row = _kv.pick_event_row(evs.get("events") or [], away, home, start) if evs.get("events") else None
+            if not row:
+                continue
+            em = _kv.event_markets(row["event_ticker"])
+            for m in (em.get("markets") or []):
+                cl = _kv.classify(m, away, home)
+                if not cl or cl["mt"] != mt:
+                    continue
+                b = _kv.book_c(m)
+                if mt == "total":
+                    ln, bd, ak = cl["line"], b["yes_bid"], b["yes_ask"]
+                else:
+                    ln, bd, ak = _line_tape_canon("spread", cl["team_side"] or "home", cl["line"], b["yes_bid"], b["yes_ask"])
+                out["kalshi"].append({"line": ln, "bid": bd, "ask": ak, "ticker": m.get("ticker"),
+                                      "status": m.get("status"), "series": series})
+            out["kalshi_event"] = row.get("event_ticker")
+            break
+    except Exception as e:
+        out["errors"]["kalshi"] = f"{type(e).__name__}: {e}"[:160]
+    try:
+        evs = _pin_live_slate(get_supabase(), sport, now, {})[0]
+        best, swapped = _pin_match_event(evs, away, home, start)
+        bm = next((b for b in ((best or {}).get("bookmakers") or []) if b.get("key") == "pinnacle"), None)
+        keys = ("spreads", "alternate_spreads") if mt == "spread" else ("totals", "alternate_totals")
+        pts: dict = {}
+        for mk in ((bm or {}).get("markets") or []):
+            if mk.get("key") not in keys:
+                continue
+            for o in (mk.get("outcomes") or []):
+                d = o.get("designation")
+                if mt == "spread" and swapped:
+                    d = {"home": "away", "away": "home"}.get(d, d)
+                try:
+                    pt = float(o.get("point"))
+                except (TypeError, ValueError):
+                    continue
+                ln = pt if d in ("home", "over") else (-pt if mt == "spread" else pt)
+                r = pts.setdefault(ln, {"line": ln, "main": mk.get("key") in ("spreads", "totals")})
+                r["p_home" if d in ("home", "over") else "p_away"] = o.get("price")
+        out["pin"] = sorted(pts.values(), key=lambda r: r["line"])
+    except Exception as e:
+        out["errors"]["pin"] = f"{type(e).__name__}: {e}"[:160]
+    out["poly"].sort(key=lambda r: (r["line"] is None, r["line"]))
+    out["kalshi"].sort(key=lambda r: (r["line"] is None, r["line"]))
+    return out
+
+
+@app.route("/api/line-tape/ladder")
+def api_line_tape_ladder():
+    """READ-ONLY, shared-secret: every rung Poly, Kalshi and Pinnacle list for
+    one game's spread or total (home / over orientation). ?sport=&away=&home=
+    &start=<iso>&mt=spread|total."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    a = request.args
+    mt = a.get("mt") or "spread"
+    return jsonify({"ok": True, **_venue_ladders(get_client(), str(a.get("sport") or "").upper(),
+                                                 a.get("away") or "", a.get("home") or "", a.get("start") or "", mt)})
+
+
 @app.route("/api/line-tape/probe")
 def api_line_tape_probe():
     """READ-ONLY, shared-secret (the site-curl bridge): the line tape from a
