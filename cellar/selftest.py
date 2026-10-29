@@ -3827,6 +3827,13 @@ def test_bet_sheet_live_section() -> None:
     check("…a tap on a game in progress is a LIVE slip item", "const live = g._st === 'live';" in html and "...(live ? { live: true } : {})" in html)
     check("…the Live section renders the in-progress games with buttons", "if (_filter === 'live') {" in html and "lv.map(g => gameCard(g, true))" in html)
     check("…and the payload carries the flag", "live: !!i.live," in html)
+    _fp = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "football_picks.html")).read()
+    check("the Pick Sheet carries the 📈 Chart (same chart, same data)",
+          "chartChip(g)" in _fp and 'id="chartx"' in _fp and "_games.forEach((g, i) => { g._gi = i; });" in _fp
+          and "/api/line-tape?sport=" in _fp)
+    _asrc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")).read()
+    check("…and its data is open to Pick Sheets access, not admin only",
+          '@app.route("/api/line-tape")\n@bot_required' in _asrc)
     check("a dead pick (order gone, nothing held) gets a Remove button",
           "(b.recon.red || []).some(f => f.code === 'dead_order')" in html and "'Remove this bet'" in html)
     _cx = inspect.getsource(_app._bet_sheet_cancel_exec)

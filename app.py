@@ -29693,7 +29693,7 @@ def _line_tape_series(sport: str, rows: list) -> dict:
 
 
 @app.route("/api/line-tape")
-@admin_required
+@bot_required          # Pick Sheets carry the chart too (Oct 29 2026) — market prices only, no per-user data
 def api_line_tape():
     """THE CHART'S DATA: one sheet game's line tape (Pinnacle every minute,
     Poly / Kalshi at the sheet's rung) as series in the home / over
