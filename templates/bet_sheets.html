@@ -414,7 +414,7 @@
                 <span><i style="background:#4FB3FF;opacity:.45"></i>Poly ask</span>
                 <span><i style="background:#7BE3A6"></i>Kalshi bid</span>
             </div>
-            <div class="ch-note">One line, every book: tap a line above and every book is priced at it, in cents for the side you pick (cents = the chance it wins). Solid = that book lists the line. Dashed = it doesn't, so its price is carried from its nearest lines by how far it sits from Pinnacle on those lines. Pinnacle fair = Pinnacle's price with the vig taken out, off its own alternate lines. Recording began Oct 29 2026: Pinnacle every minute; Poly and Kalshi every 30 min far out, 10 min inside a day, 3 min inside 3 hours.</div>
+            <div class="ch-note">One line, every book: tap a line above and every book is priced at it, in cents for the side you pick (cents = the chance it wins). Poly bid = the best order to buy (bold blue); Poly ask = the cheapest seller (faint blue) — the gap is the spread. Solid = that book lists the line. Dashed = it doesn't, so its price is carried from its nearest lines by how far it sits from Pinnacle on those lines. Pinnacle fair = Pinnacle's price with the vig taken out, off its own alternate lines. Recording began Oct 29 2026: Pinnacle every minute; Poly and Kalshi every 30 min far out, 10 min inside a day, 3 min inside 3 hours.</div>
         </div>
         <div class="ov" id="ov" onclick="closeSheet()"></div>
         <div class="as" id="as"></div>
@@ -2369,14 +2369,14 @@
         const visIf = (pts, i, exact) => vis(pts.map(p => [p[0], 0, p[i] == null ? null : (!!p[4] === exact ? p[i] : null), 0]), 2);
         const lines = S.ladder ? [
             { pts: vis(S.pin, 3), col: '#E6C36A', w: 2.5, key: 'fair' },
-            { pts: visIf(S.poly, 3, true), col: '#4FB3FF', w: 1.5, dash: '4 3', op: .5, key: 'pask' },
+            { pts: visIf(S.poly, 3, true), col: '#4FB3FF', w: 1.25, op: .45, key: 'pask' },
             { pts: visIf(S.kalshi, 2, true), col: '#7BE3A6', w: 2, key: 'kbid' },
             { pts: visIf(S.kalshi, 2, false), col: '#7BE3A6', w: 2, dash: '6 4', key: 'kbid_est' },
             { pts: visIf(S.poly, 2, true), col: '#4FB3FF', w: 2.5, key: 'pbid' },
             { pts: visIf(S.poly, 2, false), col: '#4FB3FF', w: 2.5, dash: '6 4', key: 'pbid_est' },
         ] : [
             { pts: vis(S.pin, 3), col: '#E6C36A', w: 2.5, key: 'fair' },
-            { pts: vis(S.poly, 3), col: '#4FB3FF', w: 1.5, dash: '4 3', op: .5, key: 'pask' },
+            { pts: vis(S.poly, 3), col: '#4FB3FF', w: 1.25, op: .45, key: 'pask' },
             { pts: vis(S.kalshi, 2), col: '#7BE3A6', w: 2, key: 'kbid' },
             { pts: vis(S.poly, 2), col: '#4FB3FF', w: 2.5, key: 'pbid' },
         ];
