@@ -17454,8 +17454,11 @@ def _hand_status_publish(sb, client) -> dict:
     # STARTED GAMES FIRST (Oct 24 2026, Rob: "No live quote… ON THE SCREEN… from
     # Kalshi?"): the Kalshi book budget is per tick, and the held lots in play —
     # the Live P/L box — sat behind a dozen resting bets on tonight's games.
-    _now_iso = datetime.now(timezone.utc).isoformat()
-    rows = sorted(rows, key=lambda x: (str(x.get("event_start") or "") > _now_iso, str(x.get("event_start") or "")))
+    _now = datetime.now(timezone.utc)
+    _far = _now + timedelta(days=3650)
+    # parsed, never text: the box returns starts in Arizona offset (Oct 28 2026)
+    rows = sorted(rows, key=lambda x: ((_aware_ts(x.get("event_start")) or _far) > _now,
+                                       _aware_ts(x.get("event_start")) or _far))
     for r in rows:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if blob.get("kalshi_twin_ticker") and not _kalshi_pick(blob):
@@ -29171,8 +29174,11 @@ def _sheet_touch_rows_cached(sb, now) -> list:
         c["at"] = _time.monotonic()
         _LINE_TAPE_GAMES[:] = [(sp, r.get("event_name"), r.get("market_id"), g.get("away"), g.get("home"),
                                 r.get("event_start")) for sp, r, g in c["rows"]]
-    now_iso = now.isoformat()
-    return [t for t in c["rows"] if str(t[1].get("event_start") or "") > now_iso]
+    # PARSE, never compare as text (Oct 28 2026): the box's Postgres returns
+    # starts in ARIZONA offset ('…19:30:00-07:00') and `now` is UTC — after
+    # 5 PM AZ the UTC date rolls and every evening game read as started, so
+    # tonight's games fell off the walk (no Poly/Kalshi tape, no card quote).
+    return [t for t in c["rows"] if (_aware_ts(t[1].get("event_start")) or now) > now]
 
 
 def _sheet_touch_rows(sb, now) -> list:
@@ -54705,6 +54711,20 @@ def _norm_team(name: str) -> str:
         return ""
     s = re.sub(r"[^\w\s]", " ", name.lower())
     return re.sub(r"\s+", " ", s).strip()
+
+
+def _aware_ts(ts):
+    """Pure. A timestamp (ISO text in any offset, or a datetime) as an aware
+    UTC-comparable datetime; a naive one is read as UTC. None when unreadable.
+    Compare starts THROUGH THIS, never as text — the box's Postgres answers in
+    Arizona offset and text order breaks every evening (Oct 28 2026)."""
+    if isinstance(ts, datetime):
+        d = ts
+    else:
+        d = _parse_iso(str(ts)) if ts else None
+    if d is None:
+        return None
+    return d if d.tzinfo is not None else d.replace(tzinfo=timezone.utc)
 
 
 def _parse_iso(ts: str) -> datetime | None:

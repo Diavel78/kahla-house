@@ -6879,6 +6879,19 @@ def test_line_tape() -> None:
     pay2 = _app._ladder_payload([{"at": t0, "src": "pin", "mt": "spread", "line": -19.5, "p_home": -110, "p_away": -104}],
                                 {}, "spread", "-20.5")
     check("ladder: an asked line wins", pay2["spread"]["anchor"] == -20.5)
+    import time as _t
+    from datetime import datetime as _dt2, timezone as _tz2
+    _now = _dt2(2026, 10, 29, 1, 30, tzinfo=_tz2.utc)          # 6:30 PM AZ — the UTC date has rolled
+    _saved = dict(_app._SHEET_TOUCH_ROWS_CACHE)
+    _app._SHEET_TOUCH_ROWS_CACHE.update(at=_t.monotonic(), rows=[
+        ("NBA", {"event_start": "2026-10-28T19:30:00-07:00", "event_name": "tonight"}, {}),
+        ("NBA", {"event_start": "2026-10-28T17:00:00-07:00", "event_name": "started"}, {})])
+    try:
+        kept = [r[1]["event_name"] for r in _app._sheet_touch_rows_cached(None, _now)]
+    finally:
+        _app._SHEET_TOUCH_ROWS_CACHE.clear(); _app._SHEET_TOUCH_ROWS_CACHE.update(_saved)
+    check("sheet walk: an evening game in Arizona offset stays on the walk after the UTC date rolls (Oct 28 2026)",
+          kept == ["tonight"], str(kept))
     M = _app._ladder_mid_line
     check("ladder: the 50/50 rung is the mid nearest 50", M({-2.5: (55, 56), -3.5: (49, 50.5), -4.5: (44, 45)}) == -3.5)
     check("ladder: empty ladder has no 50/50 rung", M({}) is None and M({1.5: (None, None)}) is None)
