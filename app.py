@@ -29419,7 +29419,8 @@ def _sheet_touch_health(sb) -> dict:
                 "games": pl.get("games") if isinstance(pl.get("games"), int) else len(pl.get("games") or {}),
                 "items": pl.get("items"), "poly": pl.get("poly"), "kalshi": pl.get("kalshi"),
                 "kept": pl.get("kept"), "fresh": pl.get("fresh"), "partial": pl.get("partial"), "ms": pl.get("ms"),
-                "tape_rows": pl.get("tape"), "tape_age_s": tape, "sports": pl.get("sports")}
+                "tape_rows": pl.get("tape"), "ladder_rows": pl.get("ladder"), "nopick": pl.get("nopick"),
+                "tape_age_s": tape, "sports": pl.get("sports")}
     except Exception:
         return {}
 
