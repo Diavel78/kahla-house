@@ -29859,6 +29859,15 @@ def api_line_tape_probe():
         return jsonify({"ok": False, "error": "no db"}), 503
     sport = str(request.args.get("sport") or "").upper()
     ev = request.args.get("event")
+    if request.args.get("touch"):
+        # the box's published sheet-touch quotes for one game (`event` substring)
+        r = (sb.table("lookup_cache").select("fetched_at,payload").eq("key", _SHEET_TOUCH_KEY)
+             .limit(1).execute().data) or []
+        pl = (r[0].get("payload") or {}) if r else {}
+        gm = pl.get("games") if isinstance(pl.get("games"), dict) else {}
+        q = str(ev or "").lower()
+        hit = {k: v for k, v in gm.items() if q and q in k.lower()}
+        return jsonify({"ok": True, "at": pl.get("at"), "games": hit})
     if request.args.get("rows"):
         # replay the touch walk's game list (as of `at`, default now): every game
         # it builds with its pick count, and every game it DROPS with the reason
