@@ -28375,6 +28375,255 @@ _SHEET_TOUCH_LAST: dict = {}
 _SHEET_TOUCH_STATS: dict = {"passes": 0, "errors": 0, "last_error": None}
 
 
+# ══════════════════════════════════════════════════════════════════════
+# THE LINE TAPE (Oct 29 2026, Rob: "I bet we can read markets from
+# movement, and we track pinnacle… let's read the market, like a stock
+# broker"). Price history for every upcoming sheet game, one row per
+# CHANGE, in `line_tape` (DDL kahla-scanner/supabase/line_tape.sql, the box
+# applies it at boot). Two writers, both on the box:
+#   • the sheet-touch walk writes the Poly + Kalshi bid/ask at the sheet's
+#     rung each time it reads a game — and the walk is TIERED now: 30 min
+#     far out, 10 min inside 24h, 3 min inside 3h (`_sheet_touch_due_s`);
+#   • `_line_tape_pin_worker` reads Pinnacle's own feed every minute (free,
+#     ~2 calls a sport) and writes each sheet game's main lines + prices.
+# Every row is in ONE orientation per market — HOME for ml / spread / puck,
+# OVER for a total — so a market reads as one series whichever side the
+# model names; the chart mirrors back. `/api/line-tape` serves one game.
+# ══════════════════════════════════════════════════════════════════════
+_LINE_TAPE_GAMES: list = []        # [(sport, event_name, market_id, away, home, event_start)] off the touch walk
+_LINE_TAPE_LAST: dict = {}         # (sport, event, src, mt) → the last value written
+_LINE_TAPE_STATS: dict = {"rows": 0, "pin_rows": 0, "errors": 0, "last_error": None, "pin_at": None,
+                          "venue_at": None, "pruned": None}
+_LINE_TAPE_ENSURED = {"ok": False, "at": 0.0, "applied": False}
+_LINE_TAPE_PIN_EVERY_S = 60.0
+_LINE_TAPE_KEEP_DAYS = 60
+_LINE_TAPE_PIN_THREAD = None
+_SHEET_TOUCH_TICK_S = 60.0                     # the walk wakes every minute; a game is read when it is DUE
+_SHEET_TOUCH_TIERS = ((3.0, 180.0), (24.0, 600.0))   # (hours to start ≤, seconds between reads)
+
+
+def _sheet_touch_due_s(start, now, far_s: float) -> float:
+    """Pure. Seconds between venue reads for a game starting at `start`:
+    3 min inside 3h, 10 min inside 24h, `far_s` beyond (an unreadable start
+    is far)."""
+    try:
+        h = (_parse_iso(start) - now).total_seconds() / 3600.0
+    except Exception:
+        return float(far_s)
+    for hi, s in _SHEET_TOUCH_TIERS:
+        if h <= hi:
+            return float(min(s, far_s))
+    return float(far_s)
+
+
+def _line_tape_canon(mt: str, side: str, line, bid, ask):
+    """Pure. One read on `side` → the HOME (ml/spread/puck) or OVER (total)
+    orientation: (line, bid, ask). An away / under read mirrors — bid =
+    100 − ask, ask = 100 − bid — and a spread line flips sign."""
+    def f(x):
+        try:
+            return round(float(x), 2) if x is not None else None
+        except (TypeError, ValueError):
+            return None
+    line, bid, ask = f(line), f(bid), f(ask)
+    if mt == "ml":
+        line = None
+    if side in ("home", "over"):
+        return line, bid, ask
+    mb = round(100.0 - ask, 2) if ask is not None else None
+    ma = round(100.0 - bid, 2) if bid is not None else None
+    if mt in ("spread", "puck") and line is not None:
+        line = -line
+    return line, mb, ma
+
+
+def _line_tape_venue_rows(sport: str, event_name: str, market_id, event_start, picks: dict, at: str) -> list:
+    """Pure. The sheet-touch picks for one game ({k: {mt, side, line, poly,
+    kalshi}}) → line_tape rows (src poly / kalshi), canonical orientation.
+    A carried-over read (`kept`) is not a new read; a venue with no bid and
+    no ask writes nothing."""
+    out = []
+    for k, p in (picks or {}).items():
+        if not isinstance(p, dict) or k not in ("ml", "spread", "puck", "total"):
+            continue
+        side = str(p.get("side") or "")
+        for vn in ("poly", "kalshi"):
+            q = p.get(vn) if isinstance(p.get(vn), dict) else None
+            if not q or q.get("kept") or (q.get("bid") is None and q.get("ask") is None):
+                continue
+            ln = q.get("line") if q.get("line") is not None else p.get("line")
+            line, bid, ask = _line_tape_canon(k, side, ln, q.get("bid"), q.get("ask"))
+            out.append({"at": at, "sport": sport, "event_name": event_name,
+                        "market_id": (str(market_id) if market_id else None), "event_start": event_start,
+                        "src": vn, "mt": k, "line": line, "bid_c": bid, "ask_c": ask})
+    return out
+
+
+def _line_tape_pin_rows(sport: str, event_name: str, market_id, event_start, pin: dict, at: str) -> list:
+    """Pure. A Pinnacle main-line block (`_pin_block_from_events`) → line_tape
+    rows (src pin): ml, the spread (`puck` on hockey — Pinnacle's main
+    hockey spread IS the ±1.5), the total. Prices American."""
+    if not isinstance(pin, dict):
+        return []
+    base = {"at": at, "sport": sport, "event_name": event_name,
+            "market_id": (str(market_id) if market_id else None), "event_start": event_start, "src": "pin"}
+
+    def f(x):
+        try:
+            return float(x) if x is not None else None
+        except (TypeError, ValueError):
+            return None
+    out = []
+    if pin.get("ml_home") is not None and pin.get("ml_away") is not None:
+        out.append({**base, "mt": "ml", "line": None, "p_home": f(pin["ml_home"]), "p_away": f(pin["ml_away"])})
+    if pin.get("spread_home") is not None and pin.get("spread_home_odds") is not None:
+        out.append({**base, "mt": ("puck" if str(sport).upper() == "NHL" else "spread"),
+                    "line": f(pin["spread_home"]), "p_home": f(pin.get("spread_home_odds")),
+                    "p_away": f(pin.get("spread_away_odds"))})
+    if pin.get("total") is not None and pin.get("over_odds") is not None:
+        out.append({**base, "mt": "total", "line": f(pin["total"]), "p_home": f(pin.get("over_odds")),
+                    "p_away": f(pin.get("under_odds"))})
+    return out
+
+
+def _line_tape_changed(rows: list, last: dict) -> list:
+    """Pure-ish (updates `last`). Only the rows whose value moved since the
+    last one written for the same (sport, game, src, market)."""
+    out = []
+    for r in rows or []:
+        k = (r.get("sport"), r.get("event_name"), r.get("src"), r.get("mt"))
+        v = (r.get("line"), r.get("bid_c"), r.get("ask_c"), r.get("p_home"), r.get("p_away"))
+        if last.get(k) == v:
+            continue
+        last[k] = v
+        out.append(r)
+    return out
+
+
+def _line_tape_ensure(sb) -> bool:
+    """The table exists? On the box, apply the DDL with psql once per boot
+    when it is missing (the hand_orders pattern). Elsewhere just report."""
+    if _LINE_TAPE_ENSURED["ok"]:
+        return True
+    if _time.monotonic() - _LINE_TAPE_ENSURED["at"] < 60.0:
+        return False
+    _LINE_TAPE_ENSURED["at"] = _time.monotonic()
+    msg = ""
+    try:
+        sb.table("line_tape").select("id").limit(1).execute()
+        _LINE_TAPE_ENSURED["ok"] = True
+        return True
+    except Exception as e:
+        msg = str(e)
+    if _CELLAR_SIDE == "cellar" and not _LINE_TAPE_ENSURED["applied"]:
+        _LINE_TAPE_ENSURED["applied"] = True
+        ddl = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "kahla-scanner", "supabase", "line_tape.sql")
+        psql = (os.environ.get("KAHLA_PSQL")
+                or "/Applications/Postgres.app/Contents/Versions/latest/bin/psql")
+        try:
+            import subprocess
+            r = subprocess.run([psql, os.environ.get("KAHLA_PGDB") or "kahla",
+                                "-v", "ON_ERROR_STOP=1", "-f", ddl],
+                               capture_output=True, text=True, timeout=30)
+            app.logger.warning("line_tape: applied DDL rc=%s %s", r.returncode,
+                               (r.stderr or r.stdout or "")[-200:])
+            _time.sleep(2.0)
+            sb.table("line_tape").select("id").limit(1).execute()
+            _LINE_TAPE_ENSURED["ok"] = True
+            return True
+        except Exception as e2:
+            app.logger.warning("line_tape: DDL apply failed: %s", e2)
+    else:
+        app.logger.warning("line_tape: table probe failed: %s", msg[:160])
+    return False
+
+
+def _line_tape_write(sb, rows: list) -> int:
+    """Dedup against the last write, insert in chunks. Never raises. A failed
+    insert forgets those keys so the next read writes them again."""
+    if not rows or sb is None or not _machine_flag("line_tape", True):
+        return 0
+    if not _line_tape_ensure(sb):
+        return 0
+    new = _line_tape_changed(rows, _LINE_TAPE_LAST)
+    n = 0
+    for i in range(0, len(new), 500):
+        chunk = new[i:i + 500]
+        try:
+            sb.table("line_tape").insert(chunk).execute()
+            n += len(chunk)
+        except Exception as e:
+            _LINE_TAPE_STATS["errors"] += 1
+            _LINE_TAPE_STATS["last_error"] = f"{type(e).__name__}: {e}"[:120]
+            for r in chunk:
+                _LINE_TAPE_LAST.pop((r.get("sport"), r.get("event_name"), r.get("src"), r.get("mt")), None)
+    _LINE_TAPE_STATS["rows"] += n
+    return n
+
+
+def _line_tape_pin_tick(sb, now=None) -> dict:
+    """One minute of Pinnacle: each sport's feed (memory-cached 55s, the
+    free direct feed) → every upcoming sheet game's main lines → line_tape."""
+    now = now or datetime.now(timezone.utc)
+    games = [g for g in list(_LINE_TAPE_GAMES) if g[5] and (_parse_iso(g[5]) or now) > now]
+    slates: dict = {}
+    rows, seen = [], 0
+    at = now.isoformat()
+    for sport, ev, mid, away, home, start in games:
+        try:
+            evs = _pin_live_slate(sb, sport, now, slates)[0]
+            pin = _pin_block_from_events(evs, away, home, start=start) if evs else None
+        except Exception:
+            pin = None
+        if pin:
+            seen += 1
+            rows += _line_tape_pin_rows(sport, ev, mid, start, pin, at)
+    n = _line_tape_write(sb, rows)
+    _LINE_TAPE_STATS["pin_rows"] += n
+    _LINE_TAPE_STATS["pin_at"] = at
+    return {"games": len(games), "priced": seen, "rows": n}
+
+
+def _line_tape_prune(sb, now=None) -> None:
+    now = now or datetime.now(timezone.utc)
+    try:
+        sb.table("line_tape").delete().lt("at", (now - timedelta(days=_LINE_TAPE_KEEP_DAYS)).isoformat()).execute()
+        _LINE_TAPE_STATS["pruned"] = now.isoformat()
+    except Exception as e:
+        _LINE_TAPE_STATS["last_error"] = f"prune: {e}"[:120]
+
+
+def _line_tape_pin_worker() -> None:
+    _time.sleep(_SHEET_TOUCH_BOOT_WAIT_S + 30.0)
+    last_prune = 0.0
+    while True:
+        t0 = _time.monotonic()
+        try:
+            if _machine_flag("line_tape", True) and _LINE_TAPE_GAMES:
+                sb = get_supabase()
+                if sb is not None:
+                    _line_tape_pin_tick(sb)
+                    if _time.monotonic() - last_prune > 6 * 3600:
+                        last_prune = _time.monotonic()
+                        _line_tape_prune(sb)
+        except Exception as e:
+            _LINE_TAPE_STATS["errors"] += 1
+            _LINE_TAPE_STATS["last_error"] = f"{type(e).__name__}: {e}"[:120]
+        _time.sleep(max(5.0, _LINE_TAPE_PIN_EVERY_S - (_time.monotonic() - t0)))
+
+
+def _ensure_line_tape_worker() -> None:
+    global _LINE_TAPE_PIN_THREAD
+    if _LINE_TAPE_PIN_THREAD is not None and _LINE_TAPE_PIN_THREAD.is_alive():
+        return
+    try:
+        _LINE_TAPE_PIN_THREAD = threading.Thread(target=_line_tape_pin_worker, name="line-tape-pin", daemon=True)
+        _LINE_TAPE_PIN_THREAD.start()
+    except Exception:
+        pass
+
+
 def _sheet_touch_items(sport: str, g: dict) -> list:
     """Pure. Mirrors bet_sheets.html `pickSpec(g, k, force)`: every pick
     block on a sheet game that names a side → the slip item the box would
@@ -28439,7 +28688,7 @@ def _entry_ask_c(e: dict):
     return round(a * 100.0, 2) if a <= 1.0 else round(a, 2)
 
 
-def _sheet_touch_poly(client, item: dict, cache: dict) -> dict:
+def _sheet_touch_poly(client, item: dict, cache: dict, max_age_s: float = 600.0) -> dict:
     """The Polymarket rung + our-side bid/ask for one sheet pick. One venue
     event lookup per GAME (shared across the game's picks through `cache`,
     and pmm_markets' own cache across passes), the slip's rung rule with no
@@ -28454,7 +28703,7 @@ def _sheet_touch_poly(client, item: dict, cache: dict) -> dict:
         try:
             import pmm_markets as _pm
             pmm = _pm.lookup(client, sport, item.get("away"), item.get("home"), item.get("event_start"),
-                             want_props=False, max_age_s=600) or {}
+                             want_props=False, max_age_s=max_age_s) or {}
         except Exception as e:
             return {"why": f"lookup: {e}"[:80]}
         cache[ck] = pmm
@@ -28494,6 +28743,23 @@ def _sheet_touch_kalshi(item: dict) -> dict:
             "fee": ({k: fee.get(k) for k in ("fee_type", "fee_multiplier") if k in fee} if fee else None)}
 
 
+_SHEET_TOUCH_ROWS_CACHE: dict = {"at": 0.0, "rows": None}
+_SHEET_TOUCH_ROWS_TTL_S = 600.0     # the walk wakes every minute; the sheet rows (big blobs) are read every 10
+
+
+def _sheet_touch_rows_cached(sb, now) -> list:
+    """`_sheet_touch_rows` at most every _SHEET_TOUCH_ROWS_TTL_S (a game that
+    started since is dropped here), and the line tape's game list off it."""
+    c = _SHEET_TOUCH_ROWS_CACHE
+    if c["rows"] is None or _time.monotonic() - c["at"] > _SHEET_TOUCH_ROWS_TTL_S:
+        c["rows"] = _sheet_touch_rows(sb, now)
+        c["at"] = _time.monotonic()
+        _LINE_TAPE_GAMES[:] = [(sp, r.get("event_name"), r.get("market_id"), g.get("away"), g.get("home"),
+                                r.get("event_start")) for sp, r, g in c["rows"]]
+    now_iso = now.isoformat()
+    return [t for t in c["rows"] if str(t[1].get("event_start") or "") > now_iso]
+
+
 def _sheet_touch_rows(sb, now) -> list:
     """Every UPCOMING sheet game (listed start after now, inside the horizon)
     on each sport's latest week, shaped like the page sees it, nearest
@@ -28528,16 +28794,21 @@ def _sheet_touch_rows(sb, now) -> list:
     return out
 
 
-def _sheet_touch_pass(sb, client, now=None) -> dict:
+def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
     """One walk: every upcoming sheet game's picks quoted on both venues →
     ONE lookup_cache row. Nearest games first under the budget; a game not
-    reached keeps the previous pass's read."""
+    reached keeps the previous pass's read. TIERED (Oct 29 2026, the line
+    tape): a game is re-read only when DUE (`_sheet_touch_due_s` — 3 min
+    inside 3h, 10 min inside 24h, `far_s` beyond); a game not due keeps its
+    read (`fresh`). Every read lands on the line tape."""
     t0 = _time.monotonic()
     now = now or datetime.now(timezone.utc)
     now_iso = now.isoformat()
     prev = (_SHEET_TOUCH_LAST.get("games") or {}) if isinstance(_SHEET_TOUCH_LAST.get("games"), dict) else {}
     games: dict = {}
-    st = {"games": 0, "items": 0, "poly": 0, "kalshi": 0, "kept": 0, "partial": False, "sports": {}}
+    st = {"games": 0, "items": 0, "poly": 0, "kalshi": 0, "kept": 0, "fresh": 0, "partial": False, "sports": {}}
+    far_s = float(far_s if far_s is not None else _SHEET_TOUCH_EVERY_S)
+    tape: list = []
     cache: dict = {}
     # THE WALK ROTATES (Oct 27 2026, Rob: "no pin quote from noon after on
     # college football"): nearest-first under a 240s budget read ~38 of 84
@@ -28546,7 +28817,7 @@ def _sheet_touch_pass(sb, client, now=None) -> dict:
     # happened. Now the budget is 900s of the 1800s cadence, and a partial
     # pass remembers where it stopped (`resume`) so the next pass STARTS
     # there — every game is read within two passes, the nearest the pass after.
-    rows = _sheet_touch_rows(sb, now)
+    rows = _sheet_touch_rows_cached(sb, now)
     rows = _sheet_touch_rotate(rows, _SHEET_TOUCH_LAST.get("resume"))
     resume = None
     for sport, r, g in rows:
@@ -28554,6 +28825,16 @@ def _sheet_touch_pass(sb, client, now=None) -> dict:
         items = _sheet_touch_items(sport, g)
         if not items:
             continue
+        due_s = _sheet_touch_due_s(r.get("event_start"), now, far_s)
+        pg = prev.get(key) if isinstance(prev.get(key), dict) else None
+        if pg and pg.get("at"):
+            try:
+                if (now - _parse_iso(pg["at"])).total_seconds() < due_s - 5.0:
+                    games[key] = pg
+                    st["fresh"] += 1
+                    continue
+            except Exception:
+                pass
         if _time.monotonic() - t0 > _SHEET_TOUCH_BUDGET_S:
             st["partial"] = True
             resume = resume or key
@@ -28565,7 +28846,7 @@ def _sheet_touch_pass(sb, client, now=None) -> dict:
         prev_picks = ((prev.get(key) or {}).get("picks") or {}) if isinstance(prev.get(key), dict) else {}
         for it in items:
             try:
-                pq = _sheet_touch_poly(client, it, cache)
+                pq = _sheet_touch_poly(client, it, cache, max_age_s=min(600.0, max(60.0, due_s * 0.8)))
             except Exception as e:
                 pq = {"why": f"err: {e}"[:60]}
             try:
@@ -28596,10 +28877,21 @@ def _sheet_touch_pass(sb, client, now=None) -> dict:
             st["kalshi"] += int(kq.get("bid") is not None)
         games[key] = {"at": now_iso, "market_id": r.get("market_id"), "event_start": r.get("event_start"),
                       "picks": picks}
+        tape += _line_tape_venue_rows(sport, r.get("event_name"), r.get("market_id"), r.get("event_start"),
+                                      picks, now_iso)
         st["games"] += 1
         st["sports"][sport] = st["sports"].get(sport, 0) + 1
         _time.sleep(0.15)                      # gentle on both venues; the pass is not a race
+    try:
+        st["tape"] = _line_tape_write(sb, tape)
+        _LINE_TAPE_STATS["venue_at"] = now_iso
+    except Exception as e:
+        st["tape"] = f"err: {e}"[:60]
     payload = {"at": now_iso, "ms": int((_time.monotonic() - t0) * 1000), **st, "resume": resume, "games": games}
+    if st["games"] == 0 and not st["partial"] and prev and _SHEET_TOUCH_LAST.get("published"):
+        # nothing was due this minute — the published row already says all of it
+        _SHEET_TOUCH_STATS["idle"] = _SHEET_TOUCH_STATS.get("idle", 0) + 1
+        return {k: v for k, v in payload.items() if k != "games"}
     try:
         sb.table("lookup_cache").upsert({"key": _SHEET_TOUCH_KEY, "sport": "ANY",
                                          "fetched_at": now_iso, "payload": payload}).execute()
@@ -28634,7 +28926,7 @@ def _sheet_touch_worker() -> None:
             every = float(_machine_flag_val("sheet_touch_every_s", _SHEET_TOUCH_EVERY_S))
         except (TypeError, ValueError):
             every = _SHEET_TOUCH_EVERY_S
-        every = max(_SHEET_TOUCH_MIN_EVERY_S, every)
+        every = max(_SHEET_TOUCH_MIN_EVERY_S, every)      # the FAR tier now; near games are due sooner
         if not _machine_flag("sheet_touch", True):
             _time.sleep(30.0)
             continue
@@ -28642,12 +28934,13 @@ def _sheet_touch_worker() -> None:
             sb = get_supabase()
             if sb is None:
                 raise RuntimeError("no db")
-            _sheet_touch_pass(sb, get_client())
+            _sheet_touch_pass(sb, get_client(), far_s=every)
+            _ensure_line_tape_worker()
         except Exception as e:
             _SHEET_TOUCH_STATS["errors"] += 1
             _SHEET_TOUCH_STATS["last_error"] = f"{type(e).__name__}: {e}"[:120]
             app.logger.warning("sheet touch worker: %s", str(e)[:120])
-        _time.sleep(every)
+        _time.sleep(_SHEET_TOUCH_TICK_S)
 
 
 def _ensure_sheet_touch_worker() -> None:
@@ -28675,13 +28968,105 @@ def _sheet_touch_health(sb) -> dict:
             age_s = int((datetime.now(timezone.utc) - _parse_iso(pl.get("at") or r[0].get("fetched_at"))).total_seconds())
         except Exception:
             pass
+        tape = {}
+        for src in ("pin", "poly", "kalshi"):        # the line tape: newest row per source (Oct 29 2026)
+            try:
+                t = (sb.table("line_tape").select("at").eq("src", src).order("at", desc=True)
+                     .limit(1).execute().data) or []
+                tape[src] = (int((datetime.now(timezone.utc) - _parse_iso(t[0]["at"])).total_seconds())
+                             if t else None)
+            except Exception:
+                tape[src] = "no_table"
         return {"age_s": age_s, "stale": (age_s is None or age_s > _SHEET_TOUCH_FRESH_S),
                 "games": pl.get("games") if isinstance(pl.get("games"), int) else len(pl.get("games") or {}),
                 "items": pl.get("items"), "poly": pl.get("poly"), "kalshi": pl.get("kalshi"),
-                "kept": pl.get("kept"), "partial": pl.get("partial"), "ms": pl.get("ms"),
-                "sports": pl.get("sports")}
+                "kept": pl.get("kept"), "fresh": pl.get("fresh"), "partial": pl.get("partial"), "ms": pl.get("ms"),
+                "tape_rows": pl.get("tape"), "tape_age_s": tape, "sports": pl.get("sports")}
     except Exception:
         return {}
+
+
+def _line_tape_series(sport: str, rows: list) -> dict:
+    """Pure. One game's line_tape rows (oldest first) → {mt: {poly: [[t_ms,
+    line, bid, ask]], kalshi: [...], pin: [[t_ms, pin_line, p_home, p_away,
+    fair_c, rung]]}}, all in the HOME / OVER orientation. `fair_c` =
+    Pinnacle's devigged fair for home/over AT THE VENUE'S RUNG in effect at
+    that moment (`_pin_fair_at_rung` — a hop past a half point is None);
+    with no venue read yet the rung is Pinnacle's own line."""
+    out: dict = {}
+
+    def tms(x):
+        d = _parse_iso(x) if x else None
+        return int(d.timestamp() * 1000) if d else None
+
+    def f(x):
+        try:
+            return float(x) if x is not None else None
+        except (TypeError, ValueError):
+            return None
+    pins: dict = {}
+    for r in rows or []:
+        mt, src, t = r.get("mt"), r.get("src"), tms(r.get("at"))
+        if mt not in ("ml", "spread", "puck", "total") or src not in ("pin", "poly", "kalshi") or t is None:
+            continue
+        m = out.setdefault(mt, {"poly": [], "kalshi": [], "pin": []})
+        if src == "pin":
+            pins.setdefault(mt, []).append((t, f(r.get("line")), f(r.get("p_home")), f(r.get("p_away"))))
+        else:
+            m[src].append([t, f(r.get("line")), f(r.get("bid_c")), f(r.get("ask_c"))])
+    for mt, pts in pins.items():
+        m = out[mt]
+        venue = sorted([p for p in m["poly"] if p[1] is not None or mt == "ml"]
+                       + [p for p in m["kalshi"] if p[1] is not None or mt == "ml"], key=lambda p: p[0])
+        for t, pl, ph, pa in pts:
+            rung = None
+            if mt != "ml":
+                prior = [v for v in venue if v[0] <= t and v[1] is not None]
+                rung = prior[-1][1] if prior else (venue[0][1] if venue else pl)
+            if mt == "ml":
+                blk, mtx, side = {"ml_home": ph, "ml_away": pa}, "ml", "home"
+            elif mt == "total":
+                blk, mtx, side = {"total": pl, "over_odds": ph, "under_odds": pa}, "total", "over"
+            else:
+                blk, mtx, side = {"spread_home": pl, "spread_home_odds": ph, "spread_away_odds": pa}, "spread", "home"
+            fair = None
+            try:
+                pf = _pin_fair_at_rung(sport, mtx, {"side": side, "line": (rung if rung is not None else 0)}, blk)
+                fair = round(pf["prob"] * 100.0, 2) if pf and pf.get("prob") is not None else None
+            except Exception:
+                fair = None
+            m["pin"].append([t, pl, ph, pa, fair, rung])
+    return out
+
+
+@app.route("/api/line-tape")
+@admin_required
+def api_line_tape():
+    """THE CHART'S DATA: one sheet game's line tape (Pinnacle every minute,
+    Poly / Kalshi at the sheet's rung) as series in the home / over
+    orientation. ?sport=&event=<event_name>[&days=7]."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "no db"}), 503
+    sport = str(request.args.get("sport") or "").upper()
+    ev = str(request.args.get("event") or "")
+    if not sport or not ev:
+        return jsonify({"ok": False, "error": "sport and event required"}), 400
+    try:
+        days = max(1, min(30, int(request.args.get("days") or 10)))
+    except (TypeError, ValueError):
+        days = 10
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        rows = _sb_paged(lambda: (sb.table("line_tape")
+                                  .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_start")
+                                  .eq("sport", sport).eq("event_name", ev).gte("at", since)
+                                  .order("at")), 20)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"read: {e}"[:160]}), 502
+    start = next((r.get("event_start") for r in rows if r.get("event_start")), None)
+    return jsonify({"ok": True, "sport": sport, "event_name": ev, "event_start": start, "n": len(rows),
+                    "markets": _line_tape_series(sport, rows)})
 
 
 def _sheet_attach_venue(sb, sport: str, games: list) -> None:

@@ -306,6 +306,28 @@
         .bb.st-send { background: var(--a-bg); border: 2px dashed var(--a-bd); color: var(--a-tx); }
         .gh .gm .invb { font-size: 12px; font-weight: 600; color: var(--text2); background: transparent; border: 1px solid var(--line2); border-radius: 5px; padding: 1px 7px; margin-left: 6px; vertical-align: 3px; white-space: nowrap; cursor: pointer; font-family: inherit; }
         .gh .gm .invb.on { color: var(--blue); border-color: var(--blue); }
+        /* THE LINE TAPE CHART (Oct 29 2026) */
+        .chartx { position: fixed; inset: 0; z-index: 90; background: var(--bg); display: none; flex-direction: column;
+                  padding: calc(10px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); overflow: auto; }
+        .chartx.show { display: flex; }
+        .chartx .ch-h { display: flex; align-items: flex-start; gap: 10px; }
+        .chartx .ch-t { font-size: 21px; font-weight: 800; line-height: 1.2; flex: 1; }
+        .chartx .ch-s { font-size: 14px; color: var(--text2); margin-top: 2px; }
+        .chartx .ch-x { width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--line); background: var(--card);
+                        color: var(--text); font-size: 22px; cursor: pointer; flex: none; }
+        .chartx .ch-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+        .chartx .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
+        .chartx .seg button { background: transparent; border: none; color: var(--text2); font: inherit; font-size: 14px; font-weight: 600;
+                              padding: 0 13px; height: 36px; cursor: pointer; }
+        .chartx .seg button.on { background: var(--card2); color: var(--text); }
+        .chartx .ch-read { font-size: 14px; color: var(--text2); margin-top: 12px; min-height: 40px; line-height: 1.45; }
+        .chartx .ch-read b { color: var(--text); }
+        .chartx .ch-box { position: relative; margin-top: 6px; touch-action: pan-y; }
+        .chartx svg { display: block; width: 100%; }
+        .chartx .ch-leg { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--text2); margin-top: 10px; }
+        .chartx .ch-leg i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; vertical-align: 3px; margin-right: 5px; }
+        .chartx .ch-note { font-size: 13px; color: var(--text3); margin-top: 10px; line-height: 1.45; }
+        .gh .gm .chb { font-size: 12px; font-weight: 600; color: var(--text2); background: transparent; border: 1px solid var(--line2); border-radius: 5px; padding: 1px 7px; margin-left: 6px; vertical-align: 3px; white-space: nowrap; cursor: pointer; font-family: inherit; }
         .bb.inv:not([class*="st-"]):not(.in) { border-style: dashed; border-color: var(--line2); background: transparent; }
         .bb .vsm { display: block; font-size: 11px; font-weight: 600; color: var(--text3); letter-spacing: .03em; margin-top: 2px; }
         .bb.st-send .bs { color: var(--a-tx); }
@@ -376,6 +398,23 @@
             <div class="hint" id="hint">Each market shows the model's side. Tap it to add it to the slip; tap a bet you already have to re-peg, move or cancel it. Betting against the model happens in the app.</div>
         </div>
 
+        <div class="chartx" id="chartx">
+            <div class="ch-h">
+                <div><div class="ch-t" id="chTitle"></div><div class="ch-s" id="chSub"></div></div>
+                <button class="ch-x" onclick="closeChart()" aria-label="Close">×</button>
+            </div>
+            <div class="ch-row"><div class="seg" id="chMkts"></div><div class="seg" id="chSides"></div></div>
+            <div class="ch-row"><div class="seg" id="chRange"></div></div>
+            <div class="ch-read" id="chRead"></div>
+            <div class="ch-box" id="chBox"></div>
+            <div class="ch-leg">
+                <span><i style="background:#E6C36A"></i>Pinnacle fair</span>
+                <span><i style="background:#4FB3FF"></i>Poly bid</span>
+                <span><i style="background:#4FB3FF;opacity:.45"></i>Poly ask</span>
+                <span><i style="background:#7BE3A6"></i>Kalshi bid</span>
+            </div>
+            <div class="ch-note">Prices in cents for the side you pick (cents = the chance it wins). Pinnacle fair = Pinnacle's price with the vig taken out, priced at the same line Poly and Kalshi are quoting. Labels mark where a line moved. Recording began Oct 29 2026: Pinnacle every minute, Poly and Kalshi every 30 min far out, every 10 min inside a day, every 3 min inside 3 hours.</div>
+        </div>
         <div class="ov" id="ov" onclick="closeSheet()"></div>
         <div class="as" id="as"></div>
 
@@ -2199,6 +2238,222 @@
     }
     let _fold = { started: false };   // default collapsed, every visit
     function toggleFold(k) { _fold[k] = !_fold[k]; renderGames(); }
+    // THE LINE TAPE CHART (Rob, Oct 29 2026: "let's read the market, like a
+    // stock broker"). One game's history off /api/line-tape: Pinnacle's fair
+    // (devigged, at the venue's line) against the Poly bid/ask and the Kalshi
+    // bid, in cents for the side picked. The API stores home / over; the
+    // other side is the mirror (bid = 100 − ask).
+    let _ch = null, _chTimer = null;
+    const CH_MK = { ml: 'ML', spread: 'Spread', puck: 'Puck line', total: 'Total' };
+    function chartChip(g) {
+        return '<button class="chb" title="price history" onclick="event.stopPropagation();openChart(' + g._gi + ')">📈 Chart</button>';
+    }
+    function openChart(gi) {
+        const g = _games[gi]; if (!g) return;
+        _ch = { g: g, mt: null, side: null, range: '24h', data: null, hover: null, err: null };
+        document.getElementById('chTitle').textContent = shortTeam(g.away) + ' @ ' + shortTeam(g.home);
+        document.getElementById('chSub').textContent = 'Starts ' + fmtTime(g.event_start);
+        document.getElementById('chartx').classList.add('show');
+        document.body.style.overflow = 'hidden';
+        renderChart();
+        loadChart();
+        clearInterval(_chTimer);
+        _chTimer = setInterval(loadChart, 60000);
+    }
+    function closeChart() {
+        _ch = null; clearInterval(_chTimer); _chTimer = null;
+        document.getElementById('chartx').classList.remove('show');
+        document.body.style.overflow = '';
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && _ch) closeChart(); });
+    window.addEventListener('resize', () => { if (_ch) renderChart(); });
+    async function loadChart() {
+        if (!_ch) return;
+        const c = _ch;
+        try {
+            const r = await authFetch('/api/line-tape?sport=' + encodeURIComponent(_sport) + '&event=' + encodeURIComponent(c.g.event_name));
+            const j = await r.json();
+            if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+            if (_ch !== c) return;
+            c.data = j; c.err = null;
+            const have = Object.keys(j.markets || {});
+            if (!c.mt || !have.includes(c.mt)) c.mt = ['spread', 'puck', 'total', 'ml'].find(k => have.includes(k)) || null;
+            if (c.mt && !c.side) chartPickSide();
+        } catch (e) { if (_ch === c) c.err = String(e.message || e); }
+        if (_ch === c) renderChart();
+    }
+    function chartSides(mt) { return mt === 'total' ? ['over', 'under'] : ['away', 'home']; }
+    function chartPickSide() {
+        const p = _ch.g[_ch.mt];
+        _ch.side = (p && p.side && chartSides(_ch.mt).includes(p.side)) ? p.side : chartSides(_ch.mt)[_ch.mt === 'total' ? 0 : 1];
+    }
+    function chartSet(k, v) {
+        if (!_ch) return;
+        _ch[k] = v; _ch.hover = null;
+        if (k === 'mt') chartPickSide();
+        renderChart();
+    }
+    function centsAm(c) {
+        if (c == null || !(c > 0 && c < 100)) return '';
+        const a = c >= 50 ? -100 * c / (100 - c) : 100 * (100 - c) / c;
+        return (a > 0 ? '+' : '') + Math.round(a);
+    }
+    function c1(x) { return x == null ? '—' : (Math.round(Number(x) * 10) / 10) + '¢'; }
+    function chartLineTxt(mt, side, ln) {
+        if (ln == null || mt === 'ml') return '';
+        return mt === 'total' ? (side === 'over' ? 'O ' : 'U ') + Number(ln) : sgn(ln, 1);
+    }
+    // the chosen side's series: venue [t, line, bid, ask], pin [t, line, price, fair]
+    function chartSeries() {
+        const m = (_ch.data && _ch.data.markets || {})[_ch.mt]; if (!m) return null;
+        const canon = _ch.side === 'home' || _ch.side === 'over', spr = _ch.mt === 'spread' || _ch.mt === 'puck';
+        const v = p => canon ? [p[0], p[1], p[2], p[3]]
+            : [p[0], (spr && p[1] != null) ? -p[1] : p[1], p[3] != null ? 100 - p[3] : null, p[2] != null ? 100 - p[2] : null];
+        const pn = p => [p[0], (spr && p[1] != null && !canon) ? -p[1] : p[1], canon ? p[2] : p[3],
+                         p[4] == null ? null : (canon ? p[4] : 100 - p[4])];
+        return { poly: (m.poly || []).map(v), kalshi: (m.kalshi || []).map(v), pin: (m.pin || []).map(pn) };
+    }
+    function chartAt(pts, t, i) {          // the last value at or before t (a step chart)
+        let out = null;
+        for (const p of pts) { if (p[0] > t) break; out = p; }
+        return out ? out[i] : null;
+    }
+    function renderChart() {
+        if (!_ch) return;
+        const c = _ch, have = Object.keys((c.data && c.data.markets) || {});
+        const mk = ['ml', 'spread', 'puck', 'total'].filter(k => have.includes(k));
+        document.getElementById('chMkts').innerHTML = mk.map(k => '<button class="' + (k === c.mt ? 'on' : '') + '" onclick="chartSet(\'mt\',\'' + k + '\')">' + (k === 'spread' && _sport === 'MLB' ? 'Run line' : CH_MK[k]) + '</button>').join('');
+        document.getElementById('chSides').innerHTML = c.mt ? chartSides(c.mt).map(s => '<button class="' + (s === c.side ? 'on' : '') + '" onclick="chartSet(\'side\',\'' + s + '\')">' + esc(s === 'over' ? 'Over' : s === 'under' ? 'Under' : shortTeam(c.g[s])) + '</button>').join('') : '';
+        document.getElementById('chRange').innerHTML = [['3h', '3H'], ['24h', '24H'], ['all', 'All']].map(r => '<button class="' + (r[0] === c.range ? 'on' : '') + '" onclick="chartSet(\'range\',\'' + r[0] + '\')">' + r[1] + '</button>').join('');
+        const box = document.getElementById('chBox'), rd = document.getElementById('chRead');
+        if (!c.data) { box.innerHTML = '<div class="empty">' + (c.err ? 'Could not load the chart: ' + esc(c.err) : 'loading…') + '</div>'; rd.innerHTML = ''; return; }
+        const S = chartSeries();
+        const all = S ? [].concat(S.pin, S.poly, S.kalshi) : [];
+        if (!S || !all.length) { box.innerHTML = '<div class="empty">No history for this game yet — recording began Oct 29 2026.</div>'; rd.innerHTML = ''; return; }
+        const startMs = c.g.event_start ? Date.parse(c.g.event_start) : null;
+        let tEnd = Date.now();
+        if (startMs && startMs < tEnd) tEnd = startMs;
+        const tFirst = Math.min.apply(null, all.map(p => p[0]));
+        let tStart = c.range === '3h' ? tEnd - 3 * 3600e3 : c.range === '24h' ? tEnd - 24 * 3600e3 : tFirst;
+        if (c.range === 'all' || tStart < tFirst - 3600e3) tStart = Math.min(tFirst, tEnd - 3600e3);
+        // what's on screen: each series' value carried into the window + the points inside it
+        const vis = (pts, i) => {
+            const out = [];
+            const pre = chartAt(pts, tStart, i);
+            out.push([tStart, pre]);
+            pts.forEach(p => { if (p[0] > tStart && p[0] <= tEnd) out.push([p[0], p[i]]); });
+            return out;
+        };
+        const lines = [
+            { pts: vis(S.pin, 3), col: '#E6C36A', w: 2.5, key: 'fair' },
+            { pts: vis(S.poly, 3), col: '#4FB3FF', w: 1.5, dash: '4 3', op: .5, key: 'pask' },
+            { pts: vis(S.kalshi, 2), col: '#7BE3A6', w: 2, key: 'kbid' },
+            { pts: vis(S.poly, 2), col: '#4FB3FF', w: 2.5, key: 'pbid' },
+        ];
+        const vals = [];
+        lines.forEach(L => L.pts.forEach(p => { if (p[1] != null) vals.push(p[1]); }));
+        if (!vals.length) { box.innerHTML = '<div class="empty">Nothing recorded in this window — try All.</div>'; rd.innerHTML = ''; return; }
+        let lo = Math.min.apply(null, vals) - 2, hi = Math.max.apply(null, vals) + 2;
+        if (hi - lo < 8) { const mid = (hi + lo) / 2; lo = mid - 4; hi = mid + 4; }
+        lo = Math.max(0, lo); hi = Math.min(100, hi);
+        const W = Math.max(300, box.clientWidth || 340), H = 320, ml = 4, mr = 74, mt = 22, mb = 28;
+        const X = t => ml + (W - ml - mr) * (t - tStart) / Math.max(1, tEnd - tStart);
+        const Y = v => mt + (H - mt - mb) * (hi - v) / Math.max(0.01, hi - lo);
+        let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" height="' + H + '" id="chSvg">';
+        // grid: cents with the American price beside
+        const span = hi - lo, step = span > 40 ? 10 : span > 20 ? 5 : span > 10 ? 2 : 1;
+        for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+            svg += '<line x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="#2A3242" stroke-dasharray="2 4"/>'
+                 + '<text x="' + (W - mr + 6) + '" y="' + (Y(v) + 4) + '" fill="#98A2B3" font-size="11">' + v + '¢ ' + centsAm(v) + '</text>';
+        }
+        // time axis
+        const dt = tEnd - tStart, nt = 4;
+        for (let i = 0; i <= nt; i++) {
+            const t = tStart + dt * i / nt, d = new Date(t);
+            const lab = dt > 36 * 3600e3 ? d.toLocaleDateString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric' })
+                                        : d.toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' });
+            svg += '<text x="' + Math.min(W - mr - 4, Math.max(ml + 18, X(t))) + '" y="' + (H - 8) + '" fill="#98A2B3" font-size="11" text-anchor="middle">' + lab + '</text>';
+        }
+        if (startMs && startMs >= tStart && startMs <= tEnd + 1) {
+            svg += '<line x1="' + X(startMs) + '" x2="' + X(startMs) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#F3F5F9" stroke-dasharray="3 3" opacity=".6"/>'
+                 + '<text x="' + (X(startMs) - 4) + '" y="' + (mt - 6) + '" fill="#F3F5F9" font-size="11" text-anchor="end">start</text>';
+        }
+        // the step lines
+        lines.forEach(L => {
+            let d = '', prevY = null;
+            L.pts.forEach(p => {
+                const x = X(p[0]);
+                if (p[1] == null) {                      // a gap: carry the last value to here, then lift the pen
+                    if (prevY != null) d += 'H' + x;
+                    prevY = null; return;
+                }
+                const y = Y(p[1]);
+                d += prevY == null ? 'M' + x + ' ' + y : 'H' + x + 'V' + y;
+                prevY = y;
+            });
+            if (prevY != null) d += 'H' + X(tEnd);
+            if (d) svg += '<path d="' + d + '" fill="none" stroke="' + L.col + '" stroke-width="' + L.w + '"' + (L.dash ? ' stroke-dasharray="' + L.dash + '"' : '') + (L.op ? ' opacity="' + L.op + '"' : '') + ' stroke-linejoin="round"/>';
+        });
+        // where the line moved: the venue's rung (top) and Pinnacle's own line (bottom)
+        const marks = (pts, y, col, pre) => {
+            let last, n = 0, out = '', lastX = -1e9;
+            pts.forEach(p => {
+                if (p[0] > tEnd || p[1] == null || c.mt === 'ml') return;
+                if (last !== undefined && p[1] !== last && p[0] >= tStart && n < 12) {
+                    out += '<line x1="' + X(p[0]) + '" x2="' + X(p[0]) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="' + col + '" opacity=".25"/>';
+                    if (X(p[0]) - lastX > 64 && X(p[0]) < W - mr - 30) {     // labels that would collide are left as a tick
+                        out += '<text x="' + (X(p[0]) + 3) + '" y="' + y + '" fill="' + col + '" font-size="11">' + pre + esc(chartLineTxt(c.mt, c.side, p[1])) + '</text>';
+                        lastX = X(p[0]);
+                    }
+                    n++;
+                }
+                last = p[1];
+            });
+            return out;
+        };
+        svg += marks(S.poly, mt + 10, '#4FB3FF', '') + marks(S.pin, H - mb - 6, '#E6C36A', 'PIN ');
+        // right-edge tags: the latest of each
+        const tags = [['fair', S.pin, 3, '#E6C36A', '#1a1505'], ['pbid', S.poly, 2, '#4FB3FF', '#04121f'], ['kbid', S.kalshi, 2, '#7BE3A6', '#04170c']]
+            .map(x => ({ v: chartAt(x[1], tEnd, x[2]), col: x[3], fg: x[4] })).filter(x => x.v != null).sort((a, b) => b.v - a.v);
+        let lastY = -99;
+        tags.forEach(tg => {
+            let y = Y(tg.v); if (y < lastY + 16) y = lastY + 16; lastY = y;
+            svg += '<rect x="' + (W - mr + 2) + '" y="' + (y - 8) + '" width="' + (mr - 4) + '" height="16" rx="3" fill="' + tg.col + '"/>'
+                 + '<text x="' + (W - mr + 6) + '" y="' + (y + 4) + '" fill="' + tg.fg + '" font-size="11" font-weight="700">' + c1(tg.v) + ' ' + centsAm(tg.v) + '</text>';
+        });
+        const hx = c.hover != null ? Math.min(tEnd, Math.max(tStart, c.hover)) : null;
+        if (hx != null) svg += '<line x1="' + X(hx) + '" x2="' + X(hx) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#F3F5F9" opacity=".5"/>';
+        svg += '</svg>';
+        box.innerHTML = svg;
+        // the readout: the crosshair's moment, else now
+        const t = hx != null ? hx : tEnd;
+        const fair = chartAt(S.pin, t, 3), pl = chartAt(S.pin, t, 1), pp = chartAt(S.pin, t, 2);
+        const pb = chartAt(S.poly, t, 2), pa = chartAt(S.poly, t, 3), plin = chartAt(S.poly, t, 1);
+        const kb = chartAt(S.kalshi, t, 2), ka = chartAt(S.kalshi, t, 3);
+        const when = new Date(t).toLocaleString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+        rd.innerHTML = '<b>' + esc(hx != null ? when : 'Now') + '</b>' + (plin != null && c.mt !== 'ml' ? ' · venue line ' + esc(chartLineTxt(c.mt, c.side, plin)) : '')
+            + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + (fair != null ? ' (' + centsAm(fair) + ')' : '') + '</span>'
+            + (pl != null && c.mt !== 'ml' ? ' · PIN ' + esc(chartLineTxt(c.mt, c.side, pl)) : '') + (pp != null ? ' ' + am(pp) : '')
+            + '<br><span style="color:#4FB3FF">Poly ' + c1(pb) + ' / ' + c1(pa) + '</span> · <span style="color:#7BE3A6">Kalshi ' + c1(kb) + ' / ' + c1(ka) + '</span>';
+        c.lay = { W: W, ml: ml, mr: mr, tStart: tStart, tEnd: tEnd };
+    }
+    // the crosshair: listeners on the box (it survives every re-render)
+    (function () {
+        const box = document.getElementById('chBox');
+        if (!box) return;
+        const pick = ev => {
+            if (!_ch || !_ch.lay) return;
+            const L = _ch.lay, r = box.getBoundingClientRect();
+            const pt = ev.touches ? ev.touches[0] : ev;
+            const x = (pt.clientX - r.left) * L.W / Math.max(1, r.width);
+            _ch.hover = L.tStart + (x - L.ml) / Math.max(1, L.W - L.ml - L.mr) * (L.tEnd - L.tStart);
+            renderChart();
+        };
+        box.addEventListener('mousemove', pick);
+        box.addEventListener('touchstart', pick, { passive: true });
+        box.addEventListener('touchmove', pick, { passive: true });
+        box.addEventListener('mouseleave', () => { if (_ch) { _ch.hover = null; renderChart(); } });
+    })();
     function gameCard(g, liveMode) {
         const isUp = g._st === 'up', isLive = g._st === 'live';
         _btnSides = {};
@@ -2235,7 +2490,7 @@
         if (modelScore(g)) subs.push(modelScore(g));
         return '<div class="gc' + ((isUp || liveMode) ? '' : ' done') + '"><div class="gh"><div><div class="gt">'
              + (isUp ? '' : fmtTime(g.event_start).split(',')[0] + ' ') + clk(g.event_start) + '</div>'
-             + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + tvChip(g) + ((isUp || liveMode) ? invChip(g) : '') + '</div></div>' + summ + '</div>'
+             + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + tvChip(g) + ((isUp || liveMode) ? invChip(g) : '') + chartChip(g) + '</div></div>' + summ + '</div>'
              + (subs.length ? '<div class="gsub">' + subs.join('') + '</div>' : '')
              + mk + extra.map(b => betStrip(b, false, flips[b.id])).join('') + '</div>';
     }
