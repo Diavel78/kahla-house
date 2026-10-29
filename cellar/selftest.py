@@ -6451,6 +6451,9 @@ def test_kalshi_venue_math() -> None:
     check("kalshi: the Lakers @ Clippers event is found from ESPN's names",
           (kv.pick_event_row(ev, "Los Angeles Lakers", "LA Clippers", None) or {}).get("event_ticker")
           == "KXNBAGAME-26OCT28LALLAC")
+    check("kalshi: a school code counts on its own ('UCF Knights' finds 'Baylor at UCF', Oct 28 2026)",
+          TM("Baylor at UCF", "UCF Knights") and TM("SMU at TCU", "SMU Mustangs")
+          and not TM("UCF wins by over 1.5 points", "Baylor Bears"))
     c = kv.classify({"title": "Los Angeles C wins", "yes_sub_title": "Los Angeles C"},
                     "Los Angeles Lakers", "LA Clippers")
     check("kalshi: 'Los Angeles C wins' reads as the HOME (Clippers) side",

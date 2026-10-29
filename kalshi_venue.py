@@ -758,6 +758,13 @@ def team_mentioned(text: str, team: str) -> bool:
             return True
         return len(mascot) >= 4 and f" {mascot} " in tx
     toks = [t for t in _tokens(k) if len(t) >= 4]
+    # SCHOOL CODES (Oct 28 2026, Baylor @ UCF): ESPN writes 'UCF Knights',
+    # Kalshi writes the school, and 'ucf' is three letters — under the 4+
+    # rule only 'knights' counted, so UCF / SMU / TCU / LSU / BYU / USC / FIU
+    # / UAB games never matched. An all-caps 2-4 letter word in the name is
+    # the school's code and counts on its own.
+    toks += [w.lower() for w in re.findall(r"[A-Za-z&]+", str(team or ""))
+             if w.isupper() and 2 <= len(w) <= 4 and w.isalpha()]
     return any(f" {t} " in tx for t in toks)
 
 
