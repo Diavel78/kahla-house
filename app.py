@@ -16744,11 +16744,12 @@ def api_bet_sheets_place():
                 except Exception as e:
                     k = {"ok": False, "reason": f"Kalshi: {type(e).__name__}: {e}"[:120]}
                 k.pop("_book", None)
-                venue, vdet = _hand_venue_pick(want, res, k, contracts, _hand_venue_min_gain_c())
+                venue, vdet = _hand_venue_pick(want, res, k, contracts, _hand_venue_min_gain_c(),
+                                               fairs=_hand_rung_fairs(sb, it or {}, res, k, pin_slates))
                 res["kalshi"] = {kk: k.get(kk) for kk in ("ok", "reason", "ticker", "price_c", "touch_c",
                                                            "ask_c", "rung_line", "rung_why", "fee", "thin")}
                 res["venue"] = venue
-                res["venue_pick"] = {kk: v for kk, v in (vdet or {}).items() if kk in ("why", "all_in", "best")}
+                res["venue_pick"] = {kk: v for kk, v in (vdet or {}).items() if kk in _VENUE_PICK_KEYS}
                 if venue == "KALSHI":
                     res["poly"] = {kk: res.get(kk) for kk in ("ok", "reason", "price_c", "touch_c", "ask_c", "rung_line")}
                     res.update({"ok": True, "price_c": k.get("price_c"), "touch_c": k.get("touch_c"),
@@ -17285,7 +17286,8 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                     k_rs = {"ok": False, "reason": f"Kalshi: {type(e).__name__}: {e}"[:120]}
                 _lap("kalshi")
             venue, vdet = _hand_venue_pick(want if k_on else "poly", rs, k_rs, row.get("contracts"),
-                                           _hand_venue_min_gain_c())
+                                           _hand_venue_min_gain_c(),
+                                           fairs=_hand_rung_fairs(sb, item, rs, k_rs) if (k_on and want != "poly") else None)
             if venue is None:
                 errs = [x.get("reason") for x in (rs, k_rs) if x and not x.get("ok") and x.get("reason")]
                 return {"ok": False, "error": " · ".join(errs)[:220] or "could not resolve the rung"}
@@ -17304,10 +17306,10 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                              ("slug", "synthetic", "rung_line", "rung_why",
                               "price_c", "ask_c", "event_title")}
             if k_rs is not None:
-                pl["resolve"]["venue_pick"] = {k: v for k, v in (vdet or {}).items() if k in ("why", "all_in", "best")}
+                pl["resolve"]["venue_pick"] = {k: v for k, v in (vdet or {}).items() if k in _VENUE_PICK_KEYS}
                 pl["resolve"]["kalshi_quote_c"] = k_rs.get("price_c") if k_rs.get("ok") else None
                 pl["resolve"]["kalshi_reason"] = None if k_rs.get("ok") else k_rs.get("reason")
-                if k_rs.get("ok"):
+                if k_rs.get("ok") and _hand_same_line(k_rs.get("rung_line"), rs.get("rung_line")):
                     # the Kalshi twin rides the pick: the chase may switch the bet there later
                     pl["resolve"]["kalshi_twin_ticker"] = k_rs.get("ticker")
                     pl["resolve"]["kalshi_twin_buy_yes"] = bool(k_rs.get("buy_yes"))
@@ -21199,11 +21201,52 @@ def _bet_sheet_resolve_kalshi(item: dict) -> dict:
             "series": rs.get("series"), "event_ticker": rs.get("event_ticker"), "_book": book}
 
 
-def _hand_venue_pick(want, poly_rs, k_rs, qty, min_gain_c=None):
+def _hand_same_line(a, b) -> bool:
+    """Pure. Two venue lines are the same bet (an ML carries none)."""
+    if a is None or b is None:
+        return a is None and b is None
+    try:
+        return abs(float(a) - float(b)) < 0.01
+    except (TypeError, ValueError):
+        return False
+
+
+def _hand_rung_fairs(sb, item: dict, poly_rs, k_rs, slates: dict | None = None):
+    """Pinnacle's devigged fair (¢) at EACH venue's line, only when both
+    venues resolved and landed on different lines. {POLYMARKET, KALSHI} or
+    None (one line, a miss, or no Pinnacle price at either line)."""
+    if not (poly_rs and poly_rs.get("ok") and k_rs and k_rs.get("ok")):
+        return None
+    pl, kl = poly_rs.get("rung_line"), k_rs.get("rung_line")
+    try:
+        if pl is None or kl is None or abs(float(pl) - float(kl)) <= 0.01:
+            return None
+    except (TypeError, ValueError):
+        return None
+    try:
+        sport = str(item.get("sport") or "").upper()
+        events, age = _pin_sheet_slate(sb, sport, datetime.now(timezone.utc), slates if slates is not None else {})
+        out = {}
+        for v, ln in (("POLYMARKET", pl), ("KALSHI", kl)):
+            f = _pin_fair_for_item(events, sport, {**item, "line": float(ln)}, age)
+            if not f or f.get("fair_c") is None:
+                return None
+            out[v] = float(f["fair_c"])
+        return out
+    except Exception:
+        return None
+
+
+_VENUE_PICK_KEYS = ("why", "all_in", "best", "fair", "edge", "lines")
+
+
+def _hand_venue_pick(want, poly_rs, k_rs, qty, min_gain_c=None, fairs=None):
     """Pure. want ∈ auto | poly | kalshi. Each venue's seat (our-side price
     the bet would rest at) + its maker fee → the cheaper all-in wins; on
     'auto' Polymarket is home and Kalshi must beat it by min_gain_c (no
-    churn on noise). Returns ('POLYMARKET' | 'KALSHI' | None, detail)."""
+    churn on noise). On DIFFERENT lines, `fairs` ({venue: Pinnacle fair ¢ at
+    that venue's line}) decides: the seat furthest UNDER its own fair wins.
+    Returns ('POLYMARKET' | 'KALSHI' | None, detail)."""
     import kalshi_venue as _kv
     want = str(want or "auto").lower()
     p_ok = bool(poly_rs and poly_rs.get("ok"))
@@ -21227,6 +21270,25 @@ def _hand_venue_pick(want, poly_rs, k_rs, qty, min_gain_c=None):
         except (TypeError, ValueError):
             differ = False
         if differ:
+            # PRICE EACH LINE AGAINST ITS OWN FAIR (Oct 29 2026, Rob on FAU @
+            # North Texas O 77.5 — Poly 47¢ at 77.5 vs Kalshi 51¢ at 76.5:
+            # "Will it take the Kalshi line if it's better?"): Pinnacle's fair
+            # at each venue's line, all-in (maker fee) against it; the seat
+            # further under its fair is the better bet. A tie stays home.
+            fp = (fairs or {}).get("POLYMARKET") if isinstance(fairs, dict) else None
+            fk = (fairs or {}).get("KALSHI") if isinstance(fairs, dict) else None
+            if fp is not None and fk is not None:
+                ap = _kv.all_in_c("POLYMARKET", "rest", poly_rs.get("price_c"), int(qty or 1), None)
+                ak = _kv.all_in_c("KALSHI", "rest", k_rs.get("price_c"), int(qty or 1), k_rs.get("fee"))
+                if ap is not None and ak is not None:
+                    ep, ek = round(float(fp) - ap, 2), round(float(fk) - ak, 2)
+                    best = "KALSHI" if ek > ep + 1e-9 else "POLYMARKET"
+                    return best, {"why": "line_differs_fair", "best": best,
+                                  "all_in": {"POLYMARKET": ap, "KALSHI": ak},
+                                  "fair": {"POLYMARKET": round(float(fp), 2), "KALSHI": round(float(fk), 2)},
+                                  "edge": {"POLYMARKET": ep, "KALSHI": ek},
+                                  "lines": {"POLYMARKET": pl, "KALSHI": kl},
+                                  "poly_ok": True, "kalshi_ok": True}
             if poly_rs.get("rung_why") == "exact":
                 return "POLYMARKET", {"why": "line_differs_poly_exact", "poly_line": pl, "kalshi_line": kl,
                                       "poly_ok": True, "kalshi_ok": True}
@@ -21379,7 +21441,7 @@ def _hand_order_execute_kalshi(sb, row: dict, pl: dict, item: dict, k_rs: dict,
     res = {"ok": True, "via": worker, "venue": "KALSHI", "order_id": out.get("order_id"),
            "state": out.get("state"), "resting": out.get("resting"), "cost": out.get("cost"),
            "price_c": out.get("price_c"), "ticker": k_rs["ticker"], "rung_line": k_rs.get("rung_line"),
-           "venue_pick": {k: v for k, v in (vdet or {}).items() if k in ("why", "all_in", "best")}}
+           "venue_pick": {k: v for k, v in (vdet or {}).items() if k in _VENUE_PICK_KEYS}}
     if k_rs.get("thin"):
         res["thin"] = {k: k_rs["thin"].get(k) for k in ("touch_c", "touch_q", "below_c", "below_q", "stack_q", "rungs", "pct")}
     if out.get("unverified"):
@@ -21387,7 +21449,9 @@ def _hand_order_execute_kalshi(sb, row: dict, pl: dict, item: dict, k_rs: dict,
     elif not out.get("resting"):
         res["warning"] = (f"order sent but not resting on Kalshi (state {out.get('state') or 'unknown'})"
                           " — check the app")
-    twin_ok = bool(poly_rs and poly_rs.get("ok"))
+    # A TWIN IS THE SAME BET ON THE OTHER VENUE — same line, or none: the
+    # switch compares price only, and would walk a 76.5 bet onto 77.5
+    twin_ok = bool(poly_rs and poly_rs.get("ok")) and _hand_same_line(poly_rs.get("rung_line"), k_rs.get("rung_line"))
     rs_log = {"venue": "KALSHI", "kalshi_ticker": k_rs["ticker"], "kalshi_buy_yes": bool(k_rs["buy_yes"]),
               "kalshi_series": k_rs.get("series"), "kalshi_fee": k_rs.get("fee"),
               "rung_line": k_rs.get("rung_line"), "rung_why": k_rs.get("rung_why"),

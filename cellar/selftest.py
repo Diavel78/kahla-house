@@ -6004,6 +6004,24 @@ def test_kalshi_hand_lane() -> None:
     v, d = _app._hand_venue_pick("auto", {"ok": True, "price_c": 52.5, "rung_line": 38.5, "rung_why": "favorable"},
                                  {**kal, "price_c": 59.0, "rung_line": 39.5, "rung_why": "exact"}, 10, 0.5)
     assert v == "KALSHI" and d["why"] == "line_differs_kalshi_exact", d
+    # WITH Pinnacle's fair at each line the seat further under ITS fair wins
+    # (Oct 29 2026, FAU @ North Texas O 77.5: Poly 47 at 77.5 vs Kalshi 51 at 76.5)
+    pp = {"ok": True, "price_c": 47.0, "rung_line": 77.5, "rung_why": "exact"}
+    kk = {**kal, "price_c": 51.0, "rung_line": 76.5, "rung_why": "favorable"}
+    v, d = _app._hand_venue_pick("auto", pp, kk, 10, 0.5, fairs={"POLYMARKET": 48.6, "KALSHI": 50.9})
+    assert v == "POLYMARKET" and d["why"] == "line_differs_fair" and d["edge"]["POLYMARKET"] > d["edge"]["KALSHI"], d
+    v, d = _app._hand_venue_pick("auto", pp, kk, 10, 0.5, fairs={"POLYMARKET": 48.6, "KALSHI": 54.0})
+    assert v == "KALSHI" and d["lines"] == {"POLYMARKET": 77.5, "KALSHI": 76.5}, d
+    v, d = _app._hand_venue_pick("auto", pp, kk, 10, 0.5, fairs={"POLYMARKET": 48.0, "KALSHI": 52.0})
+    assert v == "POLYMARKET", d                       # a tie stays home
+    v, d = _app._hand_venue_pick("auto", pp, kk, 10, 0.5, fairs={"POLYMARKET": 48.6})
+    assert v == "POLYMARKET" and d["why"] == "line_differs_poly_exact", d   # no fair at one line: the old rule
+    assert _app._hand_same_line(76.5, 76.5) and not _app._hand_same_line(76.5, 77.5) and _app._hand_same_line(None, None)
+    import inspect as _insp
+    _ke = _insp.getsource(_app._hand_order_execute_kalshi)
+    assert "_hand_same_line(poly_rs.get(\"rung_line\")" in _ke, "a Kalshi bet's Poly twin must be on the same line"
+    _ex = _insp.getsource(_app._hand_order_execute)
+    assert "_hand_same_line(k_rs.get(\"rung_line\")" in _ex and "fairs=_hand_rung_fairs(" in _ex
     # a Kalshi pick is invisible to every Polymarket path: no slug, no order id
     assert _app._kalshi_pick({"venue": "KALSHI"}) and not _app._kalshi_pick({"venue": "POLYMARKET"}) and not _app._kalshi_pick({})
     check("kalshi hand lane: book shape, orders/positions, venue pick", True)

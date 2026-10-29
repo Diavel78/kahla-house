@@ -816,7 +816,9 @@
                 if (i.q.ok) {
                     const vp = i.q.venue_pick || {}, ai = vp.all_in || {};
                     const vtxt = i.q.venue ? ('<b>' + (i.q.venue === 'KALSHI' ? 'KALSHI' : 'Polymarket') + '</b>'
-                        + (ai.POLYMARKET != null && ai.KALSHI != null ? ' · all-in Poly ' + Number(ai.POLYMARKET).toFixed(2) + '¢ vs Kalshi ' + Number(ai.KALSHI).toFixed(2) + '¢'
+                        + (vp.why === 'line_differs_fair' && vp.edge && vp.lines ? ' · Poly ' + rungTxt(i, vp.lines.POLYMARKET) + ' ' + Number(ai.POLYMARKET).toFixed(1) + '¢ (' + fairGapTxt(vp.edge.POLYMARKET, vp.fair.POLYMARKET) + ') vs Kalshi ' + rungTxt(i, vp.lines.KALSHI) + ' ' + Number(ai.KALSHI).toFixed(1) + '¢ (' + fairGapTxt(vp.edge.KALSHI, vp.fair.KALSHI) + ')'
+                           : /^line_differs/.test(vp.why || '') && i.q.kalshi && i.q.kalshi.ok && i.q.poly === undefined ? ' · Kalshi ' + rungTxt(i, i.q.kalshi.rung_line) + ' ' + i.q.kalshi.price_c + '¢ (no Pinnacle fair to compare lines)'
+                           : ai.POLYMARKET != null && ai.KALSHI != null ? ' · all-in Poly ' + Number(ai.POLYMARKET).toFixed(2) + '¢ vs Kalshi ' + Number(ai.KALSHI).toFixed(2) + '¢'
                            : (i.q.kalshi && i.q.kalshi.ok === false && i.q.kalshi.reason ? ' · ' + esc(i.q.kalshi.reason) : (i.q.poly && i.q.poly.reason ? ' · Poly: ' + esc(i.q.poly.reason) : ''))) + ' · ') : '';
                     q = '<div class="q ok">' + vtxt + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
                       + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.stack_q || i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + pinQuoteTxt(i) + '</div>';
@@ -847,6 +849,8 @@
         const ln = (p.line_differs && p.line != null) ? ' at ' + rungTxt(i, p.line) : '';
         return ' · <span class="pinq" title="Bet105 = Pinnacle\'s feed">Bet105 ' + am(p.price) + ' (' + Number(p.cents).toFixed(1) + '¢' + ln + ')</span>';
     }
+    // how far a seat sits from Pinnacle's fair at its own line
+    function fairGapTxt(e, f) { e = Number(e); return Math.abs(e).toFixed(1) + '¢ ' + (e >= 0 ? 'under' : 'over') + ' fair ' + Number(f).toFixed(1); }
     function rungTxt(i, ln) {
         if (ln == null) return '';
         if (i.market_type === 'total') return (i.side === 'over' ? 'O ' : 'U ') + ln;
