@@ -29091,6 +29091,39 @@ def _sheet_touch_items(sport: str, g: dict) -> list:
     return out
 
 
+def _sheet_touch_other(it: dict):
+    """Pure. The slip item for the OTHER side of a sheet pick (the card's
+    ⇄ button): over↔under at the same line, home↔away with the spread line
+    negated, ML line 0. None for the puck line (Rob never bets the dog
+    +1.5) and anything else."""
+    if not isinstance(it, dict) or it.get("k") == "puck":
+        return None
+    mt, side = it.get("market_type"), it.get("side")
+    try:
+        if mt == "total" and side in ("over", "under"):
+            return {**it, "side": "under" if side == "over" else "over", "line": float(it["line"])}
+        if mt in ("spread", "ml") and side in ("home", "away"):
+            return {**it, "side": "away" if side == "home" else "home",
+                    "line": 0.0 if mt == "ml" else -float(it["line"])}
+    except (TypeError, ValueError, KeyError):
+        return None
+    return None
+
+
+def _sheet_touch_off_rung(q, line) -> bool:
+    """Pure. True when a venue quote sits on a rung other than the sheet's
+    line — then its mirror is NOT the other side's price: the other side
+    takes its own nearest MORE FAVORABLE rung (Oct 29 2026, Rob on FAU @
+    North Texas: Under 77.5 resolved to Kalshi 79.5 and the Over read
+    'Kalshi 44¢ @ 79.5' off the mirror — the Over's rung is 76.5)."""
+    if not isinstance(q, dict) or q.get("line") is None or line is None:
+        return False
+    try:
+        return abs(float(q["line"]) - float(line)) >= 0.01
+    except (TypeError, ValueError):
+        return False
+
+
 def _entry_ask_c(e: dict):
     """Our-side best ask of a pmm lookup entry, in cents (synthetic entries
     carry the inverted quote already). None when the entry has no ask."""
@@ -29311,6 +29344,21 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
                         kq = kept
             picks[it["k"]] = {"mt": it["market_type"], "side": it["side"], "line": it["line"],
                               "poly": pq, "kalshi": kq}
+            # THE OTHER SIDE gets its OWN rung when a venue does not list the
+            # sheet's line (the page mirrors the model side only on an exact rung)
+            ot = _sheet_touch_other(it)
+            if ot and ot["market_type"] != "ml":
+                oth: dict = {}
+                try:
+                    if _sheet_touch_off_rung(pq, it["line"]):
+                        oth["poly"] = _sheet_touch_poly(client, ot, cache,
+                                                        max_age_s=min(600.0, max(60.0, due_s * 0.8)))
+                    if _sheet_touch_off_rung(kq, it["line"]):
+                        oth["kalshi"] = _sheet_touch_kalshi(ot)
+                except Exception as e:
+                    oth["err"] = str(e)[:60]
+                if oth:
+                    picks[it["k"]]["other"] = {"side": ot["side"], "line": ot["line"], **oth}
             st["items"] += 1
             st["poly"] += int(pq.get("bid") is not None)
             st["kalshi"] += int(kq.get("bid") is not None)

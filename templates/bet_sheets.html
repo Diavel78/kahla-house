@@ -1868,6 +1868,13 @@
         }
         const vp = ((g.venue || {}).picks || {})[gradeKey];
         const vq = vp ? mirrorQ({ poly: vp.poly, kalshi: vp.kalshi, age_s: g.venue.age_s }, mt) : null;
+        // the mirror is the other side's price only on the sheet's own rung; off it,
+        // the box quotes the other side at ITS nearest more favorable rung (`other`)
+        if (vq) ['poly', 'kalshi'].forEach(vn => {
+            const own = vp[vn], o = vp.other && vp.other[vn];
+            if (o) vq[vn] = o;
+            else if (own && own.line != null && mt !== 'ml' && Math.abs(Number(own.line) - Number(line)) >= 0.01) vq[vn] = null;
+        });
         const L = g.line || {};
         const price = mt === 'ml' ? L['ml_' + side] : null;
         _modelSide[g._gi + '|' + mt] = p.side;          // set even when the model's own button is hidden (a chalky ML)

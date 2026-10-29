@@ -6238,6 +6238,20 @@ def test_sheet_touch() -> None:
     check("sheet touch: ml is line 0", by["ml"]["market_type"] == "ml" and by["ml"]["line"] == 0 and by["ml"]["side"] == "home")
     check("sheet touch: puck is a spread at its own line", by["puck"]["market_type"] == "spread" and by["puck"]["line"] == -1.5)
     check("sheet touch: total at the pick's line", by["total"]["market_type"] == "total" and by["total"]["line"] == 6.5 and by["total"]["side"] == "under")
+    # THE OTHER SIDE AT ITS OWN RUNG (Oct 29 2026, FAU @ North Texas: Under 77.5
+    # → Kalshi 79.5, and the Over read the mirror '@ 79.5' — its rung is 76.5)
+    O, OR = _app._sheet_touch_other, _app._sheet_touch_off_rung
+    tot = {"k": "total", "market_type": "total", "side": "under", "line": 77.5}
+    check("sheet touch: other side of an under is the over at the same line",
+          O(tot)["side"] == "over" and O(tot)["line"] == 77.5)
+    spr = {"k": "spread", "market_type": "spread", "side": "home", "line": -13.5}
+    check("sheet touch: other side of a spread negates the line", O(spr)["side"] == "away" and O(spr)["line"] == 13.5)
+    check("sheet touch: the puck line has no other side", O(by["puck"]) is None)
+    check("sheet touch: off-rung read when the venue rung is not the sheet's",
+          OR({"line": 79.5, "bid": 55}, 77.5) and not OR({"line": 77.5, "bid": 50}, 77.5) and not OR({"why": "x"}, 77.5))
+    src_p = inspect.getsource(_app._sheet_touch_pass)
+    check("sheet touch: the walk quotes the other side only when a venue is off the rung",
+          "_sheet_touch_other(it)" in src_p and "_sheet_touch_off_rung(kq" in src_p and '"other"' in src_p)
     check("sheet touch: items carry the game", all(x["away"] == nhl["away"] and x["home"] == nhl["home"] and x["event_start"] == nhl["event_start"] and x["sport"] == "NHL" for x in it))
     fb = {"away": "A", "home": "B", "event_start": "x", "line": {"spread_home": -7, "total": 51},
           "spread": {"side": "away", "verdict": "play"}, "total": {"side": "over", "verdict": "lean"}}
