@@ -29158,6 +29158,7 @@ def _sheet_touch_kalshi(item: dict) -> dict:
 
 
 _SHEET_TOUCH_ROWS_CACHE: dict = {"at": 0.0, "rows": None}
+_SHEET_TOUCH_DROPS: dict = {}       # "sport|event" -> why the walk could not build the game
 _SHEET_TOUCH_ROWS_TTL_S = 600.0     # the walk wakes every minute; the sheet rows (big blobs) are read every 10
 
 
@@ -29201,7 +29202,9 @@ def _sheet_touch_rows(sb, now) -> list:
                 g = (_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport == "NBA"
                      else _sheet_game_mlb(r) if sport == "MLB" else _sheet_game_football(r))
                 _sheet_seed_pin_picks(sport, g, pin_evs, now)   # the same rungs the page quotes
-            except Exception:
+            except Exception as e:
+                # a dropped game records NOTHING — name it (Oct 28 2026, LAL @ LAC: zero rows)
+                _SHEET_TOUCH_DROPS[f"{sport}|{r.get('event_name')}"] = f"{type(e).__name__}: {e}"[:160]
                 continue
             out.append((sport, r, g))
     out.sort(key=lambda t: str(t[1].get("event_start") or ""))
@@ -29325,7 +29328,8 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
         _LINE_TAPE_STATS["venue_at"] = now_iso
     except Exception as e:
         st["tape"] = f"err: {e}"[:60]
-    payload = {"at": now_iso, "ms": int((_time.monotonic() - t0) * 1000), **st, "resume": resume, "games": games}
+    payload = {"at": now_iso, "ms": int((_time.monotonic() - t0) * 1000), **st, "resume": resume, "games": games,
+               "dropped": dict(list(_SHEET_TOUCH_DROPS.items())[:20])}
     if st["games"] == 0 and not st["partial"] and prev and _SHEET_TOUCH_LAST.get("published"):
         # nothing was due this minute — the published row already says all of it
         _SHEET_TOUCH_STATS["idle"] = _SHEET_TOUCH_STATS.get("idle", 0) + 1
@@ -29419,7 +29423,7 @@ def _sheet_touch_health(sb) -> dict:
                 "games": pl.get("games") if isinstance(pl.get("games"), int) else len(pl.get("games") or {}),
                 "items": pl.get("items"), "poly": pl.get("poly"), "kalshi": pl.get("kalshi"),
                 "kept": pl.get("kept"), "fresh": pl.get("fresh"), "partial": pl.get("partial"), "ms": pl.get("ms"),
-                "tape_rows": pl.get("tape"), "ladder_rows": pl.get("ladder"), "nopick": pl.get("nopick"),
+                "tape_rows": pl.get("tape"), "ladder_rows": pl.get("ladder"), "nopick": pl.get("nopick"), "dropped": pl.get("dropped"),
                 "tape_age_s": tape, "sports": pl.get("sports")}
     except Exception:
         return {}
@@ -29801,6 +29805,21 @@ def api_line_tape_probe():
         return jsonify({"ok": False, "error": "no db"}), 503
     sport = str(request.args.get("sport") or "").upper()
     ev = request.args.get("event")
+    if request.args.get("rows"):
+        # replay the touch walk's game list (as of `at`, default now): every game
+        # it builds with its pick count, and every game it DROPS with the reason
+        at_q = request.args.get("at")
+        t_at = _parse_iso(at_q) if at_q else datetime.now(timezone.utc)
+        _SHEET_TOUCH_DROPS.clear()
+        try:
+            built = _sheet_touch_rows(sb, t_at)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}), 502
+        out = [{"sport": sp, "event": r.get("event_name"), "start": r.get("event_start"),
+                "items": [i["k"] for i in _sheet_touch_items(sp, g)]}
+               for sp, r, g in built if not sport or sp == sport]
+        return jsonify({"ok": True, "at": t_at.isoformat(), "n": len(out), "games": out,
+                        "dropped": dict(_SHEET_TOUCH_DROPS)})
     try:
         hours = max(1, min(240, int(request.args.get("hours") or 3)))
     except (TypeError, ValueError):
