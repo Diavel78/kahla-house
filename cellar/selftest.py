@@ -3826,7 +3826,11 @@ def test_bet_sheet_live_section() -> None:
           and html.index("c('plays', 'Plays & leans '") < html.index("c('live', 'Live '"))
     check("…a tap on a game in progress is a LIVE slip item", "const live = g._st === 'live';" in html and "...(live ? { live: true } : {})" in html)
     check("…the Live section renders the in-progress games with buttons", "if (_filter === 'live') {" in html and "lv.map(g => gameCard(g, true))" in html)
-    check("…and the payload carries the flag", "live: !!i.live }))" in html)
+    check("…and the payload carries the flag", "live: !!i.live," in html)
+    # the ⇄ Other side bet must reach the box marked (Oct 29 2026: the Place
+    # request listed its fields by hand and dropped vs_model — FAU @ UNT O 77.5
+    # bet against the model read MODEL FLIPPED)
+    check("the Place request carries vs_model", "...(i.vs_model ? { vs_model: true } : {})" in html)
 
 
 def test_hand_red_alert() -> None:

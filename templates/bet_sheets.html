@@ -899,7 +899,7 @@
                 let r = null, d = null;
                 try {
                     r = await postTicketed('/api/bet-sheets/place', { preview, contracts: contractsN(), items: betItems.map(i => ({ key: i.key, cid: preview ? undefined : i.cid,
-                        sport: i.sport, away: i.away, home: i.home, event_start: i.event_start, market_type: i.market_type, side: i.side, line: i.line, label: i.label, venue: venueSel(), live: !!i.live })) });
+                        sport: i.sport, away: i.away, home: i.home, event_start: i.event_start, market_type: i.market_type, side: i.side, line: i.line, label: i.label, venue: venueSel(), live: !!i.live, ...(i.vs_model ? { vs_model: true } : {}) })) });
                     d = r ? await r.json().catch(() => null) : null;
                 } catch (e) {
                     if (preview) throw e;

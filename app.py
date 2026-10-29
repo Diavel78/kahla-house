@@ -6143,6 +6143,23 @@ def api_bet_sheets_picks():
                                 .eq("status", "pending").limit(1).execute().count) or 0
     except Exception as e:
         out["pending_total"] = f"err: {e}"[:120]
+    vsm = (request.args.get("set_vs_model") or "").strip()
+    if vsm:
+        # mark sheet picks as bet against the model on purpose (the ⇄ Other side
+        # bets placed before the Place request carried the flag, Oct 29 2026)
+        done = []
+        for pid in [x for x in vsm.split(",") if x.strip().isdigit()][:20]:
+            try:
+                r = (sb.table("bot_picks").select("id,signal_blob").eq("id", int(pid))
+                     .eq("signal_blob->>bet_sheet", "true").limit(1).execute().data or [])
+                if r:
+                    b = dict(r[0].get("signal_blob") or {})
+                    b["vs_model"] = True
+                    sb.table("bot_picks").update({"signal_blob": b}).eq("id", int(pid)).execute()
+                    done.append(int(pid))
+            except Exception as e:
+                out.setdefault("set_vs_model_err", []).append(f"{pid}: {e}"[:120])
+        out["set_vs_model"] = done
     keep = ("contracts", "price_c", "anchor_c", "order_id", "app_adopted", "manual_web_bet",
             "filled", "filled_qty", "placed_via", "adopted_at", "placed_at", "entry_src",
             "in_play", "live_snipe", "pmm_synthetic", "label", "line_rejoins", "amended",
