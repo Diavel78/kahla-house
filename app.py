@@ -28511,6 +28511,282 @@ def _line_tape_venue_rungs(picks: dict) -> dict:
     return out
 
 
+# ── THE LADDER TAPE (Oct 29 2026, Rob: "I need one chart… different lines
+# in different books"): every rung each book lists near the line, so the
+# chart can price every book AT ONE LINE. A book that lists the line plots
+# its own price; one that doesn't is carried there from its nearest rungs by
+# its gap to Pinnacle on those rungs (`_ladder_equiv_at`). ──
+_LADDER_LAST: dict = {}            # (sport, event, src, mt) → {line: value}
+_LADDER_WIDTH = 5.0                # rungs kept: within ±5 points of the center line
+_LADDER_STATS: dict = {"rows": 0, "errors": 0, "last_error": None}
+
+
+def _ladder_poly(entries, mt: str) -> dict:
+    """Pure. A pmm lookup's spread / total entries → {line: (bid, ask)} in
+    the home / over orientation (an away / under entry is mirrored)."""
+    out = {}
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        side = str(e.get("side") or "")
+        ln, bd, ak = _line_tape_canon("total" if mt == "total" else "spread", side, e.get("line"),
+                                      _entry_bid_c(e), _entry_ask_c(e))
+        if ln is None or (bd is None and ak is None):
+            continue
+        out.setdefault(ln, (bd, ak))
+    return out
+
+
+def _ladder_kalshi(markets, mt: str, away: str, home: str) -> dict:
+    """Pure-ish (kalshi_venue.classify). One Kalshi event's markets → {line:
+    (bid, ask)} home / over, YES-side book."""
+    import kalshi_venue as _kv
+    want = "total" if mt == "total" else "spread"
+    out = {}
+    for m in markets or []:
+        cl = _kv.classify(m, away, home)
+        if not cl or cl.get("mt") != want:
+            continue
+        b = _kv.book_c(m)
+        if want == "total":
+            ln, bd, ak = cl.get("line"), b.get("yes_bid"), b.get("yes_ask")
+        else:
+            ln, bd, ak = _line_tape_canon("spread", cl.get("team_side") or "home", cl.get("line"),
+                                          b.get("yes_bid"), b.get("yes_ask"))
+        if ln is None or (bd is None and ak is None):
+            continue
+        out.setdefault(round(float(ln), 2), (bd, ak))
+    return out
+
+
+def _ladder_pin(events, away: str, home: str, start, mt: str) -> dict:
+    """Pure. Pinnacle's main + alternate ladder for one game → {line:
+    (p_home, p_away)} American, home / over orientation."""
+    best, swapped = _pin_match_event(events, away, home, start)
+    if best is None:
+        return {}
+    bm = next((b for b in (best.get("bookmakers") or []) if b.get("key") == "pinnacle"), None)
+    keys = ("totals", "alternate_totals") if mt == "total" else ("spreads", "alternate_spreads")
+    pts: dict = {}
+    for mk in ((bm or {}).get("markets") or []):
+        if mk.get("key") not in keys:
+            continue
+        for o in (mk.get("outcomes") or []):
+            d = o.get("designation")
+            if mt != "total" and swapped:
+                d = {"home": "away", "away": "home"}.get(d, d)
+            try:
+                pt, pr = float(o.get("point")), float(o.get("price"))
+            except (TypeError, ValueError):
+                continue
+            if d in ("home", "over"):
+                pts.setdefault(round(pt, 2), [None, None])[0] = pr
+            elif d in ("away", "under"):
+                pts.setdefault(round(-pt if mt != "total" else pt, 2), [None, None])[1] = pr
+    return {k: (v[0], v[1]) for k, v in pts.items() if v[0] is not None and v[1] is not None}
+
+
+def _ladder_rows(sport, ev, src, mt, ladder: dict, at: str, center, last: dict) -> list:
+    """Pure-ish (updates `last`). One book's ladder → the ladder_tape rows that
+    CHANGED: rungs within ±_LADDER_WIDTH of `center` (all when center is
+    None); a rung that left the window or the book writes a null row."""
+    key = (sport, ev, src, mt)
+    cur = {}
+    for ln, v in (ladder or {}).items():
+        try:
+            lf = round(float(ln), 2)
+        except (TypeError, ValueError):
+            continue
+        if center is not None and abs(lf - float(center)) > _LADDER_WIDTH + 1e-9:
+            continue
+        cur[lf] = tuple(None if x is None else round(float(x), 2) for x in v)
+    prev = last.get(key) or {}
+    out = []
+    pin = src == "pin"
+    for ln, v in cur.items():
+        if prev.get(ln) == v:
+            continue
+        r = {"at": at, "sport": sport, "event_name": ev, "src": src, "mt": mt, "line": ln}
+        r.update({"p_home": v[0], "p_away": v[1]} if pin else {"bid_c": v[0], "ask_c": v[1]})
+        out.append(r)
+    for ln in prev:
+        if ln not in cur:
+            out.append({"at": at, "sport": sport, "event_name": ev, "src": src, "mt": mt, "line": ln})
+    last[key] = cur
+    return out
+
+
+def _ladder_touch_rows(sport: str, ev: str, g: dict, picks: dict, pmm: dict, at: str) -> list:
+    """The touch walk's ladder rows for one game: Polymarket's ladder off the
+    lookup the walk already made, Kalshi's off the event the resolver named
+    (`event_markets`, cached), each centered on the sheet pick's line. A
+    book that answered nothing writes nothing (never nulls a ladder)."""
+    out = []
+    for k, p in (picks or {}).items():
+        if not isinstance(p, dict) or k not in ("spread", "puck", "total"):
+            continue
+        ctr = _line_tape_canon(k, str(p.get("side") or ""), p.get("line"), None, None)[0]
+        src_mt = "total" if k == "total" else "spread"
+        lad = _ladder_poly(pmm.get(src_mt), k) if pmm else {}
+        if lad:
+            out += _ladder_rows(sport, ev, "poly", k, lad, at, ctr, _LADDER_LAST)
+        kq = p.get("kalshi") if isinstance(p.get("kalshi"), dict) else {}
+        et = kq.get("event_ticker")
+        if et and not kq.get("kept"):
+            try:
+                import kalshi_venue as _kv
+                em = _kv.event_markets(et)
+                klad = _ladder_kalshi(em.get("markets") or [], k, g.get("away"), g.get("home"))
+            except Exception:
+                klad = {}
+            if klad:
+                out += _ladder_rows(sport, ev, "kalshi", k, klad, at, ctr, _LADDER_LAST)
+    return out
+
+
+def _ladder_write(sb, rows: list) -> int:
+    """Insert ladder rows in chunks; never raises. A failed chunk forgets its
+    games so the next read writes their whole ladder again."""
+    if not rows or sb is None or not _machine_flag("line_tape", True) or not _line_tape_ensure(sb):
+        return 0
+    n = 0
+    for i in range(0, len(rows), 500):
+        chunk = rows[i:i + 500]
+        try:
+            sb.table("ladder_tape").insert(chunk).execute()
+            n += len(chunk)
+        except Exception as e:
+            _LADDER_STATS["errors"] += 1
+            _LADDER_STATS["last_error"] = f"{type(e).__name__}: {e}"[:120]
+            for r in chunk:
+                _LADDER_LAST.pop((r["sport"], r["event_name"], r["src"], r["mt"]), None)
+    _LADDER_STATS["rows"] += n
+    return n
+
+
+def _ladder_interp(lad: dict, x: float, max_gap: float = 3.0):
+    """Pure. A value at line x off a {line: value} ladder: the rung itself,
+    else linear between the two rungs around it (≤ max_gap apart)."""
+    if not lad:
+        return None
+    for ln, v in lad.items():
+        if abs(ln - x) < 0.01:
+            return v
+    lo = max((l for l in lad if l < x), default=None)
+    hi = min((l for l in lad if l > x), default=None)
+    if lo is None or hi is None or hi - lo > max_gap:
+        return None
+    a, b = lad[lo], lad[hi]
+    return a + (b - a) * (x - lo) / (hi - lo)
+
+
+def _ladder_equiv_at(book: dict, pinf: dict, x: float):
+    """Pure. One book's (bid, ask) AT line x. Listed → its own price (exact).
+    Not listed → its two nearest rungs around x carried there by their gap to
+    Pinnacle's fair on those rungs, weighted by closeness (Pinnacle's ladder
+    supplies the shape, the key numbers; the book supplies its level); no
+    Pinnacle → straight between the two rungs. (bid, ask, exact, via) or None."""
+    if not book:
+        return None
+    for ln, v in book.items():
+        if abs(ln - x) < 0.01:
+            return v[0], v[1], True, None
+    lo = max((l for l in book if l < x), default=None)
+    hi = min((l for l in book if l > x), default=None)
+    near = [l for l in (lo, hi) if l is not None and abs(l - x) <= 3.0]
+    if not near:
+        return None
+    pfx = _ladder_interp(pinf, x)
+    out = []
+    for i in (0, 1):
+        if pfx is not None and all(_ladder_interp(pinf, l) is not None for l in near):
+            num = den = 0.0
+            for l in near:
+                v = book[l][i]
+                if v is None:
+                    continue
+                w = 1.0 / max(0.25, abs(l - x))
+                num += w * (v - _ladder_interp(pinf, l))
+                den += w
+            out.append(round(pfx + num / den, 2) if den else None)
+        elif lo is not None and hi is not None and len(near) == 2 and book[lo][i] is not None and book[hi][i] is not None:
+            a, b = book[lo][i], book[hi][i]
+            out.append(round(a + (b - a) * (x - lo) / (hi - lo), 2))
+        else:
+            out.append(None)
+    if out[0] is None and out[1] is None:
+        return None
+    return out[0], out[1], False, near
+
+
+def _ladder_pin_fair(pin_lad: dict) -> dict:
+    """Pure. {line: (p_home, p_away)} → {line: home/over fair in cents}."""
+    out = {}
+    for ln, (ph, pa) in (pin_lad or {}).items():
+        a, b = _amer_to_prob_py(ph), _amer_to_prob_py(pa)
+        if a and b:
+            out[ln] = round(a / (a + b) * 100.0, 2)
+    return out
+
+
+def _ladder_series(rows: list, anchor: float) -> dict:
+    """Pure. One game-market's ladder_tape rows (oldest first) → every book
+    AT `anchor` (home / over line) over time: {pin: [[t, fair]], poly / kalshi:
+    [[t, bid, ask, exact, via]]}; a point is written when its value moves."""
+    state = {"pin": {}, "poly": {}, "kalshi": {}}
+    out = {"pin": [], "poly": [], "kalshi": []}
+    last = {"pin": None, "poly": [None, None, None, None], "kalshi": [None, None, None, None]}
+
+    def f(x):
+        try:
+            return float(x) if x is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def emit(t):
+        pinf = _ladder_pin_fair(state["pin"])
+        fx = _ladder_interp(pinf, anchor)
+        v = None if fx is None else round(fx, 2)
+        if v != last["pin"]:
+            out["pin"].append([t, v])
+            last["pin"] = v
+        for src in ("poly", "kalshi"):
+            e = _ladder_equiv_at(state[src], pinf, anchor)
+            pt = [e[0], e[1], e[2], e[3]] if e else [None, None, None, None]
+            if pt != last[src]:
+                out[src].append([t] + pt)
+                last[src] = pt
+    cur_t = None
+    for r in rows or []:
+        d = _parse_iso(r.get("at")) if r.get("at") else None
+        if d is None or r.get("src") not in state:
+            continue
+        t = int(d.timestamp() * 1000)
+        if cur_t is not None and t != cur_t:
+            emit(cur_t)
+        cur_t = t
+        ln = f(r.get("line"))
+        if ln is None:
+            continue
+        ln = round(ln, 2)
+        st = state[r["src"]]
+        if r["src"] == "pin":
+            ph, pa = f(r.get("p_home")), f(r.get("p_away"))
+            if ph is None or pa is None:
+                st.pop(ln, None)
+            else:
+                st[ln] = (ph, pa)
+        else:
+            bd, ak = f(r.get("bid_c")), f(r.get("ask_c"))
+            if bd is None and ak is None:
+                st.pop(ln, None)
+            else:
+                st[ln] = (bd, ak)
+    if cur_t is not None:
+        emit(cur_t)
+    return out
+
+
 def _line_tape_changed(rows: list, last: dict) -> list:
     """Pure-ish (updates `last`). Only the rows whose value moved since the
     last one written for the same (sport, game, src, market)."""
@@ -28596,7 +28872,7 @@ def _line_tape_pin_tick(sb, now=None) -> dict:
     games = [g for g in list(_LINE_TAPE_GAMES) if g[5] and (_parse_iso(g[5]) or now) > now]
     touch = (_SHEET_TOUCH_LAST.get("games") or {}) if isinstance(_SHEET_TOUCH_LAST.get("games"), dict) else {}
     slates: dict = {}
-    rows, seen = [], 0
+    rows, seen, lad_rows = [], 0, []
     at = now.isoformat()
     for sport, ev, mid, away, home, start in games:
         try:
@@ -28617,10 +28893,20 @@ def _line_tape_pin_tick(sb, now=None) -> dict:
                     rh, ra = None, None
                 rungs[k] = (rg, rh, ra)
             rows += _line_tape_pin_rows(sport, ev, mid, start, pin, at, rungs)
+            for k in (("puck", "total") if str(sport).upper() == "NHL" else ("spread", "total")):
+                try:
+                    lad = _ladder_pin(evs, away, home, start, k)
+                    ctr = pin.get("total") if k == "total" else pin.get("spread_home")
+                    if lad:
+                        lad_rows += _ladder_rows(sport, ev, "pin", k, lad, at, ctr, _LADDER_LAST)
+                except Exception as e:
+                    _LADDER_STATS["errors"] += 1
+                    _LADDER_STATS["last_error"] = f"pin: {e}"[:120]
     n = _line_tape_write(sb, rows)
+    nl = _ladder_write(sb, lad_rows)
     _LINE_TAPE_STATS["pin_rows"] += n
     _LINE_TAPE_STATS["pin_at"] = at
-    return {"games": len(games), "priced": seen, "rows": n}
+    return {"games": len(games), "priced": seen, "rows": n, "ladder": nl}
 
 
 def _line_tape_prune(sb, now=None) -> None:
@@ -28776,7 +29062,8 @@ def _sheet_touch_kalshi(item: dict) -> dict:
         return {"why": str((rs or {}).get("why") or "no_market")[:80]}
     q = rs.get("quote") if isinstance(rs.get("quote"), dict) else {}
     fee = rs.get("fee") if isinstance(rs.get("fee"), dict) else None
-    return {"ticker": rs.get("ticker"), "buy_yes": bool(rs.get("buy_yes")), "line": rs.get("line"),
+    return {"ticker": rs.get("ticker"), "event_ticker": rs.get("event_ticker"),
+            "buy_yes": bool(rs.get("buy_yes")), "line": rs.get("line"),
             "bid": q.get("bid"), "ask": q.get("ask"), "why": rs.get("why"),
             "fee": ({k: fee.get(k) for k in ("fee_type", "fee_multiplier") if k in fee} if fee else None)}
 
@@ -28847,6 +29134,7 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
     st = {"games": 0, "items": 0, "poly": 0, "kalshi": 0, "kept": 0, "fresh": 0, "partial": False, "sports": {}}
     far_s = float(far_s if far_s is not None else _SHEET_TOUCH_EVERY_S)
     tape: list = []
+    ladder: list = []
     cache: dict = {}
     # THE WALK ROTATES (Oct 27 2026, Rob: "no pin quote from noon after on
     # college football"): nearest-first under a 240s budget read ~38 of 84
@@ -28917,11 +29205,19 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
                       "picks": picks}
         tape += _line_tape_venue_rows(sport, r.get("event_name"), r.get("market_id"), r.get("event_start"),
                                       picks, now_iso)
+        try:
+            ladder += _ladder_touch_rows(sport, r.get("event_name"), g, picks,
+                                         cache.get((sport, str(g.get("away")), str(g.get("home")),
+                                                    str(g.get("event_start")))) or {}, now_iso)
+        except Exception as e:
+            _LADDER_STATS["errors"] += 1
+            _LADDER_STATS["last_error"] = f"touch: {e}"[:120]
         st["games"] += 1
         st["sports"][sport] = st["sports"].get(sport, 0) + 1
         _time.sleep(0.15)                      # gentle on both venues; the pass is not a race
     try:
         st["tape"] = _line_tape_write(sb, tape)
+        st["ladder"] = _ladder_write(sb, ladder)
         _LINE_TAPE_STATS["venue_at"] = now_iso
     except Exception as e:
         st["tape"] = f"err: {e}"[:60]
@@ -29118,8 +29414,52 @@ def api_line_tape():
     except Exception as e:
         return jsonify({"ok": False, "error": f"read: {e}"[:160]}), 502
     start = next((r.get("event_start") for r in rows if r.get("event_start")), None)
+    markets = _line_tape_series(sport, rows)
+    ladders, lad_err = {}, None
+    try:
+        lrows = _sb_paged(lambda: (sb.table("ladder_tape")
+                                   .select("at,src,mt,line,bid_c,ask_c,p_home,p_away")
+                                   .eq("sport", sport).eq("event_name", ev).gte("at", since)
+                                   .order("at").order("id")), 40)
+        ladders = _ladder_payload(lrows, markets, request.args.get("mt"), request.args.get("line"))
+    except Exception as e:
+        lad_err = f"{type(e).__name__}: {e}"[:120]
     return jsonify({"ok": True, "sport": sport, "event_name": ev, "event_start": start, "n": len(rows),
-                    "markets": _line_tape_series(sport, rows)})
+                    "markets": markets, "ladders": ladders, "ladder_err": lad_err})
+
+
+def _ladder_payload(lrows: list, markets: dict, want_mt=None, want_line=None) -> dict:
+    """Pure. Ladder rows → {mt: {anchor, rungs, pin, poly, kalshi}} with every
+    book priced AT the anchor (`_ladder_series`). The anchor is the asked line
+    for the asked market, else the sheet's rung (the newest Poly line on the
+    line tape), else Pinnacle's newest main line."""
+    by: dict = {}
+    for r in lrows or []:
+        by.setdefault(r.get("mt"), []).append(r)
+    out = {}
+    for mt, rs in by.items():
+        anchor = None
+        if want_mt == mt and want_line not in (None, ""):
+            try:
+                anchor = float(want_line)
+            except (TypeError, ValueError):
+                anchor = None
+        m = (markets or {}).get(mt) or {}
+        if anchor is None:
+            for src, i in (("poly", 1), ("kalshi", 1), ("pin", 1)):
+                pts = [p for p in (m.get(src) or []) if p[i] is not None]
+                if pts:
+                    anchor = float(pts[-1][i])
+                    break
+        if anchor is None:
+            pins = [r for r in rs if r.get("src") == "pin" and r.get("line") is not None]
+            if not pins:
+                continue
+            anchor = float(pins[-1]["line"])
+        lines = sorted({round(float(r["line"]), 2) for r in rs if r.get("line") is not None
+                        and abs(float(r["line"]) - anchor) <= 3.0 + 1e-9})
+        out[mt] = {"anchor": anchor, "rungs": lines, **_ladder_series(rs, anchor)}
+    return out
 
 
 def _venue_ladders(client, sport: str, away: str, home: str, start: str, mt: str, now=None) -> dict:
@@ -29262,7 +29602,16 @@ def api_line_tape_probe():
                      "pin_last": (m["pin"][-1] if m["pin"] else None),
                      "poly_last": (m["poly"][-1] if m["poly"] else None),
                      "kalshi_last": (m["kalshi"][-1] if m["kalshi"] else None)} for mt, m in ser.items()}
-        return jsonify({"ok": True, "n": len(rows), "summary": summ, "tail": rows[-30:]})
+        lrows = _sb_paged(lambda: (sb.table("ladder_tape").select("at,src,mt,line,bid_c,ask_c,p_home,p_away")
+                                   .eq("sport", sport).eq("event_name", ev).gte("at", since)
+                                   .order("at").order("id")), 20)
+        lad = _ladder_payload(lrows, ser, request.args.get("mt"), request.args.get("line"))
+        lsum = {mt: {"anchor": d["anchor"], "rungs": d["rungs"], "pin_last": (d["pin"][-1] if d["pin"] else None),
+                     "poly_last": (d["poly"][-1] if d["poly"] else None),
+                     "kalshi_last": (d["kalshi"][-1] if d["kalshi"] else None),
+                     "n": {k: len(d[k]) for k in ("pin", "poly", "kalshi")}} for mt, d in lad.items()}
+        return jsonify({"ok": True, "n": len(rows), "summary": summ, "ladder_rows": len(lrows),
+                        "ladder": lsum, "tail": rows[-30:]})
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}), 502
 

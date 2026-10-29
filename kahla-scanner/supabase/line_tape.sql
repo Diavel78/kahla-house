@@ -32,3 +32,26 @@ alter table line_tape add column if not exists r_away numeric;   -- pin: away / 
 create index if not exists line_tape_game_idx on line_tape (sport, event_name, at);
 create index if not exists line_tape_at_idx on line_tape (at);
 notify pgrst, 'reload schema';
+
+-- THE LADDER TAPE (Oct 29 2026, Rob: "I need one chart… different lines in
+-- different books"). Every rung each book lists near the line, one row per
+-- rung per CHANGE (a rung the book stops listing writes a null row). Same
+-- orientation rule: home / over. Pinnacle's alternate ladder every minute
+-- (p_home / p_away American), Poly + Kalshi bid / ask cents on the touch
+-- walk. The chart prices every book AT ONE LINE off this.
+create table if not exists ladder_tape (
+  id          bigserial primary key,
+  at          timestamptz not null default now(),
+  sport       text not null,
+  event_name  text not null,
+  src         text not null check (src in ('pin','poly','kalshi')),
+  mt          text not null,          -- spread | puck | total
+  line        numeric not null,       -- the rung, home / over orientation
+  bid_c       numeric,
+  ask_c       numeric,
+  p_home      numeric,
+  p_away      numeric
+);
+create index if not exists ladder_tape_game_idx on ladder_tape (sport, event_name, at);
+create index if not exists ladder_tape_at_idx on ladder_tape (at);
+notify pgrst, 'reload schema';

@@ -405,6 +405,7 @@
             </div>
             <div class="ch-row"><div class="seg" id="chMkts"></div><div class="seg" id="chSides"></div></div>
             <div class="ch-row"><div class="seg" id="chRange"></div></div>
+            <div class="ch-row"><div class="seg" id="chAnchor" style="overflow-x:auto;max-width:100%"></div></div>
             <div class="ch-read" id="chRead"></div>
             <div class="ch-box" id="chBox"></div>
             <div class="ch-leg">
@@ -413,7 +414,7 @@
                 <span><i style="background:#4FB3FF;opacity:.45"></i>Poly ask</span>
                 <span><i style="background:#7BE3A6"></i>Kalshi bid</span>
             </div>
-            <div class="ch-note">Prices in cents for the side you pick (cents = the chance it wins). Pinnacle fair = Pinnacle's price with the vig taken out, priced at the same line Poly and Kalshi are quoting. Labels mark where a line moved. Recording began Oct 29 2026: Pinnacle every minute, Poly and Kalshi every 30 min far out, every 10 min inside a day, every 3 min inside 3 hours.</div>
+            <div class="ch-note">One line, every book: tap a line above and every book is priced at it, in cents for the side you pick (cents = the chance it wins). Solid = that book lists the line. Dashed = it doesn't, so its price is carried from its nearest lines by how far it sits from Pinnacle on those lines. Pinnacle fair = Pinnacle's price with the vig taken out, off its own alternate lines. Recording began Oct 29 2026: Pinnacle every minute; Poly and Kalshi every 30 min far out, 10 min inside a day, 3 min inside 3 hours.</div>
         </div>
         <div class="ov" id="ov" onclick="closeSheet()"></div>
         <div class="as" id="as"></div>
@@ -2271,12 +2272,13 @@
         if (!_ch) return;
         const c = _ch;
         try {
-            const r = await authFetch('/api/line-tape?sport=' + encodeURIComponent(_sport) + '&event=' + encodeURIComponent(c.g.event_name));
+            const an = (c.anchor && c.anchor.mt === c.mt) ? '&mt=' + encodeURIComponent(c.mt) + '&line=' + encodeURIComponent(c.anchor.line) : '';
+            const r = await authFetch('/api/line-tape?sport=' + encodeURIComponent(_sport) + '&event=' + encodeURIComponent(c.g.event_name) + an);
             const j = await r.json();
             if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
             if (_ch !== c) return;
             c.data = j; c.err = null;
-            const have = Object.keys(j.markets || {});
+            const have = Array.from(new Set(Object.keys(j.markets || {}).concat(Object.keys(j.ladders || {}))));
             if (!c.mt || !have.includes(c.mt)) c.mt = ['spread', 'puck', 'total', 'ml'].find(k => have.includes(k)) || null;
             if (c.mt && !c.side) chartPickSide();
         } catch (e) { if (_ch === c) c.err = String(e.message || e); }
@@ -2292,7 +2294,12 @@
         _ch[k] = v; _ch.hover = null;
         if (k === 'mt') chartPickSide();
         renderChart();
+        if (k === 'mt' && _ch.anchor && _ch.anchor.mt !== v) { _ch.anchor = null; loadChart(); }
     }
+    // ONE LINE, EVERY BOOK (Rob, Oct 29 2026: "I need one chart"): pick the line,
+    // every book is priced there — its own price when it lists it, else carried
+    // from its nearest rungs by its gap to Pinnacle (dashed).
+    function chartAnchor(line) { if (!_ch) return; _ch.anchor = { mt: _ch.mt, line: line }; _ch.hover = null; loadChart(); }
     function centsAm(c) {
         if (c == null || !(c > 0 && c < 100)) return '';
         const a = c >= 50 ? -100 * c / (100 - c) : 100 * (100 - c) / c;
@@ -2305,8 +2312,18 @@
     }
     // the chosen side's series: venue [t, line, bid, ask], pin [t, line, price, fair]
     function chartSeries() {
-        const m = (_ch.data && _ch.data.markets || {})[_ch.mt]; if (!m) return null;
         const canon = _ch.side === 'home' || _ch.side === 'over', spr = _ch.mt === 'spread' || _ch.mt === 'puck';
+        const L = (_ch.data && _ch.data.ladders || {})[_ch.mt];
+        if (L && ((L.pin || []).length || (L.poly || []).length || (L.kalshi || []).length)) {
+            const al = (spr && !canon) ? -L.anchor : L.anchor;
+            const fl = x => (x != null && spr && !canon) ? -x : x;
+            const v = p => canon ? [p[0], al, p[1], p[2], p[3], p[4]]
+                : [p[0], al, p[2] != null ? 100 - p[2] : null, p[1] != null ? 100 - p[1] : null, p[3], p[4] ? p[4].map(fl) : p[4]];
+            const pn = p => [p[0], al, null, p[1] == null ? null : (canon ? p[1] : 100 - p[1])];
+            return { ladder: true, anchor: al, rungs: (L.rungs || []).map(fl),
+                     poly: (L.poly || []).map(v), kalshi: (L.kalshi || []).map(v), pin: (L.pin || []).map(pn) };
+        }
+        const m = (_ch.data && _ch.data.markets || {})[_ch.mt]; if (!m) return null;
         const v = p => canon ? [p[0], p[1], p[2], p[3]]
             : [p[0], (spr && p[1] != null) ? -p[1] : p[1], p[3] != null ? 100 - p[3] : null, p[2] != null ? 100 - p[2] : null];
         const pn = p => [p[0], (spr && p[1] != null && !canon) ? -p[1] : p[1], canon ? p[2] : p[3],
@@ -2320,7 +2337,7 @@
     }
     function renderChart() {
         if (!_ch) return;
-        const c = _ch, have = Object.keys((c.data && c.data.markets) || {});
+        const c = _ch, have = Array.from(new Set(Object.keys((c.data && c.data.markets) || {}).concat(Object.keys((c.data && c.data.ladders) || {}))));
         const mk = ['ml', 'spread', 'puck', 'total'].filter(k => have.includes(k));
         document.getElementById('chMkts').innerHTML = mk.map(k => '<button class="' + (k === c.mt ? 'on' : '') + '" onclick="chartSet(\'mt\',\'' + k + '\')">' + (k === 'spread' && _sport === 'MLB' ? 'Run line' : CH_MK[k]) + '</button>').join('');
         document.getElementById('chSides').innerHTML = c.mt ? chartSides(c.mt).map(s => '<button class="' + (s === c.side ? 'on' : '') + '" onclick="chartSet(\'side\',\'' + s + '\')">' + esc(s === 'over' ? 'Over' : s === 'under' ? 'Under' : shortTeam(c.g[s])) + '</button>').join('') : '';
@@ -2328,6 +2345,10 @@
         const box = document.getElementById('chBox'), rd = document.getElementById('chRead');
         if (!c.data) { box.innerHTML = '<div class="empty">' + (c.err ? 'Could not load the chart: ' + esc(c.err) : 'loading…') + '</div>'; rd.innerHTML = ''; return; }
         const S = chartSeries();
+        const anc = document.getElementById('chAnchor');
+        anc.innerHTML = (S && S.ladder && S.rungs.length) ? S.rungs.slice().sort((a, b) => a - b).map(l =>
+            '<button class="' + (Math.abs(l - S.anchor) < 0.01 ? 'on' : '') + '" onclick="chartAnchor(' + ((c.mt !== 'total' && c.side === 'away') ? -l : l) + ')">'
+            + esc(chartLineTxt(c.mt, c.side, l)) + '</button>').join('') : '';
         const all = S ? [].concat(S.pin, S.poly, S.kalshi) : [];
         if (!S || !all.length) { box.innerHTML = '<div class="empty">No history for this game yet — recording began Oct 29 2026.</div>'; rd.innerHTML = ''; return; }
         const startMs = c.g.event_start ? Date.parse(c.g.event_start) : null;
@@ -2344,7 +2365,16 @@
             pts.forEach(p => { if (p[0] > tStart && p[0] <= tEnd) out.push([p[0], p[i]]); });
             return out;
         };
-        const lines = [
+        // a book's own price at the line is solid; one carried from its other rungs is dashed
+        const visIf = (pts, i, exact) => vis(pts.map(p => [p[0], 0, p[i] == null ? null : (!!p[4] === exact ? p[i] : null), 0]), 2);
+        const lines = S.ladder ? [
+            { pts: vis(S.pin, 3), col: '#E6C36A', w: 2.5, key: 'fair' },
+            { pts: visIf(S.poly, 3, true), col: '#4FB3FF', w: 1.5, dash: '4 3', op: .5, key: 'pask' },
+            { pts: visIf(S.kalshi, 2, true), col: '#7BE3A6', w: 2, key: 'kbid' },
+            { pts: visIf(S.kalshi, 2, false), col: '#7BE3A6', w: 2, dash: '6 4', key: 'kbid_est' },
+            { pts: visIf(S.poly, 2, true), col: '#4FB3FF', w: 2.5, key: 'pbid' },
+            { pts: visIf(S.poly, 2, false), col: '#4FB3FF', w: 2.5, dash: '6 4', key: 'pbid_est' },
+        ] : [
             { pts: vis(S.pin, 3), col: '#E6C36A', w: 2.5, key: 'fair' },
             { pts: vis(S.poly, 3), col: '#4FB3FF', w: 1.5, dash: '4 3', op: .5, key: 'pask' },
             { pts: vis(S.kalshi, 2), col: '#7BE3A6', w: 2, key: 'kbid' },
@@ -2431,9 +2461,21 @@
         const pb = chartAt(S.poly, t, 2), pa = chartAt(S.poly, t, 3), plin = chartAt(S.poly, t, 1);
         const kb = chartAt(S.kalshi, t, 2), ka = chartAt(S.kalshi, t, 3), klin = chartAt(S.kalshi, t, 1);
         // Kalshi often lists a different rung than Poly — say so, it is a different bet
-        const kTxt = (klin != null && plin != null && c.mt !== 'ml' && Math.abs(klin - plin) > 0.01) ? ' at ' + esc(chartLineTxt(c.mt, c.side, klin)) : '';
+        let kTxt = (klin != null && plin != null && c.mt !== 'ml' && Math.abs(klin - plin) > 0.01) ? ' at ' + esc(chartLineTxt(c.mt, c.side, klin)) : '';
+        let pTxt = '';
+        if (S.ladder) {                     // estimated at this line: name the rungs it came from
+            const est = (pts) => { const ex = chartAt(pts, t, 4), via = chartAt(pts, t, 5);
+                return (ex === false && via && via.length) ? ' ≈ est. from ' + via.map(x => esc(chartLineTxt(c.mt, c.side, x))).join(' / ') : ''; };
+            kTxt = est(S.kalshi); pTxt = est(S.poly);
+        }
         const when = new Date(t).toLocaleString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-        rd.innerHTML = '<b>' + esc(hx != null ? when : 'Now') + '</b>' + (plin != null && c.mt !== 'ml' ? ' · venue line ' + esc(chartLineTxt(c.mt, c.side, plin)) : '')
+        const sideNm = c.mt === 'total' ? '' : shortTeam(c.g[c.side]) + ' ';
+        rd.innerHTML = S.ladder
+            ? '<b>' + esc(hx != null ? when : 'Now') + '</b> · every book at <b>' + esc(sideNm + chartLineTxt(c.mt, c.side, S.anchor)) + '</b>'
+              + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + (fair != null ? ' (' + centsAm(fair) + ')' : '') + '</span>'
+              + '<br><span style="color:#4FB3FF">Poly ' + c1(pb) + ' / ' + c1(pa) + pTxt + '</span>'
+              + '<br><span style="color:#7BE3A6">Kalshi ' + c1(kb) + ' / ' + c1(ka) + kTxt + '</span>'
+            : '<b>' + esc(hx != null ? when : 'Now') + '</b>' + (plin != null && c.mt !== 'ml' ? ' · venue line ' + esc(chartLineTxt(c.mt, c.side, plin)) : '')
             + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + (fair != null ? ' (' + centsAm(fair) + ')' : '') + '</span>'
             + (pl != null && c.mt !== 'ml' ? ' · PIN ' + esc(chartLineTxt(c.mt, c.side, pl)) : '') + (pp != null ? ' ' + am(pp) : '')
             + '<br><span style="color:#4FB3FF">Poly ' + c1(pb) + ' / ' + c1(pa) + '</span> · <span style="color:#7BE3A6">Kalshi' + kTxt + ' ' + c1(kb) + ' / ' + c1(ka) + '</span>';

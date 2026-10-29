@@ -6761,6 +6761,7 @@ def test_line_tape() -> None:
     chart's fair is priced at the venue's rung."""
     import app as _app
     import inspect
+    import os
     from datetime import datetime, timedelta, timezone
     C = _app._line_tape_canon
     check("line tape: home read is as-is", C("spread", "home", -13.5, 48, 51) == (-13.5, 48.0, 51.0))
@@ -6820,6 +6821,41 @@ def test_line_tape() -> None:
                                                  "kalshi": {"line": 47.5, "bid": 41}}}) == {"spread": -19.5, "total": 47.5})
     rr = _app._line_tape_pin_rows("NCAAF", "x", None, None, pin, "t", {"spread": (-13.5, -120, 100)})
     check("line tape: the pin row carries the rung prices", next(r for r in rr if r["mt"] == "spread").get("r_home") == -120.0)
+    # THE LADDER: every book at ONE line (Rob, Oct 29 2026: "I need one chart")
+    pinl = {-21.5: (131, -158), -20.5: (103, -123), -20.0: (-104, -115), -19.5: (-110, -104),
+            -19.0: (-116, -103), -18.5: (-120, 101), -17.5: (-129, 108)}
+    pinf = _app._ladder_pin_fair(pinl)
+    check("ladder: Pinnacle fair per rung", abs(pinf[-19.5] - 50.68) < 0.01 and abs(pinf[-20.5] - 47.18) < 0.01, str(pinf))
+    kal = {-20.5: (46, 47), -17.5: (53, 54)}
+    eq = _app._ladder_equiv_at(kal, pinf, -19.5)
+    check("ladder: a book without the line is carried there by its gap to Pinnacle (est.)",
+          eq and eq[2] is False and eq[3] == [-20.5, -17.5] and abs(eq[0] - 49.58) < 0.05, str(eq))
+    check("ladder: a book with the line plots its own price", _app._ladder_equiv_at({-19.5: (48.5, 49)}, pinf, -19.5) == (48.5, 49, True, None))
+    check("ladder: no Pinnacle → straight between the two rungs", abs(_app._ladder_equiv_at(kal, {}, -19.5)[0] - 48.33) < 0.01)
+    check("ladder: nothing within 3 points → None", _app._ladder_equiv_at({-25.5: (30, 31)}, pinf, -19.5) is None)
+    lastl: dict = {}
+    r1 = _app._ladder_rows("NCAAF", "g", "poly", "spread", {-19.5: (48.5, 49), -18.5: (50, 50.5), -30.5: (20, 21)}, "t", -19.5, lastl)
+    r2 = _app._ladder_rows("NCAAF", "g", "poly", "spread", {-19.5: (48.5, 49)}, "t", -19.5, lastl)
+    check("ladder: rungs outside the window are not kept", len(r1) == 2)
+    check("ladder: only changes, and a rung the book dropped writes a null row",
+          len(r2) == 1 and r2[0]["line"] == -18.5 and r2[0].get("bid_c") is None)
+    po = _app._ladder_poly([{"side": "away", "line": 19.5, "quote": {"bid": 0.51, "ask": 0.515}},
+                            {"side": "home", "line": -18.5, "quote": {"bid": 0.50, "ask": 0.505}}], "spread")
+    check("ladder: Poly entries land home-side", po.get(-19.5) == (48.5, 49.0) and po.get(-18.5) == (50.0, 50.5), str(po))
+    ser = _app._ladder_series([{"at": t0, "src": "pin", "mt": "spread", "line": l, "p_home": h, "p_away": a} for l, (h, a) in pinl.items()]
+                              + [{"at": t1, "src": "kalshi", "mt": "spread", "line": l, "bid_c": b, "ask_c": a} for l, (b, a) in kal.items()], -19.5)
+    check("ladder: the series prices every book at the anchor",
+          ser["pin"][0][1] == 50.68 and ser["kalshi"][-1][3] is False and ser["poly"] == [], str(ser))
+    pay = _app._ladder_payload([{"at": t0, "src": "pin", "mt": "spread", "line": -19.5, "p_home": -110, "p_away": -104}],
+                               {"spread": {"poly": [[1, -18.5, 50, 50.5]], "kalshi": [], "pin": []}})
+    check("ladder: the anchor defaults to the sheet's rung (Poly's line)", pay["spread"]["anchor"] == -18.5, str(pay))
+    pay2 = _app._ladder_payload([{"at": t0, "src": "pin", "mt": "spread", "line": -19.5, "p_home": -110, "p_away": -104}],
+                                {}, "spread", "-20.5")
+    check("ladder: an asked line wins", pay2["spread"]["anchor"] == -20.5)
+    src = inspect.getsource(_app._sheet_touch_pass)
+    check("ladder: the walk records Poly + Kalshi ladders", "_ladder_touch_rows(" in src and "_ladder_write(sb, ladder)" in src)
+    check("ladder: the Pinnacle minute records its alternate ladder", "_ladder_pin(" in inspect.getsource(_app._line_tape_pin_tick))
+    check("ladder: DDL", "create table if not exists ladder_tape" in open(os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "kahla-scanner", "supabase", "line_tape.sql")).read())
     src = inspect.getsource(_app._sheet_touch_pass)
     check("line tape: the walk writes every read", "_line_tape_venue_rows(" in src and "_line_tape_write(sb, tape)" in src)
     check("line tape: the walk skips games not due", "_sheet_touch_due_s(" in src and 'st["fresh"]' in src)
