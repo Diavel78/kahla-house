@@ -17792,6 +17792,12 @@ def _hand_start_cancel_alert(stamp: dict) -> None:
     try:
         if not _machine_flag("hand_red_alert", True):
             return
+        # THE GAME-START PINGS HAVE THEIR OWN SWITCH, OFF (Oct 29 2026, Rob turning
+        # the red alert back on: "the red light is probably all I needed… turn
+        # back on the Needs you") — NOT FILLED / CHASING / CANCELLED fired all
+        # slate long and were the noise he shut Telegram off for (Oct 27).
+        if not _machine_flag("hand_start_alert", False):
+            return
         # once per pick AND per moment: the chase hand-off at the window's end
         # and the chase's own end an hour later are two different pings
         pid = str(stamp.get("pick_id") or "")
@@ -17860,18 +17866,18 @@ def _hand_start_alert_retry() -> int:
     return sent
 
 
-def _hand_red_read_rec(sb, r: dict, blob: dict, s: dict, started: bool, cache: dict):
+def _hand_red_read_rec(sb, r: dict, blob: dict, s: dict, started: bool, cache: dict, any_rest: bool = False):
     """The model's read on a STOPPED resting bet, exactly as the page builds
     it (`_bet_sheet_reads` over a /mine-shaped row), so the box's red alert
     and the page agree on whether a CHALK / PAST LEASH is red. None when the
     bet is not stopped, not resting, or the read cannot price it."""
     hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
     o = s.get("order") if isinstance(s.get("order"), dict) else {}
-    if not hold or not o.get("resting") or started:
+    if (not hold and not any_rest) or not o.get("resting") or started:
         return None
     try:
         b = {"status": "pending", "started": False, "order": dict(o),
-             "chase": {"hold": hold}, "market_type": r.get("market_type"), "side": r.get("side"),
+             "chase": {"hold": hold} if hold else {}, "market_type": r.get("market_type"), "side": r.get("side"),
              "sport": r.get("sport"), "line": r.get("entry_line"), "market_id": r.get("market_id"),
              "event_name": r.get("event_name"), "touch_c": s.get("touch_c"),
              "price_c": blob.get("price_c"), "live_snipe": bool(blob.get("live_snipe"))}
@@ -17880,6 +17886,50 @@ def _hand_red_read_rec(sb, r: dict, blob: dict, s: dict, started: bool, cache: d
         return rd.get("rec") if rd else None
     except Exception:
         return None
+
+
+def _hand_flip_red(r: dict, blob: dict, s: dict, model: dict | None, rec=None):
+    """Pure. MODEL FLIPPED, exactly as the page paints it red ("needs you"):
+    a pre-game bet RESTING on the side opposite the model's button for its
+    market, not bet against the model on purpose (`vs_model`), not an app
+    bet, not an auto bet, and the model's read is not `hold`. `model` =
+    {side, label} for the bet's market off the sheet. (code, text) or None."""
+    if not isinstance(model, dict) or not model.get("side") or not r.get("side"):
+        return None
+    if model["side"] == r.get("side"):
+        return None
+    if blob.get("vs_model") or blob.get("app_adopted") or blob.get("placed_via") == "app" \
+            or isinstance(blob.get("auto_price"), dict) or blob.get("in_play") or blob.get("live_snipe"):
+        return None
+    o = s.get("order") if isinstance(s.get("order"), dict) else {}
+    if not o.get("resting") or rec == "hold":
+        return None
+    return "model_flipped", f"MODEL FLIPPED · model now on {model.get('label') or model['side']} — flip or hold"
+
+
+def _hand_model_sides(sb, now) -> dict:
+    """market_id → {market_type: {side, label}}: the model's button side per
+    market on every upcoming sheet game (the touch walk's rows, the page's
+    pickSpec). market_type is the bet's (ml / spread / total; a puck line is
+    a spread)."""
+    out: dict = {}
+    try:
+        rows = _sheet_touch_rows_cached(sb, now)
+    except Exception:
+        return out
+    for sport, r, g in rows:
+        mid = r.get("market_id")
+        if not mid:
+            continue
+        for it in _sheet_touch_items(sport, g):
+            mt, side, line = it["market_type"], it["side"], it["line"]
+            if mt == "total":
+                lab = f"{'Over' if side == 'over' else 'Under'} {line:g}"
+            else:
+                team = g.get("home") if side == "home" else g.get("away")
+                lab = f"{team} ML" if mt == "ml" else f"{team} {line:+g}"
+            out.setdefault(str(mid), {}).setdefault(mt, {"side": side, "label": lab})
+    return out
 
 
 def _hand_red_alert_tick(sb, now) -> dict:
@@ -17903,6 +17953,7 @@ def _hand_red_alert_tick(sb, now) -> dict:
     reds = sent = cleared = 0
     live_ids = set()
     read_cache: dict = {}
+    model_sides = None
     for r in picks:
         pid = str(r.get("id"))
         live_ids.add(pid)
@@ -17918,6 +17969,14 @@ def _hand_red_alert_tick(sb, now) -> dict:
             started = False
         rec = _hand_red_read_rec(sb, r, blob, s, started, read_cache) if not started else None
         red = _hand_red_state(blob, s, started=started, rec=rec)
+        if not red and not started:
+            if model_sides is None:
+                model_sides = _hand_model_sides(sb, now)
+            mt = "ml" if r.get("market_type") == "moneyline" else r.get("market_type")
+            model = (model_sides.get(str(r.get("market_id"))) or {}).get(mt)
+            if model and model.get("side") != r.get("side"):
+                red = _hand_flip_red(r, blob, s, model,
+                                     rec=_hand_red_read_rec(sb, r, blob, s, started, read_cache, any_rest=True))
         ra = blob.get("red_alert") if isinstance(blob.get("red_alert"), dict) else None
         if not red:
             _HAND_RED_SEEN.pop(pid, None)

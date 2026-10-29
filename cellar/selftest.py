@@ -3845,6 +3845,24 @@ def test_hand_red_alert() -> None:
     print("bet sheets: the red alert")
     import app as _app
     import inspect as _insp
+    # MODEL FLIPPED is a "needs you" red on the box too (Oct 29 2026) — the page's rules
+    F = _app._hand_flip_red
+    rr = {"side": "over", "market_type": "total"}
+    rest = {"order": {"resting": True}}
+    under = {"side": "under", "label": "Under 77.5"}
+    check("flip red: a resting bet opposite the model's side is MODEL FLIPPED",
+          (F(rr, {}, rest, under) or ("",))[0] == "model_flipped")
+    check("flip red: a bet against the model on purpose is not",
+          F(rr, {"vs_model": True}, rest, under) is None)
+    check("flip red: app / auto / live bets are not",
+          F(rr, {"placed_via": "app"}, rest, under) is None and F(rr, {"auto_price": {}}, rest, under) is None
+          and F(rr, {"live_snipe": {"at": 1}}, rest, under) is None)
+    check("flip red: a filled or unread order is not, nor a read that says hold",
+          F(rr, {}, {"order": {"resting": False}}, under) is None and F(rr, {}, rest, under, rec="hold") is None)
+    check("flip red: the model on the bet's own side is not",
+          F(rr, {}, rest, {"side": "over", "label": "Over 77.5"}) is None)
+    check("the game-start pings have their own switch, default off",
+          '_machine_flag("hand_start_alert", False)' in _insp.getsource(_app._hand_start_cancel_alert))
     R = _app._hand_red_state
     resting = {"order": {"resting": True, "leaves": 5, "price_c": 44.0}, "held": 0.0, "touch_c": 45.5, "outbid": True}
     off = {"order": {"resting": False}, "held": 0.0}
@@ -4006,7 +4024,7 @@ def test_hand_red_alert() -> None:
     # the sender: one ping per pick, the outcome rides the stamp, a failed send queues
     sent = []
     old_send, old_flag = _app._send_fill_telegram, _app._machine_flag
-    _app._machine_flag = lambda name, default=None: default
+    _app._machine_flag = lambda name, default=None: True if name == "hand_start_alert" else default
     _app._HAND_START_ALERTED.clear(); _app._HAND_START_ALERT_Q.clear()
     try:
         _app._send_fill_telegram = lambda msg, urgent=False: sent.append(msg) or True
