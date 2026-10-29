@@ -6801,6 +6801,25 @@ def test_line_tape() -> None:
     check("line tape: pin fair at the venue rung (−13.5 off Pinnacle's −14 gains the push)",
           S["pin"][0][5] == -13.5 and S["pin"][0][4] is not None and S["pin"][0][4] > 50.0, str(S["pin"][0]))
     check("line tape: on Pinnacle's own line it is the plain devig", abs(S["pin"][1][4] - 50.0) < 0.01, str(S["pin"][1]))
+    # Troy @ JMU, Oct 29 2026: Poly −19.5, Kalshi only −17.5, Pinnacle −19.5 → the fair is at POLY's rung
+    tape2 = [{"at": t0, "src": "poly", "mt": "spread", "line": -19.5, "bid_c": 48.5, "ask_c": 49},
+             {"at": t0, "src": "kalshi", "mt": "spread", "line": -17.5, "bid_c": 53, "ask_c": 54},
+             {"at": t1, "src": "pin", "mt": "spread", "line": -19.5, "p_home": -110, "p_away": -104}]
+    P2 = _app._line_tape_series("NCAAF", tape2)["spread"]["pin"][0]
+    check("line tape: the fair sits on Poly's rung, not Kalshi's", P2[5] == -19.5 and P2[4] is not None, str(P2))
+    tape3 = [{"at": t0, "src": "poly", "mt": "spread", "line": -17.5, "bid_c": 53, "ask_c": 54},
+             {"at": t1, "src": "pin", "mt": "spread", "line": -19.5, "p_home": -110, "p_away": -104,
+              "rung": -17.5, "r_home": -150, "r_away": 130}]
+    P3 = _app._line_tape_series("NCAAF", tape3)["spread"]["pin"][0]
+    check("line tape: Pinnacle's own price at the rung beats the push conversion (2 pts off the main line)",
+          P3[5] == -17.5 and P3[4] is not None and abs(P3[4] - 57.98) < 0.01, str(P3))
+    check("line tape: venue rungs Poly first",
+          _app._line_tape_venue_rungs({"spread": {"side": "away", "line": 19.5, "poly": {"line": 19.5, "bid": 51},
+                                                  "kalshi": {"line": 17.5, "bid": 47}},
+                                       "total": {"side": "under", "line": 50.5, "poly": {"why": "x"},
+                                                 "kalshi": {"line": 47.5, "bid": 41}}}) == {"spread": -19.5, "total": 47.5})
+    rr = _app._line_tape_pin_rows("NCAAF", "x", None, None, pin, "t", {"spread": (-13.5, -120, 100)})
+    check("line tape: the pin row carries the rung prices", next(r for r in rr if r["mt"] == "spread").get("r_home") == -120.0)
     src = inspect.getsource(_app._sheet_touch_pass)
     check("line tape: the walk writes every read", "_line_tape_venue_rows(" in src and "_line_tape_write(sb, tape)" in src)
     check("line tape: the walk skips games not due", "_sheet_touch_due_s(" in src and 'st["fresh"]' in src)

@@ -28459,10 +28459,13 @@ def _line_tape_venue_rows(sport: str, event_name: str, market_id, event_start, p
     return out
 
 
-def _line_tape_pin_rows(sport: str, event_name: str, market_id, event_start, pin: dict, at: str) -> list:
+def _line_tape_pin_rows(sport: str, event_name: str, market_id, event_start, pin: dict, at: str,
+                        rungs: dict | None = None) -> list:
     """Pure. A Pinnacle main-line block (`_pin_block_from_events`) → line_tape
     rows (src pin): ml, the spread (`puck` on hockey — Pinnacle's main
-    hockey spread IS the ±1.5), the total. Prices American."""
+    hockey spread IS the ±1.5), the total. Prices American. `rungs` {mt:
+    (rung, r_home, r_away)} = Pinnacle's own two prices at the venue's rung
+    (its alternate ladder), stamped on that market's row."""
     if not isinstance(pin, dict):
         return []
     base = {"at": at, "sport": sport, "event_name": event_name,
@@ -28483,6 +28486,28 @@ def _line_tape_pin_rows(sport: str, event_name: str, market_id, event_start, pin
     if pin.get("total") is not None and pin.get("over_odds") is not None:
         out.append({**base, "mt": "total", "line": f(pin["total"]), "p_home": f(pin.get("over_odds")),
                     "p_away": f(pin.get("under_odds"))})
+    for r in out:
+        rg = (rungs or {}).get(r["mt"])
+        if rg and rg[0] is not None:
+            r["rung"], r["r_home"], r["r_away"] = f(rg[0]), f(rg[1]), f(rg[2])
+    return out
+
+
+def _line_tape_venue_rungs(picks: dict) -> dict:
+    """Pure. The touch walk's picks for one game → {mt: rung} in the home /
+    over orientation: Polymarket's rung, else Kalshi's."""
+    out = {}
+    for k, p in (picks or {}).items():
+        if not isinstance(p, dict) or k not in ("spread", "puck", "total"):
+            continue
+        for vn in ("poly", "kalshi"):
+            q = p.get(vn) if isinstance(p.get(vn), dict) else None
+            if q and q.get("bid") is not None:
+                ln = q.get("line") if q.get("line") is not None else p.get("line")
+                rg = _line_tape_canon(k, str(p.get("side") or ""), ln, None, None)[0]
+                if rg is not None:
+                    out[k] = rg
+                    break
     return out
 
 
@@ -28492,7 +28517,8 @@ def _line_tape_changed(rows: list, last: dict) -> list:
     out = []
     for r in rows or []:
         k = (r.get("sport"), r.get("event_name"), r.get("src"), r.get("mt"))
-        v = (r.get("line"), r.get("bid_c"), r.get("ask_c"), r.get("p_home"), r.get("p_away"))
+        v = (r.get("line"), r.get("bid_c"), r.get("ask_c"), r.get("p_home"), r.get("p_away"),
+             r.get("rung"), r.get("r_home"), r.get("r_away"))
         if last.get(k) == v:
             continue
         last[k] = v
@@ -28511,11 +28537,12 @@ def _line_tape_ensure(sb) -> bool:
     msg = ""
     try:
         sb.table("line_tape").select("id").limit(1).execute()
-        _LINE_TAPE_ENSURED["ok"] = True
-        return True
+        if _CELLAR_SIDE != "cellar" or _LINE_TAPE_ENSURED["applied"]:
+            _LINE_TAPE_ENSURED["ok"] = True
+            return True
     except Exception as e:
         msg = str(e)
-    if _CELLAR_SIDE == "cellar" and not _LINE_TAPE_ENSURED["applied"]:
+    if _CELLAR_SIDE == "cellar" and not _LINE_TAPE_ENSURED["applied"]:   # once per boot: new columns ship with a kick
         _LINE_TAPE_ENSURED["applied"] = True
         ddl = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "kahla-scanner", "supabase", "line_tape.sql")
@@ -28567,6 +28594,7 @@ def _line_tape_pin_tick(sb, now=None) -> dict:
     free direct feed) → every upcoming sheet game's main lines → line_tape."""
     now = now or datetime.now(timezone.utc)
     games = [g for g in list(_LINE_TAPE_GAMES) if g[5] and (_parse_iso(g[5]) or now) > now]
+    touch = (_SHEET_TOUCH_LAST.get("games") or {}) if isinstance(_SHEET_TOUCH_LAST.get("games"), dict) else {}
     slates: dict = {}
     rows, seen = [], 0
     at = now.isoformat()
@@ -28575,10 +28603,20 @@ def _line_tape_pin_tick(sb, now=None) -> dict:
             evs = _pin_live_slate(sb, sport, now, slates)[0]
             pin = _pin_block_from_events(evs, away, home, start=start) if evs else None
         except Exception:
-            pin = None
+            evs, pin = None, None
         if pin:
             seen += 1
-            rows += _line_tape_pin_rows(sport, ev, mid, start, pin, at)
+            # Pinnacle's own price AT the venue's rung, off its alternate ladder
+            rungs = {}
+            tg = touch.get(f"{sport}|{ev}") if isinstance(touch.get(f"{sport}|{ev}"), dict) else {}
+            for k, rg in _line_tape_venue_rungs(tg.get("picks") or {}).items():
+                mtx, sd = ("total", "over") if k == "total" else ("spread", "home")
+                try:
+                    rh, ra = _pin_rung_prices(evs, away, home, mtx, sd, rg, start=start)
+                except Exception:
+                    rh, ra = None, None
+                rungs[k] = (rg, rh, ra)
+            rows += _line_tape_pin_rows(sport, ev, mid, start, pin, at, rungs)
     n = _line_tape_write(sb, rows)
     _LINE_TAPE_STATS["pin_rows"] += n
     _LINE_TAPE_STATS["pin_at"] = at
@@ -29011,18 +29049,33 @@ def _line_tape_series(sport: str, rows: list) -> dict:
             continue
         m = out.setdefault(mt, {"poly": [], "kalshi": [], "pin": []})
         if src == "pin":
-            pins.setdefault(mt, []).append((t, f(r.get("line")), f(r.get("p_home")), f(r.get("p_away"))))
+            pins.setdefault(mt, []).append((t, f(r.get("line")), f(r.get("p_home")), f(r.get("p_away")),
+                                            f(r.get("rung")), f(r.get("r_home")), f(r.get("r_away"))))
         else:
             m[src].append([t, f(r.get("line")), f(r.get("bid_c")), f(r.get("ask_c"))])
     for mt, pts in pins.items():
         m = out[mt]
-        venue = sorted([p for p in m["poly"] if p[1] is not None or mt == "ml"]
-                       + [p for p in m["kalshi"] if p[1] is not None or mt == "ml"], key=lambda p: p[0])
-        for t, pl, ph, pa in pts:
+        poly = [p for p in m["poly"] if p[1] is not None]
+        kal = [p for p in m["kalshi"] if p[1] is not None]
+        for t, pl, ph, pa, rr, rh, ra in pts:
             rung = None
             if mt != "ml":
-                prior = [v for v in venue if v[0] <= t and v[1] is not None]
-                rung = prior[-1][1] if prior else (venue[0][1] if venue else pl)
+                # THE POLY RUNG FIRST (Oct 29 2026, Troy @ JMU: Kalshi had no −19.5 and quoted
+                # −17.5; pricing the fair at Kalshi's rung put it two points off Pinnacle's −19.5
+                # and the fair came out blank). Kalshi's rung only when Poly has none.
+                for venue in (poly, kal):
+                    prior = [v for v in venue if v[0] <= t]
+                    if prior or venue:
+                        rung = (prior[-1] if prior else venue[0])[1]
+                        break
+                if rung is None:
+                    rung = pl
+            if mt != "ml" and rr is not None and rung is not None and abs(rr - rung) < 0.01 \
+                    and rh is not None and ra is not None:
+                a, b = _amer_to_prob_py(rh), _amer_to_prob_py(ra)
+                if a and b:                       # Pinnacle's own two prices at this rung
+                    m["pin"].append([t, pl, ph, pa, round(a / (a + b) * 100.0, 2), rung])
+                    continue
             if mt == "ml":
                 blk, mtx, side = {"ml_home": ph, "ml_away": pa}, "ml", "home"
             elif mt == "total":
@@ -29059,7 +29112,7 @@ def api_line_tape():
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     try:
         rows = _sb_paged(lambda: (sb.table("line_tape")
-                                  .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_start")
+                                  .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,rung,r_home,r_away,event_start")
                                   .eq("sport", sport).eq("event_name", ev).gte("at", since)
                                   .order("at")), 20)
     except Exception as e:
@@ -29103,7 +29156,7 @@ def api_line_tape_probe():
                 d[kk] = d.get(kk, 0) + 1
             return jsonify({"ok": True, "n": len(rows), "games": games})
         rows = _sb_paged(lambda: (sb.table("line_tape")
-                                  .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_start")
+                                  .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,rung,r_home,r_away,event_start")
                                   .eq("sport", sport).eq("event_name", ev).gte("at", since).order("at")), 20)
         ser = _line_tape_series(sport, rows)
         summ = {mt: {"poly": len(m["poly"]), "kalshi": len(m["kalshi"]), "pin": len(m["pin"]),

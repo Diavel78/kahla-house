@@ -2429,12 +2429,14 @@
         const t = hx != null ? hx : tEnd;
         const fair = chartAt(S.pin, t, 3), pl = chartAt(S.pin, t, 1), pp = chartAt(S.pin, t, 2);
         const pb = chartAt(S.poly, t, 2), pa = chartAt(S.poly, t, 3), plin = chartAt(S.poly, t, 1);
-        const kb = chartAt(S.kalshi, t, 2), ka = chartAt(S.kalshi, t, 3);
+        const kb = chartAt(S.kalshi, t, 2), ka = chartAt(S.kalshi, t, 3), klin = chartAt(S.kalshi, t, 1);
+        // Kalshi often lists a different rung than Poly — say so, it is a different bet
+        const kTxt = (klin != null && plin != null && c.mt !== 'ml' && Math.abs(klin - plin) > 0.01) ? ' at ' + esc(chartLineTxt(c.mt, c.side, klin)) : '';
         const when = new Date(t).toLocaleString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
         rd.innerHTML = '<b>' + esc(hx != null ? when : 'Now') + '</b>' + (plin != null && c.mt !== 'ml' ? ' · venue line ' + esc(chartLineTxt(c.mt, c.side, plin)) : '')
             + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + (fair != null ? ' (' + centsAm(fair) + ')' : '') + '</span>'
             + (pl != null && c.mt !== 'ml' ? ' · PIN ' + esc(chartLineTxt(c.mt, c.side, pl)) : '') + (pp != null ? ' ' + am(pp) : '')
-            + '<br><span style="color:#4FB3FF">Poly ' + c1(pb) + ' / ' + c1(pa) + '</span> · <span style="color:#7BE3A6">Kalshi ' + c1(kb) + ' / ' + c1(ka) + '</span>';
+            + '<br><span style="color:#4FB3FF">Poly ' + c1(pb) + ' / ' + c1(pa) + '</span> · <span style="color:#7BE3A6">Kalshi' + kTxt + ' ' + c1(kb) + ' / ' + c1(ka) + '</span>';
         c.lay = { W: W, ml: ml, mr: mr, tStart: tStart, tEnd: tEnd };
     }
     // the crosshair: listeners on the box (it survives every re-render)

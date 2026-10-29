@@ -24,6 +24,11 @@ create table if not exists line_tape (
   p_home      numeric,                -- pin: home / over price, American
   p_away      numeric                 -- pin: away / under price, American
 );
+-- Pinnacle's OWN two prices at the venue's rung (its alternate ladder), when it
+-- lists that rung — the fair the chart draws without a push-rate conversion.
+alter table line_tape add column if not exists rung numeric;     -- the Poly rung (home / over), else Kalshi's
+alter table line_tape add column if not exists r_home numeric;   -- pin: home / over price AT the rung
+alter table line_tape add column if not exists r_away numeric;   -- pin: away / under price at the mirror rung
 create index if not exists line_tape_game_idx on line_tape (sport, event_name, at);
 create index if not exists line_tape_at_idx on line_tape (at);
 notify pgrst, 'reload schema';
