@@ -1419,6 +1419,15 @@
             acts.push('<button class="abtn' + (rp ? ' on' : rec === 'repeg' ? ' pri' : '') + '" onclick="sheetOp(\'repeg\')">' + (rp ? '✓ On the slip: re-peg to touch' : star('repeg') + 'Re-peg to touch') + '</button>');
             if (!b.live_snipe) acts.push('<button class="abtn' + (lv ? ' on' : rec === 'live' ? ' pri' : '') + '" onclick="sheetOp(\'live\')">' + (lv ? '✓ On the slip: move to live @ 49.5¢' : star('live') + 'Move to Live · 49.5¢, no game-start cancel') + '</button>');
             acts.push('<button class="abtn dng' + (cn ? ' on' : rec === 'cancel' ? ' pri' : '') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: cancel order' : star('cancel') + 'Cancel order') + '</button>');
+        } else if (b.status === 'pending' && !o.resting && !(held > 0) && b.recon && (b.recon.red || []).some(f => f.code === 'dead_order')) {
+            // A DEAD PICK (Oct 29 2026, FAU @ UNT O 77.5: Polymarket dropped the
+            // order overnight, the pick stayed, and the sheet offered NO button —
+            // Rob: "I can't delete"). Its order is gone and nothing filled, so the
+            // cancel op just clears the pick (the cancel path deletes a pending
+            // pick holding nothing).
+            const cn = inSlip(opKey('cancel', b.id));
+            h += '<div class="note">This bet has nothing on the book — its order is gone and nothing filled. Remove it to clear CHECK ME. Your other orders are not touched.</div>';
+            acts.push('<button class="abtn dng' + (cn ? ' on' : ' pri') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: remove this bet' : 'Remove this bet') + '</button>');
         } else if (b.status === 'pending' && b.live_snipe && b.live_hold && !o.resting) {
             const cn = inSlip(opKey('cancel', b.id));
             h += '<div class="note">The live chase pulled this order (the rung collapsed) and rejoins at the bid, under the live cap, at ~' + fmtClock(b.live_hold.resume_at) + '. Cancel here to drop the bet instead.</div>';

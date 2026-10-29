@@ -3827,6 +3827,11 @@ def test_bet_sheet_live_section() -> None:
     check("…a tap on a game in progress is a LIVE slip item", "const live = g._st === 'live';" in html and "...(live ? { live: true } : {})" in html)
     check("…the Live section renders the in-progress games with buttons", "if (_filter === 'live') {" in html and "lv.map(g => gameCard(g, true))" in html)
     check("…and the payload carries the flag", "live: !!i.live," in html)
+    check("a dead pick (order gone, nothing held) gets a Remove button",
+          "(b.recon.red || []).some(f => f.code === 'dead_order')" in html and "'Remove this bet'" in html)
+    _cx = inspect.getsource(_app._bet_sheet_cancel_exec)
+    check("…and the cancel op deletes a pending pick holding nothing",
+          "held <= 0.0 and r.get(\"status\") == \"pending\"" in _cx)
     # the ⇄ Other side bet must reach the box marked (Oct 29 2026: the Place
     # request listed its fields by hand and dropped vs_model — FAU @ UNT O 77.5
     # bet against the model read MODEL FLIPPED)
