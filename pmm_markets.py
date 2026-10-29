@@ -1116,6 +1116,12 @@ def _classify_market(m: dict, away: str, home: str
     # — same V2 bucket, but not the full-game main line.
     if any(mk in v1 for mk in _VARIANT_MARKERS):
         return None
+    # TEAM TOTALS BY SLUG (Oct 28 2026): NBA team totals ('tsc-nba-lal-lac-
+    # 2026-10-28-tt-lac-fg-112pt5') carry a v1 name 'team_points' does not
+    # match, and sat in the game-total ladder beside 224.5 — a 50/50 election
+    # could land on a team's 112.5. The venue's own slug says 'tt'.
+    if "-tt-" in str(m.get("slug") or ""):
+        return None
 
     line = m.get("line")
     if line is not None:

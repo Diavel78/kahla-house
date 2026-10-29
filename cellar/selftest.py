@@ -4188,6 +4188,11 @@ def test_pmm_thunder_total() -> None:
     boundaries, and the slug guard now reads the NBA total slug too."""
     import pmm_markets as pm
     import app as _app
+    tt = {"sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL", "sportsMarketType": "basketball_team_totals",
+          "line": 112.5, "question": "Will the Clippers score more than 112.5?",
+          "slug": "tsc-nba-lal-lac-2026-10-28-tt-lac-fg-112pt5"}
+    check("pmm: a team total (slug -tt-) never joins the game-total ladder (Oct 28 2026)",
+          pm._classify_market(tt, "Los Angeles Lakers", "LA Clippers") is None)
     A, H = "Oklahoma City Thunder", "San Antonio Spurs"
     def M(q, line=232.5):
         return {"sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL", "sportsMarketType": "basketball_team_full_game_total",
