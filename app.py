@@ -29154,7 +29154,7 @@ def _venue_ladders(client, sport: str, away: str, home: str, start: str, mt: str
             em = _kv.event_markets(row["event_ticker"])
             if request and request.args.get("kraw"):
                 # what the reader drops: every market on the event, any status, with its words
-                ea = _kv.event_markets(row["event_ticker"], status="")
+                ea = _kv.event_markets(row["event_ticker"], status=None)
                 out["kalshi_raw"] = [{"ticker": m.get("ticker"), "status": m.get("status"),
                                       "title": m.get("title"), "yes_sub_title": m.get("yes_sub_title"),
                                       "floor": m.get("floor_strike"), "cls": _kv.classify(m, away, home)}
