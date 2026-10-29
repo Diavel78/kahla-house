@@ -5198,6 +5198,11 @@ def test_sheet_pin_fair_at_rung() -> None:
     from datetime import datetime, timedelta, timezone
     import app as _app
     F = _app._pin_fair_at_rung
+    la = [{"away_team": "Los Angeles Lakers", "home_team": "Los Angeles Clippers",
+           "commence_time": "2026-10-29T02:40:00Z"}]
+    m, sw = _app._pin_match_event(la, "Los Angeles Lakers", "LA Clippers", "2026-10-29T02:40:00Z")
+    check("pinnacle: ESPN's 'LA Clippers' matches Pinnacle's 'Los Angeles Clippers' (Oct 28 2026)",
+          m is la[0] and sw is False)
     pin = {"spread_home": -3.0, "spread_home_odds": -104, "spread_away_odds": -108,
            "total": 42.5, "over_odds": -118, "under_odds": 101, "ml_home": 138, "ml_away": -156}
     # the Saints card: NO +3 −108 devigs to 50.45%; +3.5 keeps that on the 90.5% no-push mass and adds the 9.5% push → 55.2% = −123

@@ -46984,7 +46984,14 @@ _PIN_ALIAS = {"mississippi": "ole miss", "central florida": "ucf",
               "connecticut": "uconn", "appalachian state": "app state",
               "ul lafayette": "louisiana ragin cajuns", "miami ohio": "miami oh",
               # Oct 27 2026 probe: ESPN names the school 'Sam Houston Bearkats'
-              "sam houston state": "sam houston"}
+              "sam houston state": "sam houston",
+              # Oct 28 2026: ESPN names the Clippers 'LA Clippers', Pinnacle
+              # 'Los Angeles Clippers' — the word match never lined up, the
+              # whole game priced off ESPN with no Pinnacle fair. Every LA pro
+              # team folds to the long form (aliases are whole-name only).
+              **{f"la {t}": f"los angeles {t}" for t in
+                 ("clippers", "lakers", "rams", "chargers", "kings", "dodgers", "angels",
+                  "galaxy", "fc", "sparks")}}
 
 
 def _pin_norm(name) -> str:
