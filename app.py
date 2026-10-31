@@ -47252,6 +47252,9 @@ _PIN_ALIAS = {"mississippi": "ole miss", "central florida": "ucf",
               "ul lafayette": "louisiana ragin cajuns", "miami ohio": "miami oh",
               # Oct 27 2026 probe: ESPN names the school 'Sam Houston Bearkats'
               "sam houston state": "sam houston",
+              # Oct 30 2026: Pinnacle 'Miami Florida' @ North Carolina, ESPN
+              # 'Miami Hurricanes' — no word overlap past 'miami', no PIN line
+              "miami florida": "miami hurricanes", "miami fl": "miami hurricanes",
               # Oct 28 2026: ESPN names the Clippers 'LA Clippers', Pinnacle
               # 'Los Angeles Clippers' — the word match never lined up, the
               # whole game priced off ESPN with no Pinnacle fair. Every LA pro

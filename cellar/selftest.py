@@ -5161,6 +5161,15 @@ def test_pin_direct_feed() -> None:
               ("Louisiana Ragin' Cajuns", "Louisiana Tech Bulldogs"),
               ("Miami (OH) RedHawks", "Massachusetts Minutemen"), ("UConn Huskies", "Temple Owls"),
               ("Old Dominion Monarchs", "App State Mountaineers"))] == [-11.0, -12.0, -13.0, -14.0, -15.0, -16.0])
+    mia = _app._pin_direct_to_events(
+        [mu(31, "Miami Florida", "North Carolina"), mu(32, "Miami Ohio", "Ohio")],
+        [mk(31, "spread", {"designation": "home", "points": 14.0, "price": -106},
+            {"designation": "away", "points": -14.0, "price": -108}),
+         mk(32, "spread", {"designation": "home", "points": -3.0, "price": -110},
+            {"designation": "away", "points": 3.0, "price": -110})], now)
+    check("matcher: Pinnacle's 'Miami Florida' is the Hurricanes, never the RedHawks",
+          L(mia, "Miami Hurricanes", "North Carolina Tar Heels", "spread", book="pinnacle") == 14.0
+          and L(mia, "Miami (OH) RedHawks", "Ohio Bobcats", "spread", book="pinnacle") == -3.0)
     check("matcher: 'Mississippi State' is not Ole Miss",
           L(alias, "Mississippi State Bulldogs", "Vanderbilt Commodores", "spread", book="pinnacle") is None)
     two = _app._pin_direct_to_events(
