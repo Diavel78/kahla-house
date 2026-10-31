@@ -26501,6 +26501,16 @@ def _bs_stamp_bet(res: dict, back: dict = None):
                 if bet.get("line") is None:
                     bet["line"] = sl[2]
                 break
+    if bet.get("line") is None and (bet.get("market_type") or "") not in ("moneyline", "ml"):
+        # THE CHASE-END STAMP CARRIES NO LINE (Oct 31 2026, SMU @ Syracuse O 58.5 /
+        # Syracuse +9.5 missing from Settled picks: type and side were there, so the
+        # slug fill above was skipped and the bet could never grade). Read it off the slug.
+        base_slug = re.sub(r"-(1h|2h|1q|2q|3q|4q|p1|p2|p3)-", "-", slug, count=1)
+        for cand in ((syn,) if syn is not None else (False, True)):
+            sl = _slug_side_line(base_slug, bool(cand))
+            if sl and sl[1] == bet.get("side"):
+                bet["line"] = sl[2]
+                break
     return bet, syn
 
 

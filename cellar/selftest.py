@@ -3858,6 +3858,12 @@ def test_bet_sheet_live_section() -> None:
     _dsh = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "dashboard.html")).read()
     check("the Duet connector button lives on the dashboard, not Bet Sheets (a one-time setup)",
           "copyConnector" not in html and "/api/mcp/address" in _dsh and "function copyConnector()" in _dsh)
+    _sb1, _ = _app._bs_stamp_bet({"slug": "tsc-cfb-smu-syra-2026-10-31-total-58pt5",
+                                  "bet": {"market_type": "total", "side": "over"}})
+    _sb2, _ = _app._bs_stamp_bet({"slug": "asc-cfb-smu-syra-2026-10-31-neg-9pt5",
+                                  "bet": {"market_type": "spread", "side": "home", "synthetic": True}})
+    check("a chase-end stamp with no line reads it off the slug (the SMU @ Syracuse bets)",
+          _sb1["line"] == 58.5 and _sb2["line"] == 9.5, f"{_sb1} {_sb2}")
     _g = _app._bs_grade_bet
     check("cancelled bets grade off the final (spread own line, total, ML, push)",
           _g("spread", "home", -3.5, 20, 24) == "win" and _g("spread", "away", 4.5, 20, 24) == "win"
