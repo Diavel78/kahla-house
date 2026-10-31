@@ -3943,6 +3943,16 @@ def test_hand_red_alert() -> None:
     r = R({"anchor_c": 42.0, "chase_hold": {"touch_c": 45.0, "leash_c": 2.0, "rerung": {"slug": "x", "line": 58.5, "bid_c": 51}}}, resting)
     check("PAST LEASH reads red with the leash math and the cheaper rung",
           r and r[0] == "past_leash" and "3¢ past your 42¢" in r[1] and "58.5 @ 51¢" in r[1], str(r))
+    pl = {"anchor_c": 42.0, "chase_hold": {"touch_c": 45.0, "leash_c": 2.0}}
+    check("PAST LEASH is not red where the start chases it live (Rob, Oct 31 2026: let it run)",
+          R(pl, resting, chases=True) is None and R(pl, resting, chases=False)[0] == "past_leash")
+    check("the alert tick passes the sport's start-chase answer",
+          "chases=_hand_start_chase_on(r.get(\"sport\"))" in _insp.getsource(_app._hand_red_alert_tick))
+    _bsh = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "bet_sheets.html")).read()
+    check("the page reads PAST LEASH amber where the start chases",
+          "hold.touch_c != null && b.start_chase" in _bsh and '"start_chase": _hand_start_chase_on(' in _insp.getsource(_app))
+    check("MLB/NHL still cancel at the start (PAST LEASH stays red there)",
+          not _app._hand_start_chase_on("NHL") and not _app._hand_start_chase_on("MLB") and _app._hand_start_chase_on("NCAAF"))
     r = R({"recon": {"red": [{"code": "dead_order", "msg": "the pick's order X is not on the book"}]}}, resting)
     check("CHECK ME is red before anything else", r and r[0] == "check_me" and "not on the book" in r[1], str(r))
     # A HOLD IS NOT RED (Rob, Oct 25 2026): the model's read says hold → CHALK / PAST LEASH are nothing to do

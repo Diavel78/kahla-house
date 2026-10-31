@@ -17666,7 +17666,7 @@ _HAND_RED_MIN_TICKS = 2
 _TG_RED_PREFIX = "\U0001f534"       # 🔴
 
 
-def _hand_red_state(blob: dict, s: dict, started: bool = False, rec=None):
+def _hand_red_state(blob: dict, s: dict, started: bool = False, rec=None, chases: bool = False):
     """Pure. (code, text) when the page would paint this bet RED, else None.
     `s` = the strip entry (order/held/touch_c/outbid/held_unknown). A venue
     read the box could not make (`held_unknown`) is never a red. `rec` =
@@ -17682,7 +17682,13 @@ def _hand_red_state(blob: dict, s: dict, started: bool = False, rec=None):
     it didn't fill and cancelled, that's it"): once the game has started
     nothing is red — a lot that vanishes is a settlement or a sale, an
     in-play app bet is his to move — and a FILLED bet whose lot is gone
-    pre-game is the sold tick's job, never a red."""
+    pre-game is the sold tick's job, never a red.
+    `chases` = the bet's sport hands an unfilled order to the live chase at
+    the drop (`_hand_start_chase_on`). PAST LEASH IS NOT RED THERE (Rob, Oct
+    31 2026, Utah State −7.5 partly filled with 3 resting under a 1¢ climb:
+    "This isn't red really, let the bitch run, and get it live?") — the
+    unfilled part is chased live at game start up to his own bid, so there
+    is nothing for him to do. MLB/NHL cancel at the start, so it stays red."""
     if started or blob.get("in_play") or isinstance(blob.get("live_hold"), dict):
         return None
     o = s.get("order") if isinstance(s.get("order"), dict) else {}
@@ -17719,6 +17725,8 @@ def _hand_red_state(blob: dict, s: dict, started: bool = False, rec=None):
                 txt += f" · cheaper rung on the ladder: line {rr.get('line')} @ {rr.get('bid_c')}¢"
             return "chalk", txt
         if hold and hold.get("touch_c") is not None:
+            if chases:
+                return None                # the start chases it live up to his bid: not red
             anchor = blob.get("anchor_c", blob.get("price_c"))
             try:
                 tc, ac = float(hold["touch_c"]), float(anchor)
@@ -18033,7 +18041,8 @@ def _hand_red_alert_tick(sb, now) -> dict:
         except Exception:
             started = False
         rec = _hand_red_read_rec(sb, r, blob, s, started, read_cache) if not started else None
-        red = _hand_red_state(blob, s, started=started, rec=rec)
+        red = _hand_red_state(blob, s, started=started, rec=rec,
+                              chases=_hand_start_chase_on(r.get("sport")))
         if not red and not started:
             if model_sides is None:
                 model_sides = _hand_model_sides(sb, now)
@@ -25480,6 +25489,7 @@ def api_bet_sheets_mine():
             "auto": bool(blob.get("auto_price")),      # the page's AUTO state (amber, never "need you")
             "vs_model": bool(blob.get("vs_model")),    # bet against the model on purpose — never MODEL FLIPPED
             "live_snipe": bool(blob.get("live_snipe")),
+            "start_chase": _hand_start_chase_on(r.get("sport")),   # PAST LEASH reads amber where the start chases
             "getlive_from": blob.get("getlive_from"),
             # NO "PULLED · back ~" ON A FULL LOT (Oct 24 2026, BC@GT O 49.5: the pull's cancel raced
             # the fill, the hold stayed on the blob, the card promised a rejoin on a bet held 10 of 10)
