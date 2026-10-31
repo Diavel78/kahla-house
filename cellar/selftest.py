@@ -3837,6 +3837,11 @@ def test_bet_sheet_live_section() -> None:
     check("tapping Settled today opens the settled list (won/lost/push/sold)",
           "onclick=\"toggleSettled()" in html and "function renderSettled(d)" in html
           and "try { renderSettled(d); } catch (e) {}" in html)
+    _cp = html[html.index("function myPicksText("):html.index("let _fold = { started: false };")]
+    check("Copy picks copies MY bets (resting/filled/settled), never the model's picks",
+          "_lastBetsPayload.bets" in _cp and "myBetLive(b)" in _cp and "gamePlays(" not in _cp)
+    check("…and carries no contract count or dollars",
+          all(x not in _cp for x in ("contracts", "pnl_usd", "fmtQ(", "money(")))
     check("a dead pick (order gone, nothing held) gets a Remove button",
           "(b.recon.red || []).some(f => f.code === 'dead_order')" in html and "'Remove this bet'" in html)
     _cx = inspect.getsource(_app._bet_sheet_cancel_exec)

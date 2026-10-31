@@ -2140,9 +2140,6 @@
             + '<button class="fchip" onclick="addTodaysPlays()">➕ Today\'s plays</button>'
             + '<button class="fchip" onclick="copyPicks()">📋 Copy picks</button>';
     }
-    // COPY PICKS (Rob, Oct 17 2026: "copy the picks (not my bets)… game,
-    // pick(s), then next game… paste it into an iMessage"): the sheet's own
-    // picks for the upcoming games on screen (tab + search + filter), as text.
     // One pick's bet in the shape the card's button uses: market type, side,
     // line and label — the slip item a tap would make. null = not a play/lean
     // (or a chalky ML, or no line to bet it at).
@@ -2237,66 +2234,77 @@
         saveSlip(); renderSlip(); renderGames(); autoOpenSlip();
         toast('Added ' + added + ' play' + (added === 1 ? '' : 's') + ' to the slip' + (had ? ' · ' + had + ' already bet/on the slip' : ''));
     }
-    // A copied pick's result: the box's grade for that market when it is the
-    // sheet's own pick, else (the puck line, a favorite's line standing in for
-    // a chalky ML) worked off the final score. 'win' | 'loss' | 'push' | null.
-    function playGrade(g, x) {
-        const gr = g.grade || {}, f = gr.final;
-        if (x.k !== 'puck' && (gr[x.k] === 'win' || gr[x.k] === 'loss' || gr[x.k] === 'push')) return gr[x.k];
-        if (!f || f.home == null || f.away == null) return null;
-        const h = Number(f.home), a = Number(f.away);
-        let m;
-        if (x.mt === 'ml') m = x.side === 'home' ? h - a : a - h;
-        else if (x.mt === 'total') m = x.side === 'over' ? h + a - x.line : x.line - (h + a);
-        else m = (x.side === 'home' ? h - a : a - h) + x.line;
-        return m > 0 ? 'win' : m < 0 ? 'loss' : 'push';
+    // COPY PICKS = MY BETS (Rob, Oct 31 2026: "make 'copy picks' on the bet
+    // sheet be MY picks (anything resting or filled) with no share or dollar
+    // count. Instead of the model picks… a copy I can send people"). Today's
+    // (AZ) bets on every sport: resting, filled, or settled from a fill — the
+    // bet and its price only, ✅/❌ on the graded ones, the record at the end.
+    // Never a contract count, never dollars. Only the search narrows it.
+    function myBetLive(b) {
+        if (b.status !== 'pending') return ['won', 'lost', 'push', 'sold'].indexOf(b.status) >= 0;
+        return !!((b.order || {}).resting || Number(b.held || 0) >= 1 || Number(b.filled_qty || 0) >= 1);
     }
-    // COPY PICKS = TODAY'S WHOLE SLATE (Rob, Oct 17 2026: "all games for the
-    // day… ✅ and ❌ next to games over, and the record at the bottom").
-    function picksText(games) {
+    function myBetPrice(b) {
+        if (b.price_c != null && b.price_c !== '') {
+            const p = Number(b.price_c) / 100;
+            if (p > 0 && p < 1) return am(_probToAmer(p));
+        }
+        return b.entry_price != null && b.entry_price !== '' ? am(b.entry_price) : '';
+    }
+    function myBetGame(b) {
+        return _games.find(g => (b.market_id && g.market_id === b.market_id)
+            || (g.event_name === b.event_name && String(g.event_start) === String(b.event_start))) || null;
+    }
+    function myPicksText(bets) {
         const out = [], rec = { win: 0, loss: 0, push: 0 };
-        const days = games.map(g => fmtTime(g.event_start));
-        const multi = new Set(days).size > 1;        // the finals kept on the page + today, or a football week
-        out.push(_sport + ' · ' + (multi ? days[0] + ' – ' + days[days.length - 1] : days[0]));
-        let lastDay = null;
-        games.forEach((g, i) => {
-            if (multi && days[i] !== lastDay) { out.push((lastDay ? '\n' : '') + '— ' + days[i] + ' —'); lastDay = days[i]; }
-            const st = gameStatus(g), f = g.grade && g.grade.final;
-            const L = g.line || {};
-            const plays = gamePlays(g);
-            const priced = Object.keys(L).some(k => L[k] != null);
-            let tag = clk(g.event_start);
-            if (st === 'final') tag = f && f.away != null && f.home != null ? 'FINAL ' + f.away + '-' + f.home : 'FINAL';
+        const RES = { won: ['win', '✅'], lost: ['loss', '❌'], push: ['push', '➖'] };
+        const day = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'short', month: 'short', day: 'numeric' });
+        out.push('My picks · ' + day);
+        const games = [], byKey = {};
+        bets.forEach(b => {
+            const k = (b.sport || '') + '|' + (b.event_name || '') + '|' + (b.event_start || '');
+            if (!byKey[k]) { byKey[k] = []; games.push(k); }
+            byKey[k].push(b);
+        });
+        let lastSport = null;
+        const sports = new Set(bets.map(b => String(b.sport || '').toUpperCase()));
+        games.forEach(k => {
+            const list = byKey[k], b0 = list[0], g = myBetGame(b0);
+            const sp = String(b0.sport || '').toUpperCase();
+            if (sports.size > 1 && sp !== lastSport) { out.push((lastSport ? '\n' : '') + '— ' + sp + ' —'); lastSport = sp; }
+            const t = (b0.event_name || '').split(' @ ').map(shortTeam);
+            const rs = list.map(b => b.result_score).find(r => r && typeof r === 'object' && r.away != null && r.home != null);
+            const f = rs || (g && g.grade && g.grade.final);
+            const st = g ? gameStatus(g) : (b0.event_start && new Date(b0.event_start) < new Date() ? 'live' : 'up');
+            let tag = clk(b0.event_start);
+            if (f && f.away != null && f.home != null && (st === 'final' || rs)) tag = 'FINAL ' + f.away + '-' + f.home;
+            else if (st === 'final') tag = 'FINAL';
             else if (st === 'live') tag = 'LIVE';
-            out.push(shortTeam(g.away) + ' @ ' + shortTeam(g.home) + ' · ' + tag + (st === 'up' && tvText(g) ? ' · ' + tvText(g) : ''));
-            if (!plays.length) { out.push(priced ? '  Pass' : '  No line yet'); return; }
-            plays.forEach(x => {
-                const r = st === 'up' ? null : playGrade(g, x);
-                if (r) rec[r]++;
-                out.push('  ' + playText(x) + (r ? ' ' + ({ win: '✅', loss: '❌', push: '➖' })[r] : ''));
+            out.push((t[0] || '?') + ' @ ' + (t[1] || '?') + ' · ' + tag + (st === 'up' && g && tvText(g) ? ' · ' + tvText(g) : ''));
+            list.forEach(b => {
+                const r = RES[b.status], px = myBetPrice(b);
+                if (r) rec[r[0]]++;
+                out.push('  ' + betLabel(b) + (px ? ' ' + px : '') + (r ? ' ' + r[1] : b.status === 'sold' ? ' (cashed out)' : ''));
             });
         });
         const n = rec.win + rec.loss;
         if (n + rec.push) out.push('\nRecord: ' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + (n ? ' (' + Math.round(100 * rec.win / n) + '%)' : ''));
         return out.join('\n');
     }
-    // TODAY'S WHOLE SLATE, EVERY SPORT (Rob, Oct 23 2026: "ALL SPORTS JUST
-    // TODAY"): every game dated today (AZ) — upcoming, live and today's
-    // finals — never last night's and never the rest of a football week.
-    // The "My bets" chip never narrows it — the copy is the sheet's picks,
-    // not Rob's bets; only the search and the "Plays & leans" chip do.
     async function copyPicks() {
+        if (!_lastBetsPayload) { toast('Your bets are still loading — try again in a second', true); return; }
         const q = (document.getElementById('search').value || '').trim().toLowerCase();
         const words = q.split(/\s+/).filter(Boolean);
         const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
-        let games = _games.filter(g => g.event_start && gameMatches(g, words));
-        games = games.filter(g => new Date(g.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today);
-        if (_filter === 'plays') games = games.filter(g => gamePlays(g).length);
-        if (!games.length) {
-            toast(!_games.length ? 'Nothing on this sheet to copy' : words.length ? 'No games match the search' : _filter === 'plays' ? 'No plays or leans to copy' : 'No games today to copy', true);
-            return;
-        }
-        const txt = picksText(games);
+        const ok1 = b => !words.length || words.every(w => ((b.event_name || '') + ' ' + betLabel(b) + ' ' + (b.sport || '')).toLowerCase().indexOf(w) >= 0);
+        const bets = (_lastBetsPayload.bets || [])
+            .filter(b => b.event_start && new Date(b.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today)
+            .filter(b => myBetLive(b) && ok1(b))
+            .sort((x, y) => String(x.sport || '').localeCompare(String(y.sport || ''))
+                         || String(x.event_start).localeCompare(String(y.event_start))
+                         || String(x.event_name || '').localeCompare(String(y.event_name || '')));
+        if (!bets.length) { toast(words.length ? 'None of your bets today match the search' : 'No bets of yours today to copy', true); return; }
+        const txt = myPicksText(bets);
         let ok = false;
         try { await navigator.clipboard.writeText(txt); ok = true; } catch (e) {}
         if (!ok) {
@@ -2306,7 +2314,7 @@
             try { ok = document.execCommand('copy'); } catch (e) {}
             document.body.removeChild(ta);
         }
-        toast(ok ? 'Copied the picks · ' + games.length + ' game' + (games.length === 1 ? '' : 's') : 'Copy failed', !ok);
+        toast(ok ? 'Copied your picks · ' + bets.length + ' bet' + (bets.length === 1 ? '' : 's') : 'Copy failed', !ok);
     }
     let _fold = { started: false };   // default collapsed, every visit
     function toggleFold(k) { _fold[k] = !_fold[k]; renderGames(); }
