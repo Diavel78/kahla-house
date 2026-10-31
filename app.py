@@ -47660,7 +47660,7 @@ def api_pinnacle_probe():
                 stt = datetime.fromisoformat(str(m.get("startTime")).replace("Z", "+00:00"))
             except Exception:
                 continue
-            if stt > now:
+            if stt > now and not m.get("isLive"):
                 continue
             names = {p.get("alignment"): p.get("name") for p in (m.get("participants") or [])}
             mm = [{"type": x.get("type"), "period": x.get("period"), "alt": x.get("isAlternate"),
@@ -47671,7 +47671,8 @@ def api_pinnacle_probe():
             started.append({"id": m.get("id"), "away": names.get("away"), "home": names.get("home"),
                             "start": m.get("startTime"), "isLive": m.get("isLive"), "liveMode": m.get("liveMode"),
                             "status": m.get("status"), "state": m.get("state"),
-                            "keys": sorted(k for k in m.keys())[:40], "main": mm[:6]})
+                            "keys": sorted(k for k in m.keys())[:40], "main": mm[:6],
+                            "periods": m.get("periods"), "parentId": m.get("parentId")})
         out["live"] = {"started": len(started), "games": started[:12],
                        "flags_seen": sorted({str(m.get("isLive")) for m in mu if isinstance(m, dict)})}
         return jsonify(out)
