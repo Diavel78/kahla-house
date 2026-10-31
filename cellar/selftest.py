@@ -6932,6 +6932,20 @@ def test_line_tape() -> None:
                        "kalshi": {"why": "no_market"}}}
     rows = _app._line_tape_venue_rows("NCAAF", "FAU @ UNT", "m1", "2026-10-30T00:00:00Z", picks, "2026-10-29T00:00:00Z")
     check("line tape: a kept read and a missing venue write nothing", len(rows) == 2 and {r["src"] for r in rows} == {"poly", "kalshi"}, str(rows))
+    # the moneyline on every game (Oct 31 2026) — football has no ML pick
+    _sp, _sk = _app._sheet_touch_poly, _app._sheet_touch_kalshi
+    try:
+        _app._sheet_touch_poly = lambda c, it, cache, max_age_s=600.0: {"line": 0, "bid": 41, "ask": 42} if it["market_type"] == "ml" and it["side"] == "home" else {}
+        _app._sheet_touch_kalshi = lambda it: {"line": 0, "bid": 40, "ask": 43} if it["market_type"] == "ml" else {}
+        _ml = _app._sheet_touch_ml_tape(None, "NCAAF", {"event_name": "A @ B", "market_id": "m", "event_start": "2026-11-01T00:00:00Z"},
+                                        {"away": "A", "home": "B", "event_start": "2026-11-01T00:00:00Z"}, {}, "2026-10-31T00:00:00Z")
+    finally:
+        _app._sheet_touch_poly, _app._sheet_touch_kalshi = _sp, _sk
+    check("line tape: every game records Poly + Kalshi ML (home side) with no ML pick",
+          sorted((r["src"], r["mt"], r["bid_c"]) for r in _ml) == [("kalshi", "ml", 40.0), ("poly", "ml", 41.0)], str(_ml))
+    _ps = inspect.getsource(_app._sheet_touch_pass)
+    check("…and the walk runs it on every picked game without an ML pick",
+          'if "ml" not in picks:' in _ps and "_sheet_touch_ml_tape(" in _ps)
     pr = next(r for r in rows if r["src"] == "poly")
     check("line tape: venue row in home orientation", pr["mt"] == "spread" and pr["line"] == -13.5 and pr["bid_c"] == 49.0 and pr["ask_c"] == 52.0, str(pr))
     pin = {"spread_home": -14, "spread_home_odds": -110, "spread_away_odds": -110, "total": 77.5, "over_odds": -105,

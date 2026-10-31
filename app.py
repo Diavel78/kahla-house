@@ -28903,10 +28903,20 @@ def _ladder_nopick_rows(client, sport: str, r: dict, g: dict, cache: dict, at: s
             out += _ladder_rows(sport, ev, "poly", k, lad, at, ctr, _LADDER_LAST)
         if klad:
             out += _ladder_rows(sport, ev, "kalshi", k, klad, at, ctr, _LADDER_LAST)
-    # the moneyline: one rung, the home side, through the walk's own readers
-    tape = []
-    it = {"k": "ml", "sport": sport, "away": away, "home": home, "event_start": start,
-          "market_type": "ml", "side": "home", "line": 0.0}
+    return out, _sheet_touch_ml_tape(client, sport, r, g, cache, at, max_age_s=max_age_s)
+
+
+def _sheet_touch_ml_tape(client, sport: str, r: dict, g: dict, cache: dict, at: str,
+                         max_age_s: float = 600.0) -> list:
+    """THE MONEYLINE ON THE CHART, EVERY GAME (Oct 31 2026, Rob: "Chart data
+    … doesn't show poly/kalshi ML"): the touch walk quoted the venues only
+    for the sheet's PICKS, and football has no ML pick (nor does a hockey /
+    basketball game whose model passes the ML), so the chart's ML tab had
+    Pinnacle alone. One rung, the home side, through the walk's own readers
+    — the Polymarket lookup is the game's cached one, Kalshi one resolve —
+    line tape only, never the published card quotes."""
+    it = {"k": "ml", "sport": sport, "away": g.get("away"), "home": g.get("home"),
+          "event_start": g.get("event_start"), "market_type": "ml", "side": "home", "line": 0.0}
     try:
         pq = _sheet_touch_poly(client, it, cache, max_age_s=max_age_s)
     except Exception:
@@ -28915,10 +28925,9 @@ def _ladder_nopick_rows(client, sport: str, r: dict, g: dict, cache: dict, at: s
         kq = _sheet_touch_kalshi(it)
     except Exception:
         kq = {}
-    tape = _line_tape_venue_rows(sport, ev, r.get("market_id"), r.get("event_start"),
+    return _line_tape_venue_rows(sport, r.get("event_name"), r.get("market_id"), r.get("event_start"),
                                  {"ml": {"mt": "ml", "side": "home", "line": 0.0,
                                          "poly": pq, "kalshi": kq}}, at)
-    return out, tape
 
 
 def _ladder_write(sb, rows: list) -> int:
@@ -29564,6 +29573,13 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
                       "picks": picks}
         tape += _line_tape_venue_rows(sport, r.get("event_name"), r.get("market_id"), r.get("event_start"),
                                       picks, now_iso)
+        if "ml" not in picks:
+            try:
+                tape += _sheet_touch_ml_tape(client, sport, r, g, cache, now_iso,
+                                             max_age_s=min(600.0, max(60.0, due_s * 0.8)))
+            except Exception as e:
+                _LADDER_STATS["errors"] += 1
+                _LADDER_STATS["last_error"] = f"ml_tape: {e}"[:120]
         try:
             ladder += _ladder_touch_rows(sport, r.get("event_name"), g, picks,
                                          cache.get((sport, str(g.get("away")), str(g.get("home")),
