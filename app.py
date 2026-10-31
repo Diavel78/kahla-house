@@ -47648,6 +47648,33 @@ def api_pinnacle_probe():
     if not isinstance(mk, list):
         out["markets_body"] = txt2
         mk = []
+    if request.args.get("live"):
+        # DOES THE FREE FEED CARRY IN-GAME LINES (Oct 31 2026): every top-level
+        # matchup already past its start, its live flags, and its main markets
+        now = datetime.now(timezone.utc)
+        started = []
+        for m in mu:
+            if m.get("parent") or m.get("parentId") or m.get("special"):
+                continue
+            try:
+                stt = datetime.fromisoformat(str(m.get("startTime")).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if stt > now:
+                continue
+            names = {p.get("alignment"): p.get("name") for p in (m.get("participants") or [])}
+            mm = [{"type": x.get("type"), "period": x.get("period"), "alt": x.get("isAlternate"),
+                   "status": x.get("status"), "cutoff": x.get("cutoffAt"), "version": x.get("version"),
+                   "prices": [(p.get("designation"), p.get("points"), p.get("price")) for p in (x.get("prices") or [])]}
+                  for x in mk if x.get("matchupId") == m.get("id") and x.get("period") in (0, None)
+                  and not x.get("isAlternate")]
+            started.append({"id": m.get("id"), "away": names.get("away"), "home": names.get("home"),
+                            "start": m.get("startTime"), "isLive": m.get("isLive"), "liveMode": m.get("liveMode"),
+                            "status": m.get("status"), "state": m.get("state"),
+                            "keys": sorted(k for k in m.keys())[:40], "main": mm[:6]})
+        out["live"] = {"started": len(started), "games": started[:12],
+                       "flags_seen": sorted({str(m.get("isLive")) for m in mu if isinstance(m, dict)})}
+        return jsonify(out)
     games = {}
     for m in mu:
         if m.get("parent") or m.get("parentId") or m.get("special"):
