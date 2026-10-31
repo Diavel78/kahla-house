@@ -1608,6 +1608,35 @@
         if (sc.away_score == null || sc.home_score == null) return '';
         return (t[0] || 'Away') + ' ' + sc.away_score + ' – ' + sc.home_score + ' ' + (t[1] || 'Home') + (sc.display_status ? ' · ' + sc.display_status : '');
     }
+    // TIME LEFT IN THE GAME (Rob, Oct 31 2026: "sort by amount of time left in
+    // the game — nearest the end at the top"). Seconds of game clock left off the
+    // bet's period + clock (Kalshi's game feed first, ESPN's score second); a final
+    // reads 0, an unknown state reads Infinity and falls back to the start time.
+    const _REG = { NCAAF: [4, 900], NFL: [4, 900], NBA: [4, 720], NCAAB: [2, 1200], CBB: [2, 1200], NHL: [3, 1200] };
+    function _clockSecs(c) {
+        const m = String(c == null ? '' : c).match(/(\d+):(\d{1,2})(?:\.\d+)?/);
+        if (m) return Number(m[1]) * 60 + Number(m[2]);
+        const n = Number(c);
+        return isFinite(n) && String(c).trim() !== '' ? n : null;
+    }
+    function secsLeft(b) {
+        const g = b.game || {}, sc = b.score || {};
+        if (g.status === 'closed' || sc.completed || sc.state === 'post') return 0;
+        const st = (g.period != null) ? g : (sc.period != null && sc.period !== '' ? sc : null);
+        if (!st) return Infinity;
+        const per = parseInt(String(st.period).replace(/[^0-9]/g, ''), 10);
+        if (!per) return Infinity;
+        const sp = String(b.sport || _sport || '').toUpperCase();
+        if (sp === 'MLB') return Math.max(0, 9 - per) * 1200 + 600;   // innings: ~20 min an inning, mid-inning
+        const reg = _REG[sp] || [4, 900], cs = _clockSecs(st.clock);
+        if (per > reg[0]) return cs != null ? cs : 0;                  // overtime: whatever is on the clock
+        return (reg[0] - per) * reg[1] + (cs != null ? cs : reg[1] / 2);
+    }
+    function byTimeLeft(x, y) {
+        const a = secsLeft(x), b = secsLeft(y);
+        if (a !== b) return a < b ? -1 : 1;
+        return String(x.event_start).localeCompare(String(y.event_start));
+    }
     function _plCls(x) { return x == null ? '' : (x > 0.004 ? 'pos' : x < -0.004 ? 'neg' : ''); }
     function _plMark(list) {
         let val = 0, cost = 0, nq = 0;
@@ -1618,7 +1647,7 @@
             const v = prob != null ? held * prob : null;
             if (v != null && c != null) { val += v; cost += c; } else nq++;
             return { b, held, pc, prob, c, v, pl: (v != null && c != null) ? v - c : null };
-        }).sort((x, y) => String(x.b.event_start).localeCompare(String(y.b.event_start)));
+        }).sort((x, y) => byTimeLeft(x.b, y.b));
         return { rows, val, cost, nq, pl: val - cost };
     }
     // a lot under one share is DUST, not a live bet (Oct 24 2026: Akron O47.5
@@ -2734,7 +2763,11 @@
             // a tap puts a LIVE bet on the slip; the box rests it at the live cap or the bid and the
             // live chase owns it (no clock). The buttons read my live bets like any other.
             const liveCap = (_lastBetsPayload && _lastBetsPayload.live_snipe_c) || 49.5;
-            const lv = liveGames.filter(g => gameMatches(g, words));
+            const gLeft = g => {
+                const sb = allBetsOnGame(g).find(b => (b.game && b.game.period != null) || (b.score && b.score.period));
+                return sb ? Object.assign({}, sb, { event_start: g.event_start }) : { event_start: g.event_start, sport: g.sport };
+            };
+            const lv = liveGames.filter(g => gameMatches(g, words)).sort((x, y) => byTimeLeft(gLeft(x), gLeft(y)));
             _btnIds = {};
             document.getElementById('games').innerHTML = lv.length
                 ? '<div class="day-hdr">Live · in progress · a tap rests the bet at ' + liveCap + '¢ or the bid, whichever is cheaper, and the live chase owns it</div>' + lv.map(g => gameCard(g, true)).join('')

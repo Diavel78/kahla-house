@@ -3855,6 +3855,9 @@ def test_bet_sheet_live_section() -> None:
           and "['won', 'lost', 'push', 'sold'].indexOf(b.status) >= 0" in _cp and "Record: " in _cp)
     check("…and a bet on a FINAL game counts settled before the venue pays it (graded off the score)",
           "gradeOffFinal(b, finalFor(b))" in _cp and "g.grade.final" in _cp)
+    check("the Live box and the Live games tab sort by time left in the game, nearest the end first",
+          "}).sort((x, y) => byTimeLeft(x.b, y.b));" in html and "byTimeLeft(gLeft(x), gLeft(y))" in html
+          and "function secsLeft(b)" in html)
     _dsh = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "dashboard.html")).read()
     check("the Duet connector button lives on the dashboard, not Bet Sheets (a one-time setup)",
           "copyConnector" not in html and "/api/mcp/address" in _dsh and "function copyConnector()" in _dsh)
