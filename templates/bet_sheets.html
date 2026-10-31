@@ -2157,20 +2157,10 @@
         document.getElementById('fchips').innerHTML = c('all', 'All games') + c('mine', 'My bets ' + nMine) + c('plays', 'Plays & leans ' + nPick) + c('live', 'Live ' + (nLive || 0))
             + '<button class="fchip" onclick="addTodaysPlays()">➕ Today\'s plays</button>'
             + '<button class="fchip" onclick="copyPicks()">📋 Copy picks</button>'
-            + '<button class="fchip" onclick="copyConnector()">🔌 Connector</button>';
+            + '<button class="fchip" onclick="copySettled()">✅ Settled picks</button>';
     }
-    // THE DUET CONNECTOR (Oct 31 2026): the read-only MCP address for Claude
-    // Duet's "Add custom connector". Shown in a box to copy — iOS refuses a
-    // clipboard write that follows a network wait.
-    async function copyConnector() {
-        let d = null;
-        try { const r = await authFetch('/api/mcp/address'); d = await r.json(); } catch (e) {}
-        if (!d || !d.ok || !d.url) { toast('Could not get the connector address' + (d && d.error ? ': ' + d.error : ''), true); return; }
-        let ok = false;
-        try { await navigator.clipboard.writeText(d.url); ok = true; } catch (e) {}
-        if (ok) toast('Connector address copied · name it Kahla House');
-        window.prompt('Kahla House connector (read-only) — paste into Add custom connector → Address:', d.url);
-    }
+    // THE DUET CONNECTOR's address lives on the dashboard footer (Rob, Oct 31
+    // 2026: "it was a 1 time setup, why would I need a button on my screen every day").
     // One pick's bet in the shape the card's button uses: market type, side,
     // line and label — the slip item a tap would make. null = not a play/lean
     // (or a chalky ML, or no line to bet it at).
@@ -2293,11 +2283,11 @@
         return _games.find(g => (b.market_id && g.market_id === b.market_id)
             || (g.event_name === b.event_name && String(g.event_start) === String(b.event_start))) || null;
     }
-    function myPicksText(bets) {
+    function myPicksText(bets, title) {
         const out = [], rec = { win: 0, loss: 0, push: 0 };
         const RES = { won: ['win', '✅'], lost: ['loss', '❌'], push: ['push', '➖'] };
         const day = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'short', month: 'short', day: 'numeric' });
-        out.push('My picks · ' + day);
+        out.push((title || 'My picks') + ' · ' + day);
         const games = [], byKey = {};
         bets.forEach(b => {
             const k = (b.sport || '') + '|' + (b.event_name || '') + '|' + (b.event_start || '');
@@ -2329,17 +2319,24 @@
         if (n + rec.push) out.push('\nRecord: ' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + (n ? ' (' + Math.round(100 * rec.win / n) + '%)' : ''));
         return out.join('\n');
     }
-    async function copyPicks() {
-        if (!_lastBetsPayload) { toast('Your bets are still loading — try again in a second', true); return; }
+    // TWO COPIES (Rob, Oct 31 2026: "Copy Picks is pre-game. Then a settled
+    // picks (that show everything I didn't cancel)… only the sport I'm on").
+    // Both read today's AZ slate: Copy picks = bets on games that have not
+    // started; Settled picks = this tab's sport, every graded bet INCLUDING
+    // the ones the box cancelled at game start unfilled (he gets those live
+    // on Bet105), never one he cancelled himself, with the record.
+    async function todaysBets(withCancelled) {
         const q = (document.getElementById('search').value || '').trim().toLowerCase();
         const words = q.split(/\s+/).filter(Boolean);
         const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
         const ok1 = b => !words.length || words.every(w => ((b.event_name || '') + ' ' + betLabel(b) + ' ' + (b.sport || '')).toLowerCase().indexOf(w) >= 0);
         let gone = [];
-        try {
-            const r = await authFetch('/api/bet-sheets/cancelled-today');
-            if (r.ok) gone = ((await r.json()) || {}).cancelled || [];
-        } catch (e) {}
+        if (withCancelled) {
+            try {
+                const r = await authFetch('/api/bet-sheets/cancelled-today');
+                if (r.ok) gone = ((await r.json()) || {}).cancelled || [];
+            } catch (e) {}
+        }
         const mine = (_lastBetsPayload.bets || []);
         const have = new Set(mine.map(b => b.id));
         const azDay = t => t ? new Date(t).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) : '';
@@ -2347,14 +2344,14 @@
             || (b.event_name === c.event_name && b.market_type === c.market_type && b.side === c.side
                 && azDay(b.event_start) === azDay(c.event_start)));
         gone = gone.filter(c => !have.has(c.pick_id) && !sameBet(c));
-        const bets = mine.concat(gone)
-            .filter(b => b.event_start && new Date(b.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today)
+        return { words: words, bets: mine.concat(gone)
+            .filter(b => b.event_start && azDay(b.event_start) === today)
             .filter(b => myBetLive(b) && ok1(b))
             .sort((x, y) => String(x.sport || '').localeCompare(String(y.sport || ''))
                          || String(x.event_start).localeCompare(String(y.event_start))
-                         || String(x.event_name || '').localeCompare(String(y.event_name || '')));
-        if (!bets.length) { toast(words.length ? 'None of your bets today match the search' : 'No bets of yours today to copy', true); return; }
-        const txt = myPicksText(bets);
+                         || String(x.event_name || '').localeCompare(String(y.event_name || ''))) };
+    }
+    async function copyText(txt) {
         let ok = false;
         try { await navigator.clipboard.writeText(txt); ok = true; } catch (e) {}
         if (!ok) {
@@ -2364,7 +2361,32 @@
             try { ok = document.execCommand('copy'); } catch (e) {}
             document.body.removeChild(ta);
         }
-        toast(ok ? 'Copied your picks · ' + bets.length + ' bet' + (bets.length === 1 ? '' : 's') : 'Copy failed', !ok);
+        return ok;
+    }
+    function betPreGame(b) {
+        if (b.status && b.status !== 'pending') return false;
+        if (b.in_play || b.live_snipe) return false;
+        const g = myBetGame(b);
+        if (g) return gameStatus(g) === 'up';
+        return !!b.event_start && new Date(b.event_start) > new Date();
+    }
+    async function copyPicks() {
+        if (!_lastBetsPayload) { toast('Your bets are still loading — try again in a second', true); return; }
+        const t = await todaysBets(false);
+        const bets = t.bets.filter(betPreGame);
+        if (!bets.length) { toast(t.words.length ? 'None of your pre-game bets today match the search' : 'No pre-game bets of yours today to copy', true); return; }
+        const ok = await copyText(myPicksText(bets, 'My picks'));
+        toast(ok ? 'Copied your pre-game picks · ' + bets.length + ' bet' + (bets.length === 1 ? '' : 's') : 'Copy failed', !ok);
+    }
+    async function copySettled() {
+        if (!_lastBetsPayload) { toast('Your bets are still loading — try again in a second', true); return; }
+        const t = await todaysBets(true);
+        const sp = String(_sport || '').toUpperCase();
+        const bets = t.bets.filter(b => String(b.sport || '').toUpperCase() === sp
+            && ['won', 'lost', 'push', 'sold'].indexOf(b.status) >= 0);
+        if (!bets.length) { toast('No settled ' + sp + ' bets of yours today' + (t.words.length ? ' match the search' : ''), true); return; }
+        const ok = await copyText(myPicksText(bets, 'Settled picks · ' + sp));
+        toast(ok ? 'Copied settled ' + sp + ' picks · ' + bets.length + ' bet' + (bets.length === 1 ? '' : 's') : 'Copy failed', !ok);
     }
     let _fold = { started: false };   // default collapsed, every visit
     function toggleFold(k) { _fold[k] = !_fold[k]; renderGames(); }

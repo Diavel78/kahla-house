@@ -29965,7 +29965,7 @@ def _line_tape_series(sport: str, rows: list) -> dict:
 # over HTTP POST, plain JSON replies, no SSE) at /mcp/<token>. Duet's sandbox
 # cannot reach this site (proxy 403) but a connector is called from Anthropic's
 # side. The token is the only key: random, kept in parlay_state `mcp_token`,
-# shown to the admin by /api/mcp/address (the Bet Sheets 🔌 chip), rotated
+# shown to the admin by /api/mcp/address (the dashboard footer link), rotated
 # with ?rotate=1. Every tool READS — nothing here can place, cancel or change
 # a bet, a flag or a row. Prices: home / over orientation, cents; times AZ.
 _MCP_TOKEN_KEY = "mcp_token"

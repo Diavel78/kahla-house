@@ -3846,6 +3846,16 @@ def test_bet_sheet_live_section() -> None:
           "if (b.status === 'void') return false;" in html and "myBetLive(b)" in _cp)
     check("…and the bets cancelled at game start / chase end ride along, deduped",
           "/api/bet-sheets/cancelled-today" in _cp and "mine.concat(gone)" in _cp and "b.getlive_from === c.pick_id" in _cp)
+    check("Copy picks is PRE-GAME only (Rob, Oct 31 2026: \"Copy Picks is pre-game\")",
+          "bets = t.bets.filter(betPreGame)" in _cp and "todaysBets(false)" in _cp
+          and "gameStatus(g) === 'up'" in _cp)
+    check("Settled picks = this tab's sport, graded bets incl. the box's game-start cancels, with the record",
+          "onclick=\"copySettled()\"" in html and "todaysBets(true)" in _cp
+          and "String(b.sport || '').toUpperCase() === sp" in _cp
+          and "['won', 'lost', 'push', 'sold'].indexOf(b.status) >= 0" in _cp and "Record: " in _cp)
+    _dsh = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "dashboard.html")).read()
+    check("the Duet connector button lives on the dashboard, not Bet Sheets (a one-time setup)",
+          "copyConnector" not in html and "/api/mcp/address" in _dsh and "function copyConnector()" in _dsh)
     _g = _app._bs_grade_bet
     check("cancelled bets grade off the final (spread own line, total, ML, push)",
           _g("spread", "home", -3.5, 20, 24) == "win" and _g("spread", "away", 4.5, 20, 24) == "win"

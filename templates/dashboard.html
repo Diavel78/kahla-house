@@ -306,10 +306,21 @@
         <div class="foot">
             <span id="stamp">loading…</span>
             <a href="/dashboard-full">Full dashboard →</a>
+            <a href="#" onclick="copyConnector(); return false;" style="margin-left:12px">🔌 Duet connector</a>
         </div>
     </div>
 
 <script>
+    // THE DUET CONNECTOR (moved off Bet Sheets Oct 31 2026 — a one-time setup):
+    // the read-only MCP address for Claude Duet's "Add custom connector".
+    // Shown in a box to copy — iOS refuses a clipboard write after a network wait.
+    async function copyConnector() {
+        let d = null;
+        try { const r = await authFetch('/api/mcp/address'); d = await r.json(); } catch (e) {}
+        if (!d || !d.ok || !d.url) { alert('Could not get the connector address' + (d && d.error ? ': ' + d.error : '')); return; }
+        try { await navigator.clipboard.writeText(d.url); } catch (e) {}
+        window.prompt('Kahla House connector (read-only) — paste into Add custom connector → Address:', d.url);
+    }
     async function authFetch(url, options = {}) {
         const user = firebase.auth().currentUser;
         if (!user) { window.location.href = '/'; return null; }
