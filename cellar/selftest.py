@@ -3872,6 +3872,21 @@ def test_bet_sheet_live_section() -> None:
     _sb4, _ = _app._bs_stamp_bet({"slug": None, "bet": {"market_type": "total", "side": "under", "line": 56.5}})
     check("a Kalshi cancel with no Polymarket twin (no slug) still reaches Settled picks",
           _sb4 and _sb4["line"] == 56.5 and "if not bet or not slug:" not in inspect.getsource(_app._bet_sheet_cancelled_today))
+    _P = _app._hand_kalshi_sold_plan
+    _kf = [{"ticker": "T", "outcome_side": "yes", "count_fp": "10.00", "yes_price_dollars": "0.30",
+            "no_price_dollars": "0.70", "fee_cost": "0.05", "created_time": "2026-10-31T21:00:00Z"},
+           {"ticker": "T", "outcome_side": "no", "count_fp": "10.00", "yes_price_dollars": "0.48",
+            "no_price_dollars": "0.52", "fee_cost": "0.02", "created_time": "2026-10-31T17:00:00Z"}]
+    _kp = _P(_kf, "T", False, "2026-10-31T16:00:00Z", 52.0, 10)
+    check("a Kalshi NO lot sold in the app reads as a sale (sell-no = outcome_side yes) at its NO price",
+          _kp and _kp["qty"] == 10 and _kp["avg_c"] == 70.0 and _kp["pnl_usd"] == round(7.0 - 5.2 - 0.05, 2), str(_kp))
+    check("…the lot's own buy is never a sale, and a sale short of the lot is not a close",
+          _P(_kf[1:], "T", False, None, 52.0, 10) is None
+          and _P([dict(_kf[0], count_fp="4.00")], "T", False, None, 52.0, 10) is None
+          and _P(_kf, "OTHER", False, None, 52.0, 10) is None)
+    check("the handbets tick closes Kalshi sales before the settle tick grades",
+          'stats["ksold"] = _hand_kalshi_sold_tick(sb, now)' in _asrc
+          and _asrc.index('stats["ksold"]') < _asrc.index('stats["ksettle"] = _hand_kalshi_settle_tick(sb, now)'))
     _g = _app._bs_grade_bet
     check("cancelled bets grade off the final (spread own line, total, ML, push)",
           _g("spread", "home", -3.5, 20, 24) == "win" and _g("spread", "away", 4.5, 20, 24) == "win"

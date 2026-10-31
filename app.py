@@ -6226,6 +6226,14 @@ def api_bet_sheets_picks():
                                                       apply=bool(request.args.get("apply")), force=True)
         except Exception as e:
             out["ksettle"] = {"ok": False, "error": str(e)[:200]}
+    if request.args.get("ksold"):
+        # SOLD ON KALSHI (Oct 31 2026): close Kalshi lots sold in the app, from here,
+        # now — dry unless &apply=1
+        try:
+            out["ksold"] = _hand_kalshi_sold_tick(sb, datetime.now(timezone.utc),
+                                                  apply=bool(request.args.get("apply")), force=True)
+        except Exception as e:
+            out["ksold"] = {"ok": False, "error": str(e)[:200]}
     re_slug = (request.args.get("readopt") or "").strip()
     if re_slug:                                        # THE MISSOURI RE-ATTACH (Oct 6 2026): book one
         out["readopt"] = _hand_readopt(sb, re_slug)     # held lot as a hand bet, from Vercel, now
@@ -21098,6 +21106,202 @@ def _hand_sold_tick(sb, client, now) -> dict:
                            plan["qty"], plan["avg_c"], b.get("price_c"), plan["pnl_usd"])
     return st
 
+# SOLD ON KALSHI (Oct 31 2026, Rob: "2 sold… sold Kalshi under Indiana for
+# profit"). The Polymarket sold-close reads the venue's trade tape; a Kalshi
+# lot sold in the Kalshi app read nothing — the pick sat pending with no lot
+# and the Settled tile counted 1 sale instead of 2. Kalshi's fills feed says
+# it directly (docs.kalshi.com/api-reference/portfolio/get-fills.md, read the
+# same day): `outcome_side` is the exposure a fill added — buy-yes / sell-no
+# read 'yes', buy-no / sell-yes read 'no' — so a fill on our ticker whose
+# outcome_side is the OTHER side is a sale of our lot. Its price on our side
+# is `yes_price_dollars` for a YES lot, `no_price_dollars` for a NO lot;
+# `fee_cost` is dollars. A settled market makes no fill, so a settlement can
+# never read as a sale.
+_HAND_KSOLD = {"at": 0.0}
+_HAND_KSOLD_EVERY_S = 60.0
+
+
+def _hand_kalshi_sold_plan(fills: list, ticker: str, buy_yes: bool, since_iso,
+                           entry_c, lot_q) -> dict | None:
+    """Pure. Kalshi fills → {qty, avg_c, proceeds, fees, pnl_usd, last_at} when
+    sales of our lot (on `ticker`, at/after since_iso) cover it (≥ lot − 0.5),
+    else None."""
+    try:
+        lq = float(lot_q or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if lq < 0.5:
+        return None
+    ours = "yes" if buy_yes else "no"
+
+    def _f(x):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    def _ts(f):
+        t = f.get("created_time")
+        if t:
+            try:
+                d = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+                return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                pass
+        v = _f(f.get("ts"))
+        return datetime.fromtimestamp(v, tz=timezone.utc) if v else None
+    since_dt = None
+    if since_iso:
+        try:
+            since_dt = datetime.fromisoformat(str(since_iso).replace("Z", "+00:00"))
+            if not since_dt.tzinfo:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            since_dt = None
+    qty = proceeds = fees = 0.0
+    last = None
+    for f in fills or []:
+        if (f.get("ticker") or f.get("market_ticker")) != ticker:
+            continue
+        osd = (f.get("outcome_side") or "").lower()
+        if not osd:                                   # the legacy pair: sell our side = a sale
+            act, sd = (f.get("action") or "").lower(), (f.get("side") or "").lower()
+            osd = sd if act == "buy" else ("no" if sd == "yes" else "yes" if sd == "no" else "")
+        if not osd or osd == ours:
+            continue
+        at = _ts(f)
+        if since_dt and at and at < since_dt:
+            continue
+        q = _f(f.get("count_fp")) or _f(f.get("count"))
+        p = _f(f.get(f"{ours}_price_dollars"))
+        if not q or q <= 0 or p is None:
+            continue
+        qty += q
+        proceeds += q * p
+        fees += _f(f.get("fee_cost")) or 0.0
+        if at and (last is None or at > last):
+            last = at
+    if qty < lq - 0.5:
+        return None
+    try:
+        cost = lq * float(entry_c) / 100.0
+    except (TypeError, ValueError):
+        cost = None
+    sold_q = min(qty, lq)
+    avg = proceeds / qty * 100.0 if qty else None
+    pnl = (sold_q * avg / 100.0 - cost - fees) if (cost is not None and avg is not None) else None
+    return {"qty": round(sold_q, 2), "avg_c": round(avg, 2) if avg is not None else None,
+            "proceeds": round(sold_q * avg / 100.0, 2) if avg is not None else None,
+            "fees": round(fees, 2), "pnl_usd": round(pnl, 2) if pnl is not None else None,
+            "last_at": last.isoformat() if last else None, "venue": "KALSHI"}
+
+
+def _hand_kalshi_sold_tick(sb, now, apply: bool = True, force: bool = False) -> dict:
+    """Close Kalshi sheet/app picks whose filled lot Rob sold in the Kalshi
+    app before settlement: status void, result_score 'sold', the venue's
+    dollars in signal_blob.sold (the feed and the Settled tile read it like
+    a Polymarket sale). The lot must be GONE on a positions read and the
+    sales must cover it. Kill switch `machine_flags hand_sold_close` (shared
+    with Polymarket); `/api/bet-sheets/picks?ksold=1[&apply=1]` runs it from
+    Vercel (dry unless apply)."""
+    import kalshi_venue as _kv
+    st = {"cands": 0, "sold": 0, "skipped": {}}
+    if not _machine_flag("hand_sold_close", True):
+        st["gate"] = "disabled"
+        return st
+    if not force and _time.monotonic() - _HAND_KSOLD["at"] < _HAND_KSOLD_EVERY_S:
+        st["gate"] = "clock"
+        return st
+    _HAND_KSOLD["at"] = _time.monotonic()
+
+    def _skip(k):
+        st["skipped"][k] = st["skipped"].get(k, 0) + 1
+    try:
+        picks = (sb.table("bot_picks").select("id,picked_at,event_name,event_start,signal_blob")
+                 .eq("status", "pending").eq("signal_blob->>bet_sheet", "true")
+                 .eq("signal_blob->>venue", "KALSHI")
+                 .gte("event_start", (now - timedelta(hours=_HAND_APP_POS_LOOKBACK_H)).isoformat())
+                 .limit(200).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    cands = []
+    for r in picks:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if not _kalshi_pick(b) or not b.get("kalshi_ticker"):
+            continue
+        if not (b.get("filled") or float(b.get("filled_qty") or 0) > 0):
+            continue
+        cands.append((r, b))
+    st["cands"] = len(cands)
+    if not cands:
+        return st
+    _orders, pos = _kalshi_acct(fresh=True)
+    if pos is None:
+        st["gate"] = "positions unreadable"
+        return st
+    live = []
+    for r, b in cands:
+        held = _kv.held_for(pos, b["kalshi_ticker"], bool(b.get("kalshi_buy_yes")))
+        if held is None:
+            _skip("held_unknown"); continue
+        if held >= 0.5:
+            _skip("still_held"); continue
+        live.append((r, b))
+    if not live:
+        return st
+    tickers = sorted({b["kalshi_ticker"] for _, b in live})[:100]
+    try:
+        oldest = min(datetime.fromisoformat(str(r.get("picked_at")).replace("Z", "+00:00")) for r, _ in live)
+        min_ts = int((oldest - timedelta(minutes=5)).timestamp())
+    except (TypeError, ValueError):
+        min_ts = int((now - timedelta(days=2)).timestamp())
+    res = _kalshi_authed_get("/portfolio/fills", params={"ticker": ",".join(tickers), "min_ts": min_ts,
+                                                          "limit": 1000})
+    if not res.get("ok"):
+        st["gate"] = f"fills unreadable: {res.get('error') or res.get('status')}"[:120]
+        return st
+    fills = (res.get("data") or {}).get("fills") or []
+    st["fills"] = len(fills)
+    rows = []
+    for r, b in live:
+        if st["sold"] >= _HAND_SOLD_MAX:
+            break
+        since = None
+        try:
+            since = (datetime.fromisoformat(str(r.get("picked_at")).replace("Z", "+00:00"))
+                     - timedelta(minutes=2)).isoformat()
+        except (TypeError, ValueError):
+            pass
+        fq = b.get("filled_qty") or b.get("contracts")
+        plan = _hand_kalshi_sold_plan(fills, b["kalshi_ticker"], bool(b.get("kalshi_buy_yes")),
+                                      since, b.get("price_c"), fq)
+        if not plan:
+            _skip("no_sale_in_fills"); continue        # settled, or not sold — the settle tick grades
+        row = {"pick_id": r["id"], "game": r.get("event_name"), "label": b.get("label"),
+               "ticker": b["kalshi_ticker"], **plan, "applied": False}
+        if apply:
+            try:
+                sb.table("bot_picks").update({
+                    "status": "void", "pnl_units": 0, "settled_at": now.isoformat(),
+                    "result_score": "sold",
+                    "signal_blob": {**b, "sold": {**plan, "at": now.isoformat()}, "filled": True},
+                }).eq("id", r["id"]).eq("status", "pending").execute()
+                row["applied"] = True
+                st["sold"] += 1
+                _probe_log({"hand_sold": True, "pick_id": r["id"], "ticker": b["kalshi_ticker"],
+                            "label": b.get("label"), "price_c": b.get("price_c"), **plan,
+                            "at": now.isoformat()})
+                app.logger.warning("hand SOLD (Kalshi) pick %s %s: %g @ %s¢ (bought %s¢) pnl $%s",
+                                   r["id"], b["kalshi_ticker"], plan["qty"], plan["avg_c"],
+                                   b.get("price_c"), plan["pnl_usd"])
+            except Exception as e:
+                row["err"] = str(e)[:120]
+        rows.append(row)
+    st["rows"] = rows
+    return st
+
+
 # THE VENUE RESET (Oct 8 2026, Rob: "Welcome to Polymarket, where some days
 # is a reset, and they just cancel every order! Nothing we did. How do we do
 # these?"): ~04:30 AZ the venue wiped every resting order on the account. The
@@ -24952,6 +25156,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
             stats["sold"] = _hand_sold_tick(sb, client, now)         # sold in the app → pick closed
         except Exception as e:
             stats["sold"] = {"err": str(e)[:80]}
+        try:
+            stats["ksold"] = _hand_kalshi_sold_tick(sb, now)         # sold in the Kalshi app → pick closed
+        except Exception as e:
+            stats["ksold"] = {"err": str(e)[:80]}
         try:
             stats["ksettle"] = _hand_kalshi_settle_tick(sb, now)     # the venue settled it → graded, venue dollars
         except Exception as e:
