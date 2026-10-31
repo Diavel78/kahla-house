@@ -2138,7 +2138,20 @@
         const c = (f, t) => '<button class="fchip' + (_filter === f ? ' on' : '') + '" onclick="setFilter(\'' + f + '\')">' + t + '</button>';
         document.getElementById('fchips').innerHTML = c('all', 'All games') + c('mine', 'My bets ' + nMine) + c('plays', 'Plays & leans ' + nPick) + c('live', 'Live ' + (nLive || 0))
             + '<button class="fchip" onclick="addTodaysPlays()">➕ Today\'s plays</button>'
-            + '<button class="fchip" onclick="copyPicks()">📋 Copy picks</button>';
+            + '<button class="fchip" onclick="copyPicks()">📋 Copy picks</button>'
+            + '<button class="fchip" onclick="copyConnector()">🔌 Connector</button>';
+    }
+    // THE DUET CONNECTOR (Oct 31 2026): the read-only MCP address for Claude
+    // Duet's "Add custom connector". Shown in a box to copy — iOS refuses a
+    // clipboard write that follows a network wait.
+    async function copyConnector() {
+        let d = null;
+        try { const r = await authFetch('/api/mcp/address'); d = await r.json(); } catch (e) {}
+        if (!d || !d.ok || !d.url) { toast('Could not get the connector address' + (d && d.error ? ': ' + d.error : ''), true); return; }
+        let ok = false;
+        try { await navigator.clipboard.writeText(d.url); ok = true; } catch (e) {}
+        if (ok) toast('Connector address copied · name it Kahla House');
+        window.prompt('Kahla House connector (read-only) — paste into Add custom connector → Address:', d.url);
     }
     // One pick's bet in the shape the card's button uses: market type, side,
     // line and label — the slip item a tap would make. null = not a play/lean

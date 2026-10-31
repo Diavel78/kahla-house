@@ -29765,6 +29765,451 @@ def _line_tape_series(sport: str, rows: list) -> dict:
     return out
 
 
+# ── THE DUET CONNECTOR (Oct 31 2026, Rob, adding Claude Duet: "I want it to
+# read the charts, look for big line moves, check for injury updates/personnel
+# updates. It will NOT be betting for me"). A READ-ONLY MCP server (JSON-RPC
+# over HTTP POST, plain JSON replies, no SSE) at /mcp/<token>. Duet's sandbox
+# cannot reach this site (proxy 403) but a connector is called from Anthropic's
+# side. The token is the only key: random, kept in parlay_state `mcp_token`,
+# shown to the admin by /api/mcp/address (the Bet Sheets 🔌 chip), rotated
+# with ?rotate=1. Every tool READS — nothing here can place, cancel or change
+# a bet, a flag or a row. Prices: home / over orientation, cents; times AZ.
+_MCP_TOKEN_KEY = "mcp_token"
+_MCP_TOKEN_CACHE: dict = {"at": 0.0, "tok": None}
+_MCP_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+_MCP_INSTRUCTIONS = (
+    "Rob's sports betting board (thekahlahouse.com), READ-ONLY. You can read the sheets, his bets, "
+    "the line charts and injuries; you can never place, cancel or change anything. Pinnacle is the "
+    "sharp line; its devigged fair is what a bet has to beat. Polymarket and Kalshi are where he bets "
+    "(both deep markets — never call them thin). Prices are in cents (51 = 51% = about -104). Chart "
+    "and move data is stored HOME / OVER: a home spread, the home ML, the over; the away/under price "
+    "is 100 minus it. All times are Arizona (America/Phoenix). Say 'game start', not 'kickoff'.")
+
+
+def _mcp_token(sb, create: bool = False, rotate: bool = False):
+    """The connector's key. Cached 60s in memory; created (or replaced)
+    only when asked. None = no key yet / unreadable."""
+    if not rotate and _MCP_TOKEN_CACHE["tok"] and _time.monotonic() - _MCP_TOKEN_CACHE["at"] < 60:
+        return _MCP_TOKEN_CACHE["tok"]
+    tok = None
+    if not rotate:
+        row = _parlay_state_get(sb, _MCP_TOKEN_KEY) if sb is not None else None
+        v = (row or {}).get("v")
+        tok = v.get("token") if isinstance(v, dict) else None
+    if (create or rotate) and not tok and sb is not None:
+        tok = secrets.token_urlsafe(32)
+        _parlay_state_put(sb, _MCP_TOKEN_KEY, {"token": tok, "created": datetime.now(timezone.utc).isoformat()},
+                          datetime.now(timezone.utc))
+        if (_mcp_token(sb) or None) != tok:          # the write did not land
+            return None
+    _MCP_TOKEN_CACHE.update(at=_time.monotonic(), tok=tok)
+    return tok
+
+
+@app.route("/api/mcp/address")
+@admin_required
+def api_mcp_address():
+    """The admin's connector address (creates the key on first ask;
+    ?rotate=1 replaces it — the old address stops working)."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    if request.args.get("rotate"):
+        _MCP_TOKEN_CACHE.update(at=0.0, tok=None)
+    tok = _mcp_token(sb, create=True, rotate=bool(request.args.get("rotate")))
+    if not tok:
+        return jsonify({"ok": False, "error": "could not create the connector key"}), 500
+    return jsonify({"ok": True, "url": f"https://www.thekahlahouse.com/mcp/{tok}", "name": "Kahla House"})
+
+
+def _mcp_az(iso) -> str | None:
+    d = _parse_iso(iso) if iso else None
+    if not d:
+        return None
+    return d.astimezone(ZoneInfo("America/Phoenix")).strftime("%a %b %d %I:%M %p").replace(" 0", " ")
+
+
+def _mcp_view(fn, path: str):
+    """Call one of the site's own read routes past its login decorator
+    (same data the page gets). → the JSON dict, or {'ok': False, ...}."""
+    import inspect as _insp
+    with app.test_request_context(path):
+        out = _insp.unwrap(fn)()
+    resp, code = (out if isinstance(out, tuple) else (out, 200))
+    try:
+        d = resp.get_json()
+    except Exception:
+        d = None
+    return d if isinstance(d, dict) else {"ok": False, "error": f"HTTP {code}"}
+
+
+_MCP_PICK_KEYS = ("side", "line", "verdict", "price", "fair", "market_line", "fair_market", "edge_pts",
+                  "edge_pp", "pin_fair", "chalky", "longshot", "flipped")
+
+
+def _mcp_board(sport=None, hours=36) -> dict:
+    sports = [str(sport).upper()] if sport else list(_SHEET_SPORTS)
+    now = datetime.now(timezone.utc)
+    try:
+        hours = max(1, min(240, float(hours or 36)))
+    except (TypeError, ValueError):
+        hours = 36
+    out = []
+    for sp in sports:
+        if sp not in _SHEET_SPORTS:
+            return {"error": f"sport must be one of {list(_SHEET_SPORTS)}"}
+        d = _mcp_view(api_football_picks, f"/api/pick-sheets?sport={sp}")
+        for g in d.get("games") or []:
+            st = _parse_iso(g.get("event_start")) if g.get("event_start") else None
+            if st is None or st > now + timedelta(hours=hours) or st < now - timedelta(hours=8):
+                continue
+            picks, venue = {}, {}
+            for k in ("ml", "spread", "puck", "total"):
+                p = g.get(k)
+                if isinstance(p, dict) and p.get("side"):
+                    picks[k] = {x: p.get(x) for x in _MCP_PICK_KEYS if p.get(x) is not None}
+            vp = (g.get("venue") or {}).get("picks") if isinstance(g.get("venue"), dict) else None
+            for k, v in (vp or {}).items():
+                if isinstance(v, dict):
+                    venue[k] = {"side": v.get("side"), "line": v.get("line"),
+                                **{vn: {x: (v.get(vn) or {}).get(x) for x in ("line", "bid", "ask")}
+                                   for vn in ("poly", "kalshi") if isinstance(v.get(vn), dict)
+                                   and ((v.get(vn) or {}).get("bid") is not None or (v.get(vn) or {}).get("ask") is not None)}}
+            gr = g.get("grade") if isinstance(g.get("grade"), dict) else {}
+            out.append({"sport": sp, "game": g.get("event_name"), "start_az": _mcp_az(g.get("event_start")),
+                        "started": st <= now, "final": (gr.get("final") or None),
+                        "tv": g.get("tv"), "market_line": g.get("line"), "pinnacle": g.get("pin"),
+                        "model": g.get("model"), "picks": picks,
+                        "venue_quotes_on_pick_side": venue or None,
+                        "venue_age_min": (round(g["venue"]["age_s"] / 60) if isinstance(g.get("venue"), dict)
+                                          and g["venue"].get("age_s") is not None else None)})
+    out.sort(key=lambda x: (x["sport"], x["start_az"] or ""))
+    return {"games": out, "n": len(out),
+            "note": "picks[k].verdict play/lean/pass is the model's call at the pick's rung; "
+                    "venue quotes are the bid/ask on the pick's side in cents"}
+
+
+def _mcp_bets() -> dict:
+    d = _mcp_view(api_bet_sheets_mine, "/api/bet-sheets/mine")
+    if not d.get("ok", True) and not d.get("bets"):
+        return {"error": d.get("error") or "bets unreadable"}
+    out = []
+    for b in d.get("bets") or []:
+        o = b.get("order") if isinstance(b.get("order"), dict) else {}
+        held = float(b.get("held") or 0)
+        st = b.get("status")
+        if st == "pending":
+            st = ("filled" if held >= 1 else "resting" if o.get("resting") else "nothing on the book")
+            if b.get("started") and st != "nothing on the book":
+                st += " · game started"
+        rs = b.get("result_score") if isinstance(b.get("result_score"), dict) else {}
+        out.append({"sport": b.get("sport"), "game": b.get("event_name"), "start_az": _mcp_az(b.get("event_start")),
+                    "bet": b.get("label") or f"{b.get('market_type')} {b.get('side')} {b.get('line')}",
+                    "venue": b.get("venue"), "price_c": b.get("price_c"), "contracts": b.get("contracts"),
+                    "filled": round(held, 2), "status": st, "outbid": bool(b.get("outbid")) or None,
+                    "pnl_usd": b.get("pnl_usd"),
+                    "final": ({"away": rs.get("away"), "home": rs.get("home")}
+                              if rs.get("away") is not None and rs.get("home") is not None else None)})
+    out.sort(key=lambda x: str(x.get("start_az") or ""))
+    return {"bets": out, "n": len(out), "note": "today's bets (Arizona day) plus anything still pending"}
+
+
+def _mcp_pin_fair(ph, pa):
+    a, b = _amer_to_prob_py(ph), _amer_to_prob_py(pa)
+    return round(a / (a + b) * 100.0, 1) if a and b else None
+
+
+def _mcp_moves(sport=None, hours=6, min_pts=1.0, min_cents=3.0) -> dict:
+    """Biggest moves per game and market over the window: Pinnacle's main
+    line (points) and fair (cents, home / over), and each venue's bid at its
+    rung. The value at the window's start is the last change before it."""
+    sb = get_supabase()
+    if sb is None:
+        return {"error": "database unavailable"}
+    try:
+        hours = max(0.5, min(240.0, float(hours or 6)))
+        min_pts = float(min_pts if min_pts is not None else 1.0)
+        min_cents = float(min_cents if min_cents is not None else 3.0)
+    except (TypeError, ValueError):
+        return {"error": "hours / min_pts / min_cents must be numbers"}
+    now = datetime.now(timezone.utc)
+    w0 = now - timedelta(hours=hours)
+    look = (w0 - timedelta(hours=48)).isoformat()
+    sp = str(sport).upper() if sport else None
+
+    def q():
+        b = (sb.table("line_tape").select("at,sport,event_name,event_start,src,mt,line,bid_c,ask_c,p_home,p_away")
+             .gte("at", look).order("at"))
+        return b.eq("sport", sp) if sp else b
+    try:
+        rows = _sb_paged(q, 60)
+    except Exception as e:
+        return {"error": f"read: {e}"[:160]}
+    by: dict = {}
+    for r in rows:
+        by.setdefault((r["sport"], r["event_name"], r["src"], r["mt"]), []).append(r)
+    moves = []
+    for (s, ev, src, mt), rs in by.items():
+        st = _parse_iso(rs[-1].get("event_start")) if rs[-1].get("event_start") else None
+        if st is not None and st < now - timedelta(hours=6):
+            continue
+        inwin = [r for r in rs if (_parse_iso(r["at"]) or now) >= w0]
+        if not inwin:
+            continue
+        before = [r for r in rs if (_parse_iso(r["at"]) or now) < w0]
+        a, z = (before[-1] if before else inwin[0]), inwin[-1]
+        m = {"sport": s, "game": ev, "start_az": _mcp_az(z.get("event_start")), "book": src,
+             "market": mt, "from_az": _mcp_az(a["at"]), "to_az": _mcp_az(z["at"])}
+        score = 0.0
+        if src == "pin":
+            f0, f1 = _mcp_pin_fair(a.get("p_home"), a.get("p_away")), _mcp_pin_fair(z.get("p_home"), z.get("p_away"))
+            if mt != "ml" and a.get("line") is not None and z.get("line") is not None:
+                d = float(z["line"]) - float(a["line"])
+                m.update(line_from=a["line"], line_to=z["line"], line_move_pts=round(d, 1))
+                if abs(d) >= min_pts:
+                    score = max(score, abs(d) * 10)
+            if f0 is not None and f1 is not None:
+                m.update(fair_from_c=f0, fair_to_c=f1, fair_move_c=round(f1 - f0, 1))
+                if abs(f1 - f0) >= min_cents and (mt == "ml" or m.get("line_move_pts", 0) == 0):
+                    score = max(score, abs(f1 - f0))
+        else:
+            m.update(line_from=a.get("line"), line_to=z.get("line"), bid_from_c=a.get("bid_c"), bid_to_c=z.get("bid_c"))
+            if a.get("line") == z.get("line") and a.get("bid_c") is not None and z.get("bid_c") is not None:
+                d = float(z["bid_c"]) - float(a["bid_c"])
+                m["bid_move_c"] = round(d, 1)
+                if abs(d) >= min_cents:
+                    score = abs(d)
+            elif a.get("line") is not None and z.get("line") is not None and a.get("line") != z.get("line"):
+                d = float(z["line"]) - float(a["line"])
+                m["line_move_pts"] = round(d, 1)
+                if abs(d) >= min_pts:
+                    score = abs(d) * 10
+        if score > 0:
+            m["_s"] = score
+            moves.append(m)
+    moves.sort(key=lambda x: -x["_s"])
+    for m in moves:
+        m.pop("_s", None)
+    return {"window_hours": hours, "moves": moves[:60], "n": len(moves),
+            "note": "home / over orientation: a home spread going -3 → -4.5 = moved toward the home team; "
+                    "fair and bids in cents"}
+
+
+def _mcp_find_event(sb, sport: str, game: str):
+    words = [w for w in re.split(r"[\s@]+", str(game or "").lower()) if len(w) > 1]
+    if not words:
+        return None
+    since = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    rows = (sb.table("line_tape").select("event_name,event_start").eq("sport", sport)
+            .ilike("event_name", f"%{words[0]}%").gte("at", since).order("at", desc=True).limit(400)
+            .execute().data) or []
+    hits = {}
+    for r in rows:
+        n = r.get("event_name") or ""
+        if all(w in n.lower() for w in words) and n not in hits:
+            hits[n] = r.get("event_start")
+    if not hits:
+        return None
+    now = datetime.now(timezone.utc)
+    return min(hits.items(), key=lambda kv: abs(((_parse_iso(kv[1]) or now) - now).total_seconds()))[0]
+
+
+def _mcp_chart(sport, game, market=None, points=40) -> dict:
+    sb = get_supabase()
+    if sb is None:
+        return {"error": "database unavailable"}
+    sport = str(sport or "").upper()
+    if sport not in _SHEET_SPORTS:
+        return {"error": f"sport must be one of {list(_SHEET_SPORTS)}"}
+    ev = _mcp_find_event(sb, sport, game)
+    if not ev:
+        return {"error": f"no chart for '{game}' in {sport} — use a team name from get_board"}
+    since = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    rows = _sb_paged(lambda: (sb.table("line_tape")
+                              .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,rung,r_home,r_away,event_start")
+                              .eq("sport", sport).eq("event_name", ev).gte("at", since).order("at")), 20)
+    ser = _line_tape_series(sport, rows)
+    try:
+        points = max(8, min(120, int(points or 40)))
+    except (TypeError, ValueError):
+        points = 40
+    out = {}
+    for mt, m in ser.items():
+        if market and mt != market:
+            continue
+        ev_pts = []
+        for p in m["pin"]:
+            ev_pts.append((p[0], "pin", {"pin_line": p[1], "pin_fair_c": p[4], "at_rung": p[5]}))
+        for vn in ("poly", "kalshi"):
+            for p in m[vn]:
+                ev_pts.append((p[0], vn, {f"{vn}_line": p[1], f"{vn}_bid": p[2], f"{vn}_ask": p[3]}))
+        if not ev_pts:
+            continue
+        ev_pts.sort(key=lambda x: x[0])
+        t0, t1 = ev_pts[0][0], ev_pts[-1][0]
+        step = max(60_000, (t1 - t0) / max(1, points - 1))
+        cur: dict = {}
+        series, i = [], 0
+        t = t0
+        while t <= t1 + 1:
+            while i < len(ev_pts) and ev_pts[i][0] <= t:
+                cur.update(ev_pts[i][2])
+                i += 1
+            series.append({"at_az": datetime.fromtimestamp(t / 1000, ZoneInfo("America/Phoenix")).strftime("%a %I:%M %p"),
+                           **cur})
+            t += step
+        while i < len(ev_pts):
+            cur.update(ev_pts[i][2])
+            i += 1
+        last = {"at_az": datetime.fromtimestamp(t1 / 1000, ZoneInfo("America/Phoenix")).strftime("%a %I:%M %p"), **cur}
+        if series[-1] != last:
+            series.append(last)
+        out[mt] = series
+    if not out:
+        return {"error": f"no {market or ''} history recorded for {ev}".replace("  ", " ")}
+    return {"game": ev, "sport": sport, "start_az": _mcp_az(next((r.get("event_start") for r in rows), None)),
+            "markets": out,
+            "note": "HOME / OVER orientation in cents (away / under = 100 minus). pin_fair_c = Pinnacle's devigged "
+                    "fair at the venue's rung; *_line = each book's line at that moment"}
+
+
+def _mcp_injuries(sport, team=None) -> dict:
+    sport = str(sport or "").upper()
+    import handicapper_web as _hw
+    pair = _hw._ESPN_PATH.get(sport)
+    if not pair:
+        return {"error": f"no ESPN injury feed for {sport}"}
+    try:
+        r = _http.get(f"https://site.api.espn.com/apis/site/v2/sports/{pair[0]}/{pair[1]}/injuries",
+                      timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        data = r.json() if r.status_code == 200 else {}
+    except Exception as e:
+        return {"error": f"ESPN: {e}"[:120]}
+    want = [w for w in str(team or "").lower().split() if w]
+    teams = []
+    for grp in (data or {}).get("injuries") or []:
+        if not isinstance(grp, dict):
+            continue
+        name = grp.get("displayName") or ((grp.get("team") or {}).get("displayName")) or ""
+        if want and not all(w in name.lower() for w in want):
+            continue
+        recs = _hw._normalize_injury_records(grp.get("injuries") or [])
+        if recs:
+            teams.append({"team": name, "injuries": recs})
+    if not teams:
+        return {"teams": [], "note": "ESPN lists no injuries for that" + (" team" if want else " sport")
+                + " (college football is often blank) — search the web for news"}
+    return {"teams": teams[:40], "source": "ESPN"}
+
+
+_MCP_TOOLS = [
+    {"name": "get_board",
+     "description": "The sheets: every game in the window with Pinnacle's line, the model's number, the model's "
+                    "pick + verdict (play / lean / pass) at its rung, and the Polymarket / Kalshi bid/ask on the "
+                    "pick's side. Today and the next `hours`.",
+     "inputSchema": {"type": "object", "properties": {
+         "sport": {"type": "string", "enum": list(_SHEET_SPORTS), "description": "omit for every sport"},
+         "hours": {"type": "number", "description": "hours ahead to include (default 36)"}}}},
+    {"name": "get_my_bets",
+     "description": "Rob's bets: today's (Arizona day) plus anything still pending — the bet, venue, price in "
+                    "cents, contracts, how much filled, status (resting / filled / won / lost / push / sold), "
+                    "dollars once settled.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "get_line_moves",
+     "description": "The biggest line moves over the last `hours`, from the chart data: Pinnacle's main line "
+                    "(points) and devigged fair (cents), and each venue's bid. Use it to spot steam, then check "
+                    "the news (injuries, starters, lineups) for why.",
+     "inputSchema": {"type": "object", "properties": {
+         "sport": {"type": "string", "enum": list(_SHEET_SPORTS), "description": "omit for every sport"},
+         "hours": {"type": "number", "description": "lookback (default 6, max 240)"},
+         "min_pts": {"type": "number", "description": "smallest line move to report, points (default 1)"},
+         "min_cents": {"type": "number", "description": "smallest price move to report, cents (default 3)"}}}},
+    {"name": "get_chart",
+     "description": "One game's chart as a time series: Pinnacle's line and fair vs the Polymarket and Kalshi "
+                    "bid/ask, per market (ml, spread, puck, total).",
+     "inputSchema": {"type": "object", "required": ["sport", "game"], "properties": {
+         "sport": {"type": "string", "enum": list(_SHEET_SPORTS)},
+         "game": {"type": "string", "description": "team name(s), e.g. 'Penn State' or 'Purdue Penn State'"},
+         "market": {"type": "string", "enum": ["ml", "spread", "puck", "total"], "description": "omit for all"},
+         "points": {"type": "integer", "description": "points per series (default 40)"}}}},
+    {"name": "get_injuries",
+     "description": "ESPN's injury report for a sport, or one team. College football is often empty there — "
+                    "search the web for depth-chart and starter news.",
+     "inputSchema": {"type": "object", "required": ["sport"], "properties": {
+         "sport": {"type": "string", "enum": list(_SHEET_SPORTS)},
+         "team": {"type": "string", "description": "part of the team name; omit for the whole league"}}}},
+]
+for _t in _MCP_TOOLS:
+    _t["annotations"] = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
+
+
+def _mcp_call(name: str, args: dict) -> dict:
+    a = args if isinstance(args, dict) else {}
+    if name == "get_board":
+        return _mcp_board(a.get("sport"), a.get("hours"))
+    if name == "get_my_bets":
+        return _mcp_bets()
+    if name == "get_line_moves":
+        return _mcp_moves(a.get("sport"), a.get("hours"), a.get("min_pts"), a.get("min_cents"))
+    if name == "get_chart":
+        return _mcp_chart(a.get("sport"), a.get("game"), a.get("market"), a.get("points"))
+    if name == "get_injuries":
+        return _mcp_injuries(a.get("sport"), a.get("team"))
+    return {"error": f"unknown tool {name}"}
+
+
+def _mcp_handle(msg: dict):
+    """One JSON-RPC message → the reply dict, or None for a notification."""
+    if not isinstance(msg, dict):
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}}
+    mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
+    if mid is None:
+        return None                                   # notifications (initialized, cancelled …)
+    if method == "initialize":
+        want = str((params or {}).get("protocolVersion") or "")
+        res = {"protocolVersion": want if want in _MCP_VERSIONS else _MCP_VERSIONS[1],
+               "capabilities": {"tools": {"listChanged": False}},
+               "serverInfo": {"name": "kahla-house", "title": "Kahla House", "version": "1.0"},
+               "instructions": _MCP_INSTRUCTIONS}
+    elif method == "ping":
+        res = {}
+    elif method == "tools/list":
+        res = {"tools": _MCP_TOOLS}
+    elif method == "tools/call":
+        try:
+            data = _mcp_call(str(params.get("name") or ""), params.get("arguments") or {})
+            err = isinstance(data, dict) and bool(data.get("error"))
+        except Exception as e:
+            app.logger.warning("mcp tool %s: %s", params.get("name"), e)
+            data, err = {"error": f"{type(e).__name__}: {e}"[:200]}, True
+        res = {"content": [{"type": "text", "text": json.dumps(data, default=str, separators=(",", ":"))}],
+               "isError": err}
+    elif method in ("resources/list", "prompts/list"):
+        res = {method.split("/")[0]: []}
+    else:
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"method not found: {method}"}}
+    return {"jsonrpc": "2.0", "id": mid, "result": res}
+
+
+@app.route("/mcp/<token>", methods=["GET", "POST", "DELETE"])
+def mcp_endpoint(token):
+    want = _mcp_token(get_supabase())
+    if not want or not secrets.compare_digest(str(token), str(want)):
+        return jsonify({"error": "not found"}), 404
+    if request.method != "POST":
+        return make_response("", 405, {"Allow": "POST"})
+    body = request.get_json(silent=True)
+    if body is None:
+        return jsonify({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}), 400
+    if isinstance(body, list):
+        replies = [x for x in (_mcp_handle(m) for m in body) if x is not None]
+        return (jsonify(replies), 200) if replies else make_response("", 202)
+    reply = _mcp_handle(body)
+    if reply is None:
+        return make_response("", 202)
+    return jsonify(reply)
+
+
 @app.route("/api/line-tape")
 @bot_required          # Pick Sheets carry the chart too (Oct 29 2026) — market prices only, no per-user data
 def api_line_tape():

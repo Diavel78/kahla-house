@@ -3842,6 +3842,29 @@ def test_bet_sheet_live_section() -> None:
           "_lastBetsPayload.bets" in _cp and "myBetLive(b)" in _cp and "gamePlays(" not in _cp)
     check("…and carries no contract count or dollars",
           all(x not in _cp for x in ("contracts", "pnl_usd", "fmtQ(", "money(")))
+    # THE DUET CONNECTOR (Oct 31 2026, Rob: "It will NOT be betting for me"):
+    # read-only by construction — no tool reaches an order, cancel, flag or write
+    _mcp_src = "".join(inspect.getsource(f) for f in (
+        _app._mcp_board, _app._mcp_bets, _app._mcp_moves, _app._mcp_chart, _app._mcp_injuries,
+        _app._mcp_find_event, _app._mcp_call, _app._mcp_handle, _app.mcp_endpoint, _app._mcp_view))
+    check("the Duet connector never writes, orders or cancels",
+          all(x not in _mcp_src for x in ("orders.", "_cancel", "cancel(", "_manual_order_place", ".insert(",
+                                          ".update({", ".upsert(", ".delete(", "_hand_orders_enqueue",
+                                          "machine_flag", "_kalshi_order", "/api/cellar/flag")))
+    check("…its tools are the five readers, all marked read-only",
+          [t["name"] for t in _app._MCP_TOOLS] == ["get_board", "get_my_bets", "get_line_moves", "get_chart", "get_injuries"]
+          and all(t["annotations"]["readOnlyHint"] for t in _app._MCP_TOOLS))
+    _c = _app.app.test_client()
+    _tok0 = _app._mcp_token
+    try:
+        _app._mcp_token = lambda sb, **k: "right"
+        check("…a wrong key reads as a missing page",
+              _c.post("/mcp/wrong", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).status_code == 404)
+        _r = _c.post("/mcp/right", json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                         "params": {"protocolVersion": "2025-06-18"}}).get_json()
+        check("…and the right key answers initialize", (_r or {}).get("result", {}).get("protocolVersion") == "2025-06-18", str(_r))
+    finally:
+        _app._mcp_token = _tok0
     check("a dead pick (order gone, nothing held) gets a Remove button",
           "(b.recon.red || []).some(f => f.code === 'dead_order')" in html and "'Remove this bet'" in html)
     _cx = inspect.getsource(_app._bet_sheet_cancel_exec)
