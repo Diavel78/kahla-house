@@ -3842,6 +3842,17 @@ def test_bet_sheet_live_section() -> None:
           "_lastBetsPayload.bets" in _cp and "myBetLive(b)" in _cp and "gamePlays(" not in _cp)
     check("…and carries no contract count or dollars",
           all(x not in _cp for x in ("contracts", "pnl_usd", "fmtQ(", "money(")))
+    check("…every bet stays: an unfilled pending pick is kept, only a dust fold drops",
+          "if (b.status === 'void') return false;" in html and "myBetLive(b)" in _cp)
+    check("…and the bets cancelled at game start / chase end ride along, deduped",
+          "/api/bet-sheets/cancelled-today" in _cp and "mine.concat(gone)" in _cp and "b.getlive_from === c.pick_id" in _cp)
+    _g = _app._bs_grade_bet
+    check("cancelled bets grade off the final (spread own line, total, ML, push)",
+          _g("spread", "home", -3.5, 20, 24) == "win" and _g("spread", "away", 4.5, 20, 24) == "win"
+          and _g("spread", "away", 2.5, 20, 24) == "loss" and _g("spread", "home", -4, 20, 24) == "push"
+          and _g("total", "over", 44.5, 20, 24) == "loss" and _g("total", "under", 44.5, 20, 24) == "win"
+          and _g("moneyline", "away", None, 3, 2) == "win" and _g("moneyline", "home", None, 3, 2) == "loss"
+          and _g("total", "over", None, 1, 2) is None and _g("spread", "home", -1.5, None, 2) is None)
     # THE DUET CONNECTOR (Oct 31 2026, Rob: "It will NOT be betting for me"):
     # read-only by construction — no tool reaches an order, cancel, flag or write
     _mcp_src = "".join(inspect.getsource(f) for f in (

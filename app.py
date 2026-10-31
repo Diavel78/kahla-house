@@ -26374,25 +26374,11 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
             names.setdefault(_ek, (_bt.get("event_name"), _bt.get("sport")))
     out, espn, client, reads = [], {}, None, 0
     for pid, (at, res) in by_pick.items():
-        bet = res.get("bet") if isinstance(res.get("bet"), dict) else back.get(pid)
         slug = res.get("slug")
+        bet, syn = _bs_stamp_bet(res, back.get(pid))
         if not bet or not slug:
             continue
-        bet = dict(bet)
         ekp = _bs_event_key(slug)
-        syn = bet.get("synthetic")
-        if syn is None:
-            syn = _bs_guess_syn(slug, bet.get("label"), bet.get("side"))
-        if syn is None or not bet.get("market_type") or not bet.get("side"):
-            base_slug = re.sub(r"-(1h|2h|1q|2q|3q|4q|p1|p2|p3)-", "-", slug, count=1)
-            for cand in ((syn,) if syn is not None else (False, True)):
-                sl = _slug_side_line(base_slug, bool(cand))
-                if sl and (not bet.get("side") or sl[1] == bet.get("side")):
-                    bet["market_type"] = bet.get("market_type") or sl[0]
-                    bet["side"], syn = bet.get("side") or sl[1], bool(cand)
-                    if bet.get("line") is None:
-                        bet["line"] = sl[2]
-                    break
         if ekp[0] and (ekp, bet.get("market_type"), bet.get("side")) in taken:
             continue                                      # he took it live — the live strip has it
         if not bet.get("event_name") and ekp[0] in names:
@@ -26451,6 +26437,146 @@ def _bet_sheet_missed(sb, now, bets: list) -> list:
         out.append(item)
     out.sort(key=lambda x: (x.get("event_start") or "", x.get("label") or ""))
     return out
+
+
+def _bs_stamp_bet(res: dict, back: dict = None):
+    """The bet a start-cancel stamp names, with market_type / side / line
+    filled off its slug when the stamp is older than those fields.
+    (bet dict or None, synthetic or None)."""
+    bet = res.get("bet") if isinstance(res.get("bet"), dict) else back
+    slug = res.get("slug")
+    if not bet or not slug:
+        return None, None
+    bet = dict(bet)
+    syn = bet.get("synthetic")
+    if syn is None:
+        syn = _bs_guess_syn(slug, bet.get("label"), bet.get("side"))
+    if syn is None or not bet.get("market_type") or not bet.get("side"):
+        base_slug = re.sub(r"-(1h|2h|1q|2q|3q|4q|p1|p2|p3)-", "-", slug, count=1)
+        for cand in ((syn,) if syn is not None else (False, True)):
+            sl = _slug_side_line(base_slug, bool(cand))
+            if sl and (not bet.get("side") or sl[1] == bet.get("side")):
+                bet["market_type"] = bet.get("market_type") or sl[0]
+                bet["side"], syn = bet.get("side") or sl[1], bool(cand)
+                if bet.get("line") is None:
+                    bet["line"] = sl[2]
+                break
+    return bet, syn
+
+
+def _bs_grade_bet(mt: str, side: str, line, away_score, home_score):
+    """win / loss / push for one bet off a final score (pure). Spread lines
+    are the bet side's OWN line; a total is over/under its line; an ML has
+    no line. None when the inputs can't grade it."""
+    try:
+        a, h = float(away_score), float(home_score)
+    except (TypeError, ValueError):
+        return None
+    mt, side = (mt or "").lower(), (side or "").lower()
+    if mt in ("total",):
+        try:
+            ln = float(line)
+        except (TypeError, ValueError):
+            return None
+        d = (a + h) - ln
+        if side == "under":
+            d = -d
+        elif side != "over":
+            return None
+    elif side in ("home", "away"):
+        own, opp = (h, a) if side == "home" else (a, h)
+        if mt in ("spread", "puck", "runline"):
+            try:
+                d = own - opp + float(line)
+            except (TypeError, ValueError):
+                return None
+        elif mt in ("moneyline", "ml"):
+            d = own - opp
+        else:
+            return None
+    else:
+        return None
+    return "win" if d > 0 else ("loss" if d < 0 else "push")
+
+
+def _bet_sheet_cancelled_today(sb, now) -> list:
+    """COPY PICKS KEEPS EVERY BET (Rob, Oct 31 2026: "should show all my
+    picks for the grading, even if they didn't fill after live chase. I get
+    those live on Bet105, so don't remove or add games regardless if they
+    filled or not"). Today's (AZ) bets the box cancelled at game start or at
+    the end of the live chase with nothing filled — the pick is deleted, so
+    they are read off the hand_start_cancel stamps — graded off ESPN's final.
+    No final/dismiss/age filter (unlike the missed list) and no venue reads;
+    only Copy picks calls it."""
+    az = ZoneInfo("America/Phoenix")
+    day0 = now.astimezone(az).replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        stamps = (sb.table("exec_probe_runs").select("at,result")
+                  .eq("result->>hand_start_cancel", "true")
+                  .gte("at", day0.isoformat())
+                  .order("at").limit(500).execute().data or [])
+    except Exception:
+        return []
+    by_pick: dict = {}
+    for row in stamps:
+        res = row.get("result") if isinstance(row.get("result"), dict) else {}
+        pid = res.get("pick_id")
+        if pid is None:
+            continue
+        outr = res.get("result") if isinstance(res.get("result"), dict) else {}
+        if outr.get("deleted") or (outr.get("ok") and (outr.get("held") or 0) < _BS_DUST_Q):
+            by_pick[int(pid)] = res
+        elif outr.get("ok"):
+            by_pick.pop(int(pid), None)       # a real partial: the pick stayed and is in the feed
+    if not by_pick:
+        return []
+    old = {pid for pid, res in by_pick.items() if not isinstance(res.get("bet"), dict)}
+    back = _bet_sheet_missed_from_queue(sb, now, old)
+    out, espn = [], {}
+    for pid, res in by_pick.items():
+        slug = res.get("slug")
+        bet, _syn = _bs_stamp_bet(res, back.get(pid))
+        if not bet or not slug:
+            continue
+        st_iso = res.get("start") or bet.get("event_start")
+        bdt = _parse_iso(st_iso or "")
+        if not bdt or bdt.astimezone(az).date() != day0.date():
+            continue
+        item = {"id": f"c{pid}", "pick_id": pid, "cancelled": True,
+                "sport": bet.get("sport") or _slug_sport(slug),
+                "event_name": bet.get("event_name"), "event_start": st_iso,
+                "market_type": bet.get("market_type"), "side": bet.get("side"),
+                "line": bet.get("line"), "label": bet.get("label"),
+                "price_c": bet.get("price_c") if bet.get("price_c") is not None else bet.get("anchor_c"),
+                "slug": slug, "chase_expired": bool(res.get("chase_expired")), "status": "pending"}
+        away, home = _live_split_event(item["event_name"] or "")
+        if away and home:
+            try:
+                dk = bdt.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+                ck = ((item["sport"] or "").lower(), dk)
+                if ck not in espn:
+                    espn[ck] = _bs_espn_events(ck[0], dk)
+                m = _live_match_espn(espn[ck], away, home, st_iso)
+            except Exception:
+                m = None
+            if m and (m.get("completed") or m.get("state") == "post"):
+                item["result_score"] = {"away": m.get("away_score"), "home": m.get("home_score")}
+                gr = _bs_grade_bet(item["market_type"], item["side"], item["line"],
+                                   m.get("away_score"), m.get("home_score"))
+                if gr:
+                    item["status"] = {"win": "won", "loss": "lost", "push": "push"}[gr]
+        out.append(item)
+    out.sort(key=lambda x: (x.get("event_start") or "", x.get("label") or ""))
+    return out
+
+
+@app.route("/api/bet-sheets/cancelled-today")
+@admin_required
+def api_bet_sheets_cancelled_today():
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "no db"}), 503
+    return jsonify({"ok": True, "cancelled": _bet_sheet_cancelled_today(sb, datetime.now(timezone.utc))})
 
 
 _LIVE_BOOK_Q_CACHE: dict = {}

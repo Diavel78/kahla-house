@@ -2265,9 +2265,16 @@
     // (AZ) bets on every sport: resting, filled, or settled from a fill — the
     // bet and its price only, ✅/❌ on the graded ones, the record at the end.
     // Never a contract count, never dollars. Only the search narrows it.
+    // EVERY BET STAYS (Rob, Oct 31 2026: "should show all my picks for the
+    // grading, even if they didn't fill after live chase. I get those live on
+    // Bet105, so don't remove or add games regardless if they filled or
+    // not"): every pending pick, filled or not, plus the bets the box
+    // cancelled at game start / chase end (their pick is deleted — they come
+    // from /api/bet-sheets/cancelled-today, graded off the final there).
+    // Only a dust fold (a duplicate pick folded into its twin) drops out.
     function myBetLive(b) {
-        if (b.status !== 'pending') return ['won', 'lost', 'push', 'sold'].indexOf(b.status) >= 0;
-        return !!((b.order || {}).resting || Number(b.held || 0) >= 1 || Number(b.filled_qty || 0) >= 1);
+        if (b.status === 'void') return false;
+        return ['pending', 'won', 'lost', 'push', 'sold'].indexOf(b.status || 'pending') >= 0;
     }
     function myBetPrice(b) {
         if (b.price_c != null && b.price_c !== '') {
@@ -2322,7 +2329,19 @@
         const words = q.split(/\s+/).filter(Boolean);
         const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
         const ok1 = b => !words.length || words.every(w => ((b.event_name || '') + ' ' + betLabel(b) + ' ' + (b.sport || '')).toLowerCase().indexOf(w) >= 0);
-        const bets = (_lastBetsPayload.bets || [])
+        let gone = [];
+        try {
+            const r = await authFetch('/api/bet-sheets/cancelled-today');
+            if (r.ok) gone = ((await r.json()) || {}).cancelled || [];
+        } catch (e) {}
+        const mine = (_lastBetsPayload.bets || []);
+        const have = new Set(mine.map(b => b.id));
+        const azDay = t => t ? new Date(t).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) : '';
+        const sameBet = c => mine.some(b => b.getlive_from === c.pick_id
+            || (b.event_name === c.event_name && b.market_type === c.market_type && b.side === c.side
+                && azDay(b.event_start) === azDay(c.event_start)));
+        gone = gone.filter(c => !have.has(c.pick_id) && !sameBet(c));
+        const bets = mine.concat(gone)
             .filter(b => b.event_start && new Date(b.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) === today)
             .filter(b => myBetLive(b) && ok1(b))
             .sort((x, y) => String(x.sport || '').localeCompare(String(y.sport || ''))
