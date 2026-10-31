@@ -743,6 +743,9 @@ _SCHOOL_ALIASES: dict = {
     "fau": ["florida atlantic"],
     "southern miss": ["southern mississippi"],
     "southern mississippi": ["southern miss"],
+    # team_key drops the hyphen: Kalshi's 'Louisiana-Monroe' reads 'louisianamonroe'
+    "ul monroe": ["louisianamonroe", "louisiana monroe"],
+    "louisiana monroe": ["louisianamonroe", "ul monroe"],
 }
 
 

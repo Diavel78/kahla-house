@@ -6525,6 +6525,8 @@ def test_kalshi_venue_math() -> None:
     # APP STATE (Oct 30 2026): Kalshi writes 'Appalachian St.'; ESPN 'App State Mountaineers'
     check("kalshi: 'App State Mountaineers' finds 'Appalachian St. vs Georgia Southern'",
           TM("Appalachian St. vs Georgia Southern", "App State Mountaineers"))
+    check("kalshi: 'UL Monroe Warhawks' finds 'Southern Miss vs Louisiana-Monroe'",
+          TM("Southern Miss vs Louisiana-Monroe", "UL Monroe Warhawks"))
     check("kalshi: the alias does not name another school",
           not TM("Georgia St. vs Coastal Carolina", "App State Mountaineers"))
     # POLYMARKET PAGES THE WINDOWED SEARCH (same night: 105 events, the game on page two)
@@ -6546,6 +6548,22 @@ def test_kalshi_venue_math() -> None:
     _pmx.lookup(_C(), "NCAAF", "App State Mountaineers", "Georgia Southern Eagles",
                 "2026-10-31T15:30:00-07:00", diag=_d)
     check("polymarket: a game on page two of the event window is found", _d.get("matched") is True)
+    def _one(title, slug, away, home, st):
+        _ev1 = [{"slug": slug, "title": title, "startTime": st}]
+        class _E1:
+            def list(self, p):
+                return {"events": _ev1 if p.get("startTimeMin") else []}
+        class _C1:
+            events, markets = _E1(), _M()
+        _d1 = {}
+        _pmx.lookup(_C1(), "NCAAF", away, home, st, diag=_d1)
+        return _d1.get("matched") is True
+    check("polymarket: 'K-State vs. Colorado' is Kansas State's game",
+          _one("K-State vs. Colorado", "cfb-kanst-col-2026-10-31", "Kansas State Wildcats",
+               "Colorado Buffaloes", "2026-10-31T18:00:00Z"))
+    check("polymarket: 'LA Tech vs. South Alabama' is Louisiana Tech's game",
+          _one("LA Tech vs. South Alabama", "cfb-loutch-sala-2026-10-31", "Louisiana Tech Bulldogs",
+               "South Alabama Jaguars", "2026-10-31T19:00:00Z"))
     check("kalshi: 'Los Angeles C' is the Clippers, not the Lakers",
           TM("Los Angeles C wins", "LA Clippers") and not TM("Los Angeles C wins", "Los Angeles Lakers"))
     check("kalshi: 'Los Angeles L' is the Lakers", TM("Los Angeles L wins", "Los Angeles Lakers"))

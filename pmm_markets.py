@@ -371,6 +371,9 @@ _SCHOOL_ALIASES: dict[str, list[str]] = {
     "florida atlantic": ["fau"],
     "southern miss": ["southern mississippi"],
     "southern mississippi": ["southern miss"],
+    # Oct 30 2026: "K-State vs. Colorado", "LA Tech vs. South Alabama" read not listed
+    "kansas state": ["k state"],
+    "louisiana tech": ["la tech"],
 }
 
 
