@@ -2378,12 +2378,36 @@
         const ok = await copyText(myPicksText(bets, 'My picks'));
         toast(ok ? 'Copied your pre-game picks · ' + bets.length + ' bet' + (bets.length === 1 ? '' : 's') : 'Copy failed', !ok);
     }
+    // A bet on a FINAL game is settled whether or not the venue has paid it
+    // yet (Rob, Oct 31 2026: "All SETTLED BET…. Not filled…") — graded here
+    // off the final score, the same arithmetic as the server's _bs_grade_bet.
+    function gradeOffFinal(b, f) {
+        if (!f || f.away == null || f.home == null) return null;
+        const a = Number(f.away), h = Number(f.home), mt = b.market_type, sd = b.side, ln = b.line != null ? Number(b.line) : null;
+        let m = null;
+        if (mt === 'total') { if (ln == null) return null; m = sd === 'over' ? a + h - ln : sd === 'under' ? ln - (a + h) : null; }
+        else if (sd === 'home' || sd === 'away') {
+            const own = sd === 'home' ? h - a : a - h;
+            if (mt === 'moneyline') m = own;
+            else { if (ln == null) return null; m = own + ln; }
+        }
+        if (m == null) return null;
+        return m > 0 ? 'won' : m < 0 ? 'lost' : 'push';
+    }
+    function finalFor(b) {
+        if (b.result_score && b.result_score.away != null && b.result_score.home != null) return b.result_score;
+        const g = myBetGame(b);
+        return g && g.grade && g.grade.final && g.grade.final.away != null ? g.grade.final : null;
+    }
     async function copySettled() {
         if (!_lastBetsPayload) { toast('Your bets are still loading — try again in a second', true); return; }
         const t = await todaysBets(true);
         const sp = String(_sport || '').toUpperCase();
-        const bets = t.bets.filter(b => String(b.sport || '').toUpperCase() === sp
-            && ['won', 'lost', 'push', 'sold'].indexOf(b.status) >= 0);
+        const bets = t.bets.filter(b => String(b.sport || '').toUpperCase() === sp).map(b => {
+            if (['won', 'lost', 'push', 'sold'].indexOf(b.status) >= 0) return b;
+            const st = gradeOffFinal(b, finalFor(b));
+            return st ? Object.assign({}, b, { status: st, result_score: finalFor(b) }) : null;
+        }).filter(Boolean);
         if (!bets.length) { toast('No settled ' + sp + ' bets of yours today' + (t.words.length ? ' match the search' : ''), true); return; }
         const ok = await copyText(myPicksText(bets, 'Settled picks · ' + sp));
         toast(ok ? 'Copied settled ' + sp + ' picks · ' + bets.length + ' bet' + (bets.length === 1 ? '' : 's') : 'Copy failed', !ok);
