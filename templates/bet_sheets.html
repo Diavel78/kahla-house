@@ -80,6 +80,8 @@
         .tile .k { font-size: 13px; color: var(--text2); }
         .tile .v { font-family: var(--mono); font-size: 20px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .tile .s { font-size: 12px; color: var(--text3); }
+        .tile.tap { cursor: pointer; }
+        .tile.tap.on { border-color: var(--text3); }
         .pos { color: var(--g-tx); } .neg { color: var(--r-tx); }
         .alerts { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
         .alerts:empty { display: none; }
@@ -369,6 +371,10 @@
                 <div class="tile"><span class="k">Settled today</span><span class="v">…</span><span class="s">&nbsp;</span></div>
                 <div class="tile"><span class="k">Live</span><span class="v">…</span><span class="s">&nbsp;</span></div>
                 <div class="tile"><span class="k">Resting</span><span class="v">…</span><span class="s">&nbsp;</span></div>
+            </div>
+            <div class="sec hide" id="setSec">
+                <div class="sh" onclick="toggleSettled()" title="Hide"><h2>Settled today</h2><span class="sub" id="setMeta"></span><span class="chev">▲</span></div>
+                <div class="sb-body" id="setBody"></div>
             </div>
             <div class="alerts" id="alerts"></div>
 
@@ -1621,11 +1627,56 @@
             if (pc != null) rest += Number(o.leaves || 0) * pc / 100;
         });
         const nset = w + l + p + s;
-        const tile = (k, v, cls, sub) => '<div class="tile"><span class="k">' + k + '</span><span class="v ' + (cls || '') + '">' + v + '</span><span class="s">' + sub + '</span></div>';
+        const tile = (k, v, cls, sub, tap) => '<div class="tile' + (tap ? ' tap' + (_setOpen ? ' on' : '') + '" onclick="toggleSettled()' : '') + '"><span class="k">' + k + '</span><span class="v ' + (cls || '') + '">' + v + '</span><span class="s">' + sub + '</span></div>';
         document.getElementById('money').innerHTML =
-              tile('Settled today', nset ? money(sp) : '$0.00', nset ? _plCls(sp) : '', nset ? (w + '-' + l + (p ? '-' + p : '') + (s ? ' · ' + s + ' sold' : '')) : 'nothing yet')
+              tile('Settled today', nset ? money(sp) : '$0.00', nset ? _plCls(sp) : '', nset ? (w + '-' + l + (p ? '-' + p : '') + (s ? ' · ' + s + ' sold' : '')) : 'nothing yet', true)
             + tile('Live', lv.rows.length ? money(lv.pl) : '—', lv.rows.length ? _plCls(lv.pl) : '', lv.rows.length ? lv.rows.length + ' bet' + (lv.rows.length === 1 ? '' : 's') + (lv.nq ? ' · ' + lv.nq + ' no quote' : '') : 'nothing live')
             + tile('Resting', '$' + rest.toFixed(2), '', nr + ' order' + (nr === 1 ? '' : 's'));
+    }
+    // THE SETTLED LIST (Rob, Oct 30 2026: "keep me a list if I clicked the
+    // settled box that shows my wins/losses/trades"): tap the Settled today
+    // tile → every bet the tile counts (won / lost / push / sold, today's AZ
+    // slate, every sport), newest game first, with the dollars the tile adds.
+    let _setOpen = false;
+    try { _setOpen = localStorage.getItem('kh_bs_settled_open') === '1'; } catch (e) {}
+    function toggleSettled() {
+        _setOpen = !_setOpen;
+        try { localStorage.setItem('kh_bs_settled_open', _setOpen ? '1' : '0'); } catch (e) {}
+        if (_lastBetsPayload) { renderMoney(_lastBetsPayload); renderSettled(_lastBetsPayload); }
+        if (_setOpen) document.getElementById('setSec').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    function _settledRows(d) {
+        return (d.bets || []).filter(b => ['won', 'lost', 'push', 'sold'].indexOf(b.status) >= 0 && b.pnl_usd != null)
+            .sort((x, y) => String(y.event_start).localeCompare(String(x.event_start)));
+    }
+    function renderSettled(d) {
+        const sec = document.getElementById('setSec');
+        const rows = _settledRows(d);
+        sec.classList.toggle('hide', !_setOpen);
+        if (!_setOpen) return;
+        const tot = rows.reduce((a, b) => a + Number(b.pnl_usd), 0);
+        document.getElementById('setMeta').innerHTML = rows.length
+            ? '<span class="amt ' + _plCls(tot) + '" style="font-size:15px">' + money(tot) + '</span>' : '';
+        if (!rows.length) { document.getElementById('setBody').innerHTML = '<div class="c-n" style="padding:6px 2px">Nothing settled yet today.</div>'; return; }
+        const TAG = { won: ['grn', 'WON'], lost: ['red', 'LOST'], push: ['gry', 'PUSH'], sold: ['gry', 'SOLD'] };
+        document.getElementById('setBody').innerHTML = rows.map(b => {
+            const tg = TAG[b.status] || ['gry', String(b.status).toUpperCase()];
+            const rs = (b.result_score && typeof b.result_score === 'object') ? b.result_score : null;
+            const t = (b.event_name || '').split(' @ ').map(shortTeam);
+            const fin = rs && rs.away != null && rs.home != null
+                ? (t[0] || 'Away') + ' ' + rs.away + ' – ' + rs.home + ' ' + (t[1] || 'Home') + ' · FINAL'
+                : String(b.sport || '') + ' · ' + gameShort(b);
+            const q = b.status === 'sold' && b.sold && b.sold.qty != null ? Number(b.sold.qty)
+                : (b.filled_qty != null ? Number(b.filled_qty) : (b.held != null ? Number(b.held) : null));
+            const n = (q != null ? fmtQ(q) : '?') + ' @ ' + (b.price_c != null ? cA(b.price_c) : am(b.entry_price))
+                + (b.status === 'sold' && b.sold && b.sold.avg_c != null ? ' · sold @ ' + (Math.round(Number(b.sold.avg_c) * 10) / 10) + '¢' : '')
+                + ' · ' + venueName(b);
+            return '<div class="card"><div class="c-row"><span class="c-t">' + esc(betLabel(b))
+                 + ' <span class="tag ' + tg[0] + '">' + tg[1] + '</span></span>'
+                 + '<span class="amt ' + _plCls(Number(b.pnl_usd)) + '">' + money(Number(b.pnl_usd)) + '</span></div>'
+                 + '<div class="c-d">' + esc(fin) + '</div>'
+                 + '<div class="c-n">' + n + '</div></div>';
+        }).join('');
     }
     // LIVE ONLY (Rob, Oct 11 2026: "The top section is all live focused"):
     // filled lots on games in progress, marked at the live win % (1/0 once
@@ -1717,6 +1768,7 @@
     }
     function renderBets(d) {
         try { renderMoney(d); } catch (e) {}
+        try { renderSettled(d); } catch (e) {}
         try { renderPnl(d); } catch (e) { document.getElementById('plMeta').textContent = 'render failed'; }
         const bets = d.bets || [];
         _betsById = {}; bets.forEach(b => { _betsById[b.id] = b; });

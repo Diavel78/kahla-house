@@ -3834,6 +3834,9 @@ def test_bet_sheet_live_section() -> None:
     _asrc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")).read()
     check("…and its data is open to Pick Sheets access, not admin only",
           '@app.route("/api/line-tape")\n@bot_required' in _asrc)
+    check("tapping Settled today opens the settled list (won/lost/push/sold)",
+          "onclick=\"toggleSettled()" in html and "function renderSettled(d)" in html
+          and "try { renderSettled(d); } catch (e) {}" in html)
     check("a dead pick (order gone, nothing held) gets a Remove button",
           "(b.recon.red || []).some(f => f.code === 'dead_order')" in html and "'Remove this bet'" in html)
     _cx = inspect.getsource(_app._bet_sheet_cancel_exec)
