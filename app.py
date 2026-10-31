@@ -29808,6 +29808,12 @@ def _sheet_touch_rotate(rows: list, resume) -> list:
 
 
 def _sheet_touch_worker() -> None:
+    # THE RECORDER STARTS WITH THE WALK, NOT AFTER IT (Oct 31 2026): it used
+    # to start after the first pass FINISHED, and the first pass after a kick
+    # reads every game (up to the 900s budget) — so every kick left the chart
+    # with no Pinnacle line for ~15 min. The walk fills the game list at the
+    # top of the pass; the recorder idles until then.
+    _ensure_line_tape_worker()
     _time.sleep(_SHEET_TOUCH_BOOT_WAIT_S)
     while True:
         try:
