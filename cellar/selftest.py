@@ -6513,6 +6513,30 @@ def test_kalshi_venue_math() -> None:
     # Angeles C'; ESPN writes 'LA Clippers'. The Clippers never matched and
     # 'angeles' matched the Lakers to either team.
     TM = kv.team_mentioned
+    # APP STATE (Oct 30 2026): Kalshi writes 'Appalachian St.'; ESPN 'App State Mountaineers'
+    check("kalshi: 'App State Mountaineers' finds 'Appalachian St. vs Georgia Southern'",
+          TM("Appalachian St. vs Georgia Southern", "App State Mountaineers"))
+    check("kalshi: the alias does not name another school",
+          not TM("Georgia St. vs Coastal Carolina", "App State Mountaineers"))
+    # POLYMARKET PAGES THE WINDOWED SEARCH (same night: 105 events, the game on page two)
+    import pmm_markets as _pmx
+    _evs = [{"slug": f"cfb-t{i}-u{i}-2026-10-31", "title": f"Team{i} vs. Other{i}",
+             "startTime": "2026-10-31T20:00:00Z"} for i in range(100)]
+    _evs.append({"slug": "cfb-applst-gas-2026-10-31", "title": "Appalachian State vs. Georgia Southern",
+                 "startTime": "2026-10-31T22:30:00Z"})
+    class _E:
+        def list(self, p):
+            o = p.get("offset", 0)
+            return {"events": _evs[o:o + p.get("limit", 100)] if p.get("startTimeMin") else []}
+    class _M:
+        def list(self, p):
+            return {"markets": []}
+    class _C:
+        events, markets = _E(), _M()
+    _d = {}
+    _pmx.lookup(_C(), "NCAAF", "App State Mountaineers", "Georgia Southern Eagles",
+                "2026-10-31T15:30:00-07:00", diag=_d)
+    check("polymarket: a game on page two of the event window is found", _d.get("matched") is True)
     check("kalshi: 'Los Angeles C' is the Clippers, not the Lakers",
           TM("Los Angeles C wins", "LA Clippers") and not TM("Los Angeles C wins", "Los Angeles Lakers"))
     check("kalshi: 'Los Angeles L' is the Lakers", TM("Los Angeles L wins", "Los Angeles Lakers"))

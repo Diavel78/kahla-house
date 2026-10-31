@@ -723,6 +723,37 @@ def _tokens(name: str) -> set:
     return {t for t in team_key(name).split() if t and t not in _STOP}
 
 
+# SCHOOL NAMES KALSHI WRITES DIFFERENTLY FROM ESPN (Oct 30 2026: ESPN's 'App
+# State Mountaineers' vs Kalshi's 'Appalachian St. vs Georgia Southern' — the
+# game read "no series lists this game" with every series carrying it). Keys
+# are the LEADING words of our team_key; values are Kalshi spellings as
+# team_key renders them ('St.' → 'st'). Only names that cannot land inside
+# another school's name belong here.
+_SCHOOL_ALIASES: dict = {
+    "app state": ["appalachian st", "appalachian state"],
+    "appalachian state": ["appalachian st", "app state"],
+    "umass": ["massachusetts"],
+    "massachusetts": ["umass"],
+    "uconn": ["connecticut"],
+    "connecticut": ["uconn"],
+    "pitt": ["pittsburgh"],
+    "pittsburgh": ["pitt"],
+    "ucf": ["central florida"],
+    "fiu": ["florida international", "florida intl"],
+    "fau": ["florida atlantic"],
+    "southern miss": ["southern mississippi"],
+    "southern mississippi": ["southern miss"],
+}
+
+
+def _alias_hit(tx: str, team: str) -> bool:
+    k = team_key(team) + " "
+    for pre, alts in _SCHOOL_ALIASES.items():
+        if k.startswith(pre + " ") and any(f" {a} " in tx for a in alts):
+            return True
+    return False
+
+
 # Cities with two teams in one league. Kalshi writes those teams as the city
 # plus an initial ('Los Angeles L' / 'Los Angeles C', Oct 28 2026), so the
 # city's words prove nothing about WHICH team a text names.
@@ -746,6 +777,8 @@ def team_mentioned(text: str, team: str) -> bool:
     tx = " " + team_key(text) + " "
     k = _team_long_key(team)
     if k and f" {k} " in tx:
+        return True
+    if _alias_hit(tx, team):
         return True
     words = k.split()
     city = next((c for c in _SHARED_CITIES if k.startswith(c + " ")), None)

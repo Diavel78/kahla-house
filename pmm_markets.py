@@ -792,15 +792,29 @@ def _search_event(client, sport: str, away: str, home: str,
         if _RL_GATE is not None and not _RL_GATE():
             last_error = "paced out"
             break
-        try:
-            resp = client.events.list(params)
-        except Exception as e:
-            last_error = f"events.list attempt {i} failed: {str(e)[:200]}"
-            if _RL_TRIP is not None and _RL_TRIP(e):
+        # PAGE THE WINDOWED SHAPES (Oct 30 2026, App State @ Georgia Southern
+        # read "not listed" on a CFB Saturday: the ±12h window held 105
+        # events, this call took the first 100, and the game sat on page two
+        # — the slip's day prefetch pages, this search did not). Up to 6
+        # pages while a page comes back full; the no-window shape stays one.
+        evs, _rl_stop = [], False
+        for _pg in range(6 if params.get("startTimeMin") else 1):
+            _pp = dict(params, offset=_pg * 100) if _pg else params
+            try:
+                resp = client.events.list(_pp)
+            except Exception as e:
+                last_error = f"events.list attempt {i} failed: {str(e)[:200]}"
+                if _RL_TRIP is not None and _RL_TRIP(e):
+                    _rl_stop = True
                 break
+            _page = (resp.get("events") if isinstance(resp, dict) else getattr(resp, "events", None)) or []
+            evs += _page
+            if len(_page) < int(params.get("limit") or 100) or (_pg and _RL_GATE is not None and not _RL_GATE()):
+                break
+        if _rl_stop:
+            break
+        if not evs:
             continue
-        evs = resp.get("events") if isinstance(resp, dict) else getattr(resp, "events", None)
-        evs = evs or []
         for ev in evs:
             slug = ev.get("slug") if isinstance(ev, dict) else getattr(ev, "slug", None)
             if slug and slug in seen_slugs:
