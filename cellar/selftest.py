@@ -3862,8 +3862,10 @@ def test_bet_sheet_live_section() -> None:
                                   "bet": {"market_type": "total", "side": "over"}})
     _sb2, _ = _app._bs_stamp_bet({"slug": "asc-cfb-smu-syra-2026-10-31-neg-9pt5",
                                   "bet": {"market_type": "spread", "side": "home", "synthetic": True}})
+    _sb3, _ = _app._bs_stamp_bet({"slug": "asc-cfb-smu-syra-2026-10-31-neg-9pt5",
+                                  "bet": {"market_type": "spread", "side": "home", "synthetic": False}})
     check("a chase-end stamp with no line reads it off the slug (the SMU @ Syracuse bets)",
-          _sb1["line"] == 58.5 and _sb2["line"] == 9.5, f"{_sb1} {_sb2}")
+          _sb1["line"] == 58.5 and _sb2["line"] == 9.5 and _sb3["line"] == 9.5, f"{_sb1} {_sb2} {_sb3}")
     _g = _app._bs_grade_bet
     check("cancelled bets grade off the final (spread own line, total, ML, push)",
           _g("spread", "home", -3.5, 20, 24) == "win" and _g("spread", "away", 4.5, 20, 24) == "win"

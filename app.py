@@ -26506,10 +26506,10 @@ def _bs_stamp_bet(res: dict, back: dict = None):
         # Syracuse +9.5 missing from Settled picks: type and side were there, so the
         # slug fill above was skipped and the bet could never grade). Read it off the slug.
         base_slug = re.sub(r"-(1h|2h|1q|2q|3q|4q|p1|p2|p3)-", "-", slug, count=1)
-        for cand in ((syn,) if syn is not None else (False, True)):
+        for cand in ((bool(syn), not bool(syn)) if syn is not None else (False, True)):
             sl = _slug_side_line(base_slug, bool(cand))
             if sl and sl[1] == bet.get("side"):
-                bet["line"] = sl[2]
+                bet["line"] = sl[2]        # the orientation whose side matches the bet's names its line
                 break
     return bet, syn
 
