@@ -5476,6 +5476,23 @@ def api_bet_sheets_picks():
         _now = datetime.now(timezone.utc)
         sb_ = get_supabase()
         res_: dict = {"ok": True, "cancelled": _bet_sheet_cancelled_today(sb_, _now)}
+        if request.args.get("audit"):
+            # every game-start cancel stamp today, one line each, and whether it reached the list
+            day0 = _now.astimezone(ZoneInfo("America/Phoenix")).replace(hour=0, minute=0, second=0, microsecond=0)
+            try:
+                st_ = (sb_.table("exec_probe_runs").select("at,result").eq("result->>hand_start_cancel", "true")
+                       .gte("at", day0.isoformat()).order("at").limit(500).execute().data or [])
+            except Exception as e:
+                st_ = []
+                res_["audit_err"] = str(e)[:120]
+            got = {c.get("pick_id") for c in res_["cancelled"]}
+            res_["audit"] = [{"at": r_.get("at"), "pick_id": (r_.get("result") or {}).get("pick_id"),
+                              "label": ((r_.get("result") or {}).get("bet") or {}).get("label"),
+                              "event": ((r_.get("result") or {}).get("bet") or {}).get("event_name"),
+                              "slug": (r_.get("result") or {}).get("slug"),
+                              "venue": (r_.get("result") or {}).get("venue"),
+                              "out": {k_: ((r_.get("result") or {}).get("result") or {}).get(k_) for k_ in ("ok", "deleted", "held", "kept")},
+                              "listed": (r_.get("result") or {}).get("pick_id") in got} for r_ in st_]
         fnd = (request.args.get("find") or "").strip().lower()
         if fnd:
             day0 = _now.astimezone(ZoneInfo("America/Phoenix")).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -26485,8 +26502,12 @@ def _bs_stamp_bet(res: dict, back: dict = None):
     (bet dict or None, synthetic or None)."""
     bet = res.get("bet") if isinstance(res.get("bet"), dict) else back
     slug = res.get("slug")
-    if not bet or not slug:
+    if not bet:
         return None, None
+    if not slug:
+        # A KALSHI BET WITH NO POLYMARKET TWIN has no slug (Oct 31 2026 audit):
+        # the stamp's own bet is the whole record — never drop it for that.
+        return (dict(bet) if bet.get("market_type") and bet.get("side") else None), bet.get("synthetic")
     bet = dict(bet)
     syn = bet.get("synthetic")
     if syn is None:
@@ -26586,14 +26607,14 @@ def _bet_sheet_cancelled_today(sb, now) -> list:
     for pid, res in by_pick.items():
         slug = res.get("slug")
         bet, _syn = _bs_stamp_bet(res, back.get(pid))
-        if not bet or not slug:
+        if not bet:
             continue
         st_iso = res.get("start") or bet.get("event_start")
         bdt = _parse_iso(st_iso or "")
         if not bdt or bdt.astimezone(az).date() != day0.date():
             continue
         item = {"id": f"c{pid}", "pick_id": pid, "cancelled": True,
-                "sport": bet.get("sport") or _slug_sport(slug),
+                "sport": bet.get("sport") or (_slug_sport(slug) if slug else None),
                 "event_name": bet.get("event_name"), "event_start": st_iso,
                 "market_type": bet.get("market_type"), "side": bet.get("side"),
                 "line": bet.get("line"), "label": bet.get("label"),

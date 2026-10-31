@@ -3866,6 +3866,9 @@ def test_bet_sheet_live_section() -> None:
                                   "bet": {"market_type": "spread", "side": "home", "synthetic": False}})
     check("a chase-end stamp with no line reads it off the slug (the SMU @ Syracuse bets)",
           _sb1["line"] == 58.5 and _sb2["line"] == 9.5 and _sb3["line"] == 9.5, f"{_sb1} {_sb2} {_sb3}")
+    _sb4, _ = _app._bs_stamp_bet({"slug": None, "bet": {"market_type": "total", "side": "under", "line": 56.5}})
+    check("a Kalshi cancel with no Polymarket twin (no slug) still reaches Settled picks",
+          _sb4 and _sb4["line"] == 56.5 and "if not bet or not slug:" not in inspect.getsource(_app._bet_sheet_cancelled_today))
     _g = _app._bs_grade_bet
     check("cancelled bets grade off the final (spread own line, total, ML, push)",
           _g("spread", "home", -3.5, 20, 24) == "win" and _g("spread", "away", 4.5, 20, 24) == "win"
