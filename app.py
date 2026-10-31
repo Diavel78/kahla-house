@@ -5469,6 +5469,36 @@ def api_bet_sheets_picks():
     want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
+    if request.args.get("cancelled_today"):
+        # What Settled picks merges in (Oct 31 2026, "where's my SMU game?"):
+        # the graded game-start cancels, plus every raw stamp/pick today that
+        # mentions `find`, so a missing bet can be traced to the step that dropped it.
+        _now = datetime.now(timezone.utc)
+        sb_ = get_supabase()
+        res_: dict = {"ok": True, "cancelled": _bet_sheet_cancelled_today(sb_, _now)}
+        fnd = (request.args.get("find") or "").strip().lower()
+        if fnd:
+            day0 = _now.astimezone(ZoneInfo("America/Phoenix")).replace(hour=0, minute=0, second=0, microsecond=0)
+            try:
+                rows = (sb_.table("exec_probe_runs").select("at,result").gte("at", day0.isoformat())
+                        .order("at").limit(5000).execute().data or [])
+            except Exception as e:
+                rows = []
+                res_["stamp_err"] = str(e)[:120]
+            res_["stamps"] = [r_ for r_ in rows if fnd in json.dumps(r_.get("result"), default=str).lower()][:40]
+            try:
+                pk = (sb_.table("bot_picks").select("id,status,event_name,event_start,sport,market_type,side,entry_line,result_score,signal_blob")
+                      .ilike("event_name", f"%{fnd}%").gte("event_start", (day0 - timedelta(days=1)).isoformat())
+                      .limit(20).execute().data or [])
+            except Exception as e:
+                pk = []
+                res_["pick_err"] = str(e)[:120]
+            res_["picks"] = [{k_: v_ for k_, v_ in p_.items() if k_ != "signal_blob"}
+                             | {"blob": {k_: (p_.get("signal_blob") or {}).get(k_) for k_ in
+                                         ("bet_sheet", "venue", "pmm_slug", "kalshi_ticker", "order_id", "filled_qty",
+                                          "contracts", "price_c", "live_snipe", "getlive_from", "start_take_window_done")}}
+                             for p_ in pk]
+        return jsonify(res_)
     slug = (request.args.get("slug") or "").strip()
     out: dict = {"ok": True, "slug": slug}
     if request.args.get("auto_cancel"):
