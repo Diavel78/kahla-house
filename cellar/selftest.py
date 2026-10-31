@@ -3902,6 +3902,23 @@ def test_hand_red_alert() -> None:
           and F(rr, {"live_snipe": {"at": 1}}, rest, under) is None)
     check("flip red: a filled or unread order is not, nor a read that says hold",
           F(rr, {}, {"order": {"resting": False}}, under) is None and F(rr, {}, rest, under, rec="hold") is None)
+    O = _app._bet_opposes_model
+    check("against the model: UConn +1.5 under a model Air Force +1.5 is NOT (both win a 1-pt game)",
+          O("spread", "home", 1.5, "away", 1.5) is False)
+    check("…UConn −1.5 is, and so is a wider gap the other way",
+          O("spread", "home", 1.5, "away", -1.5) is True and O("spread", "home", 1.5, "away", -2.5) is True)
+    check("…totals: under at or below the over's line opposes, an under above it does not",
+          O("total", "over", 52.5, "under", 52.5) and O("total", "over", 52.5, "under", 51.5)
+          and not O("total", "over", 52.5, "under", 53.5) and O("total", "under", 52.5, "over", 53.5)
+          and not O("total", "under", 52.5, "over", 51.5))
+    check("…moneyline: the other team always opposes; no line falls back to the side",
+          O("moneyline", "home", 0, "away", 0) and O("spread", "home", None, "away", 1.5))
+    check("flip red: a box bet on UConn +1.5 under Air Force +1.5 is not MODEL FLIPPED",
+          F({"side": "away", "market_type": "spread", "entry_line": 1.5}, {}, rest,
+            {"side": "home", "label": "Air Force +1.5", "line": 1.5}) is None)
+    _bsrc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "bet_sheets.html")).read()
+    check("…and the page's flip test compares lines the same way",
+          "function opposesModel(" in _bsrc and "opposesModel(b.market_type, s.side, s.line, b.side, b.line)" in _bsrc)
     check("flip red: the model on the bet's own side is not",
           F(rr, {}, rest, {"side": "over", "label": "Over 77.5"}) is None)
     check("the chase hand-off is silent, cancels still send (Rob: cancelled yes, chasing no)",

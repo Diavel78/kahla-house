@@ -1247,7 +1247,7 @@
     function pickBtn(gi, g, mt, side, line, label, verdict, price, vq, inv) {
         if (line === null || line === undefined || !side) return '';
         if (!inv) {
-            _btnSides[mt] = { side: side, label: label };   // this card's model side per market
+            _btnSides[mt] = { side: side, label: label, line: line };   // this card's model side per market
             _modelSide[gi + '|' + mt] = side;
         }
         const key = slipKey(g, mt, side), on = inSlip(key), mine = myBetOn(g, mt, side);
@@ -1307,9 +1307,21 @@
     // whose button now shows the model's side. Never cancels anything — it
     // goes red while it still rests (the call is yours); an app bet on the
     // other side was probably on purpose, so it only says so.
+    // AGAINST THE MODEL = THE TWO BETS CAN'T BOTH WIN (Oct 31 2026, Rob holding
+    // UConn +1.5 under a model Air Force +1.5: "Against model Airforce +1.5?? I have
+    // UCONN +1.5"). Both +1.5s win on a one-point game; only UConn −1.5 is the
+    // model's opposite. Spread: own lines a (model) + b (bet) ≤ 0. Total: the under
+    // at or below the over's line. ML: the other team. Mirrors app._bet_opposes_model.
+    function opposesModel(mt, mSide, mLine, bSide, bLine) {
+        if (!mSide || !bSide || mSide === bSide) return false;
+        const a = Number(mLine), b = Number(bLine);
+        if (mt === 'ml' || mt === 'moneyline' || mLine == null || bLine == null || !isFinite(a) || !isFinite(b)) return true;
+        if (mt === 'total') return mSide === 'over' ? b <= a : b >= a;
+        return a + b <= 0;
+    }
     function flipOf(b) {
         const s = _btnSides[b.market_type === 'moneyline' ? 'ml' : b.market_type];
-        return (s && b.side && s.side !== b.side) ? s : null;
+        return (s && b.side && opposesModel(b.market_type, s.side, s.line, b.side, b.line)) ? s : null;
     }
     function betStrip(b, withGame, flip) {
         const st = betState(b), loud = flip && !b.app && !b.auto && !b.vs_model;   // an auto bet re-seats on the price rule's side by itself; a vs_model bet was bet against it on purpose

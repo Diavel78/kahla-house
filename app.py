@@ -17932,6 +17932,26 @@ def _hand_red_read_rec(sb, r: dict, blob: dict, s: dict, started: bool, cache: d
         return None
 
 
+def _bet_opposes_model(mt, m_side, m_line, b_side, b_line) -> bool:
+    """Pure. True when a bet and the model's pick on the same market CAN'T BOTH
+    WIN (Oct 31 2026: UConn +1.5 under a model Air Force +1.5 read MODEL FLIPPED —
+    both +1.5s win a one-point game; only UConn −1.5 is the opposite). Spread:
+    own lines a + b ≤ 0. Total: the under at or below the over's line. ML: the
+    other team. A missing line falls back to the side test. Mirrors the page's
+    opposesModel."""
+    if not m_side or not b_side or m_side == b_side:
+        return False
+    try:
+        a, b = float(m_line), float(b_line)
+    except (TypeError, ValueError):
+        return True
+    if mt in ("ml", "moneyline"):
+        return True
+    if mt == "total":
+        return b <= a if m_side == "over" else b >= a
+    return a + b <= 0
+
+
 def _hand_flip_red(r: dict, blob: dict, s: dict, model: dict | None, rec=None):
     """Pure. MODEL FLIPPED, exactly as the page paints it red ("needs you"):
     a pre-game bet RESTING on the side opposite the model's button for its
@@ -17940,7 +17960,8 @@ def _hand_flip_red(r: dict, blob: dict, s: dict, model: dict | None, rec=None):
     {side, label} for the bet's market off the sheet. (code, text) or None."""
     if not isinstance(model, dict) or not model.get("side") or not r.get("side"):
         return None
-    if model["side"] == r.get("side"):
+    if not _bet_opposes_model(r.get("market_type"), model["side"], model.get("line"),
+                              r.get("side"), r.get("entry_line")):
         return None
     if blob.get("vs_model") or blob.get("app_adopted") or blob.get("placed_via") == "app" \
             or isinstance(blob.get("auto_price"), dict) or blob.get("in_play") or blob.get("live_snipe"):
@@ -17972,7 +17993,7 @@ def _hand_model_sides(sb, now) -> dict:
             else:
                 team = g.get("home") if side == "home" else g.get("away")
                 lab = f"{team} ML" if mt == "ml" else f"{team} {line:+g}"
-            out.setdefault(str(mid), {}).setdefault(mt, {"side": side, "label": lab})
+            out.setdefault(str(mid), {}).setdefault(mt, {"side": side, "label": lab, "line": line})
     return out
 
 
