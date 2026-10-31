@@ -2274,6 +2274,50 @@ def _sheet_items(g: dict, sport: str) -> list:
     return items
 
 
+@app.route("/api/venue/titles")
+def api_venue_titles():
+    """READ-ONLY, shared-secret (site-curl). What each venue CALLS a game.
+    ?sport=NCAAF&date=YYYY-MM-DD&q=georgia,app — Polymarket's whole ET-day
+    event list (paged, the slip's prefetch) and Kalshi's open events on the
+    sport's full-game series, filtered to titles carrying any q word. Built
+    Oct 30 2026 (App State @ Georgia Southern read 'not listed' on both)."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    import kalshi_venue as kv
+    import pmm_markets as _pm
+    sport = (request.args.get("sport") or "NCAAF").upper()
+    qs = [w.strip().lower() for w in (request.args.get("q") or "").split(",") if w.strip()]
+    d = (request.args.get("date") or datetime.now(ZoneInfo("America/New_York")).date().isoformat())
+    hit = lambda t: (not qs) or any(w in str(t or "").lower() for w in qs)
+    out: dict = {"ok": True, "sport": sport, "date": d, "q": qs}
+    try:
+        client = get_client()
+        st = _pm.prefetch_day_events(client, sport, [f"{d}T18:00:00+00:00"])
+        tag = _pm._SPORT_TAG_SLUG.get(sport)
+        evs = (_pm._DAY_EVENTS.get((tag, d)) or (0, []))[1]
+        g = lambda e, k: (e.get(k) if isinstance(e, dict) else getattr(e, k, None))
+        out["poly"] = {"stats": st, "events": len(evs),
+                       "match": [{"title": g(e, "title"), "slug": g(e, "slug"), "start": g(e, "startTime")}
+                                 for e in evs if hit(str(g(e, "title")) + " " + str(g(e, "slug")))][:40]}
+    except Exception as e:
+        out["poly"] = {"error": f"{type(e).__name__}: {e}"[:200]}
+    kout = {}
+    for mt in ("ml", "spread", "total"):
+        for ser in kv.discover_series(sport, mt)[:2]:
+            try:
+                r = kv.events(ser)
+                rows = r.get("events") or []
+                kout[ser] = {"events": len(rows), "error": r.get("error"),
+                             "match": [{"title": e.get("title"), "sub": e.get("sub_title"),
+                                        "ticker": e.get("event_ticker")}
+                                       for e in rows if hit(kv._event_text(e))][:40]}
+            except Exception as e:
+                kout[ser] = {"error": f"{type(e).__name__}: {e}"[:200]}
+    out["kalshi"] = kout
+    return jsonify(out)
+
+
 @app.route("/api/kalshi/coverage")
 def api_kalshi_coverage():
     """READ-ONLY, shared-secret (site-curl). ?sport=NCAAF [&game=nebraska]
