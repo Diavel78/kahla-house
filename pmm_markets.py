@@ -625,7 +625,8 @@ def _match_event_to_game(events: list, away: str, home: str,
 # ──────────────────────────── Event search ────────────────────────────
 
 _DAY_EVENTS: dict = {}          # (tag, ET date iso) -> (ts, [events])
-_DAY_EVENTS_TTL_S = 180.0
+_DAY_EVENTS_TTL_S = 600.0       # the list only names games (quotes come per event); a game
+                                # missing from it falls through to the per-game search
 
 
 def prefetch_day_events(client, sport: str, starts) -> dict:

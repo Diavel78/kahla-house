@@ -29461,6 +29461,19 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
     # there — every game is read within two passes, the nearest the pass after.
     rows = _sheet_touch_rows_cached(sb, now)
     rows = _sheet_touch_rotate(rows, _SHEET_TOUCH_LAST.get("resume"))
+    # ONE EVENT LIST PER (SPORT, DAY) UP FRONT (Oct 30 2026): every game's
+    # Polymarket lookup matches off it instead of running its own paged
+    # events search — a CFB Saturday is 100+ events, and 75 games × their own
+    # pages against the venue's rate limit held the first walk after a kick
+    # (and the Pinnacle recorder, which starts after it) for 10+ minutes.
+    try:
+        import pmm_markets as _pmw
+        _by_sp: dict = {}
+        for _sp, _r, _g in rows:
+            _by_sp.setdefault(_sp, []).append(_r.get("event_start"))
+        st["prefetch"] = {_sp: _pmw.prefetch_day_events(client, _sp, _ss) for _sp, _ss in _by_sp.items()}
+    except Exception as e:
+        st["prefetch"] = {"error": f"{type(e).__name__}: {e}"[:120]}
     resume = None
     for sport, r, g in rows:
         key = f"{sport}|{r.get('event_name')}"
