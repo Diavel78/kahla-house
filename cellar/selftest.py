@@ -6972,6 +6972,29 @@ def test_line_tape() -> None:
                        "kalshi": {"why": "no_market"}}}
     rows = _app._line_tape_venue_rows("NCAAF", "FAU @ UNT", "m1", "2026-10-30T00:00:00Z", picks, "2026-10-29T00:00:00Z")
     check("line tape: a kept read and a missing venue write nothing", len(rows) == 2 and {r["src"] for r in rows} == {"poly", "kalshi"}, str(rows))
+    # PINNACLE IN-GAME (Oct 31 2026): a game in progress is its own `isLive` listing
+    _now = datetime(2026, 10, 31, 17, 0, tzinfo=timezone.utc)
+    _part = [{"alignment": "away", "name": "UConn"}, {"alignment": "home", "name": "Air Force"}]
+    _mu = [{"id": 1, "participants": _part, "startTime": "2026-10-31T19:00:00Z"},                 # upcoming
+           {"id": 2, "participants": _part, "startTime": "2026-10-31T16:00:00Z"},                 # started, pre-game listing
+           {"id": 3, "participants": _part, "startTime": "2026-10-31T16:00:00Z", "isLive": True, "parentId": 2}]
+    _sp = lambda mid, st="open": {"matchupId": mid, "type": "spread", "period": 0, "status": st,
+                                  "prices": [{"designation": "home", "points": -2.5, "price": -110},
+                                             {"designation": "away", "points": 2.5, "price": -110}]}
+    _to = lambda mid, st="open": {"matchupId": mid, "type": "total", "period": 0, "status": st,
+                                  "prices": [{"designation": "over", "points": 52.5, "price": -105},
+                                             {"designation": "under", "points": 52.5, "price": -115}]}
+    _mk = [_sp(1), _to(1), _sp(2), _sp(3), _to(3, "closed")]
+    _pre = _app._pin_direct_to_events(_mu, _mk, _now)
+    _liv = _app._pin_direct_to_events(_mu, _mk, _now, live=True)
+    check("pinnacle live: pre-game reads keep only the upcoming listing (no started game, no live child)",
+          [e["id"] for e in _pre] == ["pd-1"], str([e["id"] for e in _pre]))
+    check("…live reads keep only the in-game listing, and skip a market closed between plays",
+          [e["id"] for e in _liv] == ["pd-3"]
+          and [m["key"] for m in _liv[0]["bookmakers"][0]["markets"]] == ["spreads"], str(_liv))
+    _tsrc = inspect.getsource(_app._line_tape_pin_tick)
+    check("…the recorder keeps a listed game past its start and reads the live listing for it",
+          "_LINE_TAPE_SEEN" in _tsrc and "live=True" in _tsrc and "_LINE_TAPE_LIVE_H" in _tsrc)
     # the moneyline on every game (Oct 31 2026) — football has no ML pick
     _sp, _sk = _app._sheet_touch_poly, _app._sheet_touch_kalshi
     try:

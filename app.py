@@ -28600,6 +28600,8 @@ _SHEET_TOUCH_STATS: dict = {"passes": 0, "errors": 0, "last_error": None}
 # model names; the chart mirrors back. `/api/line-tape` serves one game.
 # ══════════════════════════════════════════════════════════════════════
 _LINE_TAPE_GAMES: list = []        # [(sport, event_name, market_id, away, home, event_start)] off the touch walk
+_LINE_TAPE_SEEN: dict = {}         # (sport, event_name) → that tuple, kept past the start for the in-game read
+_LINE_TAPE_LIVE_H = 5.0            # hours past the listed start Pinnacle's in-game line is recorded
 _LINE_TAPE_LAST: dict = {}         # (sport, event, src, mt) → the last value written
 _LINE_TAPE_STATS: dict = {"rows": 0, "pin_rows": 0, "errors": 0, "last_error": None, "pin_at": None,
                           "venue_at": None, "pruned": None}
@@ -29176,17 +29178,44 @@ def _line_tape_pin_tick(sb, now=None) -> dict:
     """One minute of Pinnacle: each sport's feed (memory-cached 55s, the
     free direct feed) → every upcoming sheet game's main lines → line_tape."""
     now = now or datetime.now(timezone.utc)
-    games = [g for g in list(_LINE_TAPE_GAMES) if g[5] and (_parse_iso(g[5]) or now) > now]
+    # IN-GAME TOO (Oct 31 2026, Rob: "add live"): the walk's list holds only
+    # upcoming games, so every game it has listed is remembered here and kept
+    # _LINE_TAPE_LIVE_H past its start; a started game reads Pinnacle's live
+    # listing (the same feed, `live=True`), never the pre-game one.
+    for g in list(_LINE_TAPE_GAMES):
+        _LINE_TAPE_SEEN[(g[0], g[1])] = g
+    games, live_games = [], []
+    for k, g in list(_LINE_TAPE_SEEN.items()):
+        st = _parse_iso(g[5]) if g[5] else None
+        if st is None:
+            continue
+        if st > now:
+            games.append(g)
+        elif (now - st).total_seconds() <= _LINE_TAPE_LIVE_H * 3600:
+            live_games.append(g)
+        else:
+            _LINE_TAPE_SEEN.pop(k, None)
     touch = (_SHEET_TOUCH_LAST.get("games") or {}) if isinstance(_SHEET_TOUCH_LAST.get("games"), dict) else {}
     slates: dict = {}
+    live_slates: dict = {}
     rows, seen, lad_rows = [], 0, []
+    nlive = 0
     at = now.isoformat()
-    for sport, ev, mid, away, home, start in games:
+    for sport, ev, mid, away, home, start in games + live_games:
+        is_live = (_parse_iso(start) or now) <= now
         try:
-            evs = _pin_live_slate(sb, sport, now, slates)[0]
+            if is_live:
+                if sport not in live_slates:
+                    live_slates[sport] = (_pin_direct_events(sport, now, live=True)[0]
+                                          if sport in _PINDIRECT_LEAGUE else None)
+                evs = live_slates[sport]
+            else:
+                evs = _pin_live_slate(sb, sport, now, slates)[0]
             pin = _pin_block_from_events(evs, away, home, start=start) if evs else None
         except Exception:
             evs, pin = None, None
+        if pin and is_live:
+            nlive += 1
         if pin:
             seen += 1
             # Pinnacle's own price AT the venue's rung, off its alternate ladder
@@ -29213,7 +29242,9 @@ def _line_tape_pin_tick(sb, now=None) -> dict:
     nl = _ladder_write(sb, lad_rows)
     _LINE_TAPE_STATS["pin_rows"] += n
     _LINE_TAPE_STATS["pin_at"] = at
-    return {"games": len(games), "priced": seen, "rows": n, "ladder": nl}
+    _LINE_TAPE_STATS["pin_live"] = {"games": len(live_games), "priced": nlive}
+    return {"games": len(games), "live": len(live_games), "live_priced": nlive,
+            "priced": seen, "rows": n, "ladder": nl}
 
 
 def _line_tape_prune(sb, now=None) -> None:
@@ -47319,24 +47350,34 @@ _PINDIRECT_HDR = {"User-Agent": "Mozilla/5.0", "Accept": "application/json",
                   "X-API-Key": _PINDIRECT_KEY}
 
 
-def _pin_direct_to_events(matchups, markets, now) -> list:
+def _pin_direct_to_events(matchups, markets, now, live: bool = False) -> list:
     """Pinnacle's matchups + straight markets → TOA-shaped events (one
     `pinnacle` bookmaker, h2h/spreads/totals, full game, main lines only),
     so every slate reader works unchanged. Outcomes carry `designation`
     (home/away/over/under) — _pin_outcomes prefers it over name matching.
     Started games and child matchups (props, team totals, periods) are
-    dropped."""
+    dropped.
+    `live=True` (Oct 31 2026) returns ONLY the in-game games: Pinnacle lists a
+    game in progress as its own matchup (`isLive`, `parentId` → the pre-game
+    listing, same teams and startTime), and a market suspended between plays
+    (`status` not open) is skipped — never recorded as a price. Every pre-game
+    reader keeps `live=False`, so a closing line is never an in-game number."""
     games: dict = {}
     seen: set = set()
     for m in (matchups or []):
-        if not isinstance(m, dict) or m.get("parent") or m.get("parentId") or m.get("special"):
+        if not isinstance(m, dict) or m.get("special"):
+            continue
+        if live:
+            if not m.get("isLive"):
+                continue
+        elif m.get("parent") or m.get("parentId"):
             continue
         names = {p.get("alignment"): p.get("name") for p in (m.get("participants") or [])}
         aw, hm, st = names.get("away"), names.get("home"), m.get("startTime")
         if not aw or not hm or not st:
             continue
         try:
-            if datetime.fromisoformat(str(st).replace("Z", "+00:00")) <= now:
+            if not live and datetime.fromisoformat(str(st).replace("Z", "+00:00")) <= now:
                 continue
         except Exception:
             continue
@@ -47359,6 +47400,8 @@ def _pin_direct_to_events(matchups, markets, now) -> list:
         g = games.get((x or {}).get("matchupId"))
         mk = want.get((x or {}).get("type"))
         if not g or not mk or x.get("period") not in (0, None):
+            continue
+        if live and str(x.get("status") or "open") != "open":
             continue
         if x.get("isAlternate"):
             mk = alt_key.get((x or {}).get("type"))
@@ -47395,27 +47438,39 @@ def _pin_direct_to_events(matchups, markets, now) -> list:
     return out
 
 
-def _pin_direct_events(sport: str, now):
+_PIN_RAW_CACHE: dict = {}          # sport → (monotonic, matchups, markets): one feed read serves pre-game + live
+_PIN_RAW_TTL_S = 45.0
+
+
+def _pin_direct_events(sport: str, now, live: bool = False):
     """One sport's slate straight from Pinnacle → (events, why). events is
-    None on any failure, [] only when Pinnacle answered with no games."""
+    None on any failure, [] only when Pinnacle answered with no games.
+    `live=True` → the games in progress instead (`_pin_direct_to_events`).
+    The raw feed is reused for _PIN_RAW_TTL_S so the pre-game and the live
+    read in one recorder minute cost one pair of requests."""
     lid = _PINDIRECT_LEAGUE.get(sport)
     if not lid:
         return None, "no_league"
-    try:
-        r1 = _http.get(f"{_PINDIRECT_BASE}/leagues/{lid}/matchups",
-                       headers=_PINDIRECT_HDR, timeout=12)
-        if r1.status_code != 200:
-            return None, f"matchups_{r1.status_code}"
-        r2 = _http.get(f"{_PINDIRECT_BASE}/leagues/{lid}/markets/straight",
-                       headers=_PINDIRECT_HDR, timeout=12)
-        if r2.status_code != 200:
-            return None, f"markets_{r2.status_code}"
-        mu, mk = r1.json(), r2.json()
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"[:160]
-    if not isinstance(mu, list) or not isinstance(mk, list):
-        return None, "not_a_list"
-    return _pin_direct_to_events(mu, mk, now), None
+    hit = _PIN_RAW_CACHE.get(sport)
+    if hit and _time.monotonic() - hit[0] < _PIN_RAW_TTL_S:
+        mu, mk = hit[1], hit[2]
+    else:
+        try:
+            r1 = _http.get(f"{_PINDIRECT_BASE}/leagues/{lid}/matchups",
+                           headers=_PINDIRECT_HDR, timeout=12)
+            if r1.status_code != 200:
+                return None, f"matchups_{r1.status_code}"
+            r2 = _http.get(f"{_PINDIRECT_BASE}/leagues/{lid}/markets/straight",
+                           headers=_PINDIRECT_HDR, timeout=12)
+            if r2.status_code != 200:
+                return None, f"markets_{r2.status_code}"
+            mu, mk = r1.json(), r2.json()
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"[:160]
+        if not isinstance(mu, list) or not isinstance(mk, list):
+            return None, "not_a_list"
+        _PIN_RAW_CACHE[sport] = (_time.monotonic(), mu, mk)
+    return _pin_direct_to_events(mu, mk, now, live=live), None
 
 
 def _pin_slate(sb, sport: str, now, paid: bool = True) -> list | None:

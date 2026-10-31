@@ -830,7 +830,9 @@
         if (!S || !all.length) { box.innerHTML = '<div class="empty">No history for this game yet — recording began Oct 29 2026.</div>'; rd.innerHTML = ''; return; }
         const startMs = c.g.event_start ? Date.parse(c.g.event_start) : null;
         let tEnd = Date.now();
-        if (startMs && startMs < tEnd) tEnd = startMs;
+        // IN-GAME (Oct 31 2026): Pinnacle is recorded through the game now — after
+        // the start the chart runs to its last point (never past now), else it ends at the start
+        if (startMs && startMs < tEnd) tEnd = Math.max(startMs, Math.min(Date.now(), Math.max.apply(null, all.map(p => p[0]))));
         const tFirst = Math.min.apply(null, all.map(p => p[0]));
         let tStart = c.range === '3h' ? tEnd - 3 * 3600e3 : c.range === '24h' ? tEnd - 24 * 3600e3 : tFirst;
         if (c.range === 'all' || tStart < tFirst - 3600e3) tStart = Math.min(tFirst, tEnd - 3600e3);
