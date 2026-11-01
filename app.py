@@ -2614,6 +2614,7 @@ def api_football_picks():
             built_at = b
     _sheet_attach_tv(sport, games)
     _sheet_attach_venue(sb, sport, games)    # the box's Poly/Kalshi bids per pick, one DB read (Oct 26 2026)
+    _sheet_attach_steam(sb, sport, games)    # the books' move since the open (Nov 1 2026)
     _now = datetime.now(timezone.utc)
     for g in games:
         _sheet_attach_price(sport, g, _now)     # THE PRICE RULE: venue bid vs Pinnacle fair decides (Oct 27 2026)
@@ -30339,6 +30340,68 @@ def _steam_grade(mt: str, sgn: int, line, final: dict):
     if abs(d) < 1e-9:
         return "push"
     return "won" if (d > 0) == (sgn > 0) else "lost"
+
+
+_STEAM_CACHE: dict = {}
+
+
+def _steam_card(nums: dict, until_ms: int, min_pts: float = 0.5):
+    """Pure. The card's steam read: each book's move since its FIRST read on
+    the tape, to `until_ms` (now, or the start once the game is on). Shown
+    when Pinnacle and at least one venue moved ≥ min_pts the same way and no
+    book went the other way. {dir, books, moves} or None."""
+    plan = _steam_plan(nums, until_ms, 0, 0, min_pts, 2)
+    if not plan:
+        return None
+    agree = sum(1 for m in plan["moves"].values() if m * plan["dir"] >= min_pts)
+    return {"dir": plan["dir"], "books": agree, "moves": plan["moves"]}
+
+
+def _sheet_attach_steam(sb, sport: str, games: list) -> None:
+    """THE STEAM TAG on every sheet card (Nov 1 2026, Rob: "Pretty obvious
+    what's happening here… and I chased it, all day long"): which way
+    Pinnacle, Polymarket and Kalshi have moved since the open, in points.
+    One line_tape read per sport, cached 3 min. Never raises."""
+    if not games or (sport, "spread") not in _STEAM_SLOPE and (sport, "total") not in _STEAM_SLOPE:
+        return
+    try:
+        starts = [d for d in (_parse_iso(g.get("event_start")) for g in games if g.get("event_start")) if d]
+        if not starts:
+            return
+        lo, hi = min(starts) - timedelta(hours=1), max(starts) + timedelta(hours=1)
+        ck = (sport, lo.isoformat()[:13], hi.isoformat()[:13])
+        hit = _STEAM_CACHE.get(ck)
+        if hit and _time.monotonic() - hit[0] < 180:
+            by = hit[1]
+        else:
+            rows = _sb_paged(lambda: (sb.table("line_tape")
+                                      .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_name")
+                                      .eq("sport", sport).in_("mt", ["spread", "total"])
+                                      .gte("event_start", lo.isoformat()).lt("event_start", hi.isoformat())
+                                      .order("at").order("id")), 80)
+            by = {}
+            for r in rows:
+                by.setdefault(r.get("event_name"), []).append(r)
+            _STEAM_CACHE.clear()
+            _STEAM_CACHE[ck] = (_time.monotonic(), by)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        for g in games:
+            rs = by.get(g.get("event_name"))
+            sd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
+            if not rs or sd is None:
+                continue
+            until = min(now_ms, int(sd.timestamp() * 1000))
+            out = {}
+            for mt in ("spread", "total"):
+                if (sport, mt) not in _STEAM_SLOPE:
+                    continue
+                c = _steam_card(_steam_numbers(sport, mt, rs), until)
+                if c:
+                    out[mt] = c
+            if out:
+                g["steam"] = out
+    except Exception as e:
+        app.logger.warning("steam attach %s: %s", sport, e)
 
 
 @app.route("/api/steam-scan")

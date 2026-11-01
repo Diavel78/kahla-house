@@ -165,6 +165,7 @@
         .gh .gs { font-size: 13px; color: var(--text2); text-align: right; }
         .gh .gs.warn { color: var(--r-tx); font-weight: 700; }
         .gsub { font-size: 14px; color: var(--text2); margin-top: -8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .gsub .steam { color: #e0a040; } .gsub .steam.s3 { color: #ffc24a; }
         .final { display: inline-block; color: var(--text); font-weight: 600; font-size: 13px; background: var(--card2);
                  border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
         .mk { display: flex; flex-direction: column; gap: 8px; }
@@ -723,6 +724,26 @@
     // other side is the mirror (bid = 100 − ask).
     let _ch = null, _chTimer = null;
     const CH_MK = { ml: 'ML', spread: 'Spread', puck: 'Puck line', total: 'Total' };
+    // THE STEAM TAG (Nov 1 2026, Rob: "All I do is look at how the books are
+    // moving"): how far Pinnacle / Polymarket / Kalshi have moved toward a side
+    // since the open, in points. Gold = all three books together.
+    function steamLine(g) {
+        const s = g.steam; if (!s) return '';
+        const nm = { pin: 'Pin', poly: 'Poly', kalshi: 'Kalshi' };
+        const one = mt => {
+            const x = s[mt]; if (!x) return '';
+            const side = mt === 'total' ? (x.dir > 0 ? 'Over' : 'Under') : shortTeam(x.dir > 0 ? g.home : g.away);
+            const pts = ['pin', 'poly', 'kalshi'].filter(b => x.moves[b] != null).map(b => {
+                const v = Math.round(x.moves[b] * x.dir * 10) / 10;
+                return nm[b] + ' ' + (v >= 0 ? '+' : '') + v;
+            }).join(' · ');
+            return '<b>' + esc(side) + '</b> ' + esc(pts);
+        };
+        const parts = ['spread', 'total'].map(one).filter(Boolean);
+        if (!parts.length) return '';
+        const all3 = ['spread', 'total'].some(mt => s[mt] && s[mt].books >= 3);
+        return '<span class="steam' + (all3 ? ' s3' : '') + '" title="how far each book has moved toward this side since the open, in points">🔥 ' + parts.join(' &nbsp; ') + '</span>';
+    }
     function chartChip(g) {
         return '<button class="chb" title="price history" onclick="event.stopPropagation();openChart(' + g._gi + ')">📈 Chart</button>';
     }
@@ -1054,6 +1075,7 @@
                 if (g.series) subs.push('<span>' + esc(g.series) + '</span>');
             }
             if (modelScore(g)) subs.push(modelScore(g));
+        if (steamLine(g)) subs.push(steamLine(g));
             if (_sport === 'NBA' && g.injuries) {
                 const oa = (g.injuries.away || []), oh = (g.injuries.home || []);
                 if (oa.length || oh.length) subs.push('<span>🩹 OUT ' + esc(nameOf(g, 'away')) + ': ' + esc(oa.join(', ') || '—') + ' · ' + esc(nameOf(g, 'home')) + ': ' + esc(oh.join(', ') || '—') + '</span>');

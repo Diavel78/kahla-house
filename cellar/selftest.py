@@ -7224,6 +7224,12 @@ def test_steam_scan() -> None:
     plan2 = _app._steam_plan(_app._steam_numbers("NCAAF", "total", rows2), sms, 13, 0, 0.5, 3)
     check("steam: a book against the move = no steam", plan2 is None)
     check("steam: the probe is shared-secret", "def api_steam_scan" in open(_app.__file__).read())
+    card = _app._steam_card(nums, sms - 13 * 3600 * 1000)
+    check("steam tag: the card reads the move since the open", card is not None and card["dir"] == -1 and card["books"] == 3)
+    for pg in ("bet_sheets.html", "football_picks.html"):
+        html = open(os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "templates", pg)).read()
+        check(f"steam tag: {pg} draws it", "function steamLine(" in html and "subs.push(steamLine(g))" in html)
+    check("steam tag: the sheet API attaches it", "_sheet_attach_steam(sb, sport, games)" in open(_app.__file__).read())
 
 
 def main() -> int:
