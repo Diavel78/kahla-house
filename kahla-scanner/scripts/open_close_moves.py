@@ -87,8 +87,11 @@ def parse_item(it: dict) -> dict:
 def fetch_odds(mod, eid):
     b = mod._get(mod.CORE.format(e=eid))
     items = (b or {}).get("items") or []
-    pick = next((i for i in items if "draft" in str((i.get("provider") or {}).get("name") or "").lower()),
-                items[0] if items else None)
+    def has_open(i):
+        return bool(((i.get("homeTeamOdds") or {}).get("open") or {}).get("moneyLine"))
+    dk = [i for i in items if "draft" in str((i.get("provider") or {}).get("name") or "").lower()]
+    pick = (next((i for i in dk if has_open(i)), None) or next((i for i in items if has_open(i)), None)
+            or (dk[0] if dk else (items[0] if items else None)))
     if not pick:
         return None
     r = parse_item(pick)
