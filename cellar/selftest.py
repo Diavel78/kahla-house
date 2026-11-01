@@ -7231,6 +7231,43 @@ def test_line_tape_presheet() -> None:
     check("the tape's game list and the venue walk carry pre-sheet games", True)
 
 
+def test_fire_side() -> None:
+    """THE 🔥 SIDE IS THE BUTTON (Nov 1 2026)."""
+    import app as _app
+    from datetime import datetime, timezone, timedelta
+    now = datetime(2026, 11, 2, 1, 0, tzinfo=timezone.utc)
+    st = (now + timedelta(hours=6)).isoformat()
+    def game():
+        return {"event_start": st, "home": "Golden State Warriors", "away": "LA Clippers",
+                "steam": {"total": {"dir": 1}, "ml": {"dir": 1}},
+                "venue": {"picks": {"total": {"poly": {"bid": 46, "ask": 47, "line": 219.5}}}},
+                "ml": {"side": "away", "verdict": "play", "move": {"state": "play", "dir": -1},
+                       "pin_fair": {"prob": 0.45, "american": 122}},
+                "spread": {"side": "away", "line": 2.5, "verdict": "lean"},
+                "total": {"side": "under", "line": 219.5, "verdict": "pass", "pin_fair": {"prob": 0.46}}}
+    g = game()
+    _app._sheet_attach_fire("NBA", [g], now)
+    check("fire: a total flips to the 🔥 over, the venue quote mirrored",
+          g["total"]["side"] == "over" and g["total"]["fire"] is True
+          and g["venue"]["picks"]["total"]["poly"]["bid"] == 53.0, str(g["total"]) + str(g["venue"]))
+    check("fire: an ML play on the other side flips and loses its verdict",
+          g["ml"]["side"] == "home" and g["ml"]["verdict"] == "pass" and g["ml"]["fire"] is True, str(g["ml"]))
+    check("fire: a market with no 🔥 has no button", g["spread"]["fire"] is None and g["spread"]["side"] == "away")
+    g = game(); g["ml"]["move"] = {"state": "play", "dir": 1}; g["ml"]["side"] = "home"
+    _app._sheet_attach_fire("NBA", [g], now)
+    check("fire: the move rule's PLAY stands when it is the 🔥 side", g["ml"]["verdict"] == "play", str(g["ml"]))
+    g = game(); g["event_start"] = (now - timedelta(hours=1)).isoformat()
+    _app._sheet_attach_fire("NBA", [g], now)
+    check("fire: a started game keeps the rule's record", g["total"]["side"] == "under" and "fire" not in g["total"])
+    g = {"event_start": st, "steam": {"ml": {"dir": -1}}, "puck": {"side": "home", "line": -1.5},
+         "ml": {"side": "away"}}
+    _app._sheet_attach_fire("NHL", [g], now)
+    check("fire: a puck line whose favorite is not the 🔥 side has no button", g["puck"]["fire"] is None)
+    g = game()
+    _app._sheet_attach_fire("MLB", [g], now)
+    check("fire: a sport the tape doesn't carry is untouched", "fire" not in g["total"])
+
+
 def test_move_rule() -> None:
     """THE MOVE RULE (Nov 1 2026): Pinnacle's first move off its open picks the side."""
     import app as _app
@@ -7367,7 +7404,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_steam_scan, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_fire_side, test_steam_scan, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

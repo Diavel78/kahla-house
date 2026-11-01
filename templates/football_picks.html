@@ -567,7 +567,7 @@
         return a + (p === null ? '' : ' / ' + pct(p));
     }
     function pickBox(p, label, price, grade, vq, mt, line) {
-        return '<div class="pb' + (p.verdict === 'pass' ? ' pass' : '') + '">' + esc(label)
+        return '<div class="pb' + (p.verdict === 'pass' && !p.fire ? ' pass' : '') + '">' + esc(label)
              + (price != null ? ' <span class="pr">' + am(price) + '</span>' : '') + (grade || '') + venueLine(vq, mt, line) + '</div>';
     }
     // The box's Poly/Kalshi bids on this side (read every ~30 min; see bet_sheets.html venueLine)
@@ -602,6 +602,7 @@
         const grade = gradeKey === 'puck' ? puckGrade(g, p) : gradeMark(g, gradeKey);
         if (g._st === 'final') return p.verdict !== 'pass' ? '<div class="mk-x">' + esc(label) + grade + '</div>' : '';
         const vp = ((g.venue || {}).picks || {})[gradeKey];
+        if (p.fire === null) return '';          // THE 🔥 SIDE IS THE BUTTON: no 🔥, no pick box
         const fc = fairC(p);
         const vq = (vp || fc != null) ? { poly: vp && vp.poly, kalshi: vp && vp.kalshi, age_s: vp ? g.venue.age_s : null, fair: fc } : null;
         return pickBox(p, label, price, '', vq, gradeKey === 'puck' ? 'spread' : gradeKey, line);
@@ -660,8 +661,8 @@
         if (!p && L.ml_away != null && L.ml_home != null) mdl = nameOf(g, 'away') + ' ' + am(L.ml_away) + ' · ' + nameOf(g, 'home') + ' ' + am(L.ml_home) + (mdl ? ' · ' + mdl : '');
         if (!p && !mdl) return '';
         let body = mkBody(g, p, 0, p && p.side ? nameOf(g, p.side) + ' ML' : '', p ? (p.price != null ? p.price : L['ml_' + p.side]) : null, 'ml');
-        if (p && p.chalky && g._st !== 'final') body = '<div class="mk-note">' + esc(nameOf(g, p.side)) + ' ' + am(p.price) + ' is too chalky to bet — ' + (_sport === 'NHL' ? 'see the puck line' : _sport === 'MLB' ? 'see the run line' : 'see the spread') + '.</div>';
-        else if (p && p.longshot && g._st !== 'final') body = '<div class="mk-note">' + esc(nameOf(g, p.side)) + ' ' + am(p.price) + ' is a longshot — the dog\'s bet is ' + (_sport === 'MLB' ? 'the run line' : 'the spread') + '.</div>';
+        if (p && p.chalky && g._st !== 'final' && p.fire !== null) body = '<div class="mk-note">' + esc(nameOf(g, p.side)) + ' ' + am(p.price) + ' is too chalky to bet — ' + (_sport === 'NHL' ? 'see the puck line' : _sport === 'MLB' ? 'see the run line' : 'see the spread') + '.</div>';
+        else if (p && p.longshot && g._st !== 'final' && p.fire !== null) body = '<div class="mk-note">' + esc(nameOf(g, p.side)) + ' ' + am(p.price) + ' is a longshot — the dog\'s bet is ' + (_sport === 'MLB' ? 'the run line' : 'the spread') + '.</div>';
         return mkRow('ML', p, mdl + edgeTxt(p, false) + srcTag(L.provider) + pinTxt(g, 'ml', p ? p.side : null), body);
     }
     // NBA spread (Hoops IQ: LEAN at most — no backtested edge vs the close)
@@ -792,7 +793,7 @@
         const nm = { pin: 'Pin', poly: 'Poly', kalshi: 'Kalshi' };
         const one = mt => {
             const x = s[mt]; if (!x) return '';
-            const side = mt === 'total' ? (x.dir > 0 ? 'Over' : 'Under') : shortTeam(x.dir > 0 ? g.home : g.away);
+            const side = mt === 'total' ? (x.dir > 0 ? 'Over' : 'Under') : shortTeam(x.dir > 0 ? g.home : g.away) + (mt === 'ml' ? ' ML' : '');
             const mv = x.cents || x.moves;          // cents at one line, the way the chart reads
             const pts = ['pin', 'poly', 'kalshi'].filter(b => mv[b] != null).map(b => {
                 const v = Math.round(mv[b] * x.dir);
@@ -800,9 +801,9 @@
             }).join(' · ');
             return '<b>' + esc(side) + '</b> ' + esc(pts);
         };
-        const parts = ['spread', 'total'].map(one).filter(Boolean);
+        const parts = ['ml', 'spread', 'total'].map(one).filter(Boolean);
         if (!parts.length) return '';
-        const all3 = ['spread', 'total'].some(mt => s[mt] && s[mt].books >= 3);
+        const all3 = ['ml', 'spread', 'total'].some(mt => s[mt] && s[mt].books >= 3);
         return '<span class="steam' + (all3 ? ' s3' : '') + '" title="how many cents each book has moved toward this side since the open, priced at one line (a line move counts as the price it would take to hold the old number)">🔥 ' + parts.join(' &nbsp; ') + '</span>';
     }
     function chartChip(g) {
