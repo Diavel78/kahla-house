@@ -251,6 +251,31 @@ def parse(page, url):
             "image": image or None}
 
 
+_JUNK_TITLES = ("just a moment", "robot or human", "access denied", "attention required",
+                "are you a human", "page not found", "404", "pardon our interruption",
+                "something went wrong", "security check")
+
+
+def _target_price(url, timeout):
+    """Target renders its price in the browser; the page's own data feed has
+    it. The key is the public one target.com's pages send."""
+    m = re.search(r"/A-(\d+)", url)
+    if not m:
+        return None
+    try:
+        r = requests.get(
+            "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1",
+            params={"key": "9f36aeafbe60771e321a7cc95a78140772ab3e96",
+                    "tcin": m.group(1), "pricing_store_id": "3991",
+                    "channel": "WEB", "page": "/p/A-" + m.group(1)},
+            headers=_HEADERS, timeout=timeout)
+        price = ((r.json().get("data") or {}).get("product") or {}).get("price") or {}
+        return _num(price.get("current_retail") or price.get("current_retail_min")
+                    or price.get("reg_retail") or price.get("formatted_current_price"))
+    except Exception:
+        return None
+
+
 def _blocked(page, status):
     if status in (403, 429, 503):
         return True
@@ -260,7 +285,7 @@ def _blocked(page, status):
         "px-captcha", "verify you are human", "request unsuccessful"))
 
 
-def fetch(raw, timeout=8):
+def fetch(raw, timeout=6):
     """URL (or a pasted share) → {ok, url, store, title, price, image, blocked, error}."""
     url = extract_url(raw)
     if not url:
@@ -296,12 +321,18 @@ def fetch(raw, timeout=8):
         out["url"] = final if len(final) < 2000 else url
         out["store"] = store_name(final)
         facts = parse(page, final)
+        if r.status_code >= 400 or (facts["title"] and facts["title"].lower().startswith(_JUNK_TITLES)):
+            facts["title"] = None if not facts["price"] else facts["title"]
+        if not facts["price"] and "target.com" in (urlparse(final).hostname or ""):
+            facts["price"] = _target_price(final, timeout)
         out.update(facts)
         if not (facts["price"] or facts["title"]) and _blocked(page, r.status_code):
             out["blocked"] = True
         elif not facts["price"] and _blocked(page, r.status_code):
             out["blocked"] = True
         out["status"] = r.status_code
+        if facts["price"] and facts["title"]:
+            out["blocked"] = False
     except requests.RequestException as e:
         out["error"] = type(e).__name__
     return out
