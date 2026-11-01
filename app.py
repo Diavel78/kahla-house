@@ -30832,6 +30832,7 @@ def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
                 continue
             steam = g.get("steam") if isinstance(g.get("steam"), dict) else {}
             mv = g.get("move") if isinstance(g.get("move"), dict) else {}
+            vp = ((g.get("venue") or {}).get("picks") or {}) if isinstance(g.get("venue"), dict) else {}
             for key in ("ml", "spread", "total", "puck"):
                 pk = g.get(key)
                 if not isinstance(pk, dict) or not pk.get("side"):
@@ -30841,12 +30842,34 @@ def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
                     continue
                 rd = mv.get(mt) if isinstance(mv.get(mt), dict) else {}
                 want = _fire_want(mt, rd.get("dir")) if rd.get("state") in ("play", "lean") else None
-                if want is None or pk.get("side") != want:
+                sm = _fire_want(mt, (steam.get(mt) or {}).get("dir"))
+                src = "fire"
+                if want is None and sm is not None:
+                    # NO FIRST-MOVE READ (an open we didn't record, or none yet) — the button
+                    # follows 💨 rather than the board going blank (Rob, Nov 1 2026: "Give me
+                    # my bets back")
+                    want, src = sm, "smoke"
+                if want is None:
                     pk["fire"] = None
                     pk.pop("smoke", None)
                     continue
+                if key == "puck":
+                    pk["fire"] = True if pk.get("side") == want else None
+                    continue
+                if pk.get("side") != want:
+                    npk = _sheet_flip_pick(g, key, pk, {}, sport=sport)
+                    npk.pop("pv", None)
+                    if isinstance(pk.get("move"), dict):
+                        npk["move"] = pk["move"]
+                    q = vp.get(key) if isinstance(vp.get(key), dict) else None
+                    if q is not None:
+                        vp[key] = _sheet_mirror_quote(q, mt, key)
+                        if q.get("side"):
+                            vp[key]["side"] = npk.get("side")
+                    npk["verdict"] = "pass"
+                    g[key] = pk = npk
                 pk["fire"] = True
-                sm = _fire_want(mt, (steam.get(mt) or {}).get("dir"))
+                pk["fire_src"] = src
                 pk["smoke"] = None if sm is None else ("agrees" if sm == want else "against")
         except Exception as e:
             app.logger.warning("fire attach %s %s: %s", sport, g.get("event_name"), e)

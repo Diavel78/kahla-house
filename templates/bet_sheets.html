@@ -2545,7 +2545,7 @@
         }
         if (!parts.length) {
             if (waiting) return '<span class="mvl mvw">🔥 waiting on Pinnacle\'s open</span>';
-            if (old && old === n) return '<span class="mvl mvw">🔥 opened before we were recording — no first move to read</span>';
+            if (old && old === n) return '<span class="mvl mvw">🔥 opened before we were recording — the buttons follow 💨, the move since</span>';
             return '';
         }
         return '<span class="mvl" title="🔥 = Pinnacle\'s move in the first 1-2 hours after it opened the market, in cents at one line: 2¢+ = PLAY that side, 1-2¢ = LEAN. 💨 = whether the books have kept moving that way since.">🔥 ' + parts.join(' &nbsp; ') + '</span>';

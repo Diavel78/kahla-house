@@ -7252,6 +7252,12 @@ def test_fire_side() -> None:
     check("fire: smoke the same way reads agrees",
           g["ml"]["fire"] is True and g["ml"]["smoke"] == "agrees", str(g["ml"]))
     check("fire: a first move that passed has no button", g["total"]["fire"] is None)
+    g = game(); g["move"]["total"] = {"state": "old_open"}; g["steam"]["total"] = {"dir": 1}
+    g["venue"] = {"picks": {"total": {"side": "under", "poly": {"bid": 47, "ask": 48, "line": 222.5}}}}
+    _app._sheet_attach_fire("NBA", [g], now)
+    check("fire: no first-move read → the button follows smoke (flipped, quote mirrored)",
+          g["total"]["fire"] is True and g["total"]["side"] == "over" and g["total"]["fire_src"] == "smoke"
+          and g["venue"]["picks"]["total"]["poly"]["bid"] == 52.0, str(g["total"]) + str(g["venue"]))
     g = game(); g["spread"].pop("verdict"); g["steam"] = {}
     _app._sheet_attach_fire("NBA", [g], now)
     check("fire: no smoke reads None", g["spread"]["fire"] is True and g["spread"]["smoke"] is None)
