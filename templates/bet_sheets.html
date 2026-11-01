@@ -2060,6 +2060,8 @@
     }
     function footballMarkets(g, up) {
         const L = g.line || {}, M = g.model, bs = g.spread, bt = g.total, out = [];
+        // the football ML is a box only while its 🔥 stands (Nov 1 2026, Rob: "Ball state doesn't have a box to click?")
+        if (g.ml && g.ml.fire) out.push(mlMarket(g, up));
         let mdl = M ? 'model ' + favLine(g, M.spread_home, 1) : (g.unrated ? '<span class="unrated">unrated</span>' : '');
         if (L.spread_home != null && !bs) mdl = 'line ' + favLine(g, L.spread_home, 1) + (mdl ? ' · ' + mdl : '');
         let ln = null;   // the rung Rob bets (bs.line = the bettable half point), else the market's number

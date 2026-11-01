@@ -4695,11 +4695,11 @@ def test_sheet_seed_pin_picks() -> None:
     check("seed: puck = the favorite's own −1.5", g3["puck"]["side"] == "away" and g3["puck"]["line"] == -1.5, g3["puck"])
     check("seed: a whole total under → 6.5", g3["total"]["side"] == "under" and g3["total"]["line"] == 6.5)
     check("seed: hockey line keys are puck_*", g3["line"].get("puck_home") == 1.5 and "spread_home" not in g3["line"])
-    # a builder pick is never touched; football seeds spread + total only; a final never seeds
+    # a builder pick is never touched; football seeds the total + the ML beside it; a final never seeds
     g4 = {"event_start": up, "away": "A", "home": "H", "pin": dict(pin),
           "spread": {"side": "away", "line": 3.5, "verdict": "play"}, "model": None}
     k4 = _app._sheet_seed_pin_picks("NFL", g4, None, now)
-    check("seed: a builder pick stands, football seeds the total only", k4 == ["total"] and g4["spread"]["verdict"] == "play" and "ml" not in g4, k4)
+    check("seed: a builder pick stands, football seeds the total + ML", k4 == ["total", "ml"] and g4["spread"]["verdict"] == "play" and g4["ml"]["verdict"] == "pass", k4)
     g5 = {"event_start": (now - _td(hours=3)).isoformat(), "away": "A", "home": "H", "pin": dict(pin), "model": None}
     check("seed: a started game never seeds", _app._sheet_seed_pin_picks("NBA", g5, None, now) == [] and "spread" not in g5)
     g6 = {"event_start": up, "away": "A", "home": "H", "model": None}
@@ -7248,6 +7248,12 @@ def test_line_tape_presheet() -> None:
 def test_fire_side() -> None:
     """🔥 = the first move is the button; 💨 = the move since, agrees or not (Nov 1 2026)."""
     import app as _app
+    import os as _os
+    _rt = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    for _f in ("bet_sheets.html", "football_picks.html"):
+        _h = open(_os.path.join(_rt, "templates", _f), encoding="utf-8").read()
+        check(f"fire: {_f} draws the football ML box while its 🔥 stands",
+              "if (g.ml && g.ml.fire) out.push(mlMarket(g" in _h)
     from datetime import datetime, timezone, timedelta
     now = datetime(2026, 11, 2, 1, 0, tzinfo=timezone.utc)
     st = (now + timedelta(hours=6)).isoformat()

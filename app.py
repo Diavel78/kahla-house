@@ -1223,8 +1223,12 @@ def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None, 
 # model's over Pinnacle's devig (no model → the dog), chalk / longshot marks
 # off Pinnacle's own price. A pick the builder DID make is never touched.
 # Upcoming games only — a seeded pick on a final would grade a bet that
-# never existed.
-_SHEET_SEED_KEYS = {"NFL": ("spread", "total"), "NCAAF": ("spread", "total"),
+# never existed. FOOTBALL SEEDS THE ML TOO (Nov 1 2026, Rob on a "🔥 ML Ball
+# State PLAY" with nothing to tap: "Ball state doesn't have a box to click?")
+# — the move rule reads the football ML like every market, so its 🔥 needs a
+# pick to hang the button on; the card draws the football ML row only while
+# it has a 🔥 (`fire: True`), the spread and total stay the football card.
+_SHEET_SEED_KEYS = {"NFL": ("spread", "total", "ml"), "NCAAF": ("spread", "total", "ml"),
                     "NHL": ("ml", "puck", "total"), "NBA": ("ml", "spread", "total"),
                     "MLB": ("ml", "spread", "total")}
 
