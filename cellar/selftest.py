@@ -7197,6 +7197,35 @@ def test_line_tape() -> None:
     check("line tape: the bet sheet draws the chart", "function openChart(" in html and "/api/line-tape?sport=" in html and "chartChip(g)" in html)
 
 
+def test_steam_scan() -> None:
+    """Rob's chart read (Nov 1 2026): Pinnacle + the venues moving one way."""
+    import app as _app
+    from datetime import datetime, timezone, timedelta
+    st = datetime(2026, 10, 31, 19, 30, tzinfo=timezone.utc)
+    def at(h):
+        return (st - timedelta(hours=h)).isoformat()
+    rows = [
+        {"at": at(30), "src": "pin", "mt": "total", "line": 47.0, "p_home": -110, "p_away": -110},
+        {"at": at(30), "src": "poly", "mt": "total", "line": 47.5, "bid_c": 46, "ask_c": 48},
+        {"at": at(30), "src": "kalshi", "mt": "total", "line": 47.5, "bid_c": 46, "ask_c": 47},
+        {"at": at(20), "src": "pin", "mt": "total", "line": 45.0, "p_home": -110, "p_away": -110},
+        {"at": at(20), "src": "poly", "mt": "total", "line": 45.5, "bid_c": 50, "ask_c": 51},
+        {"at": at(20), "src": "kalshi", "mt": "total", "line": 45.5, "bid_c": 49, "ask_c": 51},
+    ]
+    nums = _app._steam_numbers("NCAAF", "total", rows)
+    check("steam: every book on the points scale", all(len(nums[s]) == 2 for s in ("pin", "poly", "kalshi")))
+    sms = int(st.timestamp() * 1000)
+    plan = _app._steam_plan(nums, sms, 13, 0, 0.5, 3)
+    check("steam: all three down = under", plan is not None and plan["dir"] == -1 and plan["line"] == 45.5)
+    check("steam: under 45.5 on 16-22 wins", _app._steam_grade("total", -1, 45.5, {"home": 22, "away": 16}) == "won")
+    check("steam: home -5.5 on a 3-pt win loses", _app._steam_grade("spread", 1, -5.5, {"home": 20, "away": 17}) == "lost")
+    rows2 = [dict(r) for r in rows]
+    rows2[5]["bid_c"], rows2[5]["ask_c"], rows2[5]["line"] = 59, 61, 47.5     # Kalshi went the other way
+    plan2 = _app._steam_plan(_app._steam_numbers("NCAAF", "total", rows2), sms, 13, 0, 0.5, 3)
+    check("steam: a book against the move = no steam", plan2 is None)
+    check("steam: the probe is shared-secret", "def api_steam_scan" in open(_app.__file__).read())
+
+
 def main() -> int:
     print("THE CELLAR — offline selftest\n")
     for t in (test_imports_without_creds, test_config_validation,
@@ -7213,7 +7242,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_steam_scan, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

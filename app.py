@@ -30228,6 +30228,209 @@ def _line_tape_series(sport: str, rows: list) -> dict:
     return out
 
 
+# ── THE STEAM SCAN (Nov 1 2026, Rob after going 42-34 off the charts while the
+# model went 31-37-2: "All I do is look at how the books are moving. It takes
+# a fuck ton of money to move a line on 3 monsters like Kalshi, Poly, Pin… I
+# chased steam, and chased early steam, about 12-15 hours before the game").
+# Every book's read is put on ONE scale — the number it implies, in points
+# (home margin for a spread, the total for a total): its line plus how far its
+# price sits off 50/50, at `_STEAM_SLOPE` cents a point. Steam = the books
+# moving the same way over a window; the scan grades following it at the line
+# Polymarket offered at bet time. Read-only: /api/steam-scan (shared-secret).
+_STEAM_SLOPE = {("NCAAF", "spread"): 2.6, ("NCAAF", "total"): 2.5,
+                ("NFL", "spread"): 3.0, ("NFL", "total"): 3.2,
+                ("NBA", "spread"): 3.0, ("NBA", "total"): 2.2}
+
+
+def _steam_numbers(sport: str, mt: str, rows: list) -> dict:
+    """Pure. One game-market's line_tape rows (oldest first, home / over
+    orientation) → {pin|poly|kalshi: [(t_ms, number, line)]}. number = the
+    book's implied home margin (spread) or total (total); line = the home
+    spread / total the read was at (venue rungs: what could be bet)."""
+    slope = _STEAM_SLOPE.get((sport, mt)) or 2.6
+    out = {"pin": [], "poly": [], "kalshi": []}
+
+    def f(x):
+        try:
+            return float(x) if x is not None else None
+        except (TypeError, ValueError):
+            return None
+    for r in rows or []:
+        if r.get("mt") != mt or r.get("src") not in out:
+            continue
+        d = _parse_iso(r.get("at")) if r.get("at") else None
+        ln = f(r.get("line"))
+        if d is None or ln is None:
+            continue
+        if r["src"] == "pin":
+            a, b = _amer_to_prob_py(f(r.get("p_home"))), _amer_to_prob_py(f(r.get("p_away")))
+            if not a or not b:
+                continue
+            p = a / (a + b) * 100.0
+        else:
+            bd, ak = f(r.get("bid_c")), f(r.get("ask_c"))
+            if bd is None or ak is None or ak < bd or ak - bd > 6:
+                continue                      # a one-sided or wide quote is not a price
+            p = (bd + ak) / 2.0
+        base = ln if mt == "total" else -ln
+        out[r["src"]].append((int(d.timestamp() * 1000), round(base + (p - 50.0) / slope, 2), ln))
+    return out
+
+
+def _steam_at(pts: list, t_ms: int):
+    """Pure. The last (t, number, line) at or before t_ms, else None."""
+    last = None
+    for p in pts or []:
+        if p[0] <= t_ms:
+            last = p
+        else:
+            break
+    return last
+
+
+def _steam_plan(nums: dict, start_ms: int, bet_h: float, look_h: float,
+                min_pts: float, need: int):
+    """Pure. Does following the books' move win a bet placed `bet_h` hours
+    before the start? The move = each book's number at bet time minus its
+    number `look_h` hours earlier (0 = its first read). Steam = Pinnacle plus
+    at least need−1 venues, every one moved ≥ min_pts the same way. Returns
+    {dir: +1 home/over | -1, moves, line} or None (no steam / no read)."""
+    tb = start_ms - int(bet_h * 3600e3)
+    moves = {}
+    for src in ("pin", "poly", "kalshi"):
+        pts = [p for p in nums.get(src) or [] if p[0] <= tb]
+        if not pts:
+            continue
+        now = pts[-1]
+        if tb - now[0] > 12 * 3600e3:
+            continue                          # the book's last read is half a day stale
+        ref = pts[0] if look_h <= 0 else _steam_at(pts, tb - int(look_h * 3600e3))
+        if ref is None:
+            continue
+        moves[src] = round(now[1] - ref[1], 2)
+    if "pin" not in moves or len(moves) < need:
+        return None
+    sgn = 1 if moves["pin"] > 0 else -1
+    agree = [s for s, m in moves.items() if m * sgn >= min_pts]
+    if "pin" not in agree or len(agree) < need:
+        return None
+    if any(m * sgn <= -min_pts for m in moves.values()):
+        return None                           # one book went the other way: no steam
+    line = None
+    for src in ("poly", "kalshi", "pin"):
+        p = _steam_at(nums.get(src) or [], tb)
+        if p is not None:
+            line = p[2]
+            break
+    return {"dir": sgn, "moves": moves, "line": line}
+
+
+def _steam_grade(mt: str, sgn: int, line, final: dict):
+    """Pure. won / lost / push for the home(+1)/away(−1) or over/under bet at
+    `line` (home spread / total) against {home, away}."""
+    try:
+        h, a, ln = float(final["home"]), float(final["away"]), float(line)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if mt == "total":
+        d = (h + a) - ln
+    else:
+        d = (h - a) + ln
+    if abs(d) < 1e-9:
+        return "push"
+    return "won" if (d > 0) == (sgn > 0) else "lost"
+
+
+@app.route("/api/steam-scan")
+def api_steam_scan():
+    """READ-ONLY (shared-secret, site-curl). Grade 'follow the books' over
+    the line tape: ?sport=NCAAF&day=2026-10-31[&days=1][&bet_h=13&look_h=12
+    &min_pts=0.5&need=3][&games=1]. Prints a grid over bet_h × look_h ×
+    min_pts × need and, for the asked params, every game's moves."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    sport = (request.args.get("sport") or "NCAAF").upper()
+    az = ZoneInfo("America/Phoenix")
+    try:
+        d0 = datetime.strptime(request.args.get("day") or "", "%Y-%m-%d").replace(tzinfo=az)
+    except ValueError:
+        d0 = datetime.now(az).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    ndays = max(1, min(7, int(request.args.get("days") or 1)))
+    d1 = d0 + timedelta(days=ndays)
+    t0 = _time.monotonic()
+    try:
+        sheets = _sb_paged(lambda: (sb.table("football_sheets").select("event_name,event_start,data_blob")
+                                    .eq("sport", sport).gte("event_start", d0.isoformat())
+                                    .lt("event_start", d1.isoformat())), 3)
+        rows = _sb_paged(lambda: (sb.table("line_tape")
+                                  .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_name,event_start")
+                                  .eq("sport", sport).in_("mt", ["spread", "total"])
+                                  .gte("event_start", d0.isoformat()).lt("event_start", d1.isoformat())
+                                  .order("at").order("id")), 300)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"read: {e}"[:200]}), 502
+    finals = {}
+    for s in sheets:
+        fin = ((s.get("data_blob") or {}).get("grade") or {}).get("final")
+        if isinstance(fin, dict) and fin.get("home") is not None:
+            finals[s["event_name"]] = (fin, s.get("event_start"))
+    by: dict = {}
+    for r in rows:
+        by.setdefault(r.get("event_name"), []).append(r)
+    games = []
+    for ev, rs in by.items():
+        if ev not in finals:
+            continue
+        fin, st = finals[ev]
+        sd = _parse_iso(st) if st else None
+        if sd is None:
+            continue
+        games.append((ev, fin, int(sd.timestamp() * 1000),
+                      {mt: _steam_numbers(sport, mt, rs) for mt in ("spread", "total")}))
+
+    def run(bet_h, look_h, min_pts, need, detail=False):
+        rec = {"won": 0, "lost": 0, "push": 0}
+        by_mt = {"spread": {"won": 0, "lost": 0}, "total": {"won": 0, "lost": 0}}
+        det = []
+        for ev, fin, sms, nums in games:
+            for mt, nm in nums.items():
+                plan = _steam_plan(nm, sms, bet_h, look_h, min_pts, need)
+                if not plan or plan["line"] is None:
+                    continue
+                g = _steam_grade(mt, plan["dir"], plan["line"], fin)
+                if g is None:
+                    continue
+                rec[g] += 1
+                if g in by_mt[mt]:
+                    by_mt[mt][g] += 1
+                if detail:
+                    side = (("over" if plan["dir"] > 0 else "under") if mt == "total"
+                            else ("home" if plan["dir"] > 0 else "away"))
+                    det.append({"g": ev, "mt": mt, "side": side, "line": plan["line"],
+                                "moves": plan["moves"], "res": g,
+                                "final": [fin.get("away"), fin.get("home")]})
+        n = rec["won"] + rec["lost"]
+        out = {"bet_h": bet_h, "look_h": look_h, "min_pts": min_pts, "need": need,
+               "rec": f"{rec['won']}-{rec['lost']}" + (f"-{rec['push']}" if rec["push"] else ""),
+               "pct": round(rec["won"] / n * 100, 1) if n else None,
+               "spread": f"{by_mt['spread']['won']}-{by_mt['spread']['lost']}",
+               "total": f"{by_mt['total']['won']}-{by_mt['total']['lost']}"}
+        if detail:
+            out["games"] = det
+        return out
+    grid = [run(bh, lh, mp, nd) for bh in (6, 13, 24) for lh in (6, 12, 0)
+            for mp in (0.5, 1.0) for nd in (2, 3)]
+    f = lambda k, d: float(request.args.get(k) or d)
+    asked = run(f("bet_h", 13), f("look_h", 12), f("min_pts", 0.5), int(f("need", 3)),
+                detail=bool(request.args.get("games")))
+    return jsonify({"ok": True, "sport": sport, "from": d0.date().isoformat(), "days": ndays,
+                    "tape_rows": len(rows), "games_graded": len(games), "ms": int((_time.monotonic() - t0) * 1000),
+                    "asked": asked, "grid": grid})
+
+
 # ── THE DUET CONNECTOR (Oct 31 2026, Rob, adding Claude Duet: "I want it to
 # read the charts, look for big line moves, check for injury updates/personnel
 # updates. It will NOT be betting for me"). A READ-ONLY MCP server (JSON-RPC
