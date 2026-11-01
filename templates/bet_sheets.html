@@ -2544,6 +2544,7 @@
             } else if (x.state === 'old_open') old++;
         }
         if (!parts.length) {
+            if (g._st && g._st !== 'up') return '';      // a started / final game waits on nothing
             if (waiting) return '<span class="mvl mvw">🔥 waiting on Pinnacle\'s open</span>';
             if (old && old === n) return '<span class="mvl mvw">🔥 opened before we were recording — the buttons follow 💨, the move since</span>';
             return '';
