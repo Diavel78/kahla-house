@@ -7232,40 +7232,39 @@ def test_line_tape_presheet() -> None:
 
 
 def test_fire_side() -> None:
-    """THE 🔥 SIDE IS THE BUTTON (Nov 1 2026)."""
+    """🔥 = the first move is the button; 💨 = the move since, agrees or not (Nov 1 2026)."""
     import app as _app
     from datetime import datetime, timezone, timedelta
     now = datetime(2026, 11, 2, 1, 0, tzinfo=timezone.utc)
     st = (now + timedelta(hours=6)).isoformat()
     def game():
-        return {"event_start": st, "home": "Golden State Warriors", "away": "LA Clippers",
-                "steam": {"total": {"dir": 1}, "ml": {"dir": 1}},
-                "venue": {"picks": {"total": {"poly": {"bid": 46, "ask": 47, "line": 219.5}}}},
-                "ml": {"side": "away", "verdict": "play", "move": {"state": "play", "dir": -1},
-                       "pin_fair": {"prob": 0.45, "american": 122}},
-                "spread": {"side": "away", "line": 2.5, "verdict": "lean"},
-                "total": {"side": "under", "line": 219.5, "verdict": "pass", "pin_fair": {"prob": 0.46}}}
+        return {"event_start": st,
+                "move": {"spread": {"state": "lean", "dir": 1}, "total": {"state": "pass"},
+                         "ml": {"state": "play", "dir": -1}},
+                "steam": {"spread": {"dir": -1}, "ml": {"dir": -1}},
+                "spread": {"side": "home", "line": 6.5, "verdict": "lean"},
+                "total": {"side": "under", "line": 222.5, "verdict": "pass"},
+                "ml": {"side": "away", "verdict": "play"}}
     g = game()
     _app._sheet_attach_fire("NBA", [g], now)
-    check("fire: a total flips to the 🔥 over, the venue quote mirrored",
-          g["total"]["side"] == "over" and g["total"]["fire"] is True
-          and g["venue"]["picks"]["total"]["poly"]["bid"] == 53.0, str(g["total"]) + str(g["venue"]))
-    check("fire: an ML play on the other side flips and loses its verdict",
-          g["ml"]["side"] == "home" and g["ml"]["verdict"] == "pass" and g["ml"]["fire"] is True, str(g["ml"]))
-    check("fire: a market with no 🔥 has no button", g["spread"]["fire"] is None and g["spread"]["side"] == "away")
-    g = game(); g["ml"]["move"] = {"state": "play", "dir": 1}; g["ml"]["side"] = "home"
+    check("fire: a first-move LEAN is the button; smoke the other way reads against",
+          g["spread"]["fire"] is True and g["spread"]["smoke"] == "against", str(g["spread"]))
+    check("fire: smoke the same way reads agrees",
+          g["ml"]["fire"] is True and g["ml"]["smoke"] == "agrees", str(g["ml"]))
+    check("fire: a first move that passed has no button", g["total"]["fire"] is None)
+    g = game(); g["spread"].pop("verdict"); g["steam"] = {}
     _app._sheet_attach_fire("NBA", [g], now)
-    check("fire: the move rule's PLAY stands when it is the 🔥 side", g["ml"]["verdict"] == "play", str(g["ml"]))
+    check("fire: no smoke reads None", g["spread"]["fire"] is True and g["spread"]["smoke"] is None)
     g = game(); g["event_start"] = (now - timedelta(hours=1)).isoformat()
     _app._sheet_attach_fire("NBA", [g], now)
-    check("fire: a started game keeps the rule's record", g["total"]["side"] == "under" and "fire" not in g["total"])
-    g = {"event_start": st, "steam": {"ml": {"dir": -1}}, "puck": {"side": "home", "line": -1.5},
-         "ml": {"side": "away"}}
+    check("fire: a started game keeps the rule's record", "fire" not in g["spread"])
+    g = {"event_start": st, "move": {"ml": {"state": "play", "dir": -1}},
+         "puck": {"side": "home", "line": -1.5}, "ml": {"side": "away"}}
     _app._sheet_attach_fire("NHL", [g], now)
-    check("fire: a puck line whose favorite is not the 🔥 side has no button", g["puck"]["fire"] is None)
+    check("fire: a puck line whose favorite is not the fire's side has no button", g["puck"]["fire"] is None)
     g = game()
     _app._sheet_attach_fire("MLB", [g], now)
-    check("fire: a sport the tape doesn't carry is untouched", "fire" not in g["total"])
+    check("fire: a sport the tape doesn't carry is untouched", "fire" not in g["spread"])
 
 
 def test_move_rule() -> None:

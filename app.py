@@ -2619,7 +2619,7 @@ def api_football_picks():
     for g in games:
         _sheet_attach_price(sport, g, _now)     # THE PRICE RULE: venue bid vs Pinnacle fair decides (Oct 27 2026)
     _sheet_attach_move(sb, sport, games, _now)  # THE MOVE RULE: Pinnacle's first move picks the side (Nov 1 2026)
-    _sheet_attach_fire(sport, games, _now)      # THE 🔥 SIDE IS THE BUTTON (Nov 1 2026)
+    _sheet_attach_fire(sport, games, _now)      # 🔥 = the first move is the button, 💨 agrees or not (Nov 1 2026)
     _play_c, _lean_c = _price_thresholds()
     return jsonify({
         "ok": True, "sport": sport, "week_key": wk.get("week_key"),
@@ -18059,14 +18059,12 @@ def _hand_model_sides(sb, now) -> dict:
         for sp in {t[0] for t in rows}:
             _sheet_attach_move(sb, sp, [t[2] for t in rows if t[0] == sp], now)
     if _fire_side_on():
-        # THE 🔥 SIDE IS THE BUTTON (Nov 1 2026): the page's button side, so a bet
-        # on the 🔥 side is never flagged; a market with no 🔥 has no button
+        # 🔥 = THE FIRST MOVE IS THE BUTTON (Nov 1 2026): a market with no fire
+        # has no button, so a bet there is never flagged
         import copy as _copy
         rows = [(sp, r, _copy.deepcopy(g)) for sp, r, g in rows]
         for sp in {t[0] for t in rows}:
-            gs = [t[2] for t in rows if t[0] == sp]
-            _sheet_attach_steam(sb, sp, gs)
-            _sheet_attach_fire(sp, gs, now)
+            _sheet_attach_fire(sp, [t[2] for t in rows if t[0] == sp], now)
     for sport, r, g in rows:
         mid = r.get("market_id")
         if not mid:
@@ -30791,17 +30789,17 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# THE 🔥 SIDE IS THE BUTTON (Nov 1 2026, Rob: "Still got this whole crap about
-# showing the other side, and this 'model' pick… Just show me the 🔥 side").
-# On every UPCOMING sheet game whose market rides the line tape, the pick is
-# put on the side the steam tag names (`g.steam[mt].dir`: Pinnacle and a venue
-# moved the same way since the open, none against) — flipped the same way the
-# move rule flips. The move rule's PLAY/LEAN survives only when its side IS the
-# 🔥 side, else the button carries no verdict. A market with no 🔥 gets
-# `fire: None` and no button (the touch walk still quotes it — this runs on
-# copies there). The puck line stands only when the ML's 🔥 is the favorite it
-# belongs to (a dog's bet is its ML). Finals keep the rule's record. A sport the
-# tape doesn't carry (MLB) is untouched. Kill switch `machine_flags fire_side`.
+# 🔥 FIRE = THE FIRST MOVE, AND IT IS THE BUTTON; 💨 SMOKE = THE MOVE SINCE
+# (Nov 1 2026, Rob: "Fire is first movement. Steam/smoke is after fire. Say on
+# card if smoke agrees or not"). The move rule (`_sheet_attach_move`) already
+# put each pick on the first move's side with its PLAY/LEAN. Here, on every
+# UPCOMING game a market whose first move is not PLAY/LEAN (pass, watching, an
+# open we didn't see) gets `fire: None` = no button; one that is gets
+# `fire: True` and `smoke` = "agrees" / "against" / None — the steam tag's
+# direction since the open (`g.steam`) against the fire's. The puck line stands
+# only on the favorite the ML's fire names (a dog's bet is its ML). Finals keep
+# the rule's record; MLB (no tape) is untouched; with the move rule off this does
+# nothing. Kill switch `machine_flags fire_side`.
 # ══════════════════════════════════════════════════════════════════════
 FIRE_SIDE_ENABLED = True
 
@@ -30811,7 +30809,7 @@ def _fire_side_on() -> bool:
 
 
 def _fire_want(mt: str, d) -> str | None:
-    """Pure. The side a steam direction names (+1 = home / over)."""
+    """Pure. The side a direction names (+1 = home / over)."""
     if not d:
         return None
     return ("over" if d > 0 else "under") if mt == "total" else ("home" if d > 0 else "away")
@@ -30822,7 +30820,7 @@ def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
     sport = str(sport or "").upper()
     if not games or not any((sport, mt) in _STEAM_SLOPE_SCAN for mt in ("ml", "spread", "total")):
         return
-    if not _fire_side_on():
+    if not _fire_side_on() or not _move_rule_on():
         return
     now = now or datetime.now(timezone.utc)
     for g in games:
@@ -30831,7 +30829,7 @@ def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
             if sd is None or sd <= now:
                 continue
             steam = g.get("steam") if isinstance(g.get("steam"), dict) else {}
-            vp = ((g.get("venue") or {}).get("picks") or {}) if isinstance(g.get("venue"), dict) else {}
+            mv = g.get("move") if isinstance(g.get("move"), dict) else {}
             for key in ("ml", "spread", "total", "puck"):
                 pk = g.get(key)
                 if not isinstance(pk, dict) or not pk.get("side"):
@@ -30839,29 +30837,15 @@ def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
                 mt = "ml" if key == "puck" else key
                 if (sport, mt) not in _STEAM_SLOPE_SCAN:
                     continue
-                want = _fire_want(mt, (steam.get(mt) or {}).get("dir"))
-                if want is None:
+                rd = mv.get(mt) if isinstance(mv.get(mt), dict) else {}
+                want = _fire_want(mt, rd.get("dir")) if rd.get("state") in ("play", "lean") else None
+                if want is None or pk.get("side") != want:
                     pk["fire"] = None
+                    pk.pop("smoke", None)
                     continue
-                if key == "puck":
-                    pk["fire"] = True if pk.get("side") == want else None
-                    continue
-                if pk.get("side") != want:
-                    npk = _sheet_flip_pick(g, key, pk, {}, sport=sport)
-                    npk.pop("pv", None)
-                    if isinstance(pk.get("move"), dict):
-                        npk["move"] = pk["move"]
-                    q = vp.get(key) if isinstance(vp.get(key), dict) else None
-                    if q is not None:
-                        vp[key] = _sheet_mirror_quote(q, mt, key)
-                    npk["verdict"] = "pass"
-                    g[key] = pk = npk
-                rd = pk.get("move") if isinstance(pk.get("move"), dict) else {}
-                if rd.get("state") in ("play", "lean") and _fire_want(mt, rd.get("dir")) == want:
-                    pk["verdict"] = rd["state"]
-                elif pk.get("verdict") in ("play", "lean") and rd:
-                    pk["verdict"] = "pass"
                 pk["fire"] = True
+                sm = _fire_want(mt, (steam.get(mt) or {}).get("dir"))
+                pk["smoke"] = None if sm is None else ("agrees" if sm == want else "against")
         except Exception as e:
             app.logger.warning("fire attach %s %s: %s", sport, g.get("event_name"), e)
 

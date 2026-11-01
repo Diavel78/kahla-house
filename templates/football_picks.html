@@ -168,7 +168,8 @@
         .gh .gbtn { display: flex; gap: 6px; }
         .gh .gs.warn { color: var(--r-tx); font-weight: 700; }
         .gsub { font-size: 14px; color: var(--text2); margin-top: -8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-        .gsub .mvl { color: #7fd1ff; } .gsub .mvl.mvw { color: #8a98a8; } .gsub .mvl .mvq { color: #8a98a8; }
+        .gsub .mvl, .fx-sub .mvl { color: #ffb15a; } .smk { color: #8a98a8; } .smk.ok { color: #7BE3A6; } .smk.no { color: #ff8a80; }
+        .gsub .mvl { color: #ffb15a; } .gsub .mvl.mvw { color: #8a98a8; } .gsub .mvl .mvq { color: #8a98a8; }
         .gsub .steam { color: #e0a040; } .gsub .steam.s3 { color: #ffc24a; }
         .final { display: inline-block; color: var(--text); font-weight: 600; font-size: 13px; background: var(--card2);
                  border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
@@ -242,7 +243,7 @@
                   padding: calc(10px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); overflow: auto; }
         .chartx.show { display: flex; }
         .fx-sub { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: var(--text2); }
-        .fx-sub .mvl { color: #7fd1ff; } .fx-sub .mvl.mvw, .fx-sub .mvl .mvq { color: #8a98a8; } .fx-sub .steam { color: #e0a040; } .fx-sub .steam.s3 { color: #ffc24a; }
+        .fx-sub .mvl { color: #ffb15a; } .fx-sub .mvl.mvw, .fx-sub .mvl .mvq { color: #8a98a8; } .fx-sub .steam, .fx-sub .steam.s3 { color: #aab4c0; }
         .fx-m { margin-top: 18px; }
         .fx-l { font-size: 13px; font-weight: 700; color: var(--text3); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 4px; }
         .fx-r { padding: 11px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); margin-top: 6px; }
@@ -311,7 +312,7 @@
                 <button class="ch-x" onclick="closeFull()" aria-label="Close">×</button>
             </div>
             <div id="fxBody"></div>
-            <div class="ch-note">Every market, both sides. Fair = Pinnacle's price with the vig taken out, at that line. Poly / Kalshi = the best bid on that side; green = at least a cent under fair. 🔥 = the side Pinnacle and the venues have moved toward since the open.</div>
+            <div class="ch-note">Every market, both sides. Fair = Pinnacle's price with the vig taken out, at that line. Poly / Kalshi = the best bid on that side; green = at least a cent under fair. 🔥 = the side of the first move (Pinnacle's first 1-2 hours after it opened); 💨 = how far each book has moved since the open.</div>
         </div>
         <div class="chartx" id="chartx">
             <div class="ch-h">
@@ -780,32 +781,43 @@
     // THE STEAM TAG (Nov 1 2026, Rob: "All I do is look at how the books are
     // moving"): how many cents Pinnacle / Polymarket / Kalshi have moved toward a
     // side since the open, at one line. Gold = all three books together.
-    function moveLine(g) {
-        // THE MOVE RULE (Nov 1 2026): Pinnacle's first move off its own open picks the side
+    function moveLine(g, full) {
+        // 🔥 FIRE = THE FIRST MOVE (Nov 1 2026, Rob: "Fire is first movement. Steam/smoke is
+        // after fire. Say on card if smoke agrees or not"): Pinnacle's move in the first 1-2
+        // hours after it opened the market picks the side; 💨 says whether everything since
+        // has moved the same way. The card shows PLAY/LEAN markets only; the full card adds
+        // each book's cents.
         const m = g.move; if (!m) return '';
         const nm = { pin: 'Pin', poly: 'Poly', kalshi: 'Kalshi' };
-        const lab = { ml: 'ML', spread: 'Spread', total: 'Total' };
+        const lab = { ml: 'ML', spread: _sport === 'MLB' ? 'Run line' : 'Spread', total: 'Total' };
         const side = (k, d) => k === 'total' ? (d > 0 ? 'Over' : 'Under') : shortTeam(d > 0 ? g.home : g.away);
         const parts = [];
-        let waiting = false;
+        let waiting = false, old = 0, n = 0;
         for (const k of ['spread', 'total', 'ml']) {
             const x = m[k]; if (!x) continue;
+            n++;
             if (x.state === 'play' || x.state === 'lean') {
-                const bk = ['pin', 'poly', 'kalshi'].filter(b => x.books && x.books[b] != null)
-                    .map(b => nm[b] + ' ' + (x.books[b] >= 0 ? '+' : '') + Math.round(x.books[b]) + '¢').join(' · ');
-                parts.push(lab[k] + ' <b>' + esc(side(k, x.dir)) + '</b> ' + x.state.toUpperCase()
-                           + ' <span class="mvq">(' + x.at_h + 'h: ' + esc(bk) + ')</span>');
+                const s = (g.steam || {})[k];
+                const smoke = !s || !s.dir ? '<span class="smk">💨 none yet</span>'
+                            : s.dir === x.dir ? '<span class="smk ok">💨 agrees</span>'
+                            : '<span class="smk no">💨 against</span>';
+                const bk = full ? ' <span class="mvq">(' + x.at_h + 'h: ' + ['pin', 'poly', 'kalshi'].filter(b => x.books && x.books[b] != null)
+                    .map(b => nm[b] + ' ' + (x.books[b] >= 0 ? '+' : '') + Math.round(x.books[b]) + '¢').join(' · ') + ')</span>' : '';
+                parts.push(lab[k] + ' <b>' + esc(side(k, x.dir)) + '</b> ' + x.state.toUpperCase() + bk + ' · ' + smoke);
             } else if (x.state === 'watching') {
-                const sf = x.so_far_c ? ' ' + esc(side(k, x.so_far_c > 0 ? 1 : -1)) + ' ' + Math.abs(Math.round(x.so_far_c)) + '¢ so far' : '';
-                parts.push(lab[k] + ' watching' + sf + ' · reads ' + esc(fmtClock(new Date(x.locks_ms).toISOString())));
+                parts.push(lab[k] + ' reads ' + esc(clk(new Date(x.locks_ms).toISOString())));
             } else if (x.state === 'pass') {
-                parts.push(lab[k] + ' no move');
+                if (full) parts.push(lab[k] + ' no move');
             } else if (x.state === 'no_open') {
                 waiting = true;
-            }
+            } else if (x.state === 'old_open') old++;
         }
-        if (!parts.length) return waiting ? '<span class="mvl mvw">⚡ waiting on Pinnacle\'s open</span>' : '';
-        return '<span class="mvl" title="Pinnacle\'s move in the first 1-2 hours after it opened the market, in cents at one line. 2¢+ = PLAY that side, 1-2¢ = LEAN. The model no longer picks.">⚡ 1st move: ' + parts.join(' &nbsp; ') + '</span>';
+        if (!parts.length) {
+            if (waiting) return '<span class="mvl mvw">🔥 waiting on Pinnacle\'s open</span>';
+            if (old && old === n) return '<span class="mvl mvw">🔥 opened before we were recording — no first move to read</span>';
+            return '';
+        }
+        return '<span class="mvl" title="🔥 = Pinnacle\'s move in the first 1-2 hours after it opened the market, in cents at one line: 2¢+ = PLAY that side, 1-2¢ = LEAN. 💨 = whether the books have kept moving that way since.">🔥 ' + parts.join(' &nbsp; ') + '</span>';
     }
     function steamLine(g) {
         const s = g.steam; if (!s) return '';
@@ -823,7 +835,7 @@
         const parts = ['ml', 'spread', 'total'].map(one).filter(Boolean);
         if (!parts.length) return '';
         const all3 = ['ml', 'spread', 'total'].some(mt => s[mt] && s[mt].books >= 3);
-        return '<span class="steam' + (all3 ? ' s3' : '') + '" title="how many cents each book has moved toward this side since the open, priced at one line (a line move counts as the price it would take to hold the old number)">🔥 ' + parts.join(' &nbsp; ') + '</span>';
+        return '<span class="steam' + (all3 ? ' s3' : '') + '" title="how many cents each book has moved toward this side since the open, priced at one line (a line move counts as the price it would take to hold the old number)">💨 since the open: ' + parts.join(' &nbsp; ') + '</span>';
     }
     function chartChip(g) {
         return '<button class="chb" title="price history" onclick="event.stopPropagation();openChart(' + g._gi + ')">📈</button>';
@@ -857,8 +869,8 @@
     function fullRows(g, key) {
         const p = g[key], L = g.line || {};
         const mt = key === 'puck' ? 'spread' : key;
-        const st = (g.steam || {})[key === 'puck' ? 'ml' : key];
-        const fire = st && st.dir ? (mt === 'total' ? (st.dir > 0 ? 'over' : 'under') : (st.dir > 0 ? 'home' : 'away')) : null;
+        const st = (g.move || {})[key === 'puck' ? 'ml' : key];      // 🔥 = the first move, PLAY/LEAN only
+        const fire = st && st.dir && (st.state === 'play' || st.state === 'lean') ? (mt === 'total' ? (st.dir > 0 ? 'over' : 'under') : (st.dir > 0 ? 'home' : 'away')) : null;
         const lab = (s, ln) => mt === 'total' ? (s === 'over' ? 'Over ' : 'Under ') + ln : nameOf(g, s) + (mt === 'ml' ? ' ML' : ' ' + sgn(ln, 1));
         let rows;
         if (p && p.side) {
@@ -901,7 +913,7 @@
         const tap = up && typeof toggleSide === 'function';
         document.getElementById('fxTitle').textContent = shortTeam(g.away) + ' @ ' + shortTeam(g.home);
         document.getElementById('fxSub').textContent = fmtTime(g.event_start) + ' ' + clk(g.event_start) + (g.tv && g.tv.length ? ' · ' + g.tv.join(' / ') : '');
-        const subs = [modelScore(g), moveLine(g), steamLine(g)].filter(Boolean);
+        const subs = [modelScore(g), moveLine(g, true), steamLine(g)].filter(Boolean);
         const keys = _sport === 'NHL' ? ['ml', 'puck', 'total'] : ['ml', 'spread', 'total'];
         const NM = { ml: 'Moneyline', spread: _sport === 'MLB' ? 'Run line' : 'Spread', puck: 'Puck line', total: 'Total' };
         let html = subs.length ? '<div class="fx-sub">' + subs.join('') + '</div>' : '';
@@ -1254,8 +1266,7 @@
                 if (g.series) subs.push('<span>' + esc(g.series) + '</span>');
             }
         if (moveLine(g)) subs.push(moveLine(g));
-        if (steamLine(g)) subs.push(steamLine(g));
-            if (_sport === 'NBA' && g.injuries) {
+                    if (_sport === 'NBA' && g.injuries) {
                 const oa = (g.injuries.away || []), oh = (g.injuries.home || []);
                 if (oa.length || oh.length) subs.push('<span>🩹 OUT ' + esc(nameOf(g, 'away')) + ': ' + esc(oa.join(', ') || '—') + ' · ' + esc(nameOf(g, 'home')) + ': ' + esc(oh.join(', ') || '—') + '</span>');
             }
