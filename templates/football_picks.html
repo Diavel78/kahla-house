@@ -329,7 +329,7 @@
                 <span><i style="background:#4FB3FF"></i>Poly bid</span>
                 <span><i style="background:#7BE3A6"></i>Kalshi bid</span>
             </div>
-            <div class="ch-note">One line, every book: tap a line above and every book is priced at it, in cents for the side you pick (cents = the chance it wins). Each line is that book's bid. Solid = that book lists the line. Dashed = it doesn't, so its price is carried from its nearest lines by how far it sits from Pinnacle on those lines. Pinnacle fair = Pinnacle's price with the vig taken out, off its own alternate lines. Recording began Oct 29 2026: Pinnacle every minute; Poly and Kalshi every 30 min far out, 10 min inside a day, 3 min inside 3 hours.</div>
+            <div class="ch-note">One line, every book: tap a line above and every book is priced at it, in cents for the side you pick (cents = the chance it wins). Each line is that book's bid. Solid = that book lists the line. Dashed = it doesn't, so its price is carried from its nearest lines by how far it sits from Pinnacle on those lines. Pinnacle fair = Pinnacle's price with the vig taken out, off its own alternate lines; dashed = Pinnacle doesn't list the line yet, so its nearest line is carried there at the same cents-a-point the 🔥 uses. Recording began Oct 29 2026: Pinnacle every minute; Poly and Kalshi every 30 min far out, 10 min inside a day, 3 min inside 3 hours.</div>
         </div>
             <div class="hint" id="hint"></div>
         </div>
@@ -1012,7 +1012,7 @@
             const fl = x => (x != null && spr && !canon) ? -x : x;
             const v = p => canon ? [p[0], al, p[1], p[2], p[3], p[4]]
                 : [p[0], al, p[2] != null ? 100 - p[2] : null, p[1] != null ? 100 - p[1] : null, p[3], p[4] ? p[4].map(fl) : p[4]];
-            const pn = p => [p[0], al, null, p[1] == null ? null : (canon ? p[1] : 100 - p[1])];
+            const pn = p => [p[0], al, null, p[1] == null ? null : (canon ? p[1] : 100 - p[1]), p[2] == null, p[2] == null ? null : [fl(p[2])]];   // [.., fair, exact, est. from Pinnacle's line]
             return { ladder: true, anchor: al, rungs: (L.rungs || []).map(fl),
                      poly: (L.poly || []).map(v), kalshi: (L.kalshi || []).map(v), pin: (L.pin || []).map(pn) };
         }
@@ -1063,7 +1063,9 @@
         // a book's own price at the line is solid; one carried from its other rungs is dashed
         const visIf = (pts, i, exact) => vis(pts.map(p => [p[0], 0, p[i] == null ? null : (!!p[4] === exact ? p[i] : null), 0]), 2);
         const lines = S.ladder ? [
-            { pts: vis(S.pin, 3), col: '#E6C36A', w: 2.5, key: 'fair' },
+            // Pinnacle's own price at the line is solid; carried from its nearest line (est.) is dashed
+            { pts: visIf(S.pin, 3, true), col: '#E6C36A', w: 2.5, key: 'fair' },
+            { pts: visIf(S.pin, 3, false), col: '#E6C36A', w: 2.5, dash: '6 4', key: 'fair_est' },
             { pts: visIf(S.kalshi, 2, true), col: '#7BE3A6', w: 2, key: 'kbid' },
             { pts: visIf(S.kalshi, 2, false), col: '#7BE3A6', w: 2, dash: '6 4', key: 'kbid_est' },
             { pts: visIf(S.poly, 2, true), col: '#4FB3FF', w: 2.5, key: 'pbid' },
@@ -1155,17 +1157,17 @@
         const kb = chartAt(S.kalshi, t, 2), ka = chartAt(S.kalshi, t, 3), klin = chartAt(S.kalshi, t, 1);
         // Kalshi often lists a different rung than Poly — say so, it is a different bet
         let kTxt = (klin != null && plin != null && c.mt !== 'ml' && Math.abs(klin - plin) > 0.01) ? ' at ' + esc(chartLineTxt(c.mt, c.side, klin)) : '';
-        let pTxt = '';
+        let pTxt = '', fTxt = '';
         if (S.ladder) {                     // estimated at this line: name the rungs it came from
             const est = (pts) => { const ex = chartAt(pts, t, 4), via = chartAt(pts, t, 5);
                 return (ex === false && via && via.length) ? ' ≈ est. from ' + via.map(x => esc(chartLineTxt(c.mt, c.side, x))).join(' / ') : ''; };
-            kTxt = est(S.kalshi); pTxt = est(S.poly);
+            kTxt = est(S.kalshi); pTxt = est(S.poly); fTxt = est(S.pin);
         }
         const when = new Date(t).toLocaleString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
         const sideNm = c.mt === 'total' ? '' : shortTeam(c.g[c.side]) + ' ';
         rd.innerHTML = S.ladder
             ? '<b>' + esc(hx != null ? when : 'Now') + '</b> · every book at <b>' + esc(sideNm + chartLineTxt(c.mt, c.side, S.anchor)) + '</b>'
-              + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + (fair != null ? ' (' + centsAm(fair) + ')' : '') + '</span>'
+              + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + (fair != null ? ' (' + centsAm(fair) + ')' : '') + fTxt + '</span>'
               + '<br><span style="color:#4FB3FF">Poly ' + c1(pb) + ' / ' + c1(pa) + pTxt + '</span>'
               + '<br><span style="color:#7BE3A6">Kalshi ' + c1(kb) + ' / ' + c1(ka) + kTxt + '</span>'
             : '<b>' + esc(hx != null ? when : 'Now') + '</b>' + (plin != null && c.mt !== 'ml' ? ' · venue line ' + esc(chartLineTxt(c.mt, c.side, plin)) : '')

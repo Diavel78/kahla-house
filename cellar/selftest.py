@@ -7156,6 +7156,20 @@ def test_line_tape() -> None:
                               + [{"at": t1, "src": "kalshi", "mt": "spread", "line": l, "bid_c": b, "ask_c": a} for l, (b, a) in kal.items()], -19.5)
     check("ladder: the series prices every book at the anchor",
           ser["pin"][0][1] == 50.68 and ser["kalshi"][-1][3] is False and ser["poly"] == [], str(ser))
+    # Pinnacle on every rung (Nov 1 2026, Toledo @ Sac State U 52): Pinnacle opened 53, the
+    # chart at 52 drew nothing until Pinnacle listed 52 — carry its nearest line there, est.
+    tot = [{"at": t0, "src": "pin", "mt": "total", "line": 53.0, "p_home": -110, "p_away": -110},
+           {"at": t1, "src": "pin", "mt": "total", "line": 53.0, "p_home": None, "p_away": None},
+           {"at": t1, "src": "pin", "mt": "total", "line": 52.0, "p_home": -110, "p_away": -110}]
+    st = _app._ladder_series(tot, 52.0, slope=2.5, sign=-1)["pin"]
+    check("ladder: Pinnacle at 53 is carried to U 52 on the 🔥's scale (over 52.5¢, est. from 53)",
+          st[0][1] == 52.5 and st[0][2] == 53.0, str(st))
+    check("ladder: Pinnacle's own price at 52 replaces the estimate", st[-1][1] == 50.0 and st[-1][2] is None, str(st))
+    check("ladder: no slope, no carry (the old behaviour)", _app._ladder_series(tot[:1], 52.0)["pin"][0][1] is None)
+    ps = _app._ladder_series([{"at": t0, "src": "pin", "mt": "spread", "line": 25.5, "p_home": -110, "p_away": -110}], 26.5, slope=2.6, sign=1)["pin"]
+    check("ladder: a spread carried a point up is a bigger home price", ps[0][1] == 52.6 and ps[0][2] == 25.5, str(ps))
+    check("ladder: the chart's payload carries Pinnacle with the sport's slope",
+          _app._ladder_payload(tot[:1], {}, "total", "52", sport="NCAAF")["total"]["pin"][0][2] == 53.0)
     pay = _app._ladder_payload([{"at": t0, "src": "pin", "mt": "spread", "line": -19.5, "p_home": -110, "p_away": -104}],
                                {"spread": {"poly": [[1, -18.5, 50, 50.5]], "kalshi": [], "pin": []}})
     check("ladder: the anchor defaults to the sheet's rung (Poly's line)", pay["spread"]["anchor"] == -18.5, str(pay))

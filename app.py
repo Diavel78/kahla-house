@@ -29923,10 +29923,24 @@ def _ladder_pin_fair(pin_lad: dict) -> dict:
     return out
 
 
-def _ladder_series(rows: list, anchor: float) -> dict:
+# PINNACLE ON EVERY RUNG (Nov 1 2026, Rob on Toledo @ Sac State, U 52 and +26.5:
+# "you know how to read a chart??"): the chart drew Pinnacle only where its
+# ladder bracketed the line, so before Pinnacle listed 52 the total's whole
+# open (53 → 52, the 🔥 Under) was invisible and the line looked flat. Where its
+# ladder doesn't reach the anchor, Pinnacle's nearest line (≤3 pts) is carried
+# there on the 🔥's own scale (`_STEAM_SLOPE_SCAN`, cents a point) — the same
+# number the move rule reads, drawn dashed as an estimate.
+_LADDER_PIN_CARRY_PTS = 3.0
+
+
+def _ladder_series(rows: list, anchor: float, slope: float | None = None, sign: int = 1) -> dict:
     """Pure. One game-market's ladder_tape rows (oldest first) → every book
-    AT `anchor` (home / over line) over time: {pin: [[t, fair]], poly / kalshi:
-    [[t, bid, ask, exact, via]]}; a point is written when its value moves."""
+    AT `anchor` (home / over line) over time: {pin: [[t, fair, est_from]], poly /
+    kalshi: [[t, bid, ask, exact, via]]}; a point is written when its value
+    moves. `slope` (cents a point) + `sign` (+1 spread: a bigger home line is a
+    bigger home price; −1 total: a higher total is a cheaper over) carry
+    Pinnacle from its nearest line when its ladder doesn't bracket the anchor —
+    `est_from` names that line (None = Pinnacle's own price)."""
     state = {"pin": {}, "poly": {}, "kalshi": {}}
     out = {"pin": [], "poly": [], "kalshi": []}
     last = {"pin": None, "poly": [None, None, None, None], "kalshi": [None, None, None, None]}
@@ -29940,10 +29954,16 @@ def _ladder_series(rows: list, anchor: float) -> dict:
     def emit(t):
         pinf = _ladder_pin_fair(state["pin"])
         fx = _ladder_interp(pinf, anchor)
+        via = None
+        if fx is None and slope and pinf:
+            near = min(pinf, key=lambda l: abs(l - anchor))
+            if abs(near - anchor) <= _LADDER_PIN_CARRY_PTS + 1e-9:
+                fx = min(99.0, max(1.0, pinf[near] + sign * (anchor - near) * slope))
+                via = near
         v = None if fx is None else round(fx, 2)
-        if v != last["pin"]:
-            out["pin"].append([t, v])
-            last["pin"] = v
+        if (v, via) != last["pin"]:
+            out["pin"].append([t, v, via])
+            last["pin"] = (v, via)
         for src in ("poly", "kalshi"):
             e = _ladder_equiv_at(state[src], pinf, anchor)
             pt = [e[0], e[1], e[2], e[3]] if e else [None, None, None, None]
@@ -32206,14 +32226,14 @@ def api_line_tape():
                                    .select("at,src,mt,line,bid_c,ask_c,p_home,p_away")
                                    .eq("sport", sport).eq("event_name", ev).gte("at", since)
                                    .order("at").order("id")), 40)
-        ladders = _ladder_payload(lrows, markets, request.args.get("mt"), request.args.get("line"))
+        ladders = _ladder_payload(lrows, markets, request.args.get("mt"), request.args.get("line"), sport=sport)
     except Exception as e:
         lad_err = f"{type(e).__name__}: {e}"[:120]
     return jsonify({"ok": True, "sport": sport, "event_name": ev, "event_start": start, "n": len(rows),
                     "markets": markets, "ladders": ladders, "ladder_err": lad_err})
 
 
-def _ladder_payload(lrows: list, markets: dict, want_mt=None, want_line=None) -> dict:
+def _ladder_payload(lrows: list, markets: dict, want_mt=None, want_line=None, sport: str = "") -> dict:
     """Pure. Ladder rows → {mt: {anchor, rungs, pin, poly, kalshi}} with every
     book priced AT the anchor (`_ladder_series`). The anchor is the asked line
     for the asked market, else the sheet's rung (the newest Poly line on the
@@ -32255,7 +32275,9 @@ def _ladder_payload(lrows: list, markets: dict, want_mt=None, want_line=None) ->
                 continue
         lines = sorted({round(float(r["line"]), 2) for r in rs if r.get("line") is not None
                         and abs(float(r["line"]) - anchor) <= 3.0 + 1e-9})
-        out[mt] = {"anchor": anchor, "rungs": lines, **_ladder_series(rs, anchor)}
+        slope = _STEAM_SLOPE_SCAN.get((str(sport or "").upper(), "spread" if mt == "puck" else mt))
+        out[mt] = {"anchor": anchor, "rungs": lines,
+                   **_ladder_series(rs, anchor, slope=slope, sign=(-1 if mt == "total" else 1))}
     return out
 
 
@@ -32535,7 +32557,7 @@ def api_line_tape_probe():
         lrows = _sb_paged(lambda: (sb.table("ladder_tape").select("at,src,mt,line,bid_c,ask_c,p_home,p_away")
                                    .eq("sport", sport).eq("event_name", ev).gte("at", since)
                                    .order("at").order("id")), 20)
-        lad = _ladder_payload(lrows, ser, request.args.get("mt"), request.args.get("line"))
+        lad = _ladder_payload(lrows, ser, request.args.get("mt"), request.args.get("line"), sport=sport)
         lsum = {mt: {"anchor": d["anchor"], "rungs": d["rungs"], "pin_last": (d["pin"][-1] if d["pin"] else None),
                      "poly_last": (d["poly"][-1] if d["poly"] else None),
                      "kalshi_last": (d["kalshi"][-1] if d["kalshi"] else None),
