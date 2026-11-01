@@ -7250,6 +7250,8 @@ def test_steam_scan() -> None:
         html = open(os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "templates", pg)).read()
         check(f"naming: {pg} prints pro teams by nickname", "const _PRO = { NBA: 1, NHL: 1, NFL: 1, MLB: 1 };" in html
               and "function shortTeam(name, sport)" in html and ".map(shortTeam)" not in html)
+    cs = _app._steam_corr_scan("NHL", ("ml",), [("A @ B", {"home": 3, "away": 2}, sms, {"ml": mn})])
+    check("steam corr: every game's move vs the result", any(r.get("pin", {}).get("n") == 1 for r in cs["ml"]))
     check("steam window scan: open-anchored rows grade", any(r["w"] == "open→start-1h" and r["rec"] == "1-0" for r in sc["windows"]))
 
 

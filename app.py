@@ -30555,6 +30555,103 @@ def _steam_window_scan(sport: str, mts: tuple, games: list, detail=None) -> dict
     return out
 
 
+# Bucket windows: every game, every window — does the move predict the result
+# graded at the line at the window's end?
+_CORR_WINDOWS = (
+    (("o", 0), ("o", 1)), (("o", 1), ("o", 2)), (("o", 2), ("o", 4)), (("o", 4), ("o", 8)),
+    (("o", 8), ("o", 12)), (("s", -12), ("s", -6)), (("s", -6), ("s", -3)), (("s", -3), ("s", -1)),
+    (("s", -1), ("s", 0)), (("o", 0), ("s", -6)), (("o", 0), ("s", -1)), (("o", 0), ("s", 0)),
+)
+
+
+def _steam_corr_scan(sport: str, mts: tuple, games: list) -> dict:
+    """Pure. MOVEMENT → RESULT over EVERY game (Nov 1 2026, Rob: "any
+    correlation to odds movements in time frames to fucking outcome"). Per
+    market × window: each book's move in cents (at one line) from the
+    window's start to its end, and the result against Pinnacle's line AT THE
+    WINDOW'S END — what a bet then would have had to beat: +1 the side the
+    move favored covered / won, −1 it lost (ML: win − Pinnacle's devigged
+    price then, so a favorite winning counts for less). Reports, for
+    Pinnacle alone and for the venues' average, the correlation over all
+    games and the follow record at ≥1¢ / ≥2¢ / ≥4¢."""
+    H = 3600e3
+    out = {}
+    for m in mts:
+        sl = _STEAM_SLOPE_SCAN.get((sport, m)) or 2.6
+        rows_m = []
+        for w in _CORR_WINDOWS:
+            samples = {"pin": [], "venues": [], "all3": []}
+            for ev, fin, sms, nums in games:
+                nm = nums.get(m) or {}
+                pin = nm.get("pin") or []
+                if not pin or pin[0][0] >= sms:
+                    continue
+                oms = pin[0][0]
+                t = [(oms if a == "o" else sms) + int(h * H) for a, h in w]
+                if t[1] > sms or t[0] >= t[1]:
+                    continue
+                end = _steam_at(pin, t[1])
+                if end is None:
+                    continue
+                try:
+                    hh, aa = float(fin["home"]), float(fin["away"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                # the result against Pinnacle's number at the window's end, +home/over
+                if m == "ml":
+                    y = (1.0 if hh > aa else 0.0) - end[1] / 100.0
+                else:
+                    ln = end[2]
+                    d = (hh + aa) - ln if m == "total" else (hh - aa) + ln
+                    if abs(d) < 1e-9:
+                        continue
+                    y = 1.0 if d > 0 else -1.0
+                mv = {}
+                for src in ("pin", "poly", "kalshi"):
+                    pts = nm.get(src) or []
+                    now = _steam_at(pts, t[1])
+                    if now is None:
+                        continue
+                    ref = _steam_at(pts, t[0]) or pts[0]
+                    if ref[0] >= t[1]:
+                        continue
+                    mv[src] = (now[1] - ref[1]) * sl
+                if "pin" not in mv:
+                    continue
+                samples["pin"].append((mv["pin"], y))
+                vs = [mv[s] for s in ("poly", "kalshi") if s in mv]
+                if vs:
+                    samples["venues"].append((sum(vs) / len(vs), y))
+                if len(mv) == 3 and all(x > 0 for x in mv.values()) or len(mv) == 3 and all(x < 0 for x in mv.values()):
+                    samples["all3"].append((sum(mv.values()) / 3, y))
+            row = {"w": _steam_win_name(w)}
+            for k, sm in samples.items():
+                if not sm:
+                    continue
+                xs = [a for a, _ in sm]
+                ys = [b for _, b in sm]
+                n = len(sm)
+                mx, my = sum(xs) / n, sum(ys) / n
+                vx = sum((x - mx) ** 2 for x in xs)
+                vy = sum((y - my) ** 2 for y in ys)
+                r = (sum((x - mx) * (y - my) for x, y in sm) / (vx * vy) ** 0.5) if vx > 0 and vy > 0 else None
+                rec = {}
+                for th in (1.0, 2.0, 4.0):
+                    sel = [(x, y) for x, y in sm if abs(x) >= th]
+                    if m == "ml":
+                        # the moved-to side's result over its price, in cents a bet
+                        rec[f"{th:g}c"] = (f"n{len(sel)} {sum((1 if x > 0 else -1) * y for x, y in sel) / len(sel) * 100:+.1f}c"
+                                           if sel else "n0")
+                    else:
+                        wn = sum(1 for x, y in sel if (x > 0) == (y > 0))
+                        rec[f"{th:g}c"] = f"{wn}-{len(sel) - wn}"
+                row[k] = {"n": n, "r": (round(r, 2) if r is not None else None),
+                          "avg_abs_c": round(sum(abs(x) for x in xs) / n, 1), **rec}
+            rows_m.append(row)
+        out[m] = rows_m
+    return out
+
+
 @app.route("/api/steam-scan")
 def api_steam_scan():
     """READ-ONLY (shared-secret, site-curl). Grade 'follow the books' over
@@ -30635,6 +30732,11 @@ def api_steam_scan():
         if detail:
             out["games"] = det
         return out
+    if request.args.get("corr"):
+        return jsonify({"ok": True, "sport": sport, "from": d0.date().isoformat(), "days": ndays,
+                        "tape_rows": len(rows), "games_graded": len(games),
+                        "corr": _steam_corr_scan(sport, mts, games),
+                        "ms": int((_time.monotonic() - t0) * 1000)})
     if request.args.get("windows"):
         return jsonify({"ok": True, "sport": sport, "from": d0.date().isoformat(), "days": ndays,
                         "tape_rows": len(rows), "games_graded": len(games),
