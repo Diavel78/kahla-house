@@ -5335,7 +5335,8 @@ def test_sheet_run_clocks() -> None:
     from cellar.batch import JOBS
     want: dict = {}
     for j in JOBS:
-        sports = (("NCAAF", "NFL") if j.name.startswith("sheets_") and j.name != "sheets_grade"
+        sports = (("NCAAF",) if j.name.startswith("sheets_cfb") else
+                  ("NCAAF", "NFL") if j.name.startswith("sheets_") and j.name != "sheets_grade"
                   else ("NHL",) if j.name.startswith("nhl_sheet") else ("NBA",) if j.name.startswith("nba_sheet")
                   else ("MLB",) if j.name.startswith("mlb_sheet") else ())
         for sp in sports:
@@ -5349,6 +5350,16 @@ def test_sheet_run_clocks() -> None:
     check("football 19:30 Sun -> Mon 05:00 build", nx("NFL", 2026, 10, 11, 19, 30).startswith("2026-10-12T05:00"))
     check("NBA 15:45 exactly -> next day 07:05", nx("NBA", 2026, 10, 10, 15, 45).startswith("2026-10-11T07:05"))
     check("MLB 15:50 exactly -> next day 07:10", nx("MLB", 2026, 10, 10, 15, 50).startswith("2026-10-11T07:10"))
+    check("college Sunday 07:30 -> the 08:00 next-week build", nx("NCAAF", 2026, 11, 1, 7, 30).startswith("2026-11-01T08:00"))
+    check("college Sunday 12:00 -> the 15:00 build", nx("NCAAF", 2026, 11, 1, 12, 0).startswith("2026-11-01T15:00"))
+    check("NFL Sunday 12:00 -> 15:30 (no Sunday build)", nx("NFL", 2026, 11, 1, 12, 0).startswith("2026-11-01T15:30"))
+    import importlib as _il
+    _bs = _il.import_module("scripts.box_sheets")
+    check("college on a Sunday writes next Monday's week; NFL stays on this one",
+          _bs.week_key_for("NCAAF", _dt(2026, 11, 1, 8, 0, tzinfo=az)) == "2026-11-02"
+          and _bs.week_key_for("NFL", _dt(2026, 11, 1, 8, 0, tzinfo=az)) == "2026-10-26"
+          and _bs.week_key_for("NCAAF", _dt(2026, 11, 2, 5, 0, tzinfo=az)) == "2026-11-02"
+          and _bs.week_key_for("NCAAF", _dt(2026, 10, 31, 9, 0, tzinfo=az)) == "2026-10-26")
     check("unknown sport -> None", _app._sheet_next_run("UFC", _dt(2026, 10, 10, 8, 0, tzinfo=az)) is None)
 
 

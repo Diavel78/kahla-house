@@ -35,7 +35,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -197,6 +197,15 @@ def price_hook(model: dict, home: str, away: str, neutral: bool) -> dict | None:
     return out
 
 
+def week_key_for(sport: str, now_az: datetime) -> str:
+    """The sheet week a run writes to: this week's Monday, except NCAAF on a
+    Sunday, whose week is over — that's next Monday's (Nov 1 2026)."""
+    d = now_az.date()
+    if sport == "NCAAF" and d.weekday() == 6:
+        return (d + timedelta(days=1)).isoformat()
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -215,19 +224,37 @@ def main() -> int:
     args = ap.parse_args()
 
     now_az = datetime.now(AZ)
-    if args.mode == "monday" and now_az.weekday() != 0 and not args.force:
+    sports = args.sport or ["NFL", "NCAAF"]
+    # COLLEGE'S WEEK TURNS OVER ON SUNDAY (Rob, Nov 1 2026: "we need to make new
+    # college sheets Sunday morning and Sunday afternoon?"): Pinnacle opens next
+    # Saturday's college lines Sunday afternoon and the first move off that open
+    # is the 🔥, so a Monday 05:00 build put the button up ~15h after the fire.
+    # Saturday's college games are all final by Sunday, so an NCAAF-only full
+    # build may run Sunday (into NEXT Monday's week key, `week_key_for`). NFL
+    # still turns over Monday — Sunday's and Monday's games are on this week.
+    sunday_cfb = now_az.weekday() == 6 and sports == ["NCAAF"]
+    if args.mode == "monday" and now_az.weekday() != 0 and not args.force and not sunday_cfb:
         print(json.dumps({"skipped": "monday build only runs on Monday "
-                          "(catch-up guard); use --mode friday or --force"}))
+                          "(Sunday for NCAAF alone; catch-up guard); use --mode friday or --force"}))
         return 0
 
     from scripts import football_sheet_data as fsd
     fsd.MODEL_HOOK = model_hook
     fsd.PRICE_HOOK = price_hook
     fsd.LINE_HOOK = line_hook
-    sports = args.sport or ["NFL", "NCAAF"]
     pin = pin_pull(sports, spend=args.pin)
-    wk = args.week_key or fsd.week_key_default()
-    summary = fsd.run(args.mode, sports, args.days, wk, args.commit)
+    # One run per week key: on a Sunday college builds/re-prices NEXT week's
+    # rows while NFL stays on this week's.
+    groups: dict = {}
+    for sp in sports:
+        groups.setdefault(args.week_key or week_key_for(sp, now_az), []).append(sp)
+    summary: dict = {}
+    for wk_, sps in groups.items():
+        part = fsd.run(args.mode, sps, args.days, wk_, args.commit)
+        part.pop("week_key", None)
+        summary.update(part)
+    wk = ",".join(groups)
+    summary["week_key"] = wk
     summary["model"] = "box:_gridiron_proj"
     summary["pinnacle"] = pin
     print(json.dumps(summary, indent=2, default=str))

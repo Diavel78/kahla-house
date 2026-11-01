@@ -2027,7 +2027,7 @@ def _nhl_sheet_fallback(sb):
 # lane runs the first due job in list order, so a run lands a few minutes
 # after its clock when two sports share one.
 _SHEET_RUN_CLOCKS = {
-    "NCAAF": ((5, 0, 0), (7, 0, None), (11, 0, None), (15, 30, None), (19, 0, None)),
+    "NCAAF": ((5, 0, 0), (7, 0, None), (8, 0, 6), (11, 0, None), (15, 0, 6), (15, 30, None), (19, 0, None)),
     "NFL": ((5, 0, 0), (7, 0, None), (11, 0, None), (15, 30, None), (19, 0, None)),
     "NHL": ((7, 0, None), (11, 5, None), (14, 0, None), (15, 35, None)),
     "NBA": ((7, 5, None), (12, 10, None), (15, 45, None)),

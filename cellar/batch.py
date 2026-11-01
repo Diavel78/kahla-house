@@ -242,6 +242,18 @@ JOBS: tuple[Job, ...] = (
     Job("sheets_build", ["scripts.box_sheets", "--mode", "monday", "--commit", "--pin"],
         hour=5, minute=0, weekday=0, timeout_s=1500,
         note="football pick sheets: Monday full build (box model)"),
+    # COLLEGE TURNS OVER SUNDAY (Nov 1 2026, Rob: "new college sheets Sunday
+    # morning and Sunday afternoon"): Pinnacle opens next Saturday's college
+    # lines ~14:30 AZ Sunday and the first move off the open is the 🔥 — the
+    # Monday 05:00 build put the button up ~15h late. box_sheets writes an
+    # NCAAF-only Sunday run into NEXT Monday's week key; the Sunday refreshes
+    # (11:00 / 15:30 / 19:00) re-price those rows the same way.
+    Job("sheets_cfb_sun_am", ["scripts.box_sheets", "--mode", "monday", "--sport", "NCAAF", "--commit"],
+        hour=8, minute=0, weekday=6, timeout_s=1500,
+        note="college pick sheets: Sunday morning build of next week"),
+    Job("sheets_cfb_sun_pm", ["scripts.box_sheets", "--mode", "monday", "--sport", "NCAAF", "--commit"],
+        hour=15, minute=0, weekday=6, timeout_s=1500,
+        note="college pick sheets: Sunday afternoon build, after Pinnacle's open"),
 
     # -- weekly ------------------------------------------------------------
     # NOT --delta: this script has no such flag. Its delta mode is
