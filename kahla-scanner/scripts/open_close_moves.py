@@ -205,6 +205,15 @@ def main():
         for it in (b.get("items") or [])[:2]:
             print("RAW", json.dumps(it)[:2500])
             print("PARSED", json.dumps(parse_item(it)))
+        # ESPN's per-provider line history, if it carries one (timestamps = intraday windows)
+        base = mod.CORE.format(e=a.probe).split("?")[0].rstrip("/")
+        for it in (b.get("items") or [])[:6]:
+            pid = (it.get("provider") or {}).get("id")
+            print("PROVIDER", pid, (it.get("provider") or {}).get("name"),
+                  sorted(k for k in it.keys()))
+            for path in (f"/{pid}/history/0/movement?limit=200", f"/{pid}/history/0?limit=200", f"/{pid}/history"):
+                h = mod._get(base + path)
+                print("HIST", pid, path, json.dumps(h)[:1500] if h else None)
         return 0
     seasons = [int(x) for x in a.seasons.split(",") if x]
     games = [g for g in mod.load(a.cache, seasons) if g.get("hs") is not None]
