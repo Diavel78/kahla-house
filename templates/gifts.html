@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Gifts · The Kahla House</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Gifts">
+<meta name="theme-color" content="#140f12">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script>
+firebase.initializeApp({
+    apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+    authDomain: "kahla-house.firebaseapp.com",
+    projectId: "kahla-house",
+    storageBucket: "kahla-house.firebasestorage.app",
+    messagingSenderId: "1029771942929",
+    appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+});
+</script>
+<style>
+:root{
+  --bg:#140f12; --card:#1d161a; --card2:#251c21; --input:#120d10;
+  --border:rgba(255,255,255,.08); --border2:rgba(255,255,255,.14);
+  --text:#f3ecef; --text2:#bcaeb5; --muted:#857780;
+  --red:#e2445c; --red-dim:rgba(226,68,92,.14);
+  --green:#2fbf71; --green-dim:rgba(47,191,113,.14);
+  --gold:#f2b84b; --gold-dim:rgba(242,184,75,.14);
+  --blue:#5b8cff; --blue-dim:rgba(91,140,255,.14);
+  --violet:#a78bfa; --violet-dim:rgba(167,139,250,.14);
+  --shadow:0 10px 40px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;overflow-x:hidden}
+body{background:
+  radial-gradient(1100px 560px at 85% -10%, rgba(226,68,92,.10), transparent 60%),
+  radial-gradient(900px 500px at -10% 5%, rgba(47,191,113,.06), transparent 55%), var(--bg);
+  color:var(--text);font-family:'DM Sans',system-ui,sans-serif;min-height:100vh;font-size:15px;
+  line-height:1.45;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit;font-size:inherit}
+input,select,textarea{font-family:inherit;font-size:16px;color:var(--text)}
+.mono{font-family:'JetBrains Mono',monospace;font-variant-numeric:tabular-nums}
+
+#app{max-width:900px;margin:0 auto;padding:0 16px 120px}
+.topbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:12px;padding:14px 0 10px;
+  background:linear-gradient(180deg,var(--bg) 70%,transparent)}
+.brand{display:flex;align-items:center;gap:11px;font-weight:700;font-size:19px;letter-spacing:-.02em}
+.brand .logo{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;font-size:21px;
+  background:linear-gradient(135deg,var(--red),var(--gold));box-shadow:0 4px 16px rgba(226,68,92,.3)}
+.brand small{display:block;font-size:11.5px;font-weight:500;color:var(--muted)}
+.spacer{flex:1}
+.iconbtn{height:36px;padding:0 12px;border-radius:11px;border:1px solid var(--border);background:var(--card);
+  display:inline-flex;align-items:center;gap:6px;font-size:13.5px;color:var(--text2)}
+.iconbtn:hover{border-color:var(--border2);color:var(--text)}
+
+.tabs{display:flex;gap:6px;overflow-x:auto;padding:4px 0 12px;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex:0 0 auto;padding:8px 14px;border-radius:999px;border:1px solid var(--border);background:var(--card);
+  color:var(--text2);font-weight:600;font-size:14px}
+.tab.on{background:var(--text);color:var(--bg);border-color:var(--text)}
+
+.occbar{display:flex;align-items:center;gap:8px;margin:0 0 14px;flex-wrap:wrap}
+.occbar label{font-size:12.5px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+select,input[type=text],input[type=number],input[type=date],input[type=url],input[type=search],textarea{
+  background:var(--input);border:1px solid var(--border2);border-radius:10px;padding:9px 11px;outline:none;width:100%}
+select:focus,input:focus,textarea:focus{border-color:var(--red)}
+.occbar select{width:auto;min-width:200px}
+
+.section-h{display:flex;align-items:baseline;gap:10px;margin:22px 0 10px}
+.section-h h2{margin:0;font-size:17px;letter-spacing:-.01em}
+.section-h .sub{color:var(--muted);font-size:13px}
+
+.addbar{display:flex;gap:8px;background:var(--card);border:1.5px solid var(--border2);border-radius:16px;
+  padding:7px 7px 7px 14px;box-shadow:var(--shadow);align-items:center;margin-bottom:16px}
+.addbar:focus-within{border-color:var(--red)}
+.addbar input{flex:1;background:none;border:none;padding:8px 0}
+.btn{padding:10px 16px;border-radius:12px;font-weight:700;font-size:14.5px;background:var(--red);color:#fff;white-space:nowrap}
+.btn.ghost{background:var(--card2);color:var(--text);border:1px solid var(--border2)}
+.btn.sm{padding:7px 11px;font-size:13px;border-radius:10px}
+.btn.green{background:var(--green)}
+.btn:disabled{opacity:.5}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.gift{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden;display:flex;flex-direction:column}
+.gift .img{height:150px;background:#fff;display:grid;place-items:center;overflow:hidden;position:relative}
+.gift .img img{max-width:100%;max-height:150px;object-fit:contain}
+.gift .img .ph{font-size:46px;background:var(--card2);width:100%;height:100%;display:grid;place-items:center}
+.gift .body{padding:11px 13px 12px;display:flex;flex-direction:column;gap:6px;flex:1}
+.gift .t{font-weight:700;font-size:14.5px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.gift .meta{display:flex;gap:8px;align-items:center;color:var(--text2);font-size:13px;flex-wrap:wrap}
+.gift .price{font-weight:700;color:var(--gold)}
+.gift .notes{font-size:12.5px;color:var(--muted)}
+.gift .acts{display:flex;gap:6px;margin-top:auto;padding-top:6px;flex-wrap:wrap}
+.star{position:absolute;top:8px;left:8px;background:rgba(0,0,0,.65);color:var(--gold);font-size:12px;
+  padding:2px 8px;border-radius:999px;font-weight:700}
+
+.pill{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:700}
+.st-wish{background:var(--card2);color:var(--text2)}
+.st-bought{background:var(--blue-dim);color:var(--blue)}
+.st-received{background:var(--violet-dim);color:var(--violet)}
+.st-wrapped{background:var(--gold-dim);color:var(--gold)}
+.st-given{background:var(--green-dim);color:var(--green)}
+.st-returned{background:var(--red-dim);color:var(--red)}
+.chip{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;
+  background:var(--card2);color:var(--text2);border:1px solid var(--border)}
+.chip.secret{background:var(--gold-dim);color:var(--gold);border-color:transparent}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:6px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:12px 14px}
+.stat .k{font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.stat .v{font-size:22px;font-weight:700;margin-top:2px}
+.stat .s{font-size:12.5px;color:var(--text2)}
+
+.kids{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.kid{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px}
+.kid .nm{font-weight:700;font-size:17px;display:flex;align-items:center;gap:8px}
+.kid .row{display:flex;justify-content:space-between;font-size:13.5px;color:var(--text2);margin-top:6px}
+.kid .row b{color:var(--text)}
+.bar{height:8px;background:var(--card2);border-radius:99px;overflow:hidden;margin-top:8px}
+.bar>i{display:block;height:100%;background:var(--green);border-radius:99px}
+.bar.over>i{background:var(--red)}
+.bal{font-size:12.5px;margin-top:8px;font-weight:600}
+.bal.lo{color:var(--gold)} .bal.hi{color:var(--blue)} .bal.ok{color:var(--green)}
+
+.list{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden}
+.li{display:flex;gap:11px;padding:11px 13px;border-top:1px solid var(--border);align-items:center}
+.li:first-child{border-top:none}
+.li .th{width:46px;height:46px;border-radius:10px;background:#fff;flex:0 0 46px;display:grid;place-items:center;overflow:hidden}
+.li .th img{max-width:100%;max-height:46px;object-fit:contain}
+.li .th .ph{background:var(--card2);width:100%;height:100%;display:grid;place-items:center;font-size:22px}
+.li .mid{flex:1;min-width:0}
+.li .mid .t{font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.li .mid .m{font-size:12.5px;color:var(--text2);display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:2px}
+.li .rt{text-align:right;display:flex;flex-direction:column;gap:5px;align-items:flex-end}
+.grp-h{padding:9px 13px;background:var(--card2);font-weight:700;font-size:13.5px;display:flex;justify-content:space-between;color:var(--text2)}
+
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+.filters select,.filters input{width:auto}
+.filters input[type=search]{flex:1;min-width:150px}
+.fchip{padding:6px 11px;border-radius:999px;border:1px solid var(--border);background:var(--card);font-size:13px;font-weight:600;color:var(--text2)}
+.fchip.on{background:var(--red);border-color:var(--red);color:#fff}
+
+table.rec{width:100%;border-collapse:collapse;font-size:13.5px}
+table.rec th{text-align:left;font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;padding:8px 10px;border-bottom:1px solid var(--border2);white-space:nowrap}
+table.rec td{padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+table.rec td.n,table.rec th.n{text-align:right;font-family:'JetBrains Mono',monospace;white-space:nowrap}
+table.rec tfoot td{font-weight:700;border-top:1px solid var(--border2);border-bottom:none}
+.tblwrap{overflow-x:auto;background:var(--card);border:1px solid var(--border);border-radius:16px}
+.sums{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:12px}
+
+.empty{text-align:center;color:var(--muted);padding:34px 16px;background:var(--card);border:1px dashed var(--border2);border-radius:16px}
+.empty .e{font-size:38px}
+
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:80;display:none;align-items:flex-end;justify-content:center}
+.scrim.show{display:flex}
+@media(min-width:640px){.scrim{align-items:center}}
+.sheet{background:var(--card);border:1px solid var(--border2);border-radius:20px 20px 0 0;width:100%;max-width:520px;
+  max-height:92vh;overflow-y:auto;padding:18px 18px 26px;box-shadow:var(--shadow)}
+@media(min-width:640px){.sheet{border-radius:20px}}
+.sheet h3{margin:0 0 12px;font-size:18px;display:flex;align-items:center;gap:8px}
+.sheet h3 .x{margin-left:auto;font-size:22px;color:var(--muted);padding:0 4px}
+.fld{margin-bottom:11px}
+.fld>label{display:block;font-size:12.5px;color:var(--text2);font-weight:600;margin-bottom:4px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.prev{display:flex;gap:10px;align-items:center;background:var(--input);border:1px solid var(--border);border-radius:12px;padding:8px;margin-bottom:11px}
+.prev img{width:58px;height:58px;object-fit:contain;background:#fff;border-radius:8px}
+.prev .pt{font-size:13px;color:var(--text2)}
+.note{font-size:12.5px;color:var(--muted);margin-top:4px}
+.note.warn{color:var(--gold)}
+.stars{display:flex;gap:4px}
+.stars button{font-size:22px;color:var(--muted);padding:2px}
+.stars button.on{color:var(--gold)}
+.toggle{display:flex;align-items:center;gap:9px;font-size:14px;cursor:pointer}
+.toggle input{width:18px;height:18px;accent-color:var(--gold)}
+.sheet .foot{display:flex;gap:8px;margin-top:16px}
+.sheet .foot .btn{flex:1}
+.danger{color:var(--red)!important}
+
+#toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(30px);opacity:0;background:var(--text);
+  color:var(--bg);padding:10px 16px;border-radius:12px;font-weight:700;font-size:14px;transition:.2s;z-index:99;pointer-events:none}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.err{background:var(--red);color:#fff}
+#gate{padding:60px 16px;text-align:center;color:var(--text2)}
+.spin{width:30px;height:30px;border:3px solid var(--border2);border-top-color:var(--red);border-radius:50%;animation:sp .8s linear infinite;margin:0 auto 14px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="topbar">
+    <a href="/" class="brand" style="text-decoration:none"><span class="logo">🎁</span>
+      <span>Gifts<small id="subtitle">The Kahla House</small></span></a>
+    <span class="spacer"></span>
+    <a href="/" class="iconbtn">Home</a>
+  </div>
+  <div id="gate"><div class="spin"></div>Loading…</div>
+  <div id="main" class="hide">
+    <div class="tabs" id="tabs"></div>
+    <div id="occWrap" class="occbar hide">
+      <label for="occSel">Occasion</label>
+      <select id="occSel" onchange="setOcc(this.value)"></select>
+    </div>
+    <div id="view"></div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim" onclick="if(event.target===this)closeSheet()"><div class="sheet" id="sheet"></div></div>
+<div id="toast"></div>
+
+<script>
+/* ============================ boot ============================ */
+let ME = null, D = null, TAB = null, OCC = '', _poll = null;
+let F = { person: '', status: 'all', q: '' };      // master-list filters
+let R = { from: '', to: '' };                        // records date range
+let FAM = '';                                        // family-lists person
+try { OCC = localStorage.getItem('kh_gifts_occ') || ''; } catch (_) {}
+
+async function authFetch(url, opt = {}) {
+  const u = firebase.auth().currentUser;
+  if (!u) throw new Error('Not signed in');
+  const tok = await u.getIdToken();
+  opt.headers = Object.assign({ 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, opt.headers || {});
+  return fetch(url, opt);
+}
+function gate(html){ const g = document.getElementById('gate'); g.innerHTML = html; g.classList.remove('hide'); document.getElementById('main').classList.add('hide'); }
+
+firebase.auth().onAuthStateChanged(async user => {
+  if (!user) { gate('🔑<br><br>Sign in on the <a href="/">home page</a>, then come back.'); return; }
+  try {
+    const r = await authFetch('/api/me');
+    if (r.status === 401 || r.status === 403) { location.href = '/'; return; }
+    if (!r.ok) { gate('The server had a problem (' + r.status + '). You are still signed in. <br><br><button class="btn" onclick="location.reload()">Retry</button>'); return; }
+    ME = await r.json();
+    if (!ME.approved) { gate('⏳<br><br>Your account is waiting for approval.'); return; }
+    if (!ME.gifts_access) { gate('🎁<br><br>Ask Mom or Dad to turn on Gifts for your account.'); return; }
+    await load();
+    _poll = setInterval(() => { if (!document.getElementById('scrim').classList.contains('show') && !document.hidden) load(true); }, 20000);
+  } catch (e) { gate('Couldn’t load. ' + esc(e.message || '') + '<br><br><button class="btn" onclick="location.reload()">Retry</button>'); }
+});
+
+async function load(quiet) {
+  try {
+    const r = await authFetch('/api/gifts');
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'load failed');
+    D = j;
+    if (!TAB) TAB = D.parent ? 'overview' : 'mine';
+    if (OCC && !D.occasions.some(o => o.id === OCC)) OCC = '';
+    if (!OCC && D.parent) { const up = defaultOcc(); if (up) OCC = up.id; }
+    document.getElementById('gate').classList.add('hide');
+    document.getElementById('main').classList.remove('hide');
+    document.getElementById('subtitle').textContent = D.parent ? 'Wish lists + gift records' : 'Your wish list';
+    render();
+  } catch (e) { if (!quiet) toast(e.message || 'Load failed', 'err'); }
+}
+
+/* ============================ helpers ============================ */
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function $(id){ return document.getElementById(id); }
+function money(v){ if (v == null || isNaN(v)) return '—'; return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
+function money0(v){ if (v == null || isNaN(v)) return '—'; return '$' + Math.round(Number(v)).toLocaleString('en-US'); }
+function toast(m, kind){ const t = $('toast'); t.textContent = m; t.className = 'show ' + (kind || ''); clearTimeout(t._t); t._t = setTimeout(() => t.className = '', 2200); }
+function today(){ return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Phoenix' }); }
+function person(id){ return (D.people || []).find(p => p.id === id); }
+function pname(id){ const p = person(id); return p ? p.name : '?'; }
+function occ(id){ return (D.occasions || []).find(o => o.id === id); }
+function defaultOcc(){
+  const live = D.occasions.filter(o => !o.archived);
+  const t = today();
+  return live.filter(o => (o.date || '9999') >= t).sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'))[0] || live[live.length - 1];
+}
+function setOcc(v){ OCC = v; try { localStorage.setItem('kh_gifts_occ', v); } catch (_) {} render(); }
+const ST_LABEL = { wish: 'Wish list', bought: 'Bought', received: 'Received', wrapped: 'Wrapped', given: 'Given', returned: 'Returned' };
+const ST_NEXT = { wish: 'bought', bought: 'received', received: 'wrapped', wrapped: 'given' };
+const ST_BTN = { bought: 'Mark bought', received: 'Arrived', wrapped: 'Wrapped', given: 'Given' };
+function stPill(s){ s = s || 'wish'; return `<span class="pill st-${s}">${ST_LABEL[s] || s}</span>`; }
+function isPurchased(it){ return it.status && it.status !== 'wish'; }
+// Money out the door on one gift: what was paid (else its list price × qty), less any refund.
+function cost(it){
+  if (!isPurchased(it)) return 0;
+  const base = it.paid != null ? it.paid : (it.price != null ? it.price * (it.qty || 1) : 0);
+  return Math.max(0, base - (it.refund || 0));
+}
+function counts(it){ return isPurchased(it) && it.status !== 'returned'; }
+function imgHtml(it, big){
+  const ph = `<div class="ph">🎁</div>`;
+  if (!it.image) return ph;
+  return `<img src="${esc(it.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.outerHTML='${ph.replace(/"/g, '&quot;')}'">`;
+}
+function linkBtn(it){ return it.url ? `<a class="btn ghost sm" href="${esc(it.url)}" target="_blank" rel="noopener">Open ↗</a>` : ''; }
+function inOcc(it){ return !OCC || it.occasion_id === OCC; }
+function liveKids(){ return D.people.filter(p => p.kind === 'kid' && !p.archived); }
+
+/* ============================ tabs ============================ */
+function render(){
+  const tabs = D.parent
+    ? [['overview', 'Overview'], ['master', 'Master list'], ['records', 'Records'], ['people', 'People'], ['occasions', 'Occasions'], ['mine', 'My list'], ['family', 'Family lists']]
+    : [['mine', 'My list'], ['family', 'Family lists']];
+  $('tabs').innerHTML = tabs.map(([k, l]) => `<button class="tab ${TAB === k ? 'on' : ''}" onclick="go('${k}')">${l}</button>`).join('');
+  const occOn = D.parent && ['overview', 'master', 'records'].includes(TAB);
+  $('occWrap').classList.toggle('hide', !occOn);
+  if (occOn) {
+    const opts = [`<option value="">All occasions</option>`].concat(D.occasions.map(o =>
+      `<option value="${o.id}" ${o.id === OCC ? 'selected' : ''}>${esc(o.name)}${o.date ? ' · ' + o.date : ''}${o.archived ? ' (archived)' : ''}</option>`));
+    $('occSel').innerHTML = opts.join('');
+    $('occSel').value = OCC;
+  }
+  const v = $('view');
+  ({ overview: vOverview, master: vMaster, records: vRecords, people: vPeople, occasions: vOccasions, mine: vMine, family: vFamily })[TAB](v);
+}
+function go(t){ TAB = t; render(); window.scrollTo({ top: 0 }); }
+
+/* ============================ my list (everyone) ============================ */
+function vMine(v){
+  const mine = D.items.filter(i => i.person_id === D.me.person_id);
+  v.innerHTML = `
+    <div class="addbar">
+      <span>🔗</span>
+      <input id="quickLink" type="url" inputmode="url" placeholder="Paste a link, or type a gift" onkeydown="if(event.key==='Enter')quickAdd()">
+      ${navigator.clipboard && navigator.clipboard.readText ? `<button class="btn ghost sm" onclick="pasteLink()">Paste</button>` : ''}
+      <button class="btn sm" onclick="quickAdd()">Add</button>
+    </div>
+    <div class="section-h"><h2>My wish list</h2><span class="sub">${mine.length} item${mine.length === 1 ? '' : 's'} · ⭐ = want it most</span></div>
+    ${mine.length ? `<div class="grid">${mine.map(it => giftCard(it, true)).join('')}</div>`
+      : `<div class="empty"><div class="e">🎄</div><p>Nothing here yet.<br>Find something you want, copy its link, and paste it above.</p></div>`}`;
+}
+function giftCard(it, editable){
+  const pri = it.priority ? `<span class="star">${'★'.repeat(it.priority)}</span>` : '';
+  return `<div class="gift">
+    <div class="img">${imgHtml(it)}${pri}</div>
+    <div class="body">
+      <div class="t">${esc(it.title || 'Gift')}</div>
+      <div class="meta">${it.price != null ? `<span class="price">${money(it.price)}</span>` : ''}${it.store ? `<span>${esc(it.store)}</span>` : ''}${(it.qty || 1) > 1 ? `<span>× ${it.qty}</span>` : ''}</div>
+      ${it.size || it.color ? `<div class="notes">${esc([it.size && 'Size ' + it.size, it.color].filter(Boolean).join(' · '))}</div>` : ''}
+      ${it.notes ? `<div class="notes">${esc(it.notes)}</div>` : ''}
+      <div class="acts">${linkBtn(it)}${editable ? `<button class="btn ghost sm" onclick="openItem('${it.id}')">Edit</button>` : ''}</div>
+    </div></div>`;
+}
+async function pasteLink(){
+  try { const t = await navigator.clipboard.readText(); $('quickLink').value = t; quickAdd(); }
+  catch (_) { toast('Long-press the box and choose Paste', 'err'); }
+}
+function quickAdd(){
+  const v = ($('quickLink').value || '').trim();
+  openItem(null, { person_id: D.me.person_id, raw: v });
+}
+
+/* ============================ family lists ============================ */
+function vFamily(v){
+  const others = D.people.filter(p => p.uid && !p.archived && p.id !== D.me.person_id);
+  if (!others.length) { v.innerHTML = `<div class="empty"><div class="e">👨‍👩‍👧‍👦</div><p>No one else has a list yet.</p></div>`; return; }
+  if (!FAM || !others.some(p => p.id === FAM)) FAM = others[0].id;
+  const items = D.items.filter(i => i.person_id === FAM && !(D.parent && i.surprise));
+  v.innerHTML = `
+    <div class="filters">${others.map(p => `<button class="fchip ${p.id === FAM ? 'on' : ''}" onclick="FAM='${p.id}';render()">${esc(p.name)}</button>`).join('')}</div>
+    <div class="section-h"><h2>${esc(pname(FAM))}'s wish list</h2><span class="sub">${items.length} item${items.length === 1 ? '' : 's'}</span></div>
+    ${items.length ? `<div class="grid">${items.map(it => giftCard(it, false)).join('')}</div>` : `<div class="empty"><div class="e">🎁</div><p>Nothing on this list yet.</p></div>`}`;
+}
+
+/* ============================ overview (parents) ============================ */
+function personSummary(pid){
+  const its = D.items.filter(i => i.person_id === pid);
+  const bought = its.filter(i => counts(i) && inOcc(i));
+  return {
+    spent: its.filter(i => isPurchased(i) && inOcc(i)).reduce((s, i) => s + cost(i), 0),
+    count: bought.reduce((s, i) => s + (i.qty || 1), 0),
+    wish: its.filter(i => !isPurchased(i) && !i.surprise && !i.owner_hidden).length,
+    waiting: bought.filter(i => i.status === 'bought').length,
+    toWrap: bought.filter(i => i.status === 'received').length,
+  };
+}
+function vOverview(v){
+  const o = occ(OCC);
+  const kids = liveKids();
+  const sums = kids.map(k => ({ k, s: personSummary(k.id), b: o ? o.budgets[k.id] : null }));
+  const avgSpend = sums.length ? sums.reduce((a, x) => a + x.s.spent, 0) / sums.length : 0;
+  const avgCount = sums.length ? sums.reduce((a, x) => a + x.s.count, 0) / sums.length : 0;
+  const all = D.items.filter(i => isPurchased(i) && inOcc(i));
+  const spent = all.reduce((s, i) => s + cost(i), 0);
+  const budget = o ? Object.values(o.budgets || {}).reduce((s, b) => s + (b || 0), 0) : null;
+  const waiting = all.filter(i => i.status === 'bought').length;
+  const toWrap = all.filter(i => i.status === 'received').length;
+  const kidCard = ({ k, s, b }) => {
+    const pct = b ? Math.min(100, s.spent / b * 100) : 0;
+    const diff = s.spent - avgSpend;
+    let bal = '';
+    if (sums.length > 1) {
+      if (Math.abs(diff) < Math.max(10, avgSpend * 0.05)) bal = `<div class="bal ok">✓ Even on dollars</div>`;
+      else bal = diff < 0 ? `<div class="bal lo">${money0(-diff)} behind the average</div>` : `<div class="bal hi">${money0(diff)} ahead of the average</div>`;
+      const cd = s.count - avgCount;
+      if (Math.abs(cd) >= 1) bal += `<div class="bal ${cd < 0 ? 'lo' : 'hi'}">${Math.abs(cd).toFixed(cd % 1 ? 1 : 0)} gift${Math.abs(cd) === 1 ? '' : 's'} ${cd < 0 ? 'fewer' : 'more'} than average</div>`;
+    }
+    return `<div class="kid">
+      <div class="nm">${esc(k.name)}</div>
+      <div class="row"><span>Spent</span><b class="mono">${money(s.spent)}${b ? ' / ' + money0(b) : ''}</b></div>
+      ${b ? `<div class="bar ${s.spent > b ? 'over' : ''}"><i style="width:${pct}%"></i></div>
+             <div class="row"><span>${s.spent > b ? 'Over budget' : 'Left to spend'}</span><b class="mono">${money(Math.abs(b - s.spent))}</b></div>` : ''}
+      <div class="row"><span>Gifts</span><b>${s.count}</b></div>
+      <div class="row"><span>Still on wish list</span><b>${s.wish}</b></div>
+      ${s.waiting ? `<div class="row"><span>Waiting to arrive</span><b>${s.waiting}</b></div>` : ''}
+      ${s.toWrap ? `<div class="row"><span>To wrap</span><b>${s.toWrap}</b></div>` : ''}
+      ${bal}
+    </div>`;
+  };
+  const others = D.people.filter(p => p.kind !== 'kid' && !p.archived);
+  const otherRows = others.map(p => ({ p, s: personSummary(p.id), b: o ? o.budgets[p.id] : null }))
+    .filter(x => x.s.spent || x.b || x.s.count);
+  v.innerHTML = `
+    ${!D.occasions.length ? `<div class="empty" style="margin-bottom:14px"><div class="e">📅</div><p>Start by making an occasion (Christmas 2026, a birthday) and setting budgets.</p><button class="btn" onclick="go('occasions')">Add an occasion</button></div>` : ''}
+    <div class="stats">
+      <div class="stat"><div class="k">Spent</div><div class="v mono">${money0(spent)}</div><div class="s">${o ? esc(o.name) : 'all occasions'}</div></div>
+      ${budget ? `<div class="stat"><div class="k">Budget</div><div class="v mono">${money0(budget)}</div><div class="s">${budget >= spent ? money0(budget - spent) + ' left' : money0(spent - budget) + ' over'}</div></div>` : ''}
+      <div class="stat"><div class="k">Gifts bought</div><div class="v">${all.filter(counts).length}</div><div class="s">${all.filter(i => i.status === 'given').length} given</div></div>
+      <div class="stat"><div class="k">Waiting to arrive</div><div class="v">${waiting}</div><div class="s">${toWrap} to wrap</div></div>
+    </div>
+    <div class="section-h"><h2>The kids</h2><span class="sub">${OCC ? 'balanced on dollars and gift count' : 'pick an occasion to compare against budgets'}</span></div>
+    ${kids.length ? `<div class="kids">${sums.map(kidCard).join('')}</div>` : `<div class="empty">No kids yet. They appear here the first time they open Gifts, or add them under People.</div>`}
+    <div class="section-h"><h2>Everyone else</h2><span class="sub">parents and extended family</span></div>
+    ${otherRows.length ? `<div class="list">${otherRows.map(({ p, s, b }) => `
+      <div class="li"><div class="mid"><div class="t">${esc(p.name)}${p.relation ? ` <span class="chip">${esc(p.relation)}</span>` : ''}</div>
+        ${b ? `<div class="bar ${s.spent > b ? 'over' : ''}" style="max-width:260px"><i style="width:${Math.min(100, s.spent / b * 100)}%"></i></div>` : ''}
+        <div class="m">${s.count} gift${s.count === 1 ? '' : 's'}${s.waiting ? ` · ${s.waiting} waiting to arrive` : ''}</div></div>
+        <div class="rt"><b class="mono">${money(s.spent)}</b>${b ? `<span class="note">of ${money0(b)}</span>` : ''}</div></div>`).join('')}</div>`
+      : `<div class="empty">Nothing bought for anyone else ${OCC ? 'for this occasion' : ''} yet. Add your brother, your dad and the rest under People.</div>`}
+    <div class="section-h"><h2>Needs attention</h2></div>
+    ${attention()}`;
+}
+function attention(){
+  const t = today();
+  const late = D.items.filter(i => i.status === 'bought' && inOcc(i) && i.bought_at && daysBetween(i.bought_at, t) > 10);
+  const noOcc = D.items.filter(i => isPurchased(i) && !i.occasion_id);
+  const noCost = D.items.filter(i => isPurchased(i) && i.paid == null && inOcc(i));
+  const rows = [];
+  late.forEach(i => rows.push(row(i, `Bought ${daysBetween(i.bought_at, t)} days ago, not marked arrived`)));
+  noCost.forEach(i => rows.push(row(i, 'No price paid entered — using the list price')));
+  if (!OCC) noOcc.forEach(i => rows.push(row(i, 'Not assigned to an occasion')));
+  return rows.length ? `<div class="list">${rows.join('')}</div>` : `<div class="empty">All caught up.</div>`;
+  function row(i, why){ return `<div class="li" onclick="openItem('${i.id}')" style="cursor:pointer"><div class="th">${imgHtml(i)}</div><div class="mid"><div class="t">${esc(i.title)}</div><div class="m">${esc(pname(i.person_id))} · ${esc(why)}</div></div><div class="rt">${stPill(i.status)}</div></div>`; }
+}
+function daysBetween(a, b){ return Math.round((new Date(b) - new Date(a)) / 86400000); }
+
+/* ============================ master list (parents) ============================ */
+function vMaster(v){
+  const people = D.people.filter(p => !p.archived);
+  let items = D.items.filter(i => i.person_id !== D.me.person_id);
+  items = items.filter(i => !isPurchased(i) || inOcc(i));
+  if (F.person) items = items.filter(i => i.person_id === F.person);
+  if (F.status !== 'all') items = items.filter(i => (i.status || 'wish') === F.status);
+  if (F.q) { const q = F.q.toLowerCase(); items = items.filter(i => ((i.title || '') + ' ' + (i.store || '') + ' ' + (i.notes || '')).toLowerCase().includes(q)); }
+  const groups = {};
+  items.forEach(i => (groups[i.person_id] = groups[i.person_id] || []).push(i));
+  const order = D.people.map(p => p.id);
+  const gids = Object.keys(groups).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  const stOpts = ['all', ...D.statuses];
+  v.innerHTML = `
+    <div class="filters">
+      <select onchange="F.person=this.value;render()"><option value="">Everyone</option>${people.map(p => `<option value="${p.id}" ${F.person === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+      <input type="search" placeholder="Search" value="${esc(F.q)}" oninput="F.q=this.value;clearTimeout(window._qt);window._qt=setTimeout(render,250)">
+      <button class="btn sm" onclick="openItem(null,{person_id:F.person||''})">+ Gift</button>
+    </div>
+    <div class="filters">${stOpts.map(s => `<button class="fchip ${F.status === s ? 'on' : ''}" onclick="F.status='${s}';render()">${s === 'all' ? 'All' : ST_LABEL[s]}</button>`).join('')}</div>
+    ${gids.length ? gids.map(pid => {
+      const its = groups[pid];
+      const spent = its.reduce((s, i) => s + cost(i), 0);
+      return `<div class="list" style="margin-bottom:12px"><div class="grp-h"><span>${esc(pname(pid))}</span><span class="mono">${its.length} · ${money(spent)}</span></div>${its.map(masterRow).join('')}</div>`;
+    }).join('') : `<div class="empty"><div class="e">🔍</div><p>Nothing matches.</p></div>`}`;
+  if (F.q) { const s = v.querySelector('input[type=search]'); s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+}
+function masterRow(i){
+  const o = occ(i.occasion_id);
+  const nxt = ST_NEXT[i.status || 'wish'];
+  const amt = isPurchased(i) ? cost(i) : i.price;
+  return `<div class="li">
+    <div class="th">${imgHtml(i)}</div>
+    <div class="mid" onclick="openItem('${i.id}')" style="cursor:pointer">
+      <div class="t">${i.priority ? '<span style="color:var(--gold)">' + '★'.repeat(i.priority) + '</span> ' : ''}${esc(i.title)}</div>
+      <div class="m">${stPill(i.status)}${i.surprise ? '<span class="chip secret">Surprise</span>' : ''}${o ? `<span class="chip">${esc(o.name)}</span>` : ''}${i.store ? `<span>${esc(i.bought_store || i.store)}</span>` : ''}${i.from_label ? `<span>from ${esc(i.from_label)}</span>` : ''}</div>
+    </div>
+    <div class="rt"><b class="mono">${amt != null ? money(amt) : '—'}</b>
+      <div style="display:flex;gap:5px">${i.url ? `<a class="btn ghost sm" href="${esc(i.url)}" target="_blank" rel="noopener">↗</a>` : ''}${nxt ? `<button class="btn sm ${nxt === 'bought' ? '' : 'ghost'}" onclick="advance('${i.id}')">${ST_BTN[nxt]}</button>` : ''}</div></div>
+  </div>`;
+}
+function advance(id){
+  const it = D.items.find(i => i.id === id); if (!it) return;
+  const nxt = ST_NEXT[it.status || 'wish'];
+  if (nxt === 'bought') return openBuy(id);
+  patchItem(id, { status: nxt }, ST_LABEL[nxt] + ' ✓');
+}
+
+/* ============================ records (parents) ============================ */
+function recordRows(){
+  return D.items.filter(i => isPurchased(i) && inOcc(i)
+    && (!R.from || (i.bought_at || '') >= R.from) && (!R.to || (i.bought_at || '') <= R.to))
+    .sort((a, b) => (b.bought_at || '').localeCompare(a.bought_at || ''));
+}
+function vRecords(v){
+  const rows = recordRows();
+  const tot = { paid: 0, refund: 0, net: 0 };
+  rows.forEach(i => { const p = i.paid != null ? i.paid : (i.price || 0) * (i.qty || 1); tot.paid += p; tot.refund += i.refund || 0; tot.net += cost(i); });
+  const by = (key) => { const m = {}; rows.forEach(i => { const k = key(i) || '—'; m[k] = m[k] || { n: 0, amt: 0 }; m[k].n++; m[k].amt += cost(i); }); return Object.entries(m).sort((a, b) => b[1].amt - a[1].amt); };
+  const sumTable = (title, ent) => `<div class="tblwrap"><table class="rec"><thead><tr><th>${title}</th><th class="n">Gifts</th><th class="n">Spent</th></tr></thead><tbody>${ent.map(([k, x]) => `<tr><td>${esc(k)}</td><td class="n">${x.n}</td><td class="n">${money(x.amt)}</td></tr>`).join('')}</tbody></table></div>`;
+  v.innerHTML = `
+    <div class="filters">
+      <label class="note">From</label><input type="date" value="${R.from}" onchange="R.from=this.value;render()">
+      <label class="note">To</label><input type="date" value="${R.to}" onchange="R.to=this.value;render()">
+      <button class="btn ghost sm" onclick="exportCsv()">Download CSV</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">Paid</div><div class="v mono">${money(tot.paid)}</div></div>
+      <div class="stat"><div class="k">Refunds</div><div class="v mono">${money(tot.refund)}</div></div>
+      <div class="stat"><div class="k">Net spent</div><div class="v mono">${money(tot.net)}</div><div class="s">${rows.length} purchase${rows.length === 1 ? '' : 's'}</div></div>
+    </div>
+    <div class="section-h"><h2>Purchases</h2><span class="sub">tap a row to edit</span></div>
+    ${rows.length ? `<div class="tblwrap"><table class="rec"><thead><tr><th>Date</th><th>For</th><th>Gift</th><th>Store</th><th>Bought by</th><th>Status</th><th class="n">Paid</th><th class="n">Refund</th><th class="n">Net</th></tr></thead><tbody>
+      ${rows.map(i => `<tr onclick="openItem('${i.id}')" style="cursor:pointer"><td class="mono">${esc(i.bought_at || '—')}</td><td>${esc(pname(i.person_id))}</td><td>${esc(i.title)}${i.order_no ? `<div class="note">#${esc(i.order_no)}</div>` : ''}</td><td>${esc(i.bought_store || i.store || '')}</td><td>${esc(i.bought_by_name || '')}</td><td>${stPill(i.status)}</td><td class="n">${i.paid != null ? money(i.paid) : `<span class="note">${money((i.price || 0) * (i.qty || 1))}*</span>`}</td><td class="n">${i.refund ? money(i.refund) : ''}</td><td class="n">${money(cost(i))}</td></tr>`).join('')}
+      </tbody><tfoot><tr><td colspan="6">Total</td><td class="n">${money(tot.paid)}</td><td class="n">${money(tot.refund)}</td><td class="n">${money(tot.net)}</td></tr></tfoot></table></div>
+      ${rows.some(i => i.paid == null) ? '<p class="note">* no price paid entered — the list price is used.</p>' : ''}` : `<div class="empty">No purchases ${OCC ? 'for this occasion' : ''} in this range.</div>`}
+    ${rows.length ? `<div class="sums">${sumTable('By person', by(i => pname(i.person_id)))}${sumTable('By who bought', by(i => i.bought_by_name))}${sumTable('By store', by(i => i.bought_store || i.store))}${OCC ? '' : sumTable('By occasion', by(i => (occ(i.occasion_id) || {}).name || 'No occasion'))}</div>` : ''}`;
+}
+function exportCsv(){
+  const rows = recordRows();
+  const head = ['Date bought', 'For', 'Gift', 'Occasion', 'Store', 'Order #', 'Bought by', 'From', 'Status', 'Qty', 'List price', 'Paid', 'Refund', 'Net', 'Received', 'Given', 'Link'];
+  const q = s => { s = s == null ? '' : String(s); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const lines = [head.join(',')].concat(rows.map(i => [i.bought_at, pname(i.person_id), i.title, (occ(i.occasion_id) || {}).name, i.bought_store || i.store, i.order_no, i.bought_by_name, i.from_label, ST_LABEL[i.status], i.qty, i.price, i.paid, i.refund, cost(i).toFixed(2), i.received_at, i.given_at, i.url].map(q).join(',')));
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'kahla-gifts-' + ((occ(OCC) || {}).name || 'all').replace(/\W+/g, '-').toLowerCase() + '-' + today() + '.csv';
+  a.click();
+}
+
+/* ============================ people (parents) ============================ */
+function vPeople(v){
+  const kindL = { kid: 'Kid', parent: 'Parent', family: 'Family' };
+  const row = p => {
+    const n = D.items.filter(i => i.person_id === p.id);
+    return `<div class="li" onclick="openPerson('${p.id}')" style="cursor:pointer">
+      <div class="mid"><div class="t">${esc(p.name)} ${p.relation ? `<span class="chip">${esc(p.relation)}</span>` : ''}</div>
+      <div class="m"><span class="chip">${kindL[p.kind] || p.kind}</span>${p.uid ? '<span>has an account</span>' : '<span>no account</span>'}${p.birthday ? `<span>🎂 ${esc(p.birthday)}</span>` : ''}${p.archived ? '<span class="chip">archived</span>' : ''}</div></div>
+      <div class="rt"><span class="note">${n.filter(i => !isPurchased(i)).length} wish · ${n.filter(isPurchased).length} bought</span></div></div>`;
+  };
+  v.innerHTML = `
+    <div class="section-h"><h2>People</h2><span class="sub">kids and parents appear on their own the first time they open Gifts</span></div>
+    <div class="list">${D.people.map(row).join('') || '<div class="li">No one yet.</div>'}</div>
+    <div style="margin-top:12px"><button class="btn" onclick="openPerson(null)">+ Add family member</button></div>
+    <p class="note">Add anyone you buy for who doesn't have an account: your brother, your dad, teachers, friends. Their gifts go into the same records.</p>`;
+}
+function openPerson(id){
+  const p = id ? person(id) : { name: '', kind: 'family', relation: '', birthday: '', notes: '' };
+  sheet(`<h3>${id ? 'Edit ' + esc(p.name) : 'Add a person'}<button class="x" onclick="closeSheet()">×</button></h3>
+    <div class="fld"><label>Name</label><input id="pName" type="text" value="${esc(p.name)}"></div>
+    <div class="two">
+      <div class="fld"><label>Group</label><select id="pKind">${['kid', 'parent', 'family'].map(k => `<option value="${k}" ${p.kind === k ? 'selected' : ''}>${({ kid: 'Kid', parent: 'Parent', family: 'Extended family' })[k]}</option>`).join('')}</select></div>
+      <div class="fld"><label>Relation</label><input id="pRel" type="text" placeholder="Rob's brother" value="${esc(p.relation)}"></div>
+    </div>
+    <div class="fld"><label>Birthday</label><input id="pBday" type="date" value="${esc(p.birthday || '')}"></div>
+    <div class="fld"><label>Notes (sizes, likes)</label><textarea id="pNotes" rows="3">${esc(p.notes || '')}</textarea></div>
+    ${p.kind === 'kid' && p.uid ? '' : `<p class="note">Kids show up in the balance cards. Kids with an account manage their own list.</p>`}
+    <div class="foot">${id ? `<button class="btn ghost danger" onclick="delPerson('${id}')">${p.archived ? 'Delete' : 'Remove'}</button>` : ''}${id && p.archived ? `<button class="btn ghost" onclick="savePerson('${id}',{archived:false})">Restore</button>` : ''}<button class="btn" onclick="savePerson(${id ? `'${id}'` : 'null'})">Save</button></div>`);
+}
+async function savePerson(id, extra){
+  const body = extra || { name: $('pName').value.trim(), kind: $('pKind').value, relation: $('pRel').value.trim(), birthday: $('pBday').value, notes: $('pNotes').value.trim() };
+  if (!extra && !body.name) return toast('Name is required', 'err');
+  const r = await authFetch(id ? '/api/gifts/person/' + id : '/api/gifts/person', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!j.ok) return toast(j.error || 'Save failed', 'err');
+  closeSheet(); toast('Saved ✓'); load(true);
+}
+async function delPerson(id){
+  if (!confirm('Remove ' + pname(id) + '? Anyone with gifts or an account is archived, not deleted, so the records stay.')) return;
+  const r = await authFetch('/api/gifts/person/' + id, { method: 'DELETE' }); const j = await r.json();
+  if (!j.ok) return toast(j.error || 'Failed', 'err');
+  closeSheet(); toast(j.archived ? 'Archived' : 'Removed'); load(true);
+}
+
+/* ============================ occasions (parents) ============================ */
+function vOccasions(v){
+  const t = today();
+  v.innerHTML = `
+    <div class="section-h"><h2>Occasions</h2><span class="sub">each has its own budgets and spend</span></div>
+    ${D.occasions.length ? `<div class="list">${D.occasions.map(o => {
+      const spent = D.items.filter(i => i.occasion_id === o.id).reduce((s, i) => s + cost(i), 0);
+      const budget = Object.values(o.budgets || {}).reduce((s, b) => s + (b || 0), 0);
+      return `<div class="li" onclick="openOcc('${o.id}')" style="cursor:pointer"><div class="mid"><div class="t">${esc(o.name)}${o.archived ? ' <span class="chip">archived</span>' : ''}</div>
+        <div class="m">${o.date ? `<span>${esc(o.date)}${o.date >= t ? ' · in ' + daysBetween(t, o.date) + ' days' : ''}</span>` : ''}</div></div>
+        <div class="rt"><b class="mono">${money0(spent)}</b><span class="note">${budget ? 'of ' + money0(budget) : 'no budget set'}</span></div></div>`;
+    }).join('')}</div>` : `<div class="empty"><div class="e">📅</div><p>No occasions yet.</p></div>`}
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" onclick="openOcc(null,{name:'Christmas ${new Date().getFullYear()}',date:'${new Date().getFullYear()}-12-25'})">+ Christmas ${new Date().getFullYear()}</button>
+      <button class="btn ghost" onclick="openOcc(null)">+ Other occasion</button>
+    </div>`;
+}
+function openOcc(id, seed){
+  const prev = D.occasions.filter(o => o.id !== id).sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0];
+  const o = id ? occ(id) : Object.assign({ name: '', date: '', budgets: {}, notes: '' }, seed || {});
+  const people = D.people.filter(p => !p.archived);
+  sheet(`<h3>${id ? 'Edit occasion' : 'New occasion'}<button class="x" onclick="closeSheet()">×</button></h3>
+    <div class="two"><div class="fld"><label>Name</label><input id="oName" type="text" value="${esc(o.name)}" placeholder="Emma's birthday"></div>
+      <div class="fld"><label>Date</label><input id="oDate" type="date" value="${esc(o.date || '')}"></div></div>
+    <div class="fld"><label>Budgets (leave blank for none)</label>
+      ${people.map(p => `<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><span style="flex:1">${esc(p.name)} <span class="note">${p.kind === 'kid' ? 'kid' : esc(p.relation || p.kind)}</span></span><input class="bud" data-pid="${p.id}" type="number" inputmode="decimal" min="0" step="1" style="width:120px" value="${o.budgets && o.budgets[p.id] != null ? o.budgets[p.id] : ''}" placeholder="$"></div>`).join('')}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <button class="btn ghost sm" onclick="sameKidBudget()">Same for every kid</button>
+        ${!id && prev ? `<button class="btn ghost sm" onclick="copyBudgets('${prev.id}')">Copy from ${esc(prev.name)}</button>` : ''}
+      </div></div>
+    <div class="fld"><label>Notes</label><textarea id="oNotes" rows="2">${esc(o.notes || '')}</textarea></div>
+    <div class="foot">${id ? `<button class="btn ghost danger" onclick="delOcc('${id}')">${o.archived ? 'Delete' : 'Archive'}</button>` : ''}${id && o.archived ? `<button class="btn ghost" onclick="saveOcc('${id}',{archived:false})">Restore</button>` : ''}<button class="btn" onclick="saveOcc(${id ? `'${id}'` : 'null'})">Save</button></div>`);
+}
+function sameKidBudget(){
+  const v = prompt('Budget for each kid ($)'); if (v == null) return;
+  const kids = new Set(liveKids().map(k => k.id));
+  document.querySelectorAll('.bud').forEach(i => { if (kids.has(i.dataset.pid)) i.value = v; });
+}
+function copyBudgets(oid){ const o = occ(oid); document.querySelectorAll('.bud').forEach(i => { const b = o.budgets[i.dataset.pid]; i.value = b != null ? b : ''; }); }
+async function saveOcc(id, extra){
+  let body = extra;
+  if (!body) {
+    const budgets = {};
+    document.querySelectorAll('.bud').forEach(i => { if (i.value !== '') budgets[i.dataset.pid] = Number(i.value); });
+    body = { name: $('oName').value.trim(), date: $('oDate').value, budgets, notes: $('oNotes').value.trim() };
+    if (!body.name) return toast('Name is required', 'err');
+  }
+  const r = await authFetch(id ? '/api/gifts/occasion/' + id : '/api/gifts/occasion', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!j.ok) return toast(j.error || 'Save failed', 'err');
+  if (!id && j.id) { OCC = j.id; try { localStorage.setItem('kh_gifts_occ', j.id); } catch (_) {} }
+  closeSheet(); toast('Saved ✓'); load(true);
+}
+async function delOcc(id){
+  if (!confirm('Archive or delete this occasion? One with gifts is archived so the records stay.')) return;
+  const r = await authFetch('/api/gifts/occasion/' + id, { method: 'DELETE' }); const j = await r.json();
+  if (!j.ok) return toast(j.error || 'Failed', 'err');
+  if (OCC === id && !j.archived) OCC = '';
+  closeSheet(); toast(j.archived ? 'Archived' : 'Deleted'); load(true);
+}
+
+/* ============================ item sheet (add / edit) ============================ */
+let _it = null;   // working copy
+function openItem(id, seed){
+  const cur = id ? D.items.find(i => i.id === id) : null;
+  _it = (seed && seed === _it) ? _it : cur ? Object.assign({}, cur) : Object.assign({ title: '', url: '', price: null, image: '', store: '', notes: '', qty: 1, priority: 0, size: '', color: '', person_id: D.me.person_id }, seed || {});
+  if (!_it.person_id) _it.person_id = D.parent ? (liveKids()[0] || {}).id || D.me.person_id : D.me.person_id;
+  const full = D.parent && _it.person_id !== D.me.person_id;
+  const forOpts = D.people.filter(p => !p.archived || p.id === _it.person_id);
+  sheet(`<h3>${id ? 'Edit gift' : 'Add a gift'}<button class="x" onclick="closeSheet()">×</button></h3>
+    ${D.parent ? `<div class="fld"><label>For</label><select id="iFor" onchange="_it.person_id=this.value;keepForm();openItem(${id ? `'${id}'` : 'null'},_it)">${forOpts.map(p => `<option value="${p.id}" ${p.id === _it.person_id ? 'selected' : ''}>${esc(p.name)}${p.id === D.me.person_id ? ' (my list)' : ''}</option>`).join('')}</select></div>` : ''}
+    <div class="fld"><label>Link</label><div style="display:flex;gap:6px"><input id="iUrl" type="url" inputmode="url" value="${esc(_it.url || '')}" placeholder="https://…" onpaste="setTimeout(fetchLink,50)" onchange="fetchLink()"><button class="btn ghost sm" onclick="fetchLink(true)">Look up</button></div><div class="note" id="linkNote">Paste a link and the name, price and picture fill in.</div></div>
+    <div id="iPrev"></div>
+    <div class="fld"><label>What is it?</label><input id="iTitle" type="text" value="${esc(_it.title || '')}" placeholder="LEGO Millennium Falcon"></div>
+    <div class="two"><div class="fld"><label>Price</label><input id="iPrice" type="number" inputmode="decimal" min="0" step="0.01" value="${_it.price != null ? _it.price : ''}" placeholder="$"></div>
+      <div class="fld"><label>How many</label><input id="iQty" type="number" min="1" step="1" value="${_it.qty || 1}"></div></div>
+    <div class="two"><div class="fld"><label>Size</label><input id="iSize" type="text" value="${esc(_it.size || '')}"></div>
+      <div class="fld"><label>Color / style</label><input id="iColor" type="text" value="${esc(_it.color || '')}"></div></div>
+    <div class="fld"><label>Notes</label><textarea id="iNotes" rows="2" placeholder="Anything else to know">${esc(_it.notes || '')}</textarea></div>
+    <div class="fld"><label>How much do you want it?</label><div class="stars" id="iStars">${[1, 2, 3].map(n => `<button class="${(_it.priority || 0) >= n ? 'on' : ''}" onclick="setPri(${n})">★</button>`).join('')}</div></div>
+    ${full ? parentFields(_it) : ''}
+    <div class="foot">${id ? `<button class="btn ghost danger" onclick="delItem('${id}')">Delete</button>` : ''}<button class="btn" id="iSave" onclick="saveItem(${id ? `'${id}'` : 'null'})">${id ? 'Save' : 'Add to list'}</button></div>`);
+  renderPrev();
+  if (!id && _it.raw) {
+    const raw = _it.raw; delete _it.raw;
+    if (/https?:\/\//i.test(raw)) { $('iUrl').value = raw; fetchLink(true); }
+    else $('iTitle').value = raw;
+  }
+}
+function parentFields(it){
+  const st = it.status || 'wish';
+  return `<div style="border-top:1px solid var(--border2);margin:14px 0 12px;padding-top:12px">
+    <div class="note" style="margin:0 0 10px;color:var(--gold)">Only parents see this part.</div>
+    <label class="toggle" style="margin-bottom:12px"><input type="checkbox" id="iSurprise" ${it.surprise ? 'checked' : ''}> Surprise (hide it from ${esc(pname(it.person_id))} and the other kids)</label>
+    <div class="two"><div class="fld"><label>Status</label><select id="iStatus" onchange="keepForm();openItem(${it.id ? `'${it.id}'` : 'null'},Object.assign(_it,{status:this.value}))">${D.statuses.map(s => `<option value="${s}" ${s === st ? 'selected' : ''}>${ST_LABEL[s]}</option>`).join('')}</select></div>
+      <div class="fld"><label>Occasion</label><select id="iOcc"><option value="">—</option>${D.occasions.filter(o => !o.archived || o.id === it.occasion_id).map(o => `<option value="${o.id}" ${o.id === (it.occasion_id || (st !== 'wish' ? OCC : '')) ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></div></div>
+    ${st !== 'wish' ? buyFields(it) : ''}
+    <div class="fld"><label>Parent notes</label><input id="iPNotes" type="text" value="${esc(it.parent_notes || '')}" placeholder="Hidden in the closet"></div>
+  </div>`;
+}
+function buyFields(it){
+  return `<div class="two"><div class="fld"><label>Paid (total, with tax + shipping)</label><input id="iPaid" type="number" inputmode="decimal" min="0" step="0.01" value="${it.paid != null ? it.paid : ''}" placeholder="${it.price != null ? (it.price * (it.qty || 1)).toFixed(2) : '$'}"></div>
+      <div class="fld"><label>Date bought</label><input id="iBought" type="date" value="${esc(it.bought_at || today())}"></div></div>
+    <div class="two"><div class="fld"><label>Bought at</label><input id="iBStore" type="text" value="${esc(it.bought_store || it.store || '')}"></div>
+      <div class="fld"><label>Order #</label><input id="iOrder" type="text" value="${esc(it.order_no || '')}"></div></div>
+    <div class="two"><div class="fld"><label>Bought by</label><input id="iBy" type="text" value="${esc(it.bought_by_name || D.me.name)}"></div>
+      <div class="fld"><label>Tag it from</label><input id="iFrom" type="text" value="${esc(it.from_label || '')}" placeholder="Santa · Mom & Dad"></div></div>
+    ${['received', 'wrapped', 'given', 'returned'].includes(it.status) ? `<div class="two"><div class="fld"><label>Arrived</label><input id="iRecv" type="date" value="${esc(it.received_at || '')}"></div><div class="fld"><label>Given</label><input id="iGiven" type="date" value="${esc(it.given_at || '')}"></div></div>` : ''}
+    ${it.status === 'returned' ? `<div class="two"><div class="fld"><label>Refund</label><input id="iRefund" type="number" inputmode="decimal" min="0" step="0.01" value="${it.refund != null ? it.refund : ''}"></div><div class="fld"><label>Returned on</label><input id="iRet" type="date" value="${esc(it.returned_at || today())}"></div></div>` : ''}`;
+}
+// Copy what's typed into _it before the sheet re-draws (status / person change).
+function keepForm(){
+  const v = id => $(id) ? $(id).value : undefined;
+  const set = (k, id, num) => { const x = v(id); if (x !== undefined) _it[k] = num ? (x === '' ? null : Number(x)) : x; };
+  set('url', 'iUrl'); set('title', 'iTitle'); set('price', 'iPrice', 1); set('qty', 'iQty', 1); set('size', 'iSize'); set('color', 'iColor'); set('notes', 'iNotes');
+  set('occasion_id', 'iOcc'); set('paid', 'iPaid', 1); set('bought_at', 'iBought'); set('bought_store', 'iBStore'); set('order_no', 'iOrder');
+  set('bought_by_name', 'iBy'); set('from_label', 'iFrom'); set('received_at', 'iRecv'); set('given_at', 'iGiven'); set('refund', 'iRefund', 1); set('returned_at', 'iRet'); set('parent_notes', 'iPNotes');
+  if ($('iSurprise')) _it.surprise = $('iSurprise').checked;
+}
+function setPri(n){ _it.priority = (_it.priority === n ? n - 1 : n); document.querySelectorAll('#iStars button').forEach((b, i) => b.classList.toggle('on', i < _it.priority)); }
+function renderPrev(){
+  const p = $('iPrev'); if (!p) return;
+  p.innerHTML = _it.image ? `<div class="prev"><img src="${esc(_it.image)}" referrerpolicy="no-referrer" onerror="this.style.display='none'"><div class="pt">${esc(_it.store || '')}<br><button class="btn ghost sm" style="margin-top:6px" onclick="_it.image='';renderPrev()">Remove picture</button></div></div>` : '';
+}
+let _lastLooked = '';
+async function fetchLink(force){
+  const url = ($('iUrl').value || '').trim();
+  if (!url || (!force && url === _lastLooked)) return;
+  _lastLooked = url;
+  const note = $('linkNote');
+  note.className = 'note'; note.textContent = 'Looking it up…';
+  try {
+    const r = await authFetch('/api/gifts/link', { method: 'POST', body: JSON.stringify({ url }) });
+    const j = await r.json();
+    if (!j.ok) { note.className = 'note warn'; note.textContent = j.error || 'Couldn’t read that link — type the name and price.'; return; }
+    if (j.url) $('iUrl').value = j.url;
+    if (j.title && !$('iTitle').value.trim()) $('iTitle').value = j.title;
+    if (j.price != null && !$('iPrice').value) $('iPrice').value = j.price;
+    if (j.image) { _it.image = j.image; }
+    _it.store = j.store || _it.store;
+    renderPrev();
+    const got = [j.title && 'name', j.price != null && 'price', j.image && 'picture'].filter(Boolean);
+    if (j.blocked && !got.length) { note.className = 'note warn'; note.textContent = (j.store || 'That store') + ' wouldn’t let us read the page. Type the name and price — the link is saved.'; }
+    else if (got.length === 3) note.textContent = 'Got the name, price and picture from ' + (j.store || 'the store') + '. Check the price.';
+    else { note.className = 'note warn'; note.textContent = 'Got the ' + (got.join(' and ') || 'link') + ' from ' + (j.store || 'the store') + '. Fill in the rest.'; }
+  } catch (e) { note.className = 'note warn'; note.textContent = 'Couldn’t reach that link. Type the name and price.'; }
+}
+async function saveItem(id){
+  keepForm();
+  const body = { title: (_it.title || '').trim(), url: (_it.url || '').trim(), price: _it.price, image: _it.image || '', store: _it.store || '',
+    notes: _it.notes || '', qty: _it.qty || 1, priority: _it.priority || 0, size: _it.size || '', color: _it.color || '', person_id: _it.person_id };
+  if (!body.title && !body.url) return toast('Add a name or a link', 'err');
+  const full = D.parent && _it.person_id !== D.me.person_id;
+  if (full) {
+    body.surprise = !!_it.surprise;
+    body.status = $('iStatus') ? $('iStatus').value : (_it.status || 'wish');
+    body.occasion_id = _it.occasion_id || '';
+    body.parent_notes = _it.parent_notes || '';
+    if (body.status !== 'wish') {
+      Object.assign(body, { paid: _it.paid, bought_at: _it.bought_at, bought_store: _it.bought_store, order_no: _it.order_no,
+        bought_by_name: _it.bought_by_name, from_label: _it.from_label });
+      if ($('iRecv')) Object.assign(body, { received_at: _it.received_at, given_at: _it.given_at });
+      if ($('iRefund')) Object.assign(body, { refund: _it.refund, returned_at: _it.returned_at });
+    }
+  }
+  $('iSave').disabled = true;
+  try {
+    const r = await authFetch(id ? '/api/gifts/item/' + id : '/api/gifts/item', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!j.ok) { $('iSave').disabled = false; return toast(j.error || 'Save failed', 'err'); }
+    closeSheet(); toast(id ? 'Saved ✓' : 'Added ✓');
+    if (!id && $('quickLink')) $('quickLink').value = '';
+    load(true);
+  } catch (e) { $('iSave').disabled = false; toast('Save failed', 'err'); }
+}
+async function delItem(id){
+  const it = D.items.find(i => i.id === id);
+  const purchased = D.parent && it && isPurchased(it);
+  if (!confirm(purchased ? 'Delete this gift AND its purchase record? To keep the money record, mark it Returned instead.' : 'Remove this from the list?')) return;
+  const r = await authFetch('/api/gifts/item/' + id, { method: 'DELETE' }); const j = await r.json();
+  if (!j.ok) return toast(j.error || 'Failed', 'err');
+  closeSheet(); toast('Removed'); load(true);
+}
+async function patchItem(id, body, msg){
+  const r = await authFetch('/api/gifts/item/' + id, { method: 'PATCH', body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!j.ok) return toast(j.error || 'Failed', 'err');
+  toast(msg || 'Saved ✓'); load(true);
+}
+
+/* ============================ buy sheet ============================ */
+function openBuy(id){
+  openItem(id);
+  _it.status = 'bought';
+  if (!_it.occasion_id) _it.occasion_id = OCC;
+  openItem(id, _it);
+}
+
+/* ============================ sheet plumbing ============================ */
+function sheet(html){ $('sheet').innerHTML = html; $('scrim').classList.add('show'); }
+function closeSheet(){ $('scrim').classList.remove('show'); _lastLooked = ''; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
+</script>
+</body>
+</html>

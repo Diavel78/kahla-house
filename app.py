@@ -7,6 +7,7 @@ Firestore for data storage. First app: Bet System (odds board + P&L dashboard).
 
 import os
 import re
+import gift_links
 import html as _html
 import json
 import math
@@ -8514,6 +8515,8 @@ def api_me():
         "games_access": bool(g.user_data.get("games_access")) or role == "admin",
         "odds_access": bool(g.user_data.get("odds_access")) or role == "admin",
         "grocery_access": bool(g.user_data.get("grocery_access")) or role == "admin",
+        "gifts_access": bool(g.user_data.get("gifts_access")) or bool(g.user_data.get("gifts_parent")) or role == "admin",
+        "gifts_parent": bool(g.user_data.get("gifts_parent")) or role == "admin",
     })
 
 
@@ -9767,6 +9770,455 @@ def api_grocery_walmart_resolve():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True, "configured": True, "resolved": resolved})
+
+
+# ---------------------------------------------------------------------------
+# Gifts (family wish lists + the parents' gift ledger) — Firestore, Admin SDK.
+# Nov 1 2026, Rob: kids add gifts (paste a link, the price fills itself in);
+# Mom and Dad get the master list, what's bought / received / spent, balance
+# across the three kids, budgets per person per occasion, extended family.
+#
+# Collections:
+#   gift_people/{id}    — everyone who gets gifts. Household members are made
+#                         on their first visit with id `u_<uid>` and `uid` set;
+#                         extended family (Rob's brother, his dad) are made by
+#                         a parent with no uid. kind: kid | parent | family.
+#   gift_occasions/{id} — Christmas 2026, a birthday… {name, date, budgets
+#                         {person_id: dollars}, archived}.
+#   gift_items/{id}     — one gift. Wish fields (title/url/price/image/notes…)
+#                         plus the PARENT fields (status, paid, store, dates,
+#                         occasion, from, surprise…).
+#
+# THE SECRECY RULE (enforced here, never only in the page): the parent fields
+# go ONLY to a parent who is not the gift's recipient. Kids — and a parent
+# looking at their own list — see a plain wish list: no status, no price
+# paid, and no `surprise` items (gifts a parent added that were never on the
+# list). A recipient who deletes an item someone already bought only HIDES it
+# (`owner_hidden`), so the purchase record survives.
+# ---------------------------------------------------------------------------
+
+_GIFT_PEOPLE = "gift_people"
+_GIFT_OCCASIONS = "gift_occasions"
+_GIFT_ITEMS = "gift_items"
+_GIFT_STATUSES = ("wish", "bought", "received", "wrapped", "given", "returned")
+_GIFT_STATUS_STAMP = {"bought": "bought_at", "received": "received_at",
+                      "wrapped": "wrapped_at", "given": "given_at",
+                      "returned": "returned_at"}
+_GIFT_WISH_FIELDS = ("title", "url", "price", "image", "store", "notes",
+                     "qty", "priority", "size", "color")
+_GIFT_PARENT_FIELDS = ("status", "occasion_id", "paid", "refund", "bought_by_name",
+                       "bought_at", "received_at", "wrapped_at", "given_at",
+                       "returned_at", "order_no", "from_label", "surprise",
+                       "parent_notes", "bought_store")
+
+
+def gifts_required(f):
+    """Firebase auth + gifts_access (or gifts_parent; admin implicit)."""
+    @functools.wraps(f)
+    @firebase_auth_required
+    def wrapper(*args, **kwargs):
+        if not (_gifts_is_parent() or g.user_data.get("gifts_access")):
+            return jsonify({"ok": False, "error": "Gifts access required"}), 403
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def _gifts_is_parent():
+    return (g.user_data.get("role") == "admin"
+            or bool(g.user_data.get("gifts_parent")))
+
+
+def _gift_me_name():
+    return g.user_data.get("displayName") or g.user_data.get("email") or "Family"
+
+
+def _gift_money(v):
+    """Dollars as a float rounded to cents, or None."""
+    if v is None or v == "":
+        return None
+    try:
+        f = round(float(str(v).replace("$", "").replace(",", "").strip()), 2)
+    except (TypeError, ValueError):
+        return None
+    return f if f >= 0 else None
+
+
+def _gift_date(v):
+    s = (v or "").strip() if isinstance(v, str) else ""
+    return s[:10] if re.match(r"^\d{4}-\d{2}-\d{2}", s) else None
+
+
+def _gift_str(v, n=500):
+    return (v or "").strip()[:n] if isinstance(v, str) else ""
+
+
+def _gift_my_person(db):
+    """The caller's own person doc (made on first visit). Returns (id, dict)."""
+    for d in db.collection(_GIFT_PEOPLE).where("uid", "==", g.uid).limit(1).stream():
+        return d.id, (d.to_dict() or {})
+    pid = "u_" + g.uid
+    doc = {"name": (_gift_me_name().split(" ")[0] or "Me"),
+           "full_name": _gift_me_name(),
+           "kind": "parent" if _gifts_is_parent() else "kid",
+           "uid": g.uid, "relation": "", "birthday": None, "archived": False,
+           "created_at": firestore.SERVER_TIMESTAMP}
+    db.collection(_GIFT_PEOPLE).document(pid).set(doc, merge=True)
+    return pid, doc
+
+
+def _gift_ser_person(pid, d):
+    return {"id": pid, "name": d.get("name") or "?", "full_name": d.get("full_name") or "",
+            "kind": d.get("kind") or "family", "uid": d.get("uid") or None,
+            "relation": d.get("relation") or "", "birthday": d.get("birthday"),
+            "notes": d.get("notes") or "", "archived": bool(d.get("archived"))}
+
+
+def _gift_ser_item(iid, d, full):
+    out = {"id": iid, "person_id": d.get("person_id"),
+           "added_by": d.get("added_by"), "added_by_name": d.get("added_by_name") or "",
+           "created_at": _g_iso(d.get("created_at"))}
+    for k in _GIFT_WISH_FIELDS:
+        out[k] = d.get(k)
+    out["qty"] = _g_int(d.get("qty"), 1)
+    out["priority"] = int(d.get("priority") or 0)
+    if full:
+        for k in _GIFT_PARENT_FIELDS:
+            out[k] = d.get(k)
+        out["status"] = d.get("status") or "wish"
+        out["owner_hidden"] = bool(d.get("owner_hidden"))
+        out["updated_at"] = _g_iso(d.get("updated_at"))
+    return out
+
+
+def _gift_can_see_full(item, my_pid):
+    return _gifts_is_parent() and item.get("person_id") != my_pid
+
+
+def _gift_visible(item, my_pid, household):
+    """May the caller see this item at all?"""
+    if _gift_can_see_full(item, my_pid):
+        return True
+    if item.get("surprise") or item.get("owner_hidden"):
+        return False
+    return item.get("person_id") in household
+
+
+@app.route("/gifts")
+def gifts_page():
+    """Family wish lists + the parents' gift ledger. Gated client-side via
+    /api/me; the API is @gifts_required."""
+    resp = make_response(render_template("gifts.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+@app.route("/api/gifts")
+@gifts_required
+def api_gifts():
+    """Everything the caller may see, in one payload (the page polls it)."""
+    db = get_db()
+    try:
+        my_pid, _ = _gift_my_person(db)
+        people = {d.id: (d.to_dict() or {}) for d in db.collection(_GIFT_PEOPLE).stream()}
+        parent = _gifts_is_parent()
+        household = {pid for pid, p in people.items() if p.get("uid") and not p.get("archived")}
+        items = []
+        for d in db.collection(_GIFT_ITEMS).stream():
+            it = d.to_dict() or {}
+            if not _gift_visible(it, my_pid, household):
+                continue
+            items.append(_gift_ser_item(d.id, it, _gift_can_see_full(it, my_pid)))
+        occasions = []
+        if parent:
+            for d in db.collection(_GIFT_OCCASIONS).stream():
+                o = d.to_dict() or {}
+                occasions.append({"id": d.id, "name": o.get("name") or "?",
+                                  "date": o.get("date"), "archived": bool(o.get("archived")),
+                                  "budgets": {k: _gift_money(v) for k, v in (o.get("budgets") or {}).items()},
+                                  "notes": o.get("notes") or ""})
+            occasions.sort(key=lambda o: (o["archived"], o["date"] or "9999"))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    plist = [_gift_ser_person(pid, p) for pid, p in people.items()
+             if parent or pid in household]
+    order = {"kid": 0, "parent": 1, "family": 2}
+    plist.sort(key=lambda p: (p["archived"], order.get(p["kind"], 3), p["name"].lower()))
+    items.sort(key=lambda i: (-(i.get("priority") or 0), i.get("created_at") or ""))
+    return jsonify({"ok": True, "parent": parent, "people": plist, "items": items,
+                    "occasions": occasions, "statuses": list(_GIFT_STATUSES),
+                    "me": {"uid": g.uid, "name": _gift_me_name(), "person_id": my_pid,
+                           "parent": parent}})
+
+
+def _gift_clean(body, parent):
+    """Allowed fields from a request body, typed."""
+    out = {}
+    for k in ("title", "url", "image", "store", "notes", "size", "color"):
+        if k in body:
+            out[k] = _gift_str(body.get(k), 2000 if k in ("url", "image") else 500)
+    if "price" in body:
+        out["price"] = _gift_money(body.get("price"))
+    if "qty" in body:
+        out["qty"] = _g_int(body.get("qty"), 1)
+    if "priority" in body:
+        try:
+            out["priority"] = max(0, min(3, int(body.get("priority") or 0)))
+        except (TypeError, ValueError):
+            out["priority"] = 0
+    if parent:
+        if "status" in body and body.get("status") in _GIFT_STATUSES:
+            out["status"] = body["status"]
+        for k in ("paid", "refund"):
+            if k in body:
+                out[k] = _gift_money(body.get(k))
+        for k in ("bought_at", "received_at", "wrapped_at", "given_at", "returned_at"):
+            if k in body:
+                out[k] = _gift_date(body.get(k))
+        for k in ("occasion_id", "order_no", "from_label", "parent_notes",
+                  "bought_by_name", "bought_store"):
+            if k in body:
+                out[k] = _gift_str(body.get(k), 300) or None
+        if "surprise" in body:
+            out["surprise"] = bool(body.get("surprise"))
+    return out
+
+
+def _gift_stamp_status(patch, cur=None):
+    """Moving to a status fills its date (today, AZ) unless one was sent;
+    marking bought records who bought it."""
+    st = patch.get("status")
+    if not st or st == "wish":
+        return
+    today = datetime.now(ZoneInfo("America/Phoenix")).date().isoformat()
+    order = ["bought", "received", "wrapped", "given"]
+    if st in order:
+        for s in order[:order.index(st) + 1]:
+            k = _GIFT_STATUS_STAMP[s]
+            if not patch.get(k) and not (cur or {}).get(k):
+                patch[k] = today
+    elif st == "returned" and not patch.get("returned_at"):
+        patch["returned_at"] = today
+    if st != "wish" and not patch.get("bought_by_name") and not (cur or {}).get("bought_by_name"):
+        patch["bought_by_name"] = _gift_me_name()
+
+
+@app.route("/api/gifts/item", methods=["POST"])
+@gifts_required
+def api_gifts_add():
+    body = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    parent = _gifts_is_parent()
+    my_pid, _ = _gift_my_person(db)
+    pid = body.get("person_id") or my_pid
+    if pid != my_pid and not parent:
+        return jsonify({"ok": False, "error": "You can only add to your own list"}), 403
+    if not db.collection(_GIFT_PEOPLE).document(pid).get().exists:
+        return jsonify({"ok": False, "error": "Unknown person"}), 400
+    doc = _gift_clean(body, parent and pid != my_pid)
+    if not (doc.get("title") or doc.get("url")):
+        return jsonify({"ok": False, "error": "Add a name or a link"}), 400
+    if not doc.get("title"):
+        doc["title"] = gift_links.store_name(doc["url"]) + " item"
+    if doc.get("url") and not doc.get("store"):
+        doc["store"] = gift_links.store_name(doc["url"])
+    if parent and pid != my_pid:
+        doc.setdefault("surprise", True)   # a parent's add is a secret by default
+        doc.setdefault("status", "wish")
+        _gift_stamp_status(doc)
+    else:
+        doc["status"] = "wish"
+        doc["surprise"] = False
+    doc.update({"person_id": pid, "added_by": g.uid, "added_by_name": _gift_me_name(),
+                "owner_hidden": False, "created_at": firestore.SERVER_TIMESTAMP,
+                "updated_at": firestore.SERVER_TIMESTAMP})
+    try:
+        ref = db.collection(_GIFT_ITEMS).document()
+        ref.set(doc)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "id": ref.id}), 201
+
+
+@app.route("/api/gifts/item/<item_id>", methods=["PATCH", "DELETE"])
+@gifts_required
+def api_gifts_item(item_id):
+    db = get_db()
+    ref = db.collection(_GIFT_ITEMS).document(item_id)
+    snap = ref.get()
+    if not snap.exists:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    cur = snap.to_dict() or {}
+    my_pid, _ = _gift_my_person(db)
+    full = _gift_can_see_full(cur, my_pid)
+    mine = cur.get("person_id") == my_pid
+    if not full and not mine:
+        return jsonify({"ok": False, "error": "Not your list"}), 403
+    if not full and (cur.get("surprise") or cur.get("owner_hidden")):
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    if request.method == "DELETE":
+        # The recipient removing something already bought only hides it from
+        # them — the parents' purchase record stays.
+        if mine and (cur.get("status") or "wish") != "wish":
+            ref.update({"owner_hidden": True, "updated_at": firestore.SERVER_TIMESTAMP})
+            return jsonify({"ok": True, "hidden": True})
+        ref.delete()
+        return jsonify({"ok": True})
+    body = request.get_json(force=True, silent=True) or {}
+    patch = _gift_clean(body, full)
+    if full and "person_id" in body:
+        np = body.get("person_id")
+        if np and db.collection(_GIFT_PEOPLE).document(np).get().exists:
+            patch["person_id"] = np
+    _gift_stamp_status(patch, cur)
+    if patch.get("status") == "wish":
+        for k in ("bought_at", "received_at", "wrapped_at", "given_at", "returned_at"):
+            patch.setdefault(k, None)
+        patch.setdefault("paid", None)
+    if not patch:
+        return jsonify({"ok": True, "noop": True})
+    patch["updated_at"] = firestore.SERVER_TIMESTAMP
+    try:
+        ref.update(patch)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/gifts/link", methods=["POST"])
+@gifts_required
+def api_gifts_link():
+    """Paste a product link → {title, price, image, store}. Anything the store
+    won't give us comes back None and the person types it in."""
+    body = request.get_json(force=True, silent=True) or {}
+    return jsonify(gift_links.fetch(body.get("url") or ""))
+
+
+@app.route("/api/gifts/link-probe")
+def api_gifts_link_probe():
+    """Shared-secret version of the link reader, so it can be checked from a
+    sandbox through the site-curl bridge: ?url=… (or several, comma-separated)."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    urls = [u for u in (request.args.get("url") or "").split(",") if u.strip()]
+    return jsonify({"ok": True, "results": [gift_links.fetch(u) for u in urls[:8]]})
+
+
+def _gift_parent_only():
+    if not _gifts_is_parent():
+        return jsonify({"ok": False, "error": "Parents only"}), 403
+    return None
+
+
+@app.route("/api/gifts/person", methods=["POST"])
+@gifts_required
+def api_gifts_person_add():
+    deny = _gift_parent_only()
+    if deny:
+        return deny
+    body = request.get_json(force=True, silent=True) or {}
+    name = _gift_str(body.get("name"), 80)
+    if not name:
+        return jsonify({"ok": False, "error": "Name is required"}), 400
+    kind = body.get("kind") if body.get("kind") in ("kid", "parent", "family") else "family"
+    doc = {"name": name, "full_name": name, "kind": kind, "uid": None,
+           "relation": _gift_str(body.get("relation"), 80),
+           "birthday": _gift_date(body.get("birthday")),
+           "notes": _gift_str(body.get("notes"), 500), "archived": False,
+           "created_at": firestore.SERVER_TIMESTAMP}
+    ref = get_db().collection(_GIFT_PEOPLE).document()
+    ref.set(doc)
+    return jsonify({"ok": True, "id": ref.id}), 201
+
+
+@app.route("/api/gifts/person/<pid>", methods=["PATCH", "DELETE"])
+@gifts_required
+def api_gifts_person(pid):
+    deny = _gift_parent_only()
+    if deny:
+        return deny
+    db = get_db()
+    ref = db.collection(_GIFT_PEOPLE).document(pid)
+    snap = ref.get()
+    if not snap.exists:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    if request.method == "DELETE":
+        has = list(db.collection(_GIFT_ITEMS).where("person_id", "==", pid).limit(1).stream())
+        if has or (snap.to_dict() or {}).get("uid"):
+            ref.update({"archived": True})       # keep the records
+            return jsonify({"ok": True, "archived": True})
+        ref.delete()
+        return jsonify({"ok": True})
+    body = request.get_json(force=True, silent=True) or {}
+    patch = {}
+    for k in ("name", "relation", "notes"):
+        if k in body:
+            patch[k] = _gift_str(body.get(k), 500 if k == "notes" else 80)
+    if "kind" in body and body.get("kind") in ("kid", "parent", "family"):
+        patch["kind"] = body["kind"]
+    if "birthday" in body:
+        patch["birthday"] = _gift_date(body.get("birthday"))
+    if "archived" in body:
+        patch["archived"] = bool(body.get("archived"))
+    if patch.get("name") == "":
+        return jsonify({"ok": False, "error": "Name is required"}), 400
+    if patch:
+        ref.update(patch)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/gifts/occasion", methods=["POST"])
+@gifts_required
+def api_gifts_occasion_add():
+    deny = _gift_parent_only()
+    if deny:
+        return deny
+    body = request.get_json(force=True, silent=True) or {}
+    name = _gift_str(body.get("name"), 80)
+    if not name:
+        return jsonify({"ok": False, "error": "Name is required"}), 400
+    budgets = {k: _gift_money(v) for k, v in (body.get("budgets") or {}).items()
+               if _gift_money(v) is not None}
+    ref = get_db().collection(_GIFT_OCCASIONS).document()
+    ref.set({"name": name, "date": _gift_date(body.get("date")), "budgets": budgets,
+             "notes": _gift_str(body.get("notes"), 500), "archived": False,
+             "created_at": firestore.SERVER_TIMESTAMP})
+    return jsonify({"ok": True, "id": ref.id}), 201
+
+
+@app.route("/api/gifts/occasion/<oid>", methods=["PATCH", "DELETE"])
+@gifts_required
+def api_gifts_occasion(oid):
+    deny = _gift_parent_only()
+    if deny:
+        return deny
+    db = get_db()
+    ref = db.collection(_GIFT_OCCASIONS).document(oid)
+    if not ref.get().exists:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    if request.method == "DELETE":
+        has = list(db.collection(_GIFT_ITEMS).where("occasion_id", "==", oid).limit(1).stream())
+        if has:
+            ref.update({"archived": True})
+            return jsonify({"ok": True, "archived": True})
+        ref.delete()
+        return jsonify({"ok": True})
+    body = request.get_json(force=True, silent=True) or {}
+    patch = {}
+    if "name" in body:
+        patch["name"] = _gift_str(body.get("name"), 80) or "Occasion"
+    if "date" in body:
+        patch["date"] = _gift_date(body.get("date"))
+    if "notes" in body:
+        patch["notes"] = _gift_str(body.get("notes"), 500)
+    if "archived" in body:
+        patch["archived"] = bool(body.get("archived"))
+    if "budgets" in body and isinstance(body.get("budgets"), dict):
+        patch["budgets"] = {k: _gift_money(v) for k, v in body["budgets"].items()
+                            if _gift_money(v) is not None}
+    if patch:
+        ref.update(patch)
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------

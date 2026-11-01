@@ -135,6 +135,10 @@ body::after {
 .app-card.games-app .app-tag { background: var(--purple-dim); color: var(--purple); }
 .games-app:hover .arrow { color: var(--purple); }
 
+.app-card.gifts-app::before { background: linear-gradient(90deg, #e2445c, #f2b84b); }
+.app-card.gifts-app:hover { border-color: rgba(226,68,92,0.3); box-shadow: 0 8px 40px rgba(226,68,92,0.08), 0 0 0 1px rgba(226,68,92,0.15); }
+.app-card.gifts-app .app-tag { background: rgba(226,68,92,0.14); color: #e2445c; }
+.gifts-app:hover .arrow { color: #e2445c; }
 .app-card.grocery-app::before { background: linear-gradient(90deg, var(--green), #34d399); }
 .app-card.grocery-app:hover { border-color: rgba(34,197,94,0.3); box-shadow: 0 8px 40px rgba(34,197,94,0.08), 0 0 0 1px rgba(34,197,94,0.15); }
 .app-card.grocery-app .app-tag { background: var(--green-dim); color: var(--green); }
@@ -254,7 +258,7 @@ select.role-select option { background: var(--surface); }
         <div class="apps-grid" id="appsGrid"></div>
         <div class="admin-panel" id="adminPanel" style="display:none">
             <div class="admin-hdr"><h2>User Management</h2><span class="badge" id="pendingBadge" style="display:none">0 pending</span></div>
-            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Sheets</th><th>Odds</th><th>Book Club</th><th>Club Mgr</th><th>Games</th><th>Grocery</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
+            <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Pick Sheets</th><th>Odds</th><th>Book Club</th><th>Club Mgr</th><th>Games</th><th>Grocery</th><th>Gifts</th><th>Gift Parent</th><th>Actions</th></tr></thead><tbody id="adminTB"></tbody></table></div>
         </div>
         <div class="footer">The Kahla House &middot; thekahlahouse.com</div>
     </div>
@@ -375,6 +379,7 @@ function renderAppCards() {
     const hasBookClub = isAdmin || !!CUD.book_club_access || !!CUD.book_club_manager;
     const hasGames = isAdmin || !!CUD.games_access;
     const hasGrocery = isAdmin || !!CUD.grocery_access;
+    const hasGifts = isAdmin || !!CUD.gifts_access || !!CUD.gifts_parent;
     let h = '';
     if (hasBot) {
         // Pick Bot retired Sep 30 2026 — bot_access IS the Pick Sheets pill now.
@@ -424,6 +429,17 @@ function renderAppCards() {
             <h2>Games</h2>
             <p>Card-game scoring sheets. Pick a game and keep score — Clubs Diamonds Hearts Spades to start. Mobile-friendly, saves as you go.</p>
             <span class="app-tag">Scorekeeping</span>
+            <span class="arrow">&rarr;</span>
+        </a>`;
+    }
+    if (hasGifts) {
+        const gp = isAdmin || !!CUD.gifts_parent;
+        h += `<a href="/gifts" class="app-card gifts-app">
+            <span class="app-icon">&#127873;</span>
+            <h2>Gifts</h2>
+            <p>${gp ? 'Every wish list in one place &mdash; what&#39;s bought, arrived and wrapped, budgets per person, the kids kept even, and the money records.'
+                    : 'Your wish list &mdash; paste a link and the price fills in. See what the rest of the family wants too.'}</p>
+            <span class="app-tag">${gp ? 'Parents' : 'Wish list'}</span>
             <span class="arrow">&rarr;</span>
         </a>`;
     }
@@ -482,6 +498,8 @@ function loadAdminPanel() {
                 <td>${clubMgrPill(u)}</td>
                 <td>${gamesPill(u)}</td>
                 <td>${groceryPill(u)}</td>
+                <td>${giftsPill(u)}</td>
+                <td>${giftParentPill(u)}</td>
                 <td>${!isMe && !u.approved
                     ? `<button class="btn btn-sm" style="background:var(--green);color:#fff;font-size:12px;margin-right:6px" onclick="approveUser('${u.id}','viewer')">Approve as Viewer</button><button class="btn btn-sm" style="background:var(--red-dim);color:#f87171;font-size:12px;margin-right:6px;border:1px solid rgba(239,68,68,.3)" onclick="approveUser('${u.id}','admin')">Approve as Admin</button><button class="btn btn-sm" style="background:var(--red);color:#fff;font-size:12px" onclick="rejectUser('${u.id}','${E(u.displayName)}')">Reject</button>`
                     : isMe ? '<span style="color:var(--text-muted);font-size:12px">You</span>'
@@ -597,6 +615,28 @@ function groceryPill(u) {
     }
     const on = !!u.grocery_access;
     return `<span class="bot-pill ${on ? 'on' : ''}" onclick="toggleGroceryAccess('${u.id}',${on ? 'false' : 'true'})">${on ? 'ON' : 'OFF'}</span>`;
+}
+
+function giftsPill(u) {
+    if (u.role === 'admin') return `<span class="bot-pill on implicit" title="Admins always have Gifts access">ON</span>`;
+    if (u.role === 'pending' || !u.approved) return `<span class="bot-pill implicit" title="Approve user first">OFF</span>`;
+    if (u.gifts_parent) return `<span class="bot-pill on implicit" title="Gift Parent includes Gifts">ON</span>`;
+    const on = !!u.gifts_access;
+    return `<span class="bot-pill ${on ? 'on' : ''}" onclick="toggleCap('${u.id}','gifts_access',${on ? 'false' : 'true'},'Gifts')">${on ? 'ON' : 'OFF'}</span>`;
+}
+
+function giftParentPill(u) {
+    // Gift Parent = the backend (master list, purchases, budgets, records).
+    // Give it to Kirsten; kids get the plain Gifts pill.
+    if (u.role === 'admin') return `<span class="bot-pill on implicit" title="Admins are always Gift Parents">ON</span>`;
+    if (u.role === 'pending' || !u.approved) return `<span class="bot-pill implicit" title="Approve user first">OFF</span>`;
+    const on = !!u.gifts_parent;
+    return `<span class="bot-pill ${on ? 'on' : ''}" onclick="toggleCap('${u.id}','gifts_parent',${on ? 'false' : 'true'},'Gift Parent')">${on ? 'ON' : 'OFF'}</span>`;
+}
+
+async function toggleCap(uid, field, on, label) {
+    await db.collection('users').doc(uid).update({ [field]: on });
+    toast(label + ' access ' + (on ? 'granted' : 'revoked'), 'success');
 }
 
 async function toggleGroceryAccess(uid, on) {
