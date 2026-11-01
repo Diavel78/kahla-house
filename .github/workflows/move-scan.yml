@@ -1,0 +1,47 @@
+name: Move scan (football open → close vs results)
+
+# Walks /api/move-scan over a date range, every page, and prints one JSON
+# line per call (MOVESCAN <json>) to the job log. Read-only.
+on:
+  workflow_dispatch:
+    inputs:
+      sport:
+        description: "NCAAF or NFL"
+        required: false
+        default: "NCAAF"
+      from:
+        description: "first AZ day (YYYY-MM-DD)"
+        required: false
+        default: "2026-08-27"
+      to:
+        description: "last AZ day (YYYY-MM-DD, exclusive)"
+        required: false
+        default: "2026-10-08"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: walk the range
+        env:
+          CRON_KEY: ${{ secrets.FILLS_CRON_SECRET }}
+        run: |
+          KEY="$(printf '%s' "$CRON_KEY" | tr -d '[:space:]')"
+          d="${{ inputs.from }}"
+          end="${{ inputs.to }}"
+          while [ "$d" \< "$end" ]; do
+            skip=0
+            while :; do
+              body=$(curl -sSL --max-time 120 "https://www.thekahlahouse.com/api/move-scan?key=${KEY}&sport=${{ inputs.sport }}&day=${d}&days=2&skip=${skip}&n=60")
+              echo "MOVESCAN ${body}" | tr -d '\n'; echo
+              nxt=$(printf '%s' "$body" | python3 -c 'import sys,json
+          try:
+              d=json.load(sys.stdin); n=d.get("next"); print(n if n is not None else "")
+          except Exception:
+              print("")')
+              [ -z "$nxt" ] && break
+              skip=$nxt
+            done
+            d=$(date -d "$d + 2 days" +%F)
+          done
