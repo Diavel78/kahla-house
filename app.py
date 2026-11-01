@@ -30241,14 +30241,21 @@ def _line_tape_series(sport: str, rows: list) -> dict:
 _STEAM_SLOPE = {("NCAAF", "spread"): 2.6, ("NCAAF", "total"): 2.5,
                 ("NFL", "spread"): 3.0, ("NFL", "total"): 3.2,
                 ("NBA", "spread"): 3.0, ("NBA", "total"): 2.2}
+# The SCAN's markets (a superset — the card tag reads `_STEAM_SLOPE` only).
+# A moneyline's number IS its devigged home price in cents (slope 1, no line).
+# NHL total: a goal moves the over ~17¢ around 6 (sd ≈ 2.3 goals) — a guess,
+# like the others; the scan thresholds in CENTS so it only scales the display.
+_STEAM_SLOPE_SCAN = {**_STEAM_SLOPE, ("NHL", "total"): 17.0,
+                     **{(s, "ml"): 1.0 for s in ("NCAAF", "NFL", "NBA", "NHL")}}
 
 
 def _steam_numbers(sport: str, mt: str, rows: list) -> dict:
     """Pure. One game-market's line_tape rows (oldest first, home / over
     orientation) → {pin|poly|kalshi: [(t_ms, number, line)]}. number = the
     book's implied home margin (spread) or total (total); line = the home
-    spread / total the read was at (venue rungs: what could be bet)."""
-    slope = _STEAM_SLOPE.get((sport, mt)) or 2.6
+    spread / total the read was at (venue rungs: what could be bet). A
+    moneyline's number is the home price in cents, its line 0."""
+    slope = _STEAM_SLOPE_SCAN.get((sport, mt)) or 2.6
     out = {"pin": [], "poly": [], "kalshi": []}
 
     def f(x):
@@ -30260,7 +30267,7 @@ def _steam_numbers(sport: str, mt: str, rows: list) -> dict:
         if r.get("mt") != mt or r.get("src") not in out:
             continue
         d = _parse_iso(r.get("at")) if r.get("at") else None
-        ln = f(r.get("line"))
+        ln = 0.0 if mt == "ml" else f(r.get("line"))
         if d is None or ln is None:
             continue
         if r["src"] == "pin":
@@ -30273,6 +30280,9 @@ def _steam_numbers(sport: str, mt: str, rows: list) -> dict:
             if bd is None or ak is None or ak < bd or ak - bd > 6:
                 continue                      # a one-sided or wide quote is not a price
             p = (bd + ak) / 2.0
+        if mt == "ml":
+            out[r["src"]].append((int(d.timestamp() * 1000), round(p, 2), 0.0))
+            continue
         base = ln if mt == "total" else -ln
         out[r["src"]].append((int(d.timestamp() * 1000), round(base + (p - 50.0) / slope, 2), ln))
     return out
@@ -30324,6 +30334,60 @@ def _steam_plan(nums: dict, start_ms: int, bet_h: float, look_h: float,
             line = p[2]
             break
     return {"dir": sgn, "moves": moves, "line": line}
+
+
+def _steam_window(nums: dict, t_from: int, t_to: int, min_pts: float, need: int):
+    """Pure. THE WINDOW READ (Nov 1 2026, Rob: "from opening, it moves… then
+    we just find the window of steam that matters. It might be 1 hour before
+    tip, or 1 hour after opening"): each book's number at `t_to` minus at
+    `t_from` (a book with no read by `t_from` counts from its first read, if
+    that is before `t_to`; the tape writes only on change, so the last read
+    IS the price). Steam = Pinnacle plus ≥ need−1 venues moved ≥ min_pts the
+    same way, none against. {dir, moves, line (the venue's at t_to)} or None."""
+    moves = {}
+    for src in ("pin", "poly", "kalshi"):
+        pts = nums.get(src) or []
+        now = _steam_at(pts, t_to)
+        if now is None:
+            continue
+        ref = _steam_at(pts, t_from) or pts[0]
+        if ref[0] >= t_to:
+            continue
+        moves[src] = round(now[1] - ref[1], 2)
+    if "pin" not in moves or len(moves) < need:
+        return None
+    sgn = 1 if moves["pin"] > 0 else -1
+    agree = [s for s, m in moves.items() if m * sgn >= min_pts]
+    if "pin" not in agree or len(agree) < need:
+        return None
+    if any(m * sgn <= -min_pts for m in moves.values()):
+        return None
+    line = None
+    for src in ("poly", "kalshi", "pin"):
+        p = _steam_at(nums.get(src) or [], t_to)
+        if p is not None:
+            line = p[2]
+            break
+    return {"dir": sgn, "moves": moves, "line": line}
+
+
+# The windows the scan grades. Each end is (anchor, hours): "o" = the open
+# (Pinnacle's first read of that market), "s" = game start. Bet at the end.
+_STEAM_WINDOWS = (
+    (("o", 0), ("o", 1)), (("o", 0), ("o", 3)), (("o", 0), ("o", 6)), (("o", 1), ("o", 6)),
+    (("o", 3), ("o", 12)), (("o", 0), ("s", -6)), (("o", 0), ("s", -3)), (("o", 0), ("s", -1)),
+    (("o", 0), ("s", 0)), (("s", -12), ("s", -6)), (("s", -6), ("s", -3)), (("s", -3), ("s", -1)),
+    (("s", -1), ("s", 0)), (("s", -6), ("s", 0)), (("s", -3), ("s", 0)),
+)
+
+
+def _steam_win_name(w) -> str:
+    def one(e):
+        a, h = e
+        if a == "o":
+            return "open" if h == 0 else f"open+{h:g}h"
+        return "start" if h == 0 else f"start{h:g}h"
+    return f"{one(w[0])}→{one(w[1])}"
 
 
 def _steam_grade(mt: str, sgn: int, line, final: dict):
@@ -30409,6 +30473,88 @@ def _sheet_attach_steam(sb, sport: str, games: list) -> None:
         app.logger.warning("steam attach %s: %s", sport, e)
 
 
+def _steam_window_scan(sport: str, mts: tuple, games: list, detail=None) -> dict:
+    """Pure. Grade every `_STEAM_WINDOWS` window × threshold (cents) × books
+    over `games` [(ev, final, start_ms, {mt: nums})]. Two scores per row: the
+    RECORD (bet at the window's end, the venue's line then, vs the final) and
+    the CONTINUATION — how many cents Pinnacle kept moving the same way from
+    the bet to game start (the close). Continuation is the quieter read: a
+    move that predicts more move is a move worth chasing, whatever one game
+    happened to do. Also each market's coverage: hours from each book's
+    first read to the start. ?detail=<i>,<min_c>,<need> lists one row's bets."""
+    H = 3600e3
+    cov = {}
+    for m in mts:
+        leads = {"pin": [], "poly": [], "kalshi": []}
+        for ev, fin, sms, nums in games:
+            for src, pts in (nums.get(m) or {}).items():
+                if pts and pts[0][0] < sms:
+                    leads[src].append(round((sms - pts[0][0]) / H, 1))
+        cov[m] = {src: ({"n": len(v), "median_h": sorted(v)[len(v) // 2], "max_h": max(v)} if v else None)
+                  for src, v in leads.items()}
+    rows_out, det = [], []
+    want = None
+    if detail:
+        try:
+            parts = str(detail).split(",")
+            want = (int(parts[0]), float(parts[1]), int(parts[2]))
+        except (ValueError, IndexError):
+            want = None
+    for wi, w in enumerate(_STEAM_WINDOWS):
+        for min_c in (1.0, 2.0, 3.0):
+            for need in (2, 3):
+                rec = {"won": 0, "lost": 0, "push": 0}
+                by_mt = {m: [0, 0] for m in mts}
+                cont = []
+                for ev, fin, sms, nums in games:
+                    for m in mts:
+                        nm = nums.get(m) or {}
+                        if not nm.get("pin"):
+                            continue
+                        oms = nm["pin"][0][0]
+                        if oms >= sms:
+                            continue
+                        t = [(oms if a == "o" else sms) + int(h * H) for a, h in w]
+                        if t[1] > sms or t[0] >= t[1]:
+                            continue
+                        sl = _STEAM_SLOPE_SCAN.get((sport, m)) or 2.6
+                        plan = _steam_window(nm, t[0], t[1], min_c / sl, need)
+                        if not plan or plan["line"] is None:
+                            continue
+                        g = _steam_grade(m, plan["dir"], plan["line"], fin)
+                        if g is None:
+                            continue
+                        rec[g] += 1
+                        if g == "won":
+                            by_mt[m][0] += 1
+                        elif g == "lost":
+                            by_mt[m][1] += 1
+                        a, b = _steam_at(nm["pin"], t[1]), _steam_at(nm["pin"], sms)
+                        c = round((b[1] - a[1]) * plan["dir"] * sl, 1) if a and b else None
+                        if c is not None:
+                            cont.append(c)
+                        if want == (wi, min_c, need):
+                            det.append({"g": ev, "mt": m, "dir": plan["dir"], "line": plan["line"],
+                                        "cents": {k: round(v * sl, 1) for k, v in plan["moves"].items()},
+                                        "cont_c": c, "res": g, "final": [fin.get("away"), fin.get("home")]})
+                n = rec["won"] + rec["lost"]
+                if not n:
+                    continue
+                rows_out.append({
+                    "i": wi, "w": _steam_win_name(w), "min_c": min_c, "need": need,
+                    "rec": f"{rec['won']}-{rec['lost']}" + (f"-{rec['push']}" if rec["push"] else ""),
+                    "pct": round(rec["won"] / n * 100, 1),
+                    "mt": {m: f"{v[0]}-{v[1]}" for m, v in by_mt.items() if v[0] or v[1]},
+                    "cont": ({"n": len(cont), "avg_c": round(sum(cont) / len(cont), 2),
+                              "kept_going": round(sum(1 for c in cont if c > 0) / len(cont) * 100),
+                              "gave_back": round(sum(1 for c in cont if c < 0) / len(cont) * 100)}
+                             if cont else None)})
+    out = {"coverage": cov, "windows": rows_out}
+    if want is not None:
+        out["detail"] = det
+    return out
+
+
 @app.route("/api/steam-scan")
 def api_steam_scan():
     """READ-ONLY (shared-secret, site-curl). Grade 'follow the books' over
@@ -30429,13 +30575,14 @@ def api_steam_scan():
     ndays = max(1, min(7, int(request.args.get("days") or 1)))
     d1 = d0 + timedelta(days=ndays)
     t0 = _time.monotonic()
+    mts = tuple(m for m in ("spread", "total", "ml") if (sport, m) in _STEAM_SLOPE_SCAN)
     try:
         sheets = _sb_paged(lambda: (sb.table("football_sheets").select("event_name,event_start,data_blob")
                                     .eq("sport", sport).gte("event_start", d0.isoformat())
                                     .lt("event_start", d1.isoformat())), 3)
         rows = _sb_paged(lambda: (sb.table("line_tape")
                                   .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_name,event_start")
-                                  .eq("sport", sport).in_("mt", ["spread", "total"])
+                                  .eq("sport", sport).in_("mt", list(mts))
                                   .gte("event_start", d0.isoformat()).lt("event_start", d1.isoformat())
                                   .order("at").order("id")), 300)
     except Exception as e:
@@ -30457,11 +30604,11 @@ def api_steam_scan():
         if sd is None:
             continue
         games.append((ev, fin, int(sd.timestamp() * 1000),
-                      {mt: _steam_numbers(sport, mt, rs) for mt in ("spread", "total")}))
+                      {mt: _steam_numbers(sport, mt, rs) for mt in mts}))
 
     def run(bet_h, look_h, min_pts, need, detail=False):
         rec = {"won": 0, "lost": 0, "push": 0}
-        by_mt = {"spread": {"won": 0, "lost": 0}, "total": {"won": 0, "lost": 0}}
+        by_mt = {m: {"won": 0, "lost": 0} for m in mts}
         det = []
         for ev, fin, sms, nums in games:
             for mt, nm in nums.items():
@@ -30484,11 +30631,15 @@ def api_steam_scan():
         out = {"bet_h": bet_h, "look_h": look_h, "min_pts": min_pts, "need": need,
                "rec": f"{rec['won']}-{rec['lost']}" + (f"-{rec['push']}" if rec["push"] else ""),
                "pct": round(rec["won"] / n * 100, 1) if n else None,
-               "spread": f"{by_mt['spread']['won']}-{by_mt['spread']['lost']}",
-               "total": f"{by_mt['total']['won']}-{by_mt['total']['lost']}"}
+               **{m: f"{v['won']}-{v['lost']}" for m, v in by_mt.items()}}
         if detail:
             out["games"] = det
         return out
+    if request.args.get("windows"):
+        return jsonify({"ok": True, "sport": sport, "from": d0.date().isoformat(), "days": ndays,
+                        "tape_rows": len(rows), "games_graded": len(games),
+                        **_steam_window_scan(sport, mts, games, request.args.get("detail")),
+                        "ms": int((_time.monotonic() - t0) * 1000)})
     grid = [run(bh, lh, mp, nd) for bh in (6, 13, 24) for lh in (6, 12, 0)
             for mp in (0.5, 1.0) for nd in (2, 3)]
     f = lambda k, d: float(request.args.get(k) or d)

@@ -7232,6 +7232,21 @@ def test_steam_scan() -> None:
     check("steam tag: the sheet API attaches it", "_sheet_attach_steam(sb, sport, games)" in open(_app.__file__).read())
     src = open(_app.__file__).read()
     check("steam tag: the card reads in cents at one line", 'c["cents"]' in src and "x.cents || x.moves" in open(os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "templates", "bet_sheets.html")).read())
+    # THE WINDOW READ: anchored to the open or to game start
+    win = _app._steam_window(nums, sms - 30 * 3600 * 1000, sms - 20 * 3600 * 1000, 0.5, 3)
+    check("steam window: the move inside the window", win is not None and win["dir"] == -1 and win["line"] == 45.5)
+    check("steam window: no move after the books settled", _app._steam_window(nums, sms - 19 * 3600 * 1000, sms - 1 * 3600 * 1000, 0.5, 2) is None)
+    ml = [{"at": at(10), "src": "pin", "mt": "ml", "line": None, "p_home": -150, "p_away": 130},
+          {"at": at(2), "src": "pin", "mt": "ml", "line": None, "p_home": -170, "p_away": 150},
+          {"at": at(10), "src": "poly", "mt": "ml", "line": None, "bid_c": 58, "ask_c": 59},
+          {"at": at(2), "src": "poly", "mt": "ml", "line": None, "bid_c": 61, "ask_c": 62}]
+    mn = _app._steam_numbers("NHL", "ml", ml)
+    check("steam: a moneyline's number is its home price in cents", len(mn["pin"]) == 2 and 57 < mn["pin"][0][1] < 59 and mn["poly"][1][1] == 61.5)
+    mw = _app._steam_window(mn, sms - 11 * 3600 * 1000, sms - 1 * 3600 * 1000, 1.0, 2)
+    check("steam: home ML steam = home", mw is not None and mw["dir"] == 1 and _app._steam_grade("ml", 1, mw["line"], {"home": 3, "away": 2}) == "won")
+    check("steam: the card tag stays off NHL", ("NHL", "total") not in _app._STEAM_SLOPE)
+    sc = _app._steam_window_scan("NHL", ("ml",), [("A @ B", {"home": 3, "away": 2}, sms, {"ml": mn})])
+    check("steam window scan: open-anchored rows grade", any(r["w"] == "open→start-1h" and r["rec"] == "1-0" for r in sc["windows"]))
 
 
 def main() -> int:
