@@ -7230,6 +7230,8 @@ def test_steam_scan() -> None:
         html = open(os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "templates", pg)).read()
         check(f"steam tag: {pg} draws it", "function steamLine(" in html and "subs.push(steamLine(g))" in html)
     check("steam tag: the sheet API attaches it", "_sheet_attach_steam(sb, sport, games)" in open(_app.__file__).read())
+    src = open(_app.__file__).read()
+    check("steam tag: the card reads in cents at one line", 'c["cents"]' in src and "x.cents || x.moves" in open(os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "templates", "bet_sheets.html")).read())
 
 
 def main() -> int:

@@ -30397,6 +30397,11 @@ def _sheet_attach_steam(sb, sport: str, games: list) -> None:
                     continue
                 c = _steam_card(_steam_numbers(sport, mt, rs), until)
                 if c:
+                    # Rob reads the chart in CENTS at one line (Nov 1 2026: "I was shopping
+                    # vig?"): the same move, priced at a fixed line — a line move counts
+                    # as the price it would take to hold the old number.
+                    sl = _STEAM_SLOPE[(sport, mt)]
+                    c["cents"] = {b: round(m * sl, 1) for b, m in c["moves"].items()}
                     out[mt] = c
             if out:
                 g["steam"] = out
@@ -30609,7 +30614,7 @@ def _mcp_board(sport=None, hours=36) -> dict:
                         "started": st <= now, "final": (gr.get("final") or None),
                         "tv": g.get("tv"), "market_line": g.get("line"), "pinnacle": g.get("pin"),
                         "model": g.get("model"), "picks": picks,
-                        "steam_since_open": g.get("steam"),   # dir +1 home/over, −1 away/under; moves in points
+                        "steam_since_open": g.get("steam"),   # dir +1 home/over, −1 away/under; cents = the move in cents at one line (moves = the same in points)
                         "venue_quotes_on_pick_side": venue or None,
                         "venue_age_min": (round(g["venue"]["age_s"] / 60) if isinstance(g.get("venue"), dict)
                                           and g["venue"].get("age_s") is not None else None)})
