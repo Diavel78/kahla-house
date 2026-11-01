@@ -1,0 +1,67 @@
+name: Open → Close moves vs results (NBA / NHL)
+
+# Does the way DraftKings' line moves from open to close predict the result?
+# ESPN core odds (open + close), finals from the nba_fetch / nhl_fetch caches.
+# Read-only: no secrets, no DB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sport:
+        description: "NBA or NHL"
+        required: false
+        default: "NBA"
+      seasons:
+        description: "ESPN season years (Y = the Y-1..Y season)"
+        required: false
+        default: "2024,2025,2026"
+      probe:
+        description: "an ESPN event id: print its raw odds item (blank = skip)"
+        required: false
+        default: ""
+
+concurrency:
+  group: open-close-moves-${{ inputs.sport }}
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests numpy httpx
+      - uses: actions/cache@v4
+        if: ${{ inputs.sport == 'NBA' }}
+        with:
+          path: kahla-scanner/.nba_cache
+          key: nba-cache-v1-${{ github.run_id }}
+          restore-keys: nba-cache-v1-
+      - uses: actions/cache@v4
+        if: ${{ inputs.sport == 'NHL' }}
+        with:
+          path: kahla-scanner/.nhl_cache
+          key: nhl-cache-v1-${{ github.run_id }}
+          restore-keys: nhl-cache-v1-
+      - name: Probe
+        if: ${{ inputs.probe != '' }}
+        run: python -m scripts.open_close_moves --sport "${{ inputs.sport }}" --probe "${{ inputs.probe }}"
+      - name: Fetch ESPN history (resumable)
+        if: ${{ inputs.probe == '' }}
+        run: |
+          if [ "${{ inputs.sport }}" = "NBA" ]; then
+            python -m scripts.nba_fetch --seasons "${{ inputs.seasons }}" --out .nba_cache
+          else
+            python -m scripts.nhl_fetch --seasons "${{ inputs.seasons }}" --out .nhl_cache
+          fi
+      - name: Open → close
+        if: ${{ inputs.probe == '' }}
+        run: |
+          if [ "${{ inputs.sport }}" = "NBA" ]; then C=.nba_cache; else C=.nhl_cache; fi
+          python -m scripts.open_close_moves --sport "${{ inputs.sport }}" --cache "$C" --seasons "${{ inputs.seasons }}"
