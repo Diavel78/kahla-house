@@ -29856,9 +29856,11 @@ def _sheet_touch_rows_cached(sb, now) -> list:
     c = _SHEET_TOUCH_ROWS_CACHE
     if c["rows"] is None or _time.monotonic() - c["at"] > _SHEET_TOUCH_ROWS_TTL_S:
         c["rows"] = _sheet_touch_rows(sb, now)
+        c["pre"] = _line_tape_presheet(sb, now, c["rows"])
         c["at"] = _time.monotonic()
-        _LINE_TAPE_GAMES[:] = [(sp, r.get("event_name"), r.get("market_id"), g.get("away"), g.get("home"),
-                                r.get("event_start")) for sp, r, g in c["rows"]]
+        _LINE_TAPE_GAMES[:] = ([(sp, r.get("event_name"), r.get("market_id"), g.get("away"), g.get("home"),
+                                 r.get("event_start")) for sp, r, g in c["rows"]]
+                               + list(c.get("pre") or []))
     # PARSE, never compare as text (Oct 28 2026): the box's Postgres returns
     # starts in ARIZONA offset ('…19:30:00-07:00') and `now` is UTC — after
     # 5 PM AZ the UTC date rolls and every evening game read as started, so
@@ -29899,6 +29901,74 @@ def _sheet_touch_rows(sb, now) -> list:
                 continue
             out.append((sport, r, g))
     out.sort(key=lambda t: str(t[1].get("event_start") or ""))
+    return out
+
+
+# THE TAPE STARTS AT THE LISTING, NOT AT THE SHEET (Nov 1 2026, Rob on next
+# Saturday's college games: "Yes, build it"). The walk + Pinnacle recorder
+# read only SHEET games, and a new football week's sheet is not built until
+# Monday 05:00 AZ — so Polymarket's first days and Pinnacle's open (Sunday
+# afternoon / evening for college) were never recorded, the exact window the
+# first-move test needs. Every upcoming game the ESPN spine has minted into
+# `markets` (football 21 days out, the rest 8) that has no sheet row yet now
+# rides the same recorder: Pinnacle every minute off the feed it already
+# reads (no extra call), the venues on the walk's far tier AFTER the sheet
+# games under their own budget. Names are the spine's ESPN names — the sheet
+# builders use the same "Away @ Home", so the series continues on the card
+# once the sheet lands. Kill switch `machine_flags line_tape_presheet`.
+_LINE_TAPE_PRESHEET_H = {"NCAAF": 9 * 24.0, "NFL": 9 * 24.0, "NBA": 72.0, "NHL": 72.0}
+_LINE_TAPE_PRESHEET_MAX = 400
+_LINE_TAPE_PRESHEET_BUDGET_S = 300.0
+_LINE_TAPE_PRESHEET_STATS: dict = {"games": 0, "read": 0, "at": None, "err": None}
+
+
+def _line_tape_presheet_pick(markets_rows: list, sheet_keys: set, now, horizons: dict,
+                             cap: int = _LINE_TAPE_PRESHEET_MAX) -> list:
+    """Pure. `markets` rows → the line tape's game tuples
+    (sport, event_name, market_id, away, home, event_start) for every
+    upcoming game inside its sport's horizon with no sheet row yet
+    (`sheet_keys` = {(sport, event_name lower)}). One tuple per name (the
+    tape keys on it), nearest start kept; nearest first; capped."""
+    best: dict = {}
+    for m in markets_rows or []:
+        sp = str(m.get("sport") or "").upper()
+        ev = str(m.get("event_name") or "")
+        if sp not in horizons or " @ " not in ev:
+            continue
+        st = _aware_ts(m.get("event_start"))
+        if st is None or st <= now or (st - now).total_seconds() > horizons[sp] * 3600.0:
+            continue
+        k = (sp, ev.lower())
+        if k in sheet_keys:
+            continue
+        if k in best and best[k][0] <= st:
+            continue
+        away, home = ev.split(" @ ", 1)
+        best[k] = (st, (sp, ev, m.get("id"), away.strip(), home.strip(), st.isoformat()))
+    out = [t for _st, t in sorted(best.values(), key=lambda x: x[0])]
+    return out[:cap]
+
+
+def _line_tape_presheet(sb, now, sheet_rows: list) -> list:
+    """Every pre-sheet game for the tape (see above); [] when switched off or
+    unreadable — the sheet games always ride regardless."""
+    if not _machine_flag("line_tape_presheet", True):
+        _LINE_TAPE_PRESHEET_STATS["games"] = 0
+        return []
+    keys = {(sp, str(r.get("event_name") or "").lower()) for sp, r, _g in (sheet_rows or [])}
+    hi = (now + timedelta(hours=max(_LINE_TAPE_PRESHEET_H.values()))).isoformat()
+    try:
+        rows = _sb_paged(lambda: (sb.table("markets").select("id,sport,event_name,event_start")
+                                  .eq("status", "active").in_("sport", list(_LINE_TAPE_PRESHEET_H))
+                                  .gte("event_start", now.isoformat()).lte("event_start", hi)
+                                  .order("event_start")), max_pages=3)
+    except Exception as e:
+        _LINE_TAPE_PRESHEET_STATS["err"] = f"{type(e).__name__}: {e}"[:120]
+        return []
+    out = _line_tape_presheet_pick(rows, keys, now, _LINE_TAPE_PRESHEET_H)
+    _LINE_TAPE_PRESHEET_STATS.update({"games": len(out), "at": now.isoformat(), "err": None,
+                                      "by_sport": {sp: sum(1 for t in out if t[0] == sp)
+                                                   for sp in _LINE_TAPE_PRESHEET_H}})
     return out
 
 
@@ -30048,6 +30118,40 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
         st["games"] += 1
         st["sports"][sport] = st["sports"].get(sport, 0) + 1
         _time.sleep(0.15)                      # gentle on both venues; the pass is not a race
+    # PRE-SHEET GAMES (Nov 1 2026): the venues' ladders + ML off the no-pick
+    # path, on the far tier, only after every sheet game had its turn, under
+    # their own budget — a sheet game is never starved for one.
+    if not st["partial"]:
+        t_pre = _time.monotonic()
+        npre = 0
+        for sp, ev, mid, away, home, start in list(_SHEET_TOUCH_ROWS_CACHE.get("pre") or []):
+            if _time.monotonic() - t_pre > _LINE_TAPE_PRESHEET_BUDGET_S:
+                break
+            if (_aware_ts(start) or now) <= now:
+                continue
+            key = f"{sp}|{ev}"
+            due_s = _sheet_touch_due_s(start, now, far_s)
+            last = _LADDER_NOPICK_AT.get(key)
+            if last is not None and _time.monotonic() - last < due_s - 5.0:
+                continue
+            _LADDER_NOPICK_AT[key] = _time.monotonic()
+            try:
+                res = _ladder_nopick_rows(client, sp, {"event_name": ev, "market_id": mid, "event_start": start},
+                                          {"away": away, "home": home, "event_start": start}, cache, now_iso,
+                                          max_age_s=min(600.0, max(60.0, due_s * 0.8)))
+                if isinstance(res, tuple) and len(res) == 2:      # [] = the venue's rate breaker was up
+                    ladder += res[0]
+                    tape += res[1]
+                    npre += 1
+                else:
+                    _LADDER_NOPICK_AT.pop(key, None)
+            except Exception as e:
+                _LADDER_STATS["errors"] += 1
+                _LADDER_STATS["last_error"] = f"presheet: {e}"[:120]
+            _time.sleep(0.15)
+        st["presheet"] = npre
+        st["presheet_games"] = len(_SHEET_TOUCH_ROWS_CACHE.get("pre") or [])
+        _LINE_TAPE_PRESHEET_STATS["read"] = _LINE_TAPE_PRESHEET_STATS.get("read", 0) + npre
     try:
         st["tape"] = _line_tape_write(sb, tape)
         st["ladder"] = _ladder_write(sb, ladder)
@@ -30156,6 +30260,7 @@ def _sheet_touch_health(sb) -> dict:
                 "items": pl.get("items"), "poly": pl.get("poly"), "kalshi": pl.get("kalshi"),
                 "kept": pl.get("kept"), "fresh": pl.get("fresh"), "partial": pl.get("partial"), "ms": pl.get("ms"),
                 "tape_rows": pl.get("tape"), "ladder_rows": pl.get("ladder"), "nopick": pl.get("nopick"), "dropped": pl.get("dropped"),
+                "presheet": pl.get("presheet"), "presheet_games": pl.get("presheet_games"),
                 "tape_age_s": tape, "sports": pl.get("sports")}
     except Exception:
         return {}
