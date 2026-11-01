@@ -169,6 +169,9 @@
         .gh .gm { font-size: 19px; font-weight: 700; }
         .gh .gm .tv { font-size: 12px; font-weight: 600; color: var(--text3); border: 1px solid var(--line2); border-radius: 5px; padding: 1px 6px; margin-left: 8px; vertical-align: 3px; white-space: nowrap; }
         .gh .gs { font-size: 13px; color: var(--text2); text-align: right; }
+        .vq .vq-ok { color: #7BE3A6; } .vq .vq-fair { color: #E6C36A; }
+        .gh .gr2 { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
+        .gh .gbtn { display: flex; gap: 6px; }
         .gh .gs.warn { color: var(--r-tx); font-weight: 700; }
         .gsub { font-size: 14px; color: var(--text2); margin-top: -8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
         .gsub .mvl { color: #7fd1ff; } .gsub .mvl.mvw { color: #8a98a8; } .gsub .mvl .mvq { color: #8a98a8; }
@@ -308,8 +311,8 @@
         /* TAP AND GO (Oct 24 2026, Rob: "I tap my credit card, I take my shit and I leave… to me it looks instant"):
            a sent bet leaves the slip at once; its card button reads "sending…" until the box has it resting. */
         .bb.st-send { background: var(--a-bg); border: 2px dashed var(--a-bd); color: var(--a-tx); }
-        .gh .gm .invb { font-size: 12px; font-weight: 600; color: var(--text2); background: transparent; border: 1px solid var(--line2); border-radius: 5px; padding: 1px 7px; margin-left: 6px; vertical-align: 3px; white-space: nowrap; cursor: pointer; font-family: inherit; }
-        .gh .gm .invb.on { color: var(--blue); border-color: var(--blue); }
+        .gh .invb { font-size: 16px; font-weight: 600; color: var(--text2); background: transparent; border: 1px solid var(--line2); border-radius: 8px; padding: 4px 10px; line-height: 1; white-space: nowrap; cursor: pointer; font-family: inherit; }
+        .gh .invb.on { color: var(--blue); border-color: var(--blue); }
         /* THE LINE TAPE CHART (Oct 29 2026) */
         .chartx { position: fixed; inset: 0; z-index: 90; background: var(--bg); display: none; flex-direction: column;
                   padding: calc(10px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); overflow: auto; }
@@ -331,7 +334,7 @@
         .chartx .ch-leg { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--text2); margin-top: 10px; }
         .chartx .ch-leg i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; vertical-align: 3px; margin-right: 5px; }
         .chartx .ch-note { font-size: 13px; color: var(--text3); margin-top: 10px; line-height: 1.45; }
-        .gh .gm .chb { font-size: 12px; font-weight: 600; color: var(--text2); background: transparent; border: 1px solid var(--line2); border-radius: 5px; padding: 1px 7px; margin-left: 6px; vertical-align: 3px; white-space: nowrap; cursor: pointer; font-family: inherit; }
+        .gh .chb { font-size: 16px; font-weight: 600; color: var(--text2); background: transparent; border: 1px solid var(--line2); border-radius: 8px; padding: 4px 10px; line-height: 1; white-space: nowrap; cursor: pointer; font-family: inherit; }
         .bb.inv:not([class*="st-"]):not(.in) { border-style: dashed; border-color: var(--line2); background: transparent; }
         .bb .vsm { display: block; font-size: 11px; font-weight: 600; color: var(--text3); letter-spacing: .03em; margin-top: 2px; }
         .bb.st-send .bs { color: var(--a-tx); }
@@ -571,6 +574,7 @@
     // the game's TV channel(s), off ESPN's scoreboard (/api/pick-sheets → tv)
     function tvText(g) { return g.tv && g.tv.length ? g.tv.slice(0, 2).join(' / ') : ''; }
     function tvChip(g) { const t = tvText(g); return t ? '<span class="tv">📺 ' + esc(t) + '</span>' : ''; }
+    function tvTxt(g) { return g.tv && g.tv.length ? ' · 📺 ' + esc(g.tv[0]) : ''; }
     function finalChip(g) {
         const f = g.grade && g.grade.final;
         if (!f || f.away === undefined || f.home === undefined) return '';
@@ -1254,7 +1258,7 @@
     function invOn(g) { return !!_inv[invKey(g)] || allBetsOnGame(g).some(b => b.vs_model); }
     function toggleInv(gi) { const g = _games[gi]; if (!g) return; const k = invKey(g); _inv[k] = !_inv[k]; renderGames(); }
     function invChip(g) {
-        return '<button class="invb' + (invOn(g) ? ' on' : '') + '" title="show the other side of every market" onclick="event.stopPropagation();toggleInv(' + g._gi + ')">⇄ ' + (invOn(g) ? 'Hide other side' : 'Other side') + '</button>';
+        return '<button class="invb' + (invOn(g) ? ' on' : '') + '" title="show the other side of every market" onclick="event.stopPropagation();toggleInv(' + g._gi + ')">⇄</button>';
     }
     function mirrorQ(q, mt) {
         if (!q) return q;
@@ -1287,7 +1291,7 @@
             if (on) { cls += ' in'; sub = '<span class="bs">✓ on the slip</span>'; }
             click = 'toggleSide(' + args + ')';
         }
-        const pr = price != null ? ' <span class="pr">' + amPct(price) + '</span>' : '';   // the sheet's book price, American / %
+        const pr = price != null ? ' <span class="pr">' + am(price) + '</span>' : '';   // the sheet's book price (the cents are on the line under it)
         return '<button class="' + cls + '" data-k="' + esc(key) + '" onclick=\'' + click.replace(/'/g, '&#39;') + '\'><span class="bl">' + esc(label) + pr + '</span>' + (inv ? '<span class="vsm">AGAINST THE MODEL</span>' : '') + venueLine(vq, mt, line) + sub + '</button>';
     }
     // THE SHEET TOUCH (Rob, Oct 26 2026: "CGY ML +133 is from hours ago… can't we
@@ -1300,14 +1304,18 @@
         const c = x => Math.round(Number(x) * 10) / 10;
         const rung = (vl) => (vl == null || mt === 'ml' || Math.abs(Number(vl) - Number(line)) < 0.01) ? ''
                             : ' @ ' + (mt === 'total' ? Number(vl) : sgn(vl, 1));
+        const fair = vq.fair != null ? Number(vq.fair) : null;
         const one = (name, q) => {
             if (!q) return '';
             if (q.bid == null) return '<span class="vq-no">' + name + ' —</span>';
-            return name + ' ' + c(q.bid) + '¢' + rung(q.line) + (q.chalk ? ' chalk' : '');
+            const t = name + ' ' + c(q.bid) + '¢' + rung(q.line) + (q.chalk ? ' chalk' : '');
+            // a bid a cent or more under fair at the same line reads green
+            return (fair != null && !rung(q.line) && Number(q.bid) <= fair - 1) ? '<span class="vq-ok">' + t + '</span>' : t;
         };
         const parts = [one('Poly', vq.poly), one('Kalshi', vq.kalshi)].filter(Boolean);
+        if (fair != null) parts.push('<span class="vq-fair">fair ' + c(fair) + '¢</span>');
         if (!parts.length) return '';
-        const age = vq.age_s != null ? ' · ' + (vq.age_s < 90 ? 'now' : Math.round(vq.age_s / 60) + 'm') : '';
+        const age = (vq.age_s != null && vq.age_s > 45 * 60) ? ' · ' + Math.round(vq.age_s / 60) + 'm old' : '';
         return '<span class="vq' + (vq.age_s > 45 * 60 ? ' old' : '') + '" title="the venues\' best bid on this side, read by the box">' + parts.join(' · ') + age + '</span>';
     }
     // The pending pre-game bets on a game (both lookups: market id, event name).
@@ -1956,11 +1964,24 @@
              + esc(pv.venue) + ' ' + r1(pv.cost_c) + '¢ vs fair ' + r1(pv.fair_c) + '¢ · ' + (e >= 0 ? '+' : '') + e + '¢'
              + (pv.flipped && p && p.model ? ' · model liked ' + esc(p.model.team || p.model.side || 'the other side') : '') + '</span>';
     }
+    // THE CLEAN CARD (Nov 1 2026, Rob: "data overload, clunky and shit written
+    // everywhere"): a market is its label, PLAY/LEAN (a PASS only dims the row)
+    // and the button — the venue bids and Pinnacle's fair ride the button's
+    // price line. The model / edge / PIN text is gone; the bare line text shows
+    // only on a market with no pick. A passed market on a final shows nothing.
     function mkRow(label, pick, modelHtml, body) {
         const v = pick ? (pick.verdict || 'pass') : null;
+        if (pick && !body) return '';
         return '<div class="mk' + (v === 'pass' ? ' pass' : '') + '"><div class="mk-h"><span class="mk-l">' + label + '</span>'
-             + (v ? verdictBadge(v) : '') + (pick && pick.pv ? priceTxt(pick.pv, pick) : '') + (modelHtml ? '<span class="mk-m">' + modelHtml + '</span>' : '') + '</div>'
+             + (v && v !== 'pass' ? verdictBadge(v) : '') + (!pick && modelHtml ? '<span class="mk-m">' + modelHtml + '</span>' : '') + '</div>'
              + (body || '') + '</div>';
+    }
+    // Pinnacle's devigged fair on the pick's side at its rung, in cents
+    function fairC(p) {
+        if (!p) return null;
+        if (p.pin_fair && p.pin_fair.prob != null) return Number(p.pin_fair.prob) * 100;
+        if (p.pv && p.pv.fair_c != null) return Number(p.pv.fair_c);
+        return null;
     }
     function edgeTxt(p, pts) {
         if (!p) return '';
@@ -1974,7 +1995,8 @@
         if (!p || !p.side || line == null) return '';
         if (up) {
             const vp = ((g.venue || {}).picks || {})[gradeKey];
-            const vq = vp ? { poly: vp.poly, kalshi: vp.kalshi, age_s: g.venue.age_s } : null;
+            const fc = fairC(p);
+            const vq = (vp || fc != null) ? { poly: vp && vp.poly, kalshi: vp && vp.kalshi, age_s: vp ? g.venue.age_s : null, fair: fc } : null;
             return pickBtn(g._gi, g, mt, p.side, line, label, p.verdict, price, vq) + invBody(g, mt, p, line, gradeKey);
         }
         return p.verdict !== 'pass' ? '<div class="mk-x">' + esc(label) + (gradeKey === 'puck' ? puckGrade(g, p) : gradeMark(g, gradeKey)) + '</div>' : '';
@@ -1991,7 +2013,9 @@
             else { oline = -Number(line); label = nameOf(g, side) + ' ' + sgn(oline, 1); }
         }
         const vp = ((g.venue || {}).picks || {})[gradeKey];
-        const vq = vp ? mirrorQ({ poly: vp.poly, kalshi: vp.kalshi, age_s: g.venue.age_s }, mt) : null;
+        let vq = vp ? mirrorQ({ poly: vp.poly, kalshi: vp.kalshi, age_s: g.venue.age_s }, mt) : null;
+        const fc = fairC(p);
+        if (fc != null) { vq = vq || {}; vq.fair = 100 - fc; }
         // the mirror is the other side's price only on the sheet's own rung; off it,
         // the box quotes the other side at ITS nearest more favorable rung (`other`)
         if (vq) ['poly', 'kalshi'].forEach(vn => {
@@ -2511,7 +2535,7 @@
         return '<span class="steam' + (all3 ? ' s3' : '') + '" title="how many cents each book has moved toward this side since the open, priced at one line (a line move counts as the price it would take to hold the old number)">🔥 ' + parts.join(' &nbsp; ') + '</span>';
     }
     function chartChip(g) {
-        return '<button class="chb" title="price history" onclick="event.stopPropagation();openChart(' + g._gi + ')">📈 Chart</button>';
+        return '<button class="chb" title="price history" onclick="event.stopPropagation();openChart(' + g._gi + ')">📈</button>';
     }
     function openChart(gi) {
         const g = _games[gi]; if (!g) return;
@@ -2795,12 +2819,12 @@
             if (sa.name || sh.name) subs.push('<span title="* = no starts on record — priced as a league-average arm">⚾ ' + nm(sa) + ' vs ' + nm(sh) + '</span>');
             if (g.series) subs.push('<span>' + esc(g.series) + '</span>');
         }
-        if (modelScore(g)) subs.push(modelScore(g));
         if (moveLine(g)) subs.push(moveLine(g));
         if (steamLine(g)) subs.push(steamLine(g));
         return '<div class="gc' + ((isUp || liveMode) ? '' : ' done') + '"><div class="gh"><div><div class="gt">'
-             + (isUp ? '' : fmtTime(g.event_start).split(',')[0] + ' ') + clk(g.event_start) + '</div>'
-             + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + tvChip(g) + ((isUp || liveMode) ? invChip(g) : '') + chartChip(g) + '</div></div>' + summ + '</div>'
+             + (isUp ? '' : fmtTime(g.event_start).split(',')[0] + ' ') + clk(g.event_start) + tvTxt(g) + '</div>'
+             + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + '</div></div>'
+             + '<div class="gr2">' + summ + '<span class="gbtn">' + ((isUp || liveMode) ? invChip(g) : '') + chartChip(g) + '</span></div></div>'
              + (subs.length ? '<div class="gsub">' + subs.join('') + '</div>' : '')
              + mk + extra.map(b => betStrip(b, false, flips[b.id])).join('') + '</div>';
     }
