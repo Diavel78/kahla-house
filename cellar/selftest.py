@@ -7276,6 +7276,10 @@ def test_fire_side() -> None:
           _km.get("state") == "play" and _km.get("dir") == -1, str(_km))
     _kb = _app._steam_numbers("NBA", "spread", [dict(r, line=-r["line"]) for r in _kr])
     check("key hop: football spreads only (NBA keeps the slope)", _kb["pin"][1][1] != _kn["pin"][1][1])
+    _fg = {"home": "UMass", "away": "Ball State", "pin": {"spread_home": -3.0, "spread_home_odds": -114, "spread_away_odds": -102}}
+    _ff = _app._sheet_flip_pick(_fg, "spread", {"side": "home", "line": -2.5, "market_line": -3.0}, {}, sport="NCAAF")
+    check("flip: the new side bets ITS half point (UMass −2.5 → Ball State +3.5, not +2.5)",
+          _ff["side"] == "away" and _ff["line"] == 3.5 and (_ff.get("pin_fair") or {}).get("pin_line") == 3.0, str(_ff))
     import os as _os
     _rt = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
     for _f in ("bet_sheets.html", "football_picks.html"):

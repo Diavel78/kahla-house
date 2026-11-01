@@ -1569,6 +1569,25 @@ def _sheet_flip_pick(g: dict, key: str, pick: dict, pv: dict, sport=None) -> dic
         out.pop(k, None)
     if key in ("spread", "puck") and out.get("line") is not None:
         out["market_line"] = out["line"]
+    # THE NEW SIDE'S OWN RUNG (Nov 1 2026, Rob on Ball State @ UMass, Pinnacle UMass −3:
+    # "the line is +3.5, not 2.5"): a flip off UMass −2.5 mirrored to Ball State +2.5,
+    # the rung that GIVES the half point back. The other side bets the half point in ITS
+    # favor of the market's number (+3 → +3.5, over 49 → 48.5), priced there off Pinnacle.
+    if key in ("spread", "total") and pick.get("market_line") is not None and opp:
+        try:
+            mk = float(pick["market_line"])
+            own = mk if key == "total" else -mk
+            nr = _bettable_half(own, key, opp)
+        except (TypeError, ValueError):
+            nr = None
+        if nr is not None and (out.get("line") is None or abs(float(nr) - float(out["line"])) > 1e-6):
+            out["line"], out["market_line"] = nr, own
+            try:
+                pf2 = _pin_fair_at_rung(str(sport or g.get("sport") or "").upper(), key, out,
+                                        g.get("pin") if isinstance(g.get("pin"), dict) else None)
+            except Exception:
+                pf2 = None
+            out["pin_fair"] = pf2 if pf2 and pf2.get("american") is not None else None
     if key == "ml" and npf and npf.get("american") is not None:
         # the OTHER side gets its own chalk / longshot marks off Pinnacle's
         # price (Oct 26 2026, BKN @ BOS: the flip to the +468 dog carried no
