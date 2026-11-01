@@ -7246,6 +7246,10 @@ def test_steam_scan() -> None:
     check("steam: home ML steam = home", mw is not None and mw["dir"] == 1 and _app._steam_grade("ml", 1, mw["line"], {"home": 3, "away": 2}) == "won")
     check("steam: the card tag stays off NHL", ("NHL", "total") not in _app._STEAM_SLOPE)
     sc = _app._steam_window_scan("NHL", ("ml",), [("A @ B", {"home": 3, "away": 2}, sms, {"ml": mn})])
+    for pg in ("bet_sheets.html", "football_picks.html"):
+        html = open(os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "templates", pg)).read()
+        check(f"naming: {pg} prints pro teams by nickname", "const _PRO = { NBA: 1, NHL: 1, NFL: 1, MLB: 1 };" in html
+              and "function shortTeam(name, sport)" in html and ".map(shortTeam)" not in html)
     check("steam window scan: open-anchored rows grade", any(r["w"] == "open→start-1h" and r["rec"] == "1-0" for r in sc["windows"]))
 
 

@@ -498,9 +498,19 @@
     }
     // "Toronto Maple Leafs" → "Toronto", not "Toronto Maple": two-word nicknames.
     const _TWO_WORD = /\s(Maple Leafs|Red Wings|Blue Jackets|Golden Knights|Red Sox|White Sox|Blue Jays|Trail Blazers|Golden Bears|Green Wave|Red Raiders|Blue Devils|Tar Heels|Fighting Irish|Yellow Jackets|Crimson Tide|Sun Devils|Golden Gophers|Nittany Lions|Scarlet Knights|Horned Frogs|Demon Deacons|Golden Flashes|Mean Green|Black Knights|Golden Eagles|Ragin' Cajuns|Rainbow Warriors|Golden Hurricane|Red Wolves|Thundering Herd|Blue Hens|Wolf Pack|Fighting Illini)$/;
-    function shortTeam(name) {
+    // PRO TEAMS GO BY NICKNAME (Rob, Nov 1 2026, on "LA @ Golden State" and
+    // "Toronto @ Los Angeles": "can you PLEASE figure out the god damn naming"):
+    // a city can't name a pro team — LA, New York and Chicago each carry two —
+    // so NBA/NHL/NFL/MLB print "Clippers @ Warriors"; college keeps the school.
+    const _PRO = { NBA: 1, NHL: 1, NFL: 1, MLB: 1 };
+    function shortTeam(name, sport) {
         if (!name) return '?';
         const two = name.match(_TWO_WORD);
+        if (_PRO[String(sport || _sport || '').toUpperCase()]) {
+            if (two) return two[1];
+            const w = name.split(' ');
+            return w[w.length - 1];
+        }
         if (two) return name.slice(0, two.index);
         const parts = name.split(' ');
         return parts.length > 1 ? parts.slice(0, -1).join(' ') : name;
@@ -1215,7 +1225,7 @@
     }
     function fmtQ(x) { return String(Math.round(Number(x || 0) * 100) / 100); }
     function clk(iso) { return fmtClock(iso).replace(' AM', 'a').replace(' PM', 'p'); }
-    function gameShort(b) { return (b.event_name || '').split(' @ ').map(shortTeam).join(' @ '); }
+    function gameShort(b) { return (b.event_name || '').split(' @ ').map(n => shortTeam(n, b.sport)).join(' @ '); }
     // The words on a button that holds my bet: "RESTING 5 @ 56.5¢ · on +7.5".
     function stateTxt(b, line) {
         const st = betState(b), o = b.order || {};
@@ -1540,7 +1550,7 @@
     // ("Indiana vs. Nebraska") — Rob couldn't tell which bet it was (Oct 7 2026).
     function betLabel(b) {
         const parts = (b.event_name || '').split(' @ ');
-        const team = parts.length === 2 ? (b.side === 'home' ? shortTeam(parts[1]) : b.side === 'away' ? shortTeam(parts[0]) : '') : '';
+        const team = parts.length === 2 ? (b.side === 'home' ? shortTeam(parts[1], b.sport) : b.side === 'away' ? shortTeam(parts[0], b.sport) : '') : '';
         if (b.market_type === 'total' && b.line != null && (b.side === 'over' || b.side === 'under')) return (b.side === 'over' ? 'O ' : 'U ') + Number(b.line);
         if (b.market_type === 'spread' && b.line != null && team) return team + ' ' + sgn(b.line, 1);
         if (b.market_type === 'moneyline' && team) return team + ' ML';
@@ -1593,7 +1603,7 @@
             && String(b.sport || '').toUpperCase() === String(_sport || '').toUpperCase());
     }
     function _scoreLine(b) {
-        const t = (b.event_name || '').split(' @ ').map(shortTeam);
+        const t = (b.event_name || '').split(' @ ').map(n => shortTeam(n, b.sport));
         const g = b.game || {};
         if (g.away_score != null && g.home_score != null) {
             // THE GAME FEED (Oct 25 2026): Kalshi's record, seconds behind the play — period, clock, the last play
@@ -1710,7 +1720,7 @@
         document.getElementById('setBody').innerHTML = rows.map(b => {
             const tg = TAG[b.status] || ['gry', String(b.status).toUpperCase()];
             const rs = (b.result_score && typeof b.result_score === 'object') ? b.result_score : null;
-            const t = (b.event_name || '').split(' @ ').map(shortTeam);
+            const t = (b.event_name || '').split(' @ ').map(n => shortTeam(n, b.sport));
             const fin = rs && rs.away != null && rs.home != null
                 ? (t[0] || 'Away') + ' ' + rs.away + ' – ' + rs.home + ' ' + (t[1] || 'Home') + ' · FINAL'
                 : String(b.sport || '') + ' · ' + gameShort(b);
@@ -2330,7 +2340,7 @@
             const list = byKey[k], b0 = list[0], g = myBetGame(b0);
             const sp = String(b0.sport || '').toUpperCase();
             if (sports.size > 1 && sp !== lastSport) { out.push((lastSport ? '\n' : '') + '— ' + sp + ' —'); lastSport = sp; }
-            const t = (b0.event_name || '').split(' @ ').map(shortTeam);
+            const t = (b0.event_name || '').split(' @ ').map(n => shortTeam(n, b0.sport));
             const rs = list.map(b => b.result_score).find(r => r && typeof r === 'object' && r.away != null && r.home != null);
             const f = rs || (g && g.grade && g.grade.final);
             const st = g ? gameStatus(g) : (b0.event_start && new Date(b0.event_start) < new Date() ? 'live' : 'up');

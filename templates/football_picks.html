@@ -363,9 +363,19 @@
     }
     // "Toronto Maple Leafs" → "Toronto", not "Toronto Maple": two-word nicknames.
     const _TWO_WORD = /\s(Maple Leafs|Red Wings|Blue Jackets|Golden Knights|Red Sox|White Sox|Blue Jays|Trail Blazers|Golden Bears|Green Wave|Red Raiders|Blue Devils|Tar Heels|Fighting Irish|Yellow Jackets|Crimson Tide|Sun Devils|Golden Gophers|Nittany Lions|Scarlet Knights|Horned Frogs|Demon Deacons|Golden Flashes|Mean Green|Black Knights|Golden Eagles|Ragin' Cajuns|Rainbow Warriors|Golden Hurricane|Red Wolves|Thundering Herd|Blue Hens|Wolf Pack|Fighting Illini)$/;
-    function shortTeam(name) {
+    // PRO TEAMS GO BY NICKNAME (Rob, Nov 1 2026, on "LA @ Golden State" and
+    // "Toronto @ Los Angeles": "can you PLEASE figure out the god damn naming"):
+    // a city can't name a pro team — LA, New York and Chicago each carry two —
+    // so NBA/NHL/NFL/MLB print "Clippers @ Warriors"; college keeps the school.
+    const _PRO = { NBA: 1, NHL: 1, NFL: 1, MLB: 1 };
+    function shortTeam(name, sport) {
         if (!name) return '?';
         const two = name.match(_TWO_WORD);
+        if (_PRO[String(sport || _sport || '').toUpperCase()]) {
+            if (two) return two[1];
+            const w = name.split(' ');
+            return w[w.length - 1];
+        }
         if (two) return name.slice(0, two.index);
         const parts = name.split(' ');
         return parts.length > 1 ? parts.slice(0, -1).join(' ') : name;
