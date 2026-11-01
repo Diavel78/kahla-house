@@ -3947,6 +3947,9 @@ def test_hand_red_alert() -> None:
     under = {"side": "under", "label": "Under 77.5"}
     check("flip red: a resting bet opposite the model's side is MODEL FLIPPED",
           (F(rr, {}, rest, under) or ("",))[0] == "model_flipped")
+    check("flip red: the alert names the 🔥, never 'model now on' (Nov 1 2026)",
+          "🔥 now on Under 77.5" in (F(rr, {}, rest, under) or ("", ""))[1]
+          and "model now on" not in (F(rr, {}, rest, under) or ("", ""))[1])
     check("flip red: a bet against the model on purpose is not",
           F(rr, {"vs_model": True}, rest, under) is None)
     check("flip red: app / auto / live bets are not",

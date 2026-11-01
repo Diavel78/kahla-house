@@ -18037,7 +18037,9 @@ def _hand_flip_red(r: dict, blob: dict, s: dict, model: dict | None, rec=None):
     o = s.get("order") if isinstance(s.get("order"), dict) else {}
     if not o.get("resting") or rec == "hold":
         return None
-    return "model_flipped", f"MODEL FLIPPED · model now on {model.get('label') or model['side']} — flip or hold"
+    # The 🔥 names the button since Nov 1 2026 — the old "MODEL FLIPPED · model now on" text
+    # read as a second signal fighting the board (Rob: "Which one is it…").
+    return "model_flipped", f"MOVED AGAINST YOU · 🔥 now on {model.get('label') or model['side']} — flip or hold"
 
 
 def _hand_model_sides(sb, now) -> dict:
