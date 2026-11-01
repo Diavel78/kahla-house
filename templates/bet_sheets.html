@@ -317,6 +317,17 @@
         .chartx { position: fixed; inset: 0; z-index: 90; background: var(--bg); display: none; flex-direction: column;
                   padding: calc(10px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); overflow: auto; }
         .chartx.show { display: flex; }
+        .fx-sub { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: var(--text2); }
+        .fx-sub .mvl { color: #7fd1ff; } .fx-sub .mvl.mvw, .fx-sub .mvl .mvq { color: #8a98a8; } .fx-sub .steam { color: #e0a040; } .fx-sub .steam.s3 { color: #ffc24a; }
+        .fx-m { margin-top: 18px; }
+        .fx-l { font-size: 13px; font-weight: 700; color: var(--text3); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 4px; }
+        .fx-r { padding: 11px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); margin-top: 6px; }
+        .fx-r.tap { cursor: pointer; } .fx-r.fire { border-color: #e0a040; } .fx-r.in { border-color: var(--blue); }
+        .fx-r.st-fill { border-color: #2f9e6a; } .fx-r.st-rest { border-color: #c99a2e; } .fx-r.st-warn { border-color: #d9534f; }
+        .fx-n { font-family: var(--mono); font-size: 16px; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
+        .fx-s { font-family: inherit; font-size: 12px; font-weight: 700; color: var(--text2); }
+        .fx-q { font-family: var(--mono); font-size: 12px; color: var(--text2); margin-top: 3px; }
+        .fx-q .ok { color: #7BE3A6; } .fx-q .fv { color: #E6C36A; } .fx-q .no { color: var(--text3); }
         .chartx .ch-h { display: flex; align-items: flex-start; gap: 10px; }
         .chartx .ch-t { font-size: 21px; font-weight: 800; line-height: 1.2; flex: 1; }
         .chartx .ch-s { font-size: 14px; color: var(--text2); margin-top: 2px; }
@@ -409,6 +420,14 @@
             <div class="hint" id="hint">Each market shows the 🔥 side — where Pinnacle and the venues have moved since the open. Tap it to add it to the slip; tap a bet you already have to re-peg, move or cancel it.</div>
         </div>
 
+        <div class="chartx" id="fullx">
+            <div class="ch-h">
+                <div><div class="ch-t" id="fxTitle"></div><div class="ch-s" id="fxSub"></div></div>
+                <button class="ch-x" onclick="closeFull()" aria-label="Close">×</button>
+            </div>
+            <div id="fxBody"></div>
+            <div class="ch-note">Every market, both sides. Fair = Pinnacle's price with the vig taken out, at that line. Poly / Kalshi = the best bid on that side; green = at least a cent under fair. 🔥 = the side Pinnacle and the venues have moved toward since the open.</div>
+        </div>
         <div class="chartx" id="chartx">
             <div class="ch-h">
                 <div><div class="ch-t" id="chTitle"></div><div class="ch-s" id="chSub"></div></div>
@@ -2540,6 +2559,104 @@
     function chartChip(g) {
         return '<button class="chb" title="price history" onclick="event.stopPropagation();openChart(' + g._gi + ')">📈</button>';
     }
+    // THE FULL CARD (Nov 1 2026, Rob: "you need a way to look at the whole thing… show both
+    // ML's, both spreads, and O and U, but it doesn't clutter the dashboard"): ▦ beside the
+    // chart opens every market, BOTH sides — Pinnacle's devigged fair and both venues' bids,
+    // the 🔥 side marked. The other side's venue price is the same market read from the other
+    // side (bid = 100 − the quoted side's ask). On Bet Sheets a side taps onto the slip.
+    function fullChip(g) {
+        return '<button class="chb" title="every market, both sides" onclick="event.stopPropagation();openFull(' + g._gi + ')">▦</button>';
+    }
+    let _fullGi = null;
+    function openFull(gi) {
+        if (!_games[gi]) return;
+        _fullGi = gi; renderFull();
+        document.getElementById('fullx').classList.add('show');
+        document.body.style.overflow = 'hidden';
+    }
+    function closeFull() {
+        _fullGi = null;
+        document.getElementById('fullx').classList.remove('show');
+        document.body.style.overflow = '';
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && _fullGi !== null) closeFull(); });
+    function fullMirror(q, mt) {
+        if (!q) return null;
+        return { bid: q.ask != null ? 100 - Number(q.ask) : null,
+                 line: (mt === 'spread' && q.line != null) ? -Number(q.line) : q.line };
+    }
+    function fullRows(g, key) {
+        const p = g[key], L = g.line || {};
+        const mt = key === 'puck' ? 'spread' : key;
+        const st = (g.steam || {})[key === 'puck' ? 'ml' : key];
+        const fire = st && st.dir ? (mt === 'total' ? (st.dir > 0 ? 'over' : 'under') : (st.dir > 0 ? 'home' : 'away')) : null;
+        const lab = (s, ln) => mt === 'total' ? (s === 'over' ? 'Over ' : 'Under ') + ln : nameOf(g, s) + (mt === 'ml' ? ' ML' : ' ' + sgn(ln, 1));
+        let rows;
+        if (p && p.side) {
+            const line = key === 'ml' ? 0 : p.line != null ? Number(p.line)
+                       : key === 'total' ? (L.total != null ? Number(L.total) : null)
+                       : (L.spread_home != null ? (p.side === 'home' ? Number(L.spread_home) : -Number(L.spread_home)) : null);
+            if (line == null) return null;
+            const vp = ((g.venue || {}).picks || {})[key] || {};
+            const fc = fairC(p);
+            const opp = { home: 'away', away: 'home', over: 'under', under: 'over' }[p.side];
+            const oline = mt === 'spread' ? -line : line;
+            rows = [{ side: p.side, line, q: { poly: vp.poly, kalshi: vp.kalshi }, fair: fc },
+                    { side: opp, line: oline, q: { poly: fullMirror(vp.poly, mt), kalshi: fullMirror(vp.kalshi, mt) }, fair: fc != null ? 100 - fc : null }];
+        } else if (key === 'ml' && L.ml_away != null && L.ml_home != null) {
+            // no ML pick on the sheet (football): Pinnacle's two prices, devigged
+            const a = impl(L.ml_away), h = impl(L.ml_home);
+            const fa = (a && h) ? 100 * a / (a + h) : null;
+            rows = [{ side: 'away', line: 0, q: {}, fair: fa }, { side: 'home', line: 0, q: {}, fair: fa != null ? 100 - fa : null }];
+        } else return null;
+        rows.forEach(r => { r.label = lab(r.side, r.line); r.fire = fire === r.side; });
+        if (rows[0].side === 'home' || rows[0].side === 'under') rows.reverse();
+        return { key, mt, rows };
+    }
+    function fullQ(r, mt) {
+        const c = x => Math.round(Number(x) * 10) / 10;
+        const one = (name, q) => {
+            if (!q) return '';
+            if (q.bid == null) return '<span class="no">' + name + ' —</span>';
+            const off = q.line != null && mt !== 'ml' && Math.abs(Number(q.line) - Number(r.line)) >= 0.01;
+            const t = name + ' ' + c(q.bid) + '¢' + (off ? ' @ ' + (mt === 'total' ? Number(q.line) : sgn(q.line, 1)) : '');
+            return (r.fair != null && !off && Number(q.bid) <= r.fair - 1) ? '<span class="ok">' + t + '</span>' : t;
+        };
+        const parts = [r.fair != null ? '<span class="fv">fair ' + c(r.fair) + '¢ ' + centsAm(r.fair) + '</span>' : '',
+                       one('Poly', r.q.poly), one('Kalshi', r.q.kalshi)].filter(Boolean);
+        return parts.join(' · ') || '<span class="no">no price</span>';
+    }
+    function renderFull() {
+        const g = _games[_fullGi]; if (!g) return;
+        const up = g._st !== 'final';
+        const tap = up && typeof toggleSide === 'function';
+        document.getElementById('fxTitle').textContent = shortTeam(g.away) + ' @ ' + shortTeam(g.home);
+        document.getElementById('fxSub').textContent = fmtTime(g.event_start) + ' ' + clk(g.event_start) + (g.tv && g.tv.length ? ' · ' + g.tv.join(' / ') : '');
+        const subs = [modelScore(g), moveLine(g), steamLine(g)].filter(Boolean);
+        const keys = _sport === 'NHL' ? ['ml', 'puck', 'total'] : ['ml', 'spread', 'total'];
+        const NM = { ml: 'Moneyline', spread: _sport === 'MLB' ? 'Run line' : 'Spread', puck: 'Puck line', total: 'Total' };
+        let html = subs.length ? '<div class="fx-sub">' + subs.join('') + '</div>' : '';
+        keys.forEach(k => {
+            const m = fullRows(g, k); if (!m) return;
+            html += '<div class="fx-m"><div class="fx-l">' + NM[k] + '</div>';
+            m.rows.forEach(r => {
+                let cls = 'fx-r' + (r.fire ? ' fire' : ''), state = '', click = '';
+                if (tap) {
+                    const key = slipKey(g, m.mt, r.side), mine = myBetOn(g, m.mt, r.side);
+                    if (mine) { const s = betState(mine); cls += ' st-' + s.cls; state = '<span class="fx-s">' + esc(s.short) + '</span>'; }
+                    else if (inSlip(key)) { cls += ' in'; state = '<span class="fx-s">✓ on the slip</span>'; }
+                    const args = [JSON.stringify(key), JSON.stringify(m.mt), JSON.stringify(r.side), Number(r.line), JSON.stringify(r.label), g._gi].join(',');
+                    click = mine ? ' onclick=\'closeFull();openSheet(' + JSON.stringify(String(mine.id)) + ',' + args.replace(/'/g, '&#39;') + ')\''
+                                 : ' onclick=\'toggleSide(' + args.replace(/'/g, '&#39;') + ');renderFull()\'';
+                    cls += ' tap';
+                }
+                html += '<div class="' + cls + '"' + click + '><div class="fx-n">' + (r.fire ? '🔥 ' : '') + esc(r.label) + state + '</div>'
+                      + '<div class="fx-q">' + fullQ(r, m.mt) + '</div></div>';
+            });
+            html += '</div>';
+        });
+        document.getElementById('fxBody').innerHTML = html || '<div class="empty">No markets on the sheet for this game yet.</div>';
+    }
     function openChart(gi) {
         const g = _games[gi]; if (!g) return;
         _ch = { g: g, mt: null, side: null, range: '24h', data: null, hover: null, err: null };
@@ -2829,7 +2946,7 @@
         return '<div class="gc' + ((isUp || liveMode) ? '' : ' done') + '"><div class="gh"><div><div class="gt">'
              + (isUp ? '' : fmtTime(g.event_start).split(',')[0] + ' ') + clk(g.event_start) + tvTxt(g) + '</div>'
              + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + '</div></div>'
-             + '<div class="gr2">' + summ + '<span class="gbtn">' + chartChip(g) + '</span></div></div>'
+             + '<div class="gr2">' + summ + '<span class="gbtn">' + fullChip(g) + chartChip(g) + '</span></div></div>'
              + (subs.length ? '<div class="gsub">' + subs.join('') + '</div>' : '')
              + mk + extra.map(b => betStrip(b, false, flips[b.id])).join('') + '</div>';
     }
