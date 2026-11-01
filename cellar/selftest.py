@@ -7274,60 +7274,29 @@ def test_fire_side() -> None:
 
 
 def test_move_rule() -> None:
-    """THE MOVE RULE (Nov 1 2026): Pinnacle's first move off its open picks the side."""
+    """🔥 THE FIRST MOVE (Nov 1 2026): the first read is the open; the first ≥1¢ move off it, any time, is the fire."""
     import app as _app
     from datetime import datetime, timezone, timedelta
     H = 3600e3
-    o = datetime(2026, 11, 2, 1, 0, tzinfo=timezone.utc)          # after the epoch
-    start = o + timedelta(days=5)
+    o = datetime(2026, 10, 25, 1, 0, tzinfo=timezone.utc)          # an open well before the recorder's epoch counts
+    start = o + timedelta(days=7)
     oms, sms = int(o.timestamp() * 1000), int(start.timestamp() * 1000)
-    sl = _app._STEAM_SLOPE_SCAN[("NCAAF", "spread")]
+    sl = _app._STEAM_SLOPE_SCAN[("NFL", "spread")]
     def nums(*pts):                                                # (hours after open, cents moved toward home)
         return {"pin": [(oms + int(h * H), round(3.5 + c / sl, 4), -3.5) for h, c in pts], "poly": [], "kalshi": []}
-    r = _app._move_read("NCAAF", nums((0, 0), (0.5, 3.0)), sl, sms, oms + int(3 * H))
-    check("move rule: 3¢ toward home in the first hour = PLAY home, decided at 1h",
-          r["state"] == "play" and r["dir"] == 1 and r["at_h"] == 1.0 and r["cents"] == 3.0, str(r))
-    r = _app._move_read("NCAAF", nums((0, 0), (0.5, -1.0), (1.5, -1.5)), sl, sms, oms + int(3 * H))
-    check("move rule: 1.5¢ toward away by 2h = LEAN away, decided at 2h",
-          r["state"] == "lean" and r["dir"] == -1 and r["at_h"] == 2.0, str(r))
-    r = _app._move_read("NCAAF", nums((0, 0), (0.5, 0.4)), sl, sms, oms + int(3 * H))
-    check("move rule: under 1¢ by 2h = PASS", r["state"] == "pass" and not r.get("dir"), str(r))
-    r = _app._move_read("NCAAF", nums((0, 0), (0.2, 1.0)), sl, sms, oms + int(0.5 * H))
-    check("move rule: inside the first hour = watching, reads at +1h",
-          r["state"] == "watching" and r["locks_ms"] == oms + int(H), str(r))
-    old = int(datetime(2026, 10, 30, tzinfo=timezone.utc).timestamp() * 1000)
-    on = {"pin": [(old, 3.5, -3.5), (old + int(H), 4.9, -3.5)], "poly": [], "kalshi": []}
-    check("move rule: a football first read before the box watched every listing is not an open",
-          _app._move_read("NCAAF", on, sl, old + int(48 * H), old + int(3 * H))["state"] == "old_open")
-    check("move rule: an NBA first read 20h before the start is Pinnacle's open",
-          _app._move_read("NBA", on, sl, old + int(20 * H), old + int(3 * H))["state"] == "play")
+    r = _app._move_read("NFL", nums((0, 0), (0.5, 3.0)), sl, sms, oms + int(3 * H))
+    check("move rule: 3¢ toward home = PLAY home", r["state"] == "play" and r["dir"] == 1 and r["cents"] == 3.0, str(r))
+    r = _app._move_read("NFL", nums((0, 0), (0.4, 0.5), (90, -1.5)), sl, sms, oms + int(100 * H))
+    check("move rule: the first move can come days later — 1.5¢ toward away at 90h = LEAN away",
+          r["state"] == "lean" and r["dir"] == -1 and r["at_h"] == 90.0, str(r))
+    r = _app._move_read("NFL", nums((0, 0), (1, -1.2), (5, 4.0)), sl, sms, oms + int(10 * H))
+    check("move rule: the FIRST move decides, not a bigger later one", r["dir"] == -1 and r["state"] == "lean", str(r))
+    r = _app._move_read("NFL", nums((0, 0), (0.5, 0.4)), sl, sms, oms + int(3 * H))
+    check("move rule: under 1¢ so far = watching, no fire", r["state"] == "watching" and not r.get("cents"), str(r))
+    r = _app._move_read("NFL", nums((0, 0), (200, 3.0)), sl, sms, oms + int(300 * H))
+    check("move rule: a move after the start doesn't count", r["state"] == "watching", str(r))
     check("move rule: no Pinnacle read = no_open",
-          _app._move_read("NCAAF", {"pin": []}, sl, sms, oms)["state"] == "no_open")
-
-    # a card: the model likes the home side, Pinnacle moved toward the away side → the pick flips
-    class _Q:
-        def __init__(self, rows): self.rows = rows
-        def __getattr__(self, name): return lambda *a, **k: self
-        def execute(self):
-            class R: pass
-            r = R(); r.data = self.rows; self.rows = []; return r
-    class _SB:
-        def __init__(self, rows): self.rows = rows
-        def table(self, name): return _Q(list(self.rows))
-    def tape(h, line, ph, pa):
-        return {"at": (o + timedelta(hours=h)).isoformat(), "src": "pin", "mt": "spread", "line": line,
-                "p_home": ph, "p_away": pa, "event_name": "A @ B"}
-    rows = [tape(0, -3.5, -110, -110), tape(0.5, -2.5, -110, -110)]     # home -3.5 → -2.5: toward away
-    g = {"event_name": "A @ B", "event_start": start.isoformat(), "home": "B", "away": "A",
-         "spread": {"side": "home", "line": -3.5, "verdict": "play", "team": "B"}}
-    _app._MOVE_CACHE.clear()
-    _app._sheet_attach_move(_SB(rows), "NCAAF", [g], o + timedelta(hours=3))
-    sp = g["spread"]
-    check("move rule card: the pick flips to the side Pinnacle moved to, PLAY, the model kept",
-          sp["side"] == "away" and sp["line"] == 3.5 and sp["verdict"] == "play"
-          and sp.get("model", {}).get("side") == "home" and g["move"]["spread"]["state"] == "play", str(sp))
-    _app._MOVE_CACHE.clear()
-
+          _app._move_read("NFL", {"pin": []}, sl, sms, oms)["state"] == "no_open")
 
 def test_steam_scan() -> None:
     """Rob's chart read (Nov 1 2026): Pinnacle + the venues moving one way."""

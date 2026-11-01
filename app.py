@@ -2626,7 +2626,7 @@ def api_football_picks():
         "games": games,
         "price_rule": {"play_c": _play_c, "lean_c": _lean_c},
         "move_rule": {"on": _move_rule_on(), "play_c": _MOVE_PLAY_C, "lean_c": _MOVE_LEAN_C,
-                      "windows_h": list(_MOVE_WIN_H)},
+                      "open": "first Pinnacle read on the tape", "fire": "first move >= lean_c off it, any time before the start"},
         "venue_at": next((g["venue"].get("at") for g in games if isinstance(g.get("venue"), dict)), None),
         "pdf_url": _pub_url(wk.get("friday_pdf_path") or wk.get("pdf_path")),
         "picks_pdf_url": _pub_url(wk.get("picks_pdf_path")),
@@ -30646,19 +30646,21 @@ def _move_open_ok(sport: str, open_ms: int, start_ms: int) -> bool:
 
 def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
                play_c: float = _MOVE_PLAY_C, lean_c: float = _MOVE_LEAN_C) -> dict:
-    """Pure. One market's first move off Pinnacle's open. `nums` =
+    """Pure. 🔥 THE FIRST MOVE (Nov 1 2026, Rob: "whatever we had as the opener is
+    what we have as the opener… Whether that's 10 minutes, 3 hours, 6 days, that's
+    the fire"): the open is Pinnacle's FIRST READ on the tape, whenever we got it;
+    the fire is the first time its price at one line moves ≥ lean_c off that open,
+    before the start — however long that took. Its size at that moment decides
+    PLAY (≥ play_c) or LEAN. No such move yet = `watching`. `nums` =
     _steam_numbers (each book's (t_ms, number, line), home / over). Returns
-    {state: play|lean|pass|watching|no_open|old_open, dir (+1 home/over),
-    cents (Pinnacle's move toward dir), at_h (the window that decided),
-    open_ms, locks_ms (when a watching read decides), books {src: cents}}."""
+    {state: play|lean|watching|no_open, dir (+1 home/over), cents, at_h (hours
+    after the open), open_ms, decided_ms, books {src: cents toward dir}}."""
     pin = nums.get("pin") or []
     if not pin or pin[0][0] >= start_ms:
         return {"state": "no_open"}
-    o = pin[0][0]
-    if not _move_open_ok(sport, o, start_ms):
-        return {"state": "old_open", "open_ms": o}
-    H = 3600e3
+    o, base = pin[0][0], pin[0][1]
     lim = min(now_ms, start_ms)
+    H = 3600e3
 
     def mv(src, t):
         pts = nums.get(src) or []
@@ -30670,30 +30672,23 @@ def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
             return None
         return round((cur[1] - ref[1]) * slope, 2)
 
-    out = {"open_ms": o}
-    w1, w2 = _MOVE_WIN_H
-    for wh in (w1, w2):
-        t = o + int(wh * H)
-        closed = t <= lim or start_ms <= now_ms
-        if not closed:
-            m = mv("pin", min(lim, t)) or 0.0
-            out.update({"state": "watching", "locks_ms": int(t),
-                        "so_far_c": m, "dir": (1 if m > 0 else -1) if m else 0})
-            return out
-        te = min(t, start_ms)
-        m = mv("pin", te) or 0.0
-        if abs(m) >= play_c or wh == w2:
+    last = 0.0
+    for t, num, _ln in pin[1:]:
+        if t > lim:
+            break
+        m = round((num - base) * slope, 2)
+        last = m
+        if abs(m) >= lean_c:
             d = 1 if m > 0 else -1
-            st = "play" if abs(m) >= play_c else "lean" if abs(m) >= lean_c else "pass"
             books = {}
             for src in ("pin", "poly", "kalshi"):
-                v = mv(src, te)
+                v = mv(src, t)
                 if v is not None:
                     books[src] = round(v * d, 1)
-            out.update({"state": st, "dir": d if st != "pass" else 0, "cents": round(abs(m), 1),
-                        "at_h": wh, "decided_ms": int(te), "books": books})
-            return out
-    return {"state": "pass", **out}
+            return {"state": "play" if abs(m) >= play_c else "lean", "dir": d, "cents": round(abs(m), 1),
+                    "at_h": round((t - o) / H, 1), "open_ms": o, "decided_ms": int(t), "books": books}
+    return {"state": "watching", "open_ms": o, "so_far_c": last,
+            "dir": (1 if last > 0 else -1) if last else 0}
 
 
 def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:

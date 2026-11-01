@@ -312,7 +312,7 @@
                 <button class="ch-x" onclick="closeFull()" aria-label="Close">×</button>
             </div>
             <div id="fxBody"></div>
-            <div class="ch-note">Every market, both sides. Fair = Pinnacle's price with the vig taken out, at that line. Poly / Kalshi = the best bid on that side; green = at least a cent under fair. 🔥 = the side of the first move (Pinnacle's first 1-2 hours after it opened); 💨 = how far each book has moved since the open.</div>
+            <div class="ch-note">Every market, both sides. Fair = Pinnacle's price with the vig taken out, at that line. Poly / Kalshi = the best bid on that side; green = at least a cent under fair. 🔥 = the side of Pinnacle's first move off the first price we recorded; 💨 = how far each book has moved since the open.</div>
         </div>
         <div class="chartx" id="chartx">
             <div class="ch-h">
@@ -801,11 +801,12 @@
                 const smoke = !s || !s.dir ? '<span class="smk">💨 none yet</span>'
                             : s.dir === x.dir ? '<span class="smk ok">💨 agrees</span>'
                             : '<span class="smk no">💨 against</span>';
-                const bk = full ? ' <span class="mvq">(' + x.at_h + 'h: ' + ['pin', 'poly', 'kalshi'].filter(b => x.books && x.books[b] != null)
+                const when = x.at_h == null ? '' : x.at_h < 1 ? Math.round(x.at_h * 60) + 'm in' : x.at_h < 48 ? Math.round(x.at_h) + 'h in' : Math.round(x.at_h / 24) + 'd in';
+                const bk = full ? ' <span class="mvq">(' + when + ': ' + ['pin', 'poly', 'kalshi'].filter(b => x.books && x.books[b] != null)
                     .map(b => nm[b] + ' ' + (x.books[b] >= 0 ? '+' : '') + Math.round(x.books[b]) + '¢').join(' · ') + ')</span>' : '';
                 parts.push(lab[k] + ' <b>' + esc(side(k, x.dir)) + '</b> ' + x.state.toUpperCase() + bk + ' · ' + smoke);
             } else if (x.state === 'watching') {
-                parts.push(lab[k] + ' reads ' + esc(clk(new Date(x.locks_ms).toISOString())));
+                if (full) parts.push(lab[k] + ' no move yet');
             } else if (x.state === 'pass') {
                 if (full) parts.push(lab[k] + ' no move');
             } else if (x.state === 'no_open') {
@@ -818,7 +819,7 @@
             if (old && old === n) return '<span class="mvl mvw">🔥 opened before we were recording — the buttons follow 💨, the move since</span>';
             return '';
         }
-        return '<span class="mvl" title="🔥 = Pinnacle\'s move in the first 1-2 hours after it opened the market, in cents at one line: 2¢+ = PLAY that side, 1-2¢ = LEAN. 💨 = whether the books have kept moving that way since.">🔥 ' + parts.join(' &nbsp; ') + '</span>';
+        return '<span class="mvl" title="🔥 = Pinnacle\'s first move off the first price we recorded, whenever it came, in cents at one line: 2¢+ = PLAY that side, 1-2¢ = LEAN. 💨 = whether the books have kept moving that way since.">🔥 ' + parts.join(' &nbsp; ') + '</span>';
     }
     function steamLine(g) {
         const s = g.steam; if (!s) return '';
