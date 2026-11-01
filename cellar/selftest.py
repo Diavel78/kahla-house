@@ -7329,9 +7329,11 @@ def test_steam_scan() -> None:
     check("steam tag: the card reads the move since the open", card is not None and card["dir"] == -1 and card["books"] == 3)
     for pg in ("bet_sheets.html", "football_picks.html"):
         html = open(os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "templates", pg)).read()
-        # 💨 (Nov 1 2026): the per-book cents live on the full card; the game card says agrees / against
-        check(f"steam tag: {pg} draws it on the full card + the smoke verdict on the game card",
-              "function steamLine(" in html and "moveLine(g, true), steamLine(g)" in html and "💨 agrees" in html)
+        # 💨 (Nov 1 2026): the per-book cents live on the full card; the game card shows 💨 only
+        # when the trend since the open agrees with the 🔥 (no icon = against or none)
+        check(f"steam tag: {pg} draws it on the full card + 💨 on the game card only when it agrees",
+              "function steamLine(" in html and "moveLine(g, true), steamLine(g)" in html
+              and "s.dir === x.dir ?" in html and "💨 against" not in html and "💨 none yet" not in html)
     check("steam tag: the sheet API attaches it", "_sheet_attach_steam(sb, sport, games)" in open(_app.__file__).read())
     src = open(_app.__file__).read()
     check("steam tag: the card reads in cents at one line", 'c["cents"]' in src and "x.cents || x.moves" in open(os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "templates", "bet_sheets.html")).read())

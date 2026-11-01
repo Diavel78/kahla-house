@@ -798,13 +798,13 @@
             n++;
             if (x.state === 'play' || x.state === 'lean') {
                 const s = (g.steam || {})[k];
-                const smoke = !s || !s.dir ? '<span class="smk">💨 none yet</span>'
-                            : s.dir === x.dir ? '<span class="smk ok">💨 agrees</span>'
-                            : '<span class="smk no">💨 against</span>';
+                // 💨 only when the trend since the open still runs the 🔥's way (Rob, Nov 1 2026:
+                // "no smoke icon, and the smoke isn't there") — against / none = no icon.
+                const smoke = s && s.dir && s.dir === x.dir ? ' <span class="smk ok" title="still moving the 🔥 way since the open">💨</span>' : '';
                 const when = x.at_h == null ? '' : x.at_h < 1 ? Math.round(x.at_h * 60) + 'm in' : x.at_h < 48 ? Math.round(x.at_h) + 'h in' : Math.round(x.at_h / 24) + 'd in';
                 const bk = full ? ' <span class="mvq">(' + when + ': ' + ['pin', 'poly', 'kalshi'].filter(b => x.books && x.books[b] != null)
                     .map(b => nm[b] + ' ' + (x.books[b] >= 0 ? '+' : '') + Math.round(x.books[b]) + '¢').join(' · ') + ')</span>' : '';
-                parts.push(lab[k] + ' <b>' + esc(side(k, x.dir)) + '</b> ' + x.state.toUpperCase() + bk + ' · ' + smoke);
+                parts.push('🔥 ' + lab[k] + ' <b>' + esc(side(k, x.dir)) + '</b> ' + x.state.toUpperCase() + smoke + bk);
             } else if (x.state === 'watching') {
                 if (full) parts.push(lab[k] + ' no move yet');
             } else if (x.state === 'pass') {
@@ -819,7 +819,7 @@
             if (old && old === n) return '<span class="mvl mvw">🔥 opened before we were recording — the buttons follow 💨, the move since</span>';
             return '';
         }
-        return '<span class="mvl" title="🔥 = Pinnacle\'s first move off the first price we recorded, whenever it came, in cents at one line: 2¢+ = PLAY that side, 1-2¢ = LEAN. 💨 = whether the books have kept moving that way since.">🔥 ' + parts.join(' &nbsp; ') + '</span>';
+        return '<span class="mvl" title="🔥 = Pinnacle\'s first move off the first price we recorded, whenever it came: 2¢+ = PLAY that side, 1-2¢ = LEAN. 💨 = the books are still moving that way since the open; no 💨 = they aren\'t.">' + parts.join(' &nbsp; ') + '</span>';
     }
     function steamLine(g) {
         const s = g.steam; if (!s) return '';
