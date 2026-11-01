@@ -7231,6 +7231,62 @@ def test_line_tape_presheet() -> None:
     check("the tape's game list and the venue walk carry pre-sheet games", True)
 
 
+def test_move_rule() -> None:
+    """THE MOVE RULE (Nov 1 2026): Pinnacle's first move off its open picks the side."""
+    import app as _app
+    from datetime import datetime, timezone, timedelta
+    H = 3600e3
+    o = datetime(2026, 11, 2, 1, 0, tzinfo=timezone.utc)          # after the epoch
+    start = o + timedelta(days=5)
+    oms, sms = int(o.timestamp() * 1000), int(start.timestamp() * 1000)
+    sl = _app._STEAM_SLOPE_SCAN[("NCAAF", "spread")]
+    def nums(*pts):                                                # (hours after open, cents moved toward home)
+        return {"pin": [(oms + int(h * H), round(3.5 + c / sl, 4), -3.5) for h, c in pts], "poly": [], "kalshi": []}
+    r = _app._move_read("NCAAF", nums((0, 0), (0.5, 3.0)), sl, sms, oms + int(3 * H))
+    check("move rule: 3¢ toward home in the first hour = PLAY home, decided at 1h",
+          r["state"] == "play" and r["dir"] == 1 and r["at_h"] == 1.0 and r["cents"] == 3.0, str(r))
+    r = _app._move_read("NCAAF", nums((0, 0), (0.5, -1.0), (1.5, -1.5)), sl, sms, oms + int(3 * H))
+    check("move rule: 1.5¢ toward away by 2h = LEAN away, decided at 2h",
+          r["state"] == "lean" and r["dir"] == -1 and r["at_h"] == 2.0, str(r))
+    r = _app._move_read("NCAAF", nums((0, 0), (0.5, 0.4)), sl, sms, oms + int(3 * H))
+    check("move rule: under 1¢ by 2h = PASS", r["state"] == "pass" and not r.get("dir"), str(r))
+    r = _app._move_read("NCAAF", nums((0, 0), (0.2, 1.0)), sl, sms, oms + int(0.5 * H))
+    check("move rule: inside the first hour = watching, reads at +1h",
+          r["state"] == "watching" and r["locks_ms"] == oms + int(H), str(r))
+    old = int(datetime(2026, 10, 30, tzinfo=timezone.utc).timestamp() * 1000)
+    on = {"pin": [(old, 3.5, -3.5), (old + int(H), 4.9, -3.5)], "poly": [], "kalshi": []}
+    check("move rule: a football first read before the box watched every listing is not an open",
+          _app._move_read("NCAAF", on, sl, old + int(48 * H), old + int(3 * H))["state"] == "old_open")
+    check("move rule: an NBA first read 20h before the start is Pinnacle's open",
+          _app._move_read("NBA", on, sl, old + int(20 * H), old + int(3 * H))["state"] == "play")
+    check("move rule: no Pinnacle read = no_open",
+          _app._move_read("NCAAF", {"pin": []}, sl, sms, oms)["state"] == "no_open")
+
+    # a card: the model likes the home side, Pinnacle moved toward the away side → the pick flips
+    class _Q:
+        def __init__(self, rows): self.rows = rows
+        def __getattr__(self, name): return lambda *a, **k: self
+        def execute(self):
+            class R: pass
+            r = R(); r.data = self.rows; self.rows = []; return r
+    class _SB:
+        def __init__(self, rows): self.rows = rows
+        def table(self, name): return _Q(list(self.rows))
+    def tape(h, line, ph, pa):
+        return {"at": (o + timedelta(hours=h)).isoformat(), "src": "pin", "mt": "spread", "line": line,
+                "p_home": ph, "p_away": pa, "event_name": "A @ B"}
+    rows = [tape(0, -3.5, -110, -110), tape(0.5, -2.5, -110, -110)]     # home -3.5 → -2.5: toward away
+    g = {"event_name": "A @ B", "event_start": start.isoformat(), "home": "B", "away": "A",
+         "spread": {"side": "home", "line": -3.5, "verdict": "play", "team": "B"}}
+    _app._MOVE_CACHE.clear()
+    _app._sheet_attach_move(_SB(rows), "NCAAF", [g], o + timedelta(hours=3))
+    sp = g["spread"]
+    check("move rule card: the pick flips to the side Pinnacle moved to, PLAY, the model kept",
+          sp["side"] == "away" and sp["line"] == 3.5 and sp["verdict"] == "play"
+          and sp.get("model", {}).get("side") == "home" and g["move"]["spread"]["state"] == "play", str(sp))
+    _app._MOVE_CACHE.clear()
+
+
 def test_steam_scan() -> None:
     """Rob's chart read (Nov 1 2026): Pinnacle + the venues moving one way."""
     import app as _app
@@ -7311,7 +7367,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_steam_scan, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_steam_scan, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

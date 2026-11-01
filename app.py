@@ -2618,11 +2618,14 @@ def api_football_picks():
     _now = datetime.now(timezone.utc)
     for g in games:
         _sheet_attach_price(sport, g, _now)     # THE PRICE RULE: venue bid vs Pinnacle fair decides (Oct 27 2026)
+    _sheet_attach_move(sb, sport, games, _now)  # THE MOVE RULE: Pinnacle's first move picks the side (Nov 1 2026)
     _play_c, _lean_c = _price_thresholds()
     return jsonify({
         "ok": True, "sport": sport, "week_key": wk.get("week_key"),
         "games": games,
         "price_rule": {"play_c": _play_c, "lean_c": _lean_c},
+        "move_rule": {"on": _move_rule_on(), "play_c": _MOVE_PLAY_C, "lean_c": _MOVE_LEAN_C,
+                      "windows_h": list(_MOVE_WIN_H)},
         "venue_at": next((g["venue"].get("at") for g in games if isinstance(g.get("venue"), dict)), None),
         "pdf_url": _pub_url(wk.get("friday_pdf_path") or wk.get("pdf_path")),
         "picks_pdf_url": _pub_url(wk.get("picks_pdf_path")),
@@ -18046,6 +18049,14 @@ def _hand_model_sides(sb, now) -> dict:
         rows = _sheet_touch_rows_cached(sb, now)
     except Exception:
         return out
+    if _move_rule_on():
+        # THE MOVE RULE names the button now (Nov 1 2026) — a bet on the move's
+        # side against the model is not MODEL FLIPPED. Copies: the walk's cached
+        # rows quote the venues and must stay as built.
+        import copy as _copy
+        rows = [(sp, r, _copy.deepcopy(g)) for sp, r, g in rows]
+        for sp in {t[0] for t in rows}:
+            _sheet_attach_move(sb, sp, [t[2] for t in rows if t[0] == sp], now)
     for sport, r, g in rows:
         mid = r.get("market_id")
         if not mid:
@@ -30576,6 +30587,192 @@ def _sheet_attach_steam(sb, sport: str, games: list) -> None:
                 g["steam"] = out
     except Exception as e:
         app.logger.warning("steam attach %s: %s", sport, e)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# THE MOVE RULE (Nov 1 2026, Rob: "you are publishing a model, that has
+# consistently cost me money, for over a month… NOW WHAT?"). The model no
+# longer picks a side on the sheets. PINNACLE'S FIRST MOVE OFF ITS OWN OPEN
+# does: its devigged price at one line (a line move counts as the price it
+# takes to hold the old number), 1 hour after its first read of the market —
+# ≥ _MOVE_PLAY_C toward a side = PLAY that side; otherwise read again at 2
+# hours: ≥ PLAY = PLAY, ≥ _MOVE_LEAN_C = LEAN, else PASS. WHEN the bet goes in
+# afterwards doesn't change what the window said (Rob: "WHEN you bet it is
+# pointless") — the price does. Why: on Polymarket's football tape (Aug 29 →
+# Oct 6) college first-hour moves of 2¢+ went 17-3 and NFL first-2h 9-3,
+# while the full open→close move predicted nothing at scale. NOT validated on
+# Pinnacle's open yet — the rule IS the test; every pick is graded off the
+# final on the card. An open counts only when the box was watching: football
+# from _MOVE_OPEN_EPOCH (the pre-sheet tape, Nov 1 2026); NBA / NHL also when
+# the first read sits ≥ _MOVE_OPEN_LEAD_H before the start (Pinnacle opens
+# them ~21-25h out, and those sheets were already taped). Else `old_open`:
+# PASS, no pick. The puck line is not on the rule (PASS). The model's number
+# stays on the card as information (`model_verdict`, `move.model_side`).
+# Kill switch `machine_flags move_rule` (off = the model's verdicts again).
+# ══════════════════════════════════════════════════════════════════════
+MOVE_RULE_ENABLED = True
+_MOVE_PLAY_C = 2.0
+_MOVE_LEAN_C = 1.0
+_MOVE_WIN_H = (1.0, 2.0)
+_MOVE_OPEN_EPOCH_MS = int(datetime(2026, 11, 1, 16, 0, tzinfo=timezone.utc).timestamp() * 1000)
+_MOVE_OPEN_LEAD_H = 18.0
+_MOVE_CACHE: dict = {}
+
+
+def _move_rule_on() -> bool:
+    return bool(_machine_flag("move_rule", MOVE_RULE_ENABLED))
+
+
+def _move_open_ok(sport: str, open_ms: int, start_ms: int) -> bool:
+    """Pure. Is the tape's first Pinnacle read of this market its real open?"""
+    if open_ms >= _MOVE_OPEN_EPOCH_MS:
+        return True
+    return (str(sport).upper() in ("NBA", "NHL")
+            and (start_ms - open_ms) >= _MOVE_OPEN_LEAD_H * 3600e3)
+
+
+def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
+               play_c: float = _MOVE_PLAY_C, lean_c: float = _MOVE_LEAN_C) -> dict:
+    """Pure. One market's first move off Pinnacle's open. `nums` =
+    _steam_numbers (each book's (t_ms, number, line), home / over). Returns
+    {state: play|lean|pass|watching|no_open|old_open, dir (+1 home/over),
+    cents (Pinnacle's move toward dir), at_h (the window that decided),
+    open_ms, locks_ms (when a watching read decides), books {src: cents}}."""
+    pin = nums.get("pin") or []
+    if not pin or pin[0][0] >= start_ms:
+        return {"state": "no_open"}
+    o = pin[0][0]
+    if not _move_open_ok(sport, o, start_ms):
+        return {"state": "old_open", "open_ms": o}
+    H = 3600e3
+    lim = min(now_ms, start_ms)
+
+    def mv(src, t):
+        pts = nums.get(src) or []
+        cur = _steam_at(pts, t)
+        if cur is None or not pts:
+            return None
+        ref = _steam_at(pts, o) or pts[0]
+        if ref[0] > t:
+            return None
+        return round((cur[1] - ref[1]) * slope, 2)
+
+    out = {"open_ms": o}
+    w1, w2 = _MOVE_WIN_H
+    for wh in (w1, w2):
+        t = o + int(wh * H)
+        closed = t <= lim or start_ms <= now_ms
+        if not closed:
+            m = mv("pin", min(lim, t)) or 0.0
+            out.update({"state": "watching", "locks_ms": int(t),
+                        "so_far_c": m, "dir": (1 if m > 0 else -1) if m else 0})
+            return out
+        te = min(t, start_ms)
+        m = mv("pin", te) or 0.0
+        if abs(m) >= play_c or wh == w2:
+            d = 1 if m > 0 else -1
+            st = "play" if abs(m) >= play_c else "lean" if abs(m) >= lean_c else "pass"
+            books = {}
+            for src in ("pin", "poly", "kalshi"):
+                v = mv(src, te)
+                if v is not None:
+                    books[src] = round(v * d, 1)
+            out.update({"state": st, "dir": d if st != "pass" else 0, "cents": round(abs(m), 1),
+                        "at_h": wh, "decided_ms": int(te), "books": books})
+            return out
+    return {"state": "pass", **out}
+
+
+def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
+    """THE MOVE RULE on every sheet game (see above): `g.move` per market and
+    — while the rule is on — each pick's side + verdict from it, finals
+    included (the record on the card is the rule's). One line_tape read per
+    sport, cached 2 min. Never raises."""
+    if not games:
+        return
+    now = now or datetime.now(timezone.utc)
+    sport = str(sport or "").upper()
+    keys = (("ml", "ml"), ("total", "total")) if sport == "NHL" else \
+        (("ml", "ml"), ("spread", "spread"), ("total", "total"))
+    keys = tuple(kv for kv in keys if (sport, kv[1]) in _STEAM_SLOPE_SCAN)
+    if not keys:
+        return
+    rule_on = _move_rule_on()
+    try:
+        starts = [d for d in (_parse_iso(g.get("event_start")) for g in games if g.get("event_start")) if d]
+        if not starts:
+            return
+        lo, hi = min(starts) - timedelta(hours=1), max(starts) + timedelta(hours=1)
+        ck = (sport, lo.isoformat()[:13], hi.isoformat()[:13])
+        hit = _MOVE_CACHE.get(ck)
+        if hit and _time.monotonic() - hit[0] < 120:
+            by = hit[1]
+        else:
+            rows = _sb_paged(lambda: (sb.table("line_tape")
+                                      .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_name")
+                                      .eq("sport", sport).in_("mt", [kv[1] for kv in keys])
+                                      .gte("event_start", lo.isoformat()).lt("event_start", hi.isoformat())
+                                      .order("at").order("id")), 120)
+            by = {}
+            for r in rows:
+                by.setdefault(r.get("event_name"), []).append(r)
+            for k in [k for k in _MOVE_CACHE if k[0] == sport]:
+                _MOVE_CACHE.pop(k, None)
+            _MOVE_CACHE[ck] = (_time.monotonic(), by)
+    except Exception as e:
+        app.logger.warning("move attach %s: %s", sport, e)
+        return
+    now_ms = int(now.timestamp() * 1000)
+    vp_of = lambda g: ((g.get("venue") or {}).get("picks") or {}) if isinstance(g.get("venue"), dict) else {}
+    for g in games:
+        try:
+            sd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
+            if sd is None:
+                continue
+            rs = by.get(g.get("event_name")) or []
+            sms = int(sd.timestamp() * 1000)
+            mv_all = {}
+            for key, mt in keys:
+                rd = _move_read(sport, _steam_numbers(sport, mt, rs), _STEAM_SLOPE_SCAN[(sport, mt)], sms, now_ms)
+                mv_all[key] = rd
+                pk = g.get(key)
+                if not isinstance(pk, dict):
+                    continue
+                pk.setdefault("model_verdict", pk.get("verdict"))
+                rd["model_side"] = pk.get("side")
+                pk["move"] = rd
+                if not rule_on:
+                    continue
+                if rd.get("state") in ("play", "lean"):
+                    d = rd.get("dir")
+                    want = ("over" if d > 0 else "under") if key == "total" else ("home" if d > 0 else "away")
+                    if pk.get("side") and pk.get("side") != want:
+                        npk = _sheet_flip_pick(g, key, pk, {}, sport=sport)
+                        npk["move"] = rd
+                        vp = vp_of(g)
+                        q = vp.get(key) if isinstance(vp.get(key), dict) else None
+                        if q is not None:
+                            vp[key] = _sheet_mirror_quote(q, mt, key)
+                        if isinstance(npk.get("pv"), dict):
+                            npk.pop("pv", None)
+                        pk = npk
+                        g[key] = pk
+                    pk["verdict"] = rd["state"]
+                else:
+                    pk["verdict"] = "pass"
+                gr = _sheet_grade_pick(g, key, pk)
+                if gr:
+                    pk["grade"] = gr
+                else:
+                    pk.pop("grade", None)
+            if rule_on and isinstance(g.get("puck"), dict):
+                g["puck"].setdefault("model_verdict", g["puck"].get("verdict"))
+                g["puck"]["verdict"] = "pass"
+                g["puck"]["move"] = {"state": "not_on_rule"}
+            if mv_all:
+                g["move"] = mv_all
+        except Exception as e:
+            app.logger.warning("move attach %s %s: %s", sport, g.get("event_name"), e)
 
 
 def _steam_window_scan(sport: str, mts: tuple, games: list, detail=None) -> dict:
