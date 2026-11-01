@@ -318,7 +318,7 @@ def fetch(raw, timeout=6):
             if len(buf) > _MAX_BYTES:
                 break
         page = buf.decode(r.encoding or "utf-8", errors="replace")
-        out["url"] = final if len(final) < 2000 else url
+        out["url"] = final if len(final) < 2000 and "/blocked" not in final else url
         out["store"] = store_name(final)
         facts = parse(page, final)
         if r.status_code >= 400 or (facts["title"] and facts["title"].lower().startswith(_JUNK_TITLES)):
