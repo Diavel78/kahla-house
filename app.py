@@ -30652,6 +30652,126 @@ def _steam_corr_scan(sport: str, mts: tuple, games: list) -> dict:
     return out
 
 
+# ── THE OPEN-MOVE SCAN (Nov 1 2026, Rob: "My guess is the first move from
+# open is the sharps, they drive the move"). Football history lives in
+# pm_snapshots (Polymarket mids every ~2 min, Aug → Oct 6 2026, when that
+# lane was shut off). For every finished game: the home moneyline's price at
+# fixed points from the OPEN (the first TIGHT book — a listing stub is not a
+# price) and before the start, plus the final. The analysis runs off these
+# rows (read-only, shared-secret, chunked: ?sport=&day=&days=&skip=&n=).
+_MOVE_OPEN_PTS = (0, 1, 2, 3, 6, 12, 24, 48)
+_MOVE_START_PTS = (48, 24, 12, 6, 3, 1, 0)
+
+
+def _move_series_points(rows: list, start_ms: int, max_w: float = 4.0) -> dict | None:
+    """Pure. One game's home-ML pm_snapshots rows (oldest first) → the price
+    (mid, cents) at each `_MOVE_OPEN_PTS` hour after the open and each
+    `_MOVE_START_PTS` hour before the start. The open = the first row whose
+    own book is ≤ max_w cents wide (no bid/ask stored = taken at face).
+    Rows at or after the start are ignored. None when no tight row."""
+    pts = []
+    for r in rows or []:
+        d = _parse_iso(r.get("captured_at")) if r.get("captured_at") else None
+        if d is None:
+            continue
+        t = int(d.timestamp() * 1000)
+        if t >= start_ms:
+            break
+        b, a = r.get("bid_c"), r.get("ask_c")
+        if b is not None and a is not None:
+            try:
+                if float(a) - float(b) > max_w or float(a) < float(b):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        try:
+            pts.append((t, float(r.get("cents"))))
+        except (TypeError, ValueError):
+            continue
+    if not pts:
+        return None
+    o = pts[0][0]
+    H = 3600e3
+
+    def at(t):
+        last = None
+        for p in pts:
+            if p[0] <= t:
+                last = p[1]
+            else:
+                break
+        return last
+    out = {"open_h": round((start_ms - o) / H, 1), "n": len(pts),
+           "o": {str(h): (at(o + int(h * H)) if o + h * H < start_ms else None) for h in _MOVE_OPEN_PTS},
+           "s": {str(h): (at(start_ms - int(h * H)) if start_ms - h * H >= o else None) for h in _MOVE_START_PTS}}
+    return out
+
+
+@app.route("/api/move-scan")
+def api_move_scan():
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    sport = (request.args.get("sport") or "NCAAF").upper()
+    az = ZoneInfo("America/Phoenix")
+    try:
+        d0 = datetime.strptime(request.args.get("day") or "", "%Y-%m-%d").replace(tzinfo=az)
+    except ValueError:
+        return jsonify({"ok": False, "error": "day=YYYY-MM-DD"}), 400
+    d1 = d0 + timedelta(days=max(1, min(4, int(request.args.get("days") or 1))))
+    skip = max(0, int(request.args.get("skip") or 0))
+    n_max = max(1, min(80, int(request.args.get("n") or 40)))
+    t0 = _time.monotonic()
+    try:
+        mk = _sb_paged(lambda: (sb.table("markets").select("id,event_name,event_start,sport")
+                                .eq("sport", sport).gte("event_start", d0.isoformat())
+                                .lt("event_start", d1.isoformat()).order("event_start").order("id")), 5)
+        gr = _sb_paged(lambda: (sb.table("game_results").select("event_start,home,away,home_score,away_score")
+                                .eq("sport", sport).gte("event_start", (d0 - timedelta(hours=12)).isoformat())
+                                .lt("event_start", (d1 + timedelta(hours=12)).isoformat())), 5)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"read: {e}"[:200]}), 502
+    finals: dict = {}
+    for g in gr:
+        finals.setdefault((_pair_team_key(g.get("away")), _pair_team_key(g.get("home"))), []).append(g)
+    todo = []
+    for m in mk:
+        aw, _, hm = str(m.get("event_name") or "").split(" · ")[0].partition(" @ ")
+        sd = _parse_iso(m.get("event_start")) if m.get("event_start") else None
+        if not hm or sd is None:
+            continue
+        best = None
+        for g in finals.get((_pair_team_key(aw), _pair_team_key(hm)), []):
+            gd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
+            if gd is not None and abs((gd - sd).total_seconds()) <= 6 * 3600:
+                best = g
+                break
+        if best:
+            todo.append((m, best, sd))
+    games, done = [], 0
+    for m, g, sd in todo[skip:skip + n_max]:
+        if _time.monotonic() - t0 > 50:
+            break
+        done += 1
+        try:
+            rows = _sb_paged(lambda: (sb.table("pm_snapshots").select("captured_at,cents,bid_c,ask_c")
+                                      .eq("market_id", m["id"]).eq("source", "pmm").eq("market_type", "ml")
+                                      .eq("side", "home").lt("captured_at", sd.isoformat())
+                                      .order("captured_at").order("id")), 15)
+        except Exception as e:
+            games.append({"g": m.get("event_name"), "err": str(e)[:80]})
+            continue
+        s = _move_series_points(rows, int(sd.timestamp() * 1000))
+        if s:
+            games.append({"g": m.get("event_name"), "start": m.get("event_start"),
+                          "hs": g.get("home_score"), "as": g.get("away_score"), **s})
+    return jsonify({"ok": True, "sport": sport, "from": d0.date().isoformat(), "matched": len(todo),
+                    "skip": skip, "done": done, "next": (skip + done if skip + done < len(todo) else None),
+                    "games": games, "ms": int((_time.monotonic() - t0) * 1000)})
+
+
 @app.route("/api/steam-scan")
 def api_steam_scan():
     """READ-ONLY (shared-secret, site-curl). Grade 'follow the books' over

@@ -7252,6 +7252,12 @@ def test_steam_scan() -> None:
               and "function shortTeam(name, sport)" in html and ".map(shortTeam)" not in html)
     cs = _app._steam_corr_scan("NHL", ("ml",), [("A @ B", {"home": 3, "away": 2}, sms, {"ml": mn})])
     check("steam corr: every game's move vs the result", any(r.get("pin", {}).get("n") == 1 for r in cs["ml"]))
+    mrows = [{"captured_at": at(30), "cents": 50, "bid_c": 30, "ask_c": 70},   # a stub: skipped
+             {"captured_at": at(29), "cents": 55, "bid_c": 54, "ask_c": 56},
+             {"captured_at": at(27), "cents": 60, "bid_c": 59, "ask_c": 61},
+             {"captured_at": at(2), "cents": 62, "bid_c": 61, "ask_c": 63}]
+    ms = _app._move_series_points(mrows, sms)
+    check("move scan: the open is the first tight book", ms is not None and ms["open_h"] == 29.0 and ms["o"]["0"] == 55 and ms["o"]["3"] == 60 and ms["s"]["0"] == 62)
     check("steam window scan: open-anchored rows grade", any(r["w"] == "open→start-1h" and r["rec"] == "1-0" for r in sc["windows"]))
 
 
