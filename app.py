@@ -2883,7 +2883,7 @@ def api_football_picks_debug():
             for k in ("ml", "puck", "spread", "total"):
                 pk = g.get(k)
                 if isinstance(pk, dict) and pk.get("pv"):
-                    blk[k] = {kk: pk.get(kk) for kk in ("side", "line", "verdict", "model_verdict", "flipped", "pv", "pin_fair")}
+                    blk[k] = {kk: pk.get(kk) for kk in ("side", "line", "verdict", "model_verdict", "flipped", "pv", "pin_fair", "fire")}
             sample.append(blk)
         return jsonify({"ok": True, "sport": sport, "games": len(games), "upcoming": n_up, "pin_slate": bool(pin_evs),
                         "thresholds": _price_thresholds(), "counts": counts, "sample": sample})
