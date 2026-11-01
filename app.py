@@ -30766,6 +30766,8 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
                         q = vp.get(key) if isinstance(vp.get(key), dict) else None
                         if q is not None:
                             vp[key] = _sheet_mirror_quote(q, mt, key)
+                            if q.get("side"):
+                                vp[key]["side"] = npk.get("side")    # the quote now names the side it prices
                         if isinstance(npk.get("pv"), dict):
                             npk.pop("pv", None)
                         pk = npk
@@ -31328,7 +31330,7 @@ def _mcp_view(fn, path: str):
 
 
 _MCP_PICK_KEYS = ("side", "line", "verdict", "price", "fair", "market_line", "fair_market", "edge_pts",
-                  "edge_pp", "pin_fair", "chalky", "longshot", "flipped")
+                  "edge_pp", "pin_fair", "chalky", "longshot", "flipped", "fire", "smoke")
 
 
 def _mcp_board(sport=None, hours=36) -> dict:
