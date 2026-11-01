@@ -7262,6 +7262,20 @@ def test_line_tape_presheet() -> None:
 def test_fire_side() -> None:
     """🔥 = the first move is the button; 💨 = the move since, agrees or not (Nov 1 2026)."""
     import app as _app
+    # KEY NUMBERS (Nov 1 2026, Ball State @ UMass): Pinnacle −3.5 even → −3 at −114 is a
+    # 2.5¢ move to Ball State +3.5, not the flat slope's zero
+    from datetime import datetime as _dtk, timezone as _tzk, timedelta as _tdk
+    check("key hop: −3 @ 51.3 → −3.5 = 47.45 (the 3's mass)", abs(_app._key_hop_c("NCAAF", -3.0, 51.3, -3.5) - 47.45) < 0.05)
+    check("key hop: NFL −7 @ 50 → −6.5 adds the 7", abs(_app._key_hop_c("NFL", -7.0, 50.0, -6.5) - 52.75) < 0.05)
+    _k0 = _dtk(2026, 11, 1, 20, 26, tzinfo=_tzk.utc)
+    _kr = [{"at": _k0.isoformat(), "src": "pin", "mt": "spread", "line": -3.5, "p_home": -108, "p_away": -108},
+           {"at": (_k0 + _tdk(minutes=75)).isoformat(), "src": "pin", "mt": "spread", "line": -3.0, "p_home": -114, "p_away": -102}]
+    _kn = _app._steam_numbers("NCAAF", "spread", _kr)
+    _km = _app._move_read("NCAAF", _kn, 2.6, int((_k0 + _tdk(days=3)).timestamp() * 1000), int((_k0 + _tdk(hours=3)).timestamp() * 1000))
+    check("key hop: Ball State's half point off the 3 is a 🔥 PLAY to the away side",
+          _km.get("state") == "play" and _km.get("dir") == -1, str(_km))
+    _kb = _app._steam_numbers("NBA", "spread", [dict(r, line=-r["line"]) for r in _kr])
+    check("key hop: football spreads only (NBA keeps the slope)", _kb["pin"][1][1] != _kn["pin"][1][1])
     import os as _os
     _rt = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
     for _f in ("bet_sheets.html", "football_picks.html"):

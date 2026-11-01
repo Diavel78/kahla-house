@@ -30853,6 +30853,37 @@ _STEAM_SLOPE_SCAN = {**_STEAM_SLOPE, ("NHL", "total"): 17.0,
                      **{(s, "ml"): 1.0 for s in ("NCAAF", "NFL", "NBA", "NHL")}}
 
 
+def _key_hop_c(sport: str, ln: float, p: float, ref: float) -> float:
+    """Pure. A football home-cover price `p` (cents, devigged; a whole line's
+    price excludes the push) at home line `ln` carried to home line `ref` across
+    the key numbers: every integer margin crossed adds / removes its own mass
+    (`pmm_push_rates`, 3 and 7 the heavy ones). KEY NUMBERS (Nov 1 2026, Rob on
+    Ball State @ UMass, Pinnacle −3.5 even → −3 at −114: "12 basis points is a
+    huge move"): a flat cents-a-point slope read that as no move; Pinnacle's own
+    +3.5 price went 50 → 52.8."""
+    from pmm_push_rates import _lookup_push_rate as _pr
+
+    def mass(k):
+        return 0.0 if k == 0 else float(_pr(sport, "spread", float(k)) or 0.0)
+    whole = lambda x: abs(x - round(x)) < 1e-6
+    T, T0 = -float(ln), -float(ref)                    # home covers when margin > T
+    q = float(p) / 100.0
+    if whole(T):
+        q *= 1.0 - mass(int(round(T)))
+    lo, hi = sorted((T, T0))
+    k = int(math.floor(lo)) + 1
+    while k <= hi + 1e-9:
+        q += mass(k) if T0 < T else -mass(k)
+        k += 1
+    if whole(T0):
+        d = 1.0 - mass(int(round(T0)))
+        q = q / d if d > 0 else q
+    return min(99.5, max(0.5, q * 100.0))
+
+
+_KEY_HOP_SPORTS = ("NFL", "NCAAF")
+
+
 def _steam_numbers(sport: str, mt: str, rows: list) -> dict:
     """Pure. One game-market's line_tape rows (oldest first, home / over
     orientation) → {pin|poly|kalshi: [(t_ms, number, line)]}. number = the
@@ -30861,6 +30892,15 @@ def _steam_numbers(sport: str, mt: str, rows: list) -> dict:
     moneyline's number is the home price in cents, its line 0."""
     slope = _STEAM_SLOPE_SCAN.get((sport, mt)) or 2.6
     out = {"pin": [], "poly": [], "kalshi": []}
+    ref = None                     # football spreads: every read priced at Pinnacle's open line
+    if mt == "spread" and str(sport or "").upper() in _KEY_HOP_SPORTS:
+        for r in rows or []:
+            if r.get("mt") == mt and r.get("src") == "pin" and r.get("line") is not None:
+                try:
+                    ref = float(r["line"])
+                except (TypeError, ValueError):
+                    ref = None
+                break
 
     def f(x):
         try:
@@ -30887,7 +30927,11 @@ def _steam_numbers(sport: str, mt: str, rows: list) -> dict:
         if mt == "ml":
             out[r["src"]].append((int(d.timestamp() * 1000), round(p, 2), 0.0))
             continue
-        base = ln if mt == "total" else -ln
+        if ref is not None and abs(ln - ref) > 1e-6:
+            p = _key_hop_c(str(sport).upper(), ln, p, ref)
+            base = -ref
+        else:
+            base = ln if mt == "total" else -ln
         out[r["src"]].append((int(d.timestamp() * 1000), round(base + (p - 50.0) / slope, 2), ln))
     return out
 
