@@ -982,11 +982,35 @@
         const p = _ch.g[_ch.mt];
         _ch.side = (p && p.side && chartSides(_ch.mt).includes(p.side)) ? p.side : chartSides(_ch.mt)[_ch.mt === 'total' ? 0 : 1];
     }
+    // THE SIDE'S OWN RUNG (Nov 1 2026, Rob on Ball State @ UMass, Pinnacle UMass −3:
+    // "the line is +3.5, not 2.5"): the chart opened on the pick's rung (UMass −2.5) and
+    // the other side read its mirror (+2.5). A side tap anchors at THAT side's own
+    // bettable half of Pinnacle's line — dog +3 → +3.5, over 49 → 48.5 — home / over terms.
+    function chartSideRung(g, mt, side) {
+        const L = (g && g.line) || {}, half = x => Math.abs(x - Math.round(x)) > 0.01;
+        if (mt === 'spread' && L.spread_home != null) {
+            const own = side === 'home' ? Number(L.spread_home) : -Number(L.spread_home);
+            const r = half(own) ? own : own + 0.5;
+            return side === 'home' ? r : -r;
+        }
+        if (mt === 'total' && L.total != null) {
+            const t = Number(L.total);
+            return half(t) ? t : (side === 'over' ? t - 0.5 : t + 0.5);
+        }
+        return null;
+    }
     function chartSet(k, v) {
         if (!_ch) return;
         _ch[k] = v; _ch.hover = null;
         if (k === 'mt') chartPickSide();
         renderChart();
+        if (k === 'side') {
+            const p = _ch.g[_ch.mt], r = chartSideRung(_ch.g, _ch.mt, v);
+            const want = (p && p.side === v) ? null : r;          // the pick's own side keeps the sheet's rung
+            const cur = _ch.anchor && _ch.anchor.mt === _ch.mt ? Number(_ch.anchor.line) : null;
+            if (want != null && cur !== want) { _ch.anchor = { mt: _ch.mt, line: want }; loadChart(); }
+            else if (want == null && cur != null) { _ch.anchor = null; loadChart(); }   // back to the sheet's rung
+        }
         if (k === 'mt' && _ch.anchor && _ch.anchor.mt !== v) { _ch.anchor = null; loadChart(); }
     }
     // ONE LINE, EVERY BOOK (Rob, Oct 29 2026: "I need one chart"): pick the line,

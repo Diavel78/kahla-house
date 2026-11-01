@@ -7268,6 +7268,8 @@ def test_fire_side() -> None:
         _h = open(_os.path.join(_rt, "templates", _f), encoding="utf-8").read()
         check(f"fire: {_f} draws the football ML box while its 🔥 stands",
               "if (g.ml && g.ml.fire) out.push(mlMarket(g" in _h)
+        check(f"chart: {_f} anchors a side tap at that side's own rung (Ball State +3.5, not the mirrored +2.5)",
+              "function chartSideRung(" in _h and "chartSideRung(_ch.g, _ch.mt, v)" in _h)
     from datetime import datetime, timezone, timedelta
     now = datetime(2026, 11, 2, 1, 0, tzinfo=timezone.utc)
     st = (now + timedelta(hours=6)).isoformat()
