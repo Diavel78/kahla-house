@@ -6715,6 +6715,32 @@ def test_kalshi_venue_math() -> None:
     check("kalshi: the Lakers @ Clippers event is found from ESPN's names",
           (kv.pick_event_row(ev, "Los Angeles Lakers", "LA Clippers", None) or {}).get("event_ticker")
           == "KXNBAGAME-26OCT28LALLAC")
+    # A SCHOOL'S WORD INSIDE ANOTHER SCHOOL'S NAME (Nov 1 2026: Kentucky @
+    # Tennessee rested on the Western Kentucky @ Middle Tennessee spread)
+    check("kalshi: 'Western Kentucky vs Middle Tennessee' is not Kentucky @ Tennessee",
+          kv.pick_event_row([{"event_ticker": "KXNCAAFSPREAD-26NOV07WKUMTU",
+                              "title": "Western Kentucky at Middle Tennessee"},
+                             {"event_ticker": "KXNCAAFSPREAD-26NOV07UKTENN",
+                              "title": "Kentucky at Tennessee"}],
+                            "Kentucky Wildcats", "Tennessee Volunteers", None)["event_ticker"]
+          == "KXNCAAFSPREAD-26NOV07UKTENN")
+    check("kalshi: a qualified school never matches alone",
+          not TM("Western Kentucky at Middle Tennessee", "Kentucky Wildcats")
+          and not TM("Western Kentucky at Middle Tennessee", "Tennessee Volunteers")
+          and TM("Western Kentucky at Middle Tennessee", "Western Kentucky Hilltoppers")
+          and TM("Western Kentucky at Middle Tennessee", "Middle Tennessee Blue Raiders"))
+    check("kalshi: 'Ohio St.' is Ohio State, not Ohio; 'Ohio' is not Ohio State",
+          TM("Ohio St. at Michigan", "Ohio State Buckeyes") and not TM("Ohio St. at Michigan", "Ohio Bobcats")
+          and not TM("Ohio at Akron", "Ohio State Buckeyes") and TM("Ohio at Akron", "Ohio Bobcats")
+          and not TM("Ohio St. at Michigan St.", "Michigan Wolverines")
+          and TM("Ohio St. at Michigan St.", "Michigan State Spartans"))
+    check("kalshi: Texas / Texas A&M / North Texas / Georgia Southern / Miami (OH) stay apart",
+          not TM("Texas A&M at LSU", "Texas Longhorns") and TM("Texas A&M at LSU", "Texas A&M Aggies")
+          and not TM("Texas at Oklahoma", "Texas A&M Aggies") and not TM("Texas at Oklahoma", "North Texas Mean Green")
+          and not TM("Georgia Southern at Troy", "Georgia Bulldogs")
+          and not TM("Miami (OH) at Ohio", "Miami Hurricanes") and TM("Miami (OH) at Ohio", "Miami (OH) RedHawks")
+          and not TM("North Carolina St. at Duke", "North Carolina Tar Heels")
+          and TM("Kansas St. at Baylor", "Kansas State Wildcats") and TM("Kansas City at Denver", "Kansas City Chiefs"))
     check("kalshi: a school code counts on its own ('UCF Knights' finds 'Baylor at UCF', Oct 28 2026)",
           TM("Baylor at UCF", "UCF Knights") and TM("SMU at TCU", "SMU Mustangs")
           and not TM("UCF wins by over 1.5 points", "Baylor Bears"))

@@ -801,7 +801,50 @@ def team_mentioned(text: str, team: str) -> bool:
     # the school's code and counts on its own.
     toks += [w.lower() for w in re.findall(r"[A-Za-z&]+", str(team or ""))
              if w.isupper() and 2 <= len(w) <= 4 and w.isalpha()]
-    return any(f" {t} " in tx for t in toks)
+    tw = tx.split()
+    return any(_tok_hit(tw, words, t) for t in toks)
+
+
+# A SCHOOL'S WORD INSIDE ANOTHER SCHOOL'S NAME (Nov 1 2026: Kentucky @
+# Tennessee rested on KXNCAAFSPREAD-26NOV07WKUMTU — 'Western Kentucky vs
+# Middle Tennessee' named both teams' words). A token counts only where the
+# words around it agree with OUR name: 'western kentucky' is not Kentucky,
+# 'ohio st' is not Ohio, 'ohio' alone is not Ohio State.
+_QUAL_PRE = {"western", "eastern", "northern", "southern", "central", "middle",
+             "north", "south", "east", "west", "coastal"}
+_QUAL_POST = {"state", "tech", "am", "atlantic", "international", "intl", "oh",
+              "southern", "christian"}
+
+
+def _qn(w):
+    return "state" if w in ("st", "state") else w
+
+
+def _tok_hit(tw: list, kw: list, t: str) -> bool:
+    """PURE. Token `t` of our name `kw` appears in the text words `tw` as OUR
+    school, not a qualified sibling (see _QUAL_PRE / _QUAL_POST)."""
+    if t not in kw:
+        return t in tw
+    j = kw.index(t)
+    for i, w in enumerate(tw):
+        if w != t:
+            continue
+        a, b = i, j
+        while a > 0 and b > 0 and _qn(tw[a - 1]) == _qn(kw[b - 1]):
+            a, b = a - 1, b - 1
+        tp = _qn(tw[a - 1]) if a > 0 else None
+        kp = _qn(kw[b - 1]) if b > 0 else None
+        if tp != kp and (tp in _QUAL_PRE or kp in _QUAL_PRE):
+            continue
+        a, b = i, j
+        while a + 1 < len(tw) and b + 1 < len(kw) and _qn(tw[a + 1]) == _qn(kw[b + 1]):
+            a, b = a + 1, b + 1
+        tn = _qn(tw[a + 1]) if a + 1 < len(tw) else None
+        kn = _qn(kw[b + 1]) if b + 1 < len(kw) else None
+        if tn != kn and (tn in _QUAL_POST or kn in _QUAL_POST):
+            continue
+        return True
+    return False
 
 
 def _num(s):
