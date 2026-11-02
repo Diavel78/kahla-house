@@ -20179,14 +20179,22 @@ def _hand_move_plan(rows, our_price_c, our_qty, now_ts: float, collapse_pct: flo
     return "stay", det
 
 
+_HAND_DROP_MAX_C = 3.0              # a vanish drop moves at most this far under the departure rung
+
+
 def _hand_drop_target(ladder, p_c, our_price_c, our_qty, min_pct):
     """Pure. The rung to drop to after a vanish at p_c: the fat seat
     (`_hand_fat_seat`, the same stacked test the thin-touch guard uses)
     among the rungs under p_c; None when nothing rests below. Selftest
     `test_hand_move_plan`."""
+    # THE DROP IS A RUNG OR TWO, NEVER A CLIFF (Nov 1 2026, LA Tech @ Troy
+    # O 46.5: every bid near 48¢ vanished, the only rung left was the venue's
+    # 1¢ placeholder, and the order was amended 48¢ → 1¢). Only rungs within
+    # _HAND_DROP_MAX_C under the departure rung count; none there → stay.
     try:
         rows = sorted([(float(p), float(q)) for p, q in (ladder or [])
-                       if p is not None and q is not None and float(p) < float(p_c) - 1e-9],
+                       if p is not None and q is not None and float(p) < float(p_c) - 1e-9
+                       and float(p) >= float(p_c) - _HAND_DROP_MAX_C - 1e-9],
                       key=lambda x: -x[0])
     except (TypeError, ValueError):
         return None

@@ -3155,6 +3155,9 @@ def test_hand_thin_touch() -> None:
           f([(53.0, 500.0), (52.5, 500.0), (52.0, 3000.0)], 51.0, 5, 20.0)[0] is False)
     check("drop target with no sliver keeps the first rung under",
           _app._hand_drop_target([(52.5, 900.0), (52.0, 1000.0)], 53.0, None, 0, 20.0) == 52.5)
+    check("the vanish drop never falls off a cliff to the 1¢ placeholder (Nov 1 2026, LA Tech @ Troy 48→1)",
+          _app._hand_drop_target([(1.0, 500000.0)], 48.0, None, 0, 20.0) is None
+          and _app._hand_drop_target([(46.0, 900.0), (1.0, 500000.0)], 48.0, None, 0, 20.0) == 46.0)
     # the chase plan itself is unchanged: the guard sits in the tick between 'move' and the amend
     check("plan still says move", _app._hand_chase_plan(51.0, 52.0, 51.0, 2.0)[0] == "move")
     # the boot fallback: a REST book → our-side ladder (Oct 4 2026, the 28s-after-boot join)
