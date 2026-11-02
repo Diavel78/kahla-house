@@ -7335,6 +7335,16 @@ def test_fire_side() -> None:
     g = game()
     _app._sheet_attach_fire("MLB", [g], now)
     check("fire: a sport the tape doesn't carry is untouched", "fire" not in g["spread"])
+    # FOOTBALL ML IS A SIDE-GLANCE (Rob, Nov 2 2026: "was it a mistake to give you ML's??")
+    check("ml gate: Pinnacle's spread wins over the sheet line",
+          _app._fire_ml_spread({"pin": {"spread_home": -2.5}, "line": {"spread_home": -6.5}}) == -2.5)
+    check("ml gate: no Pinnacle → the sheet line", _app._fire_ml_spread({"line": {"spread_home": 7.0}}) == 7.0)
+    g = game(); g["move"]["ml"] = {"state": "off_rule"}
+    _app._sheet_attach_fire("NCAAF", [g], now)
+    check("fire: an off-rule football ML gets no button, not even off 💨", g["ml"]["fire"] is None, str(g["ml"]))
+    _src = open(_os.path.join(_rt, "app.py"), encoding="utf-8").read()
+    check("ml gate: the move attach puts a football ML past ±2.5 off the rule",
+          'if key == "ml" and sport in _FIRE_ML_SPREAD_SPORTS:' in _src and '"state": "off_rule"' in _src)
 
 
 def test_move_ladder() -> None:

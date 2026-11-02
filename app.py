@@ -31275,6 +31275,28 @@ def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
 # Pinnacle's fair would move with Pinnacle, not on its own); per book the
 # source with the EARLIER first read wins (`_move_merge_nums`), so a book the
 # ladder missed still reads off the line tape.
+# FOOTBALL ML IS A SIDE-GLANCE (Rob, Aug 22 2026: "It's spreads and overs and
+# unders... if the spread is like 1.5 or 2.5, then you can look"; Nov 2 2026,
+# on 🔥 ML buttons on a 28¢ UConn and a −238 UCLA: "was it a mistake to give
+# you ML's?? Get fucking real"). The ML is on the move rule only while
+# Pinnacle's spread is a pick'em (|line| ≤ 2.5); past that the spread is the
+# bet and the ML reads `off_rule` — no 🔥, no button, no row.
+_FIRE_ML_MAX_SPREAD = 2.5
+_FIRE_ML_SPREAD_SPORTS = ("NFL", "NCAAF")
+
+
+def _fire_ml_spread(g: dict):
+    """Pure. The game's current home spread: Pinnacle's, else the sheet's line."""
+    for blk in ((g.get("pin") or {}), (g.get("line") or {})):
+        v = blk.get("spread_home") if isinstance(blk, dict) else None
+        try:
+            if v is not None:
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 _MOVE_LADDER_BAND = 3.5       # rungs read around the anchor (the chart's carry reach)
 _MOVE_LADDER_TTL_S = 180
 _MOVE_LADDER_FINAL_TTL_S = 3600
@@ -31469,6 +31491,12 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
                 rd = _move_read(sport, nums, sl, sms, now_ms)
                 if anc is not None:
                     rd["anchor"] = anc
+                if key == "ml" and sport in _FIRE_ML_SPREAD_SPORTS:
+                    spl = _fire_ml_spread(g)
+                    if spl is None or abs(spl) > _FIRE_ML_MAX_SPREAD + 1e-9:
+                        rd = {"state": "off_rule", "spread_home": spl,
+                              "why": "spread is the bet (|line| > %.1f)" % _FIRE_ML_MAX_SPREAD,
+                              "first": {k: v for k, v in rd.items() if k in ("state", "dir", "cents")}}
                 mv_all[key] = rd
                 pk = g.get(key)
                 if not isinstance(pk, dict):
@@ -31566,6 +31594,8 @@ def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
                 want = _fire_want(mt, rd.get("dir")) if rd.get("state") in ("play", "lean") else None
                 sm = _fire_want(mt, (steam.get(mt) or {}).get("dir"))
                 src = "fire"
+                if rd.get("state") == "off_rule":
+                    sm = None                          # off the rule (a football ML past a pick'em): no 💨 fallback either
                 if want is None and sm is not None:
                     # NO FIRST-MOVE READ (an open we didn't record, or none yet) — the button
                     # follows 💨 rather than the board going blank (Rob, Nov 1 2026: "Give me
