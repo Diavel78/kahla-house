@@ -31426,7 +31426,10 @@ def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
 # Pinnacle's spread is a pick'em (|line| ≤ 2.5); past that the spread is the
 # bet and the ML reads `off_rule` — no 🔥, no button, no row.
 _FIRE_ML_MAX_SPREAD = 2.5
-_FIRE_ML_SPREAD_SPORTS = ("NFL", "NCAAF")
+# NBA too (Nov 2 2026, Pelicans @ Grizzlies: a +188 NO ML button off the 💨
+# fallback beside a 5.5-point spread). Hockey's ML IS the bet (the puck line is
+# the favorite's only); MLB has no tape.
+_FIRE_ML_SPREAD_SPORTS = ("NFL", "NCAAF", "NBA", "NCAAB")
 
 
 def _fire_ml_spread(g: dict):

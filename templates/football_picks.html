@@ -675,6 +675,8 @@
     // verdict as information; the play is the puck line (hockey) or the spread (NBA).
     function mlMarket(g) {
         const L = g.line || {}, M = g.model, p = g.ml;
+        // the ML is a side-glance: past a pick'em spread it reads off_rule and has no row (Rob, Nov 2 2026)
+        if (g.move && g.move.ml && g.move.ml.state === 'off_rule' && g._st !== 'final') return '';
         let mdl = '';
         if (M && M.win_home != null) {
             const wh = Number(M.win_home);
@@ -807,6 +809,12 @@
                 const bk = full ? ' <span class="mvq">(' + when + ': ' + ['pin', 'poly', 'kalshi'].filter(b => x.books && x.books[b] != null)
                     .map(b => nm[b] + ' ' + (x.books[b] >= 0 ? '+' : '') + Math.round(x.books[b]) + '¢').join(' · ') + ')</span>' : '';
                 parts.push('🔥 ' + lab[k] + ' <b>' + esc(side(k, x.dir)) + '</b> ' + x.state.toUpperCase() + smoke + bk);
+            } else if (g[k] && g[k].fire && g[k].fire_src === 'smoke' && g[k].side) {
+                // NO 🔥 READ, THE BUTTON FOLLOWS 💨 (Nov 2 2026, Rob on a NO ML LEAN with nothing
+                // above it: "not even listed as fire or smoke") — say so, every time.
+                parts.push('<span title="no first move recorded for this market — the button follows the move since the open">💨 ' + lab[k] + ' <b>'
+                    + esc(k === 'total' ? (g[k].side === 'over' ? 'Over' : 'Under') : shortTeam(g[k].side === 'home' ? g.home : g.away))
+                    + '</b> ' + String(g[k].verdict || 'lean').toUpperCase() + '</span>');
             } else if (x.state === 'watching') {
                 // one book moved alone: the 🔥 waits for a second (Rob, Nov 1 2026: "2 out of the 3 books")
                 if (full) parts.push(x.lone ? lab[k] + ' ' + nm[x.lone.src] + ' ' + Math.round(x.lone.cents) + '¢ '

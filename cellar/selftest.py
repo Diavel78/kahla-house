@@ -7394,6 +7394,13 @@ def test_fire_side() -> None:
     _src = open(_os.path.join(_rt, "app.py"), encoding="utf-8").read()
     check("ml gate: the move attach puts a football ML past ±2.5 off the rule",
           'if key == "ml" and sport in _FIRE_ML_SPREAD_SPORTS:' in _src and '"state": "off_rule"' in _src)
+    # NBA TOO (Nov 2 2026, Pelicans @ Grizzlies: a +188 NO ML LEAN off 💨, no header, beside a 5.5 spread)
+    check("ml gate: NBA's ML is on the pick'em rule, hockey's is not",
+          "NBA" in _app._FIRE_ML_SPREAD_SPORTS and "NHL" not in _app._FIRE_ML_SPREAD_SPORTS)
+    for _t in ("bet_sheets.html", "football_picks.html"):
+        _h = open(_os.path.join(_rt, "templates", _t), encoding="utf-8").read()
+        check("card names a 💨-sourced button in the header, and an off-rule ML has no row (%s)" % _t,
+              "fire_src === 'smoke'" in _h and "g.move.ml.state === 'off_rule'" in _h)
 
 
 def test_move_ladder() -> None:
