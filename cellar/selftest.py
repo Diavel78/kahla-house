@@ -7281,7 +7281,7 @@ def test_fire_side() -> None:
     _kr = [{"at": _k0.isoformat(), "src": "pin", "mt": "spread", "line": -3.5, "p_home": -108, "p_away": -108},
            {"at": (_k0 + _tdk(minutes=75)).isoformat(), "src": "pin", "mt": "spread", "line": -3.0, "p_home": -114, "p_away": -102}]
     _kn = _app._steam_numbers("NCAAF", "spread", _kr)
-    _km = _app._move_read("NCAAF", _kn, 2.6, int((_k0 + _tdk(days=3)).timestamp() * 1000), int((_k0 + _tdk(hours=3)).timestamp() * 1000))
+    _km = _app._move_read("NCAAF", _kn, 2.6, int((_k0 + _tdk(days=3)).timestamp() * 1000), int((_k0 + _tdk(hours=3)).timestamp() * 1000), need=1)
     check("key hop: Ball State's half point off the 3 is a 🔥 PLAY to the away side",
           _km.get("state") == "play" and _km.get("dir") == -1, str(_km))
     _kb = _app._steam_numbers("NBA", "spread", [dict(r, line=-r["line"]) for r in _kr])
@@ -7338,29 +7338,51 @@ def test_fire_side() -> None:
 
 
 def test_move_rule() -> None:
-    """🔥 THE FIRST MOVE (Nov 1 2026): the first read is the open; the first ≥1¢ move off it, any time, is the fire."""
+    """🔥 THE FIRST MOVE, 2 OF 3 BOOKS (Nov 1 2026): each book's first read is its open; the first
+    moment two books have each moved ≥1¢ the same way off their own opens is the fire."""
     import app as _app
     from datetime import datetime, timezone, timedelta
     H = 3600e3
-    o = datetime(2026, 10, 25, 1, 0, tzinfo=timezone.utc)          # an open well before the recorder's epoch counts
+    o = datetime(2026, 10, 25, 1, 0, tzinfo=timezone.utc)
     start = o + timedelta(days=7)
     oms, sms = int(o.timestamp() * 1000), int(start.timestamp() * 1000)
     sl = _app._STEAM_SLOPE_SCAN[("NFL", "spread")]
-    def nums(*pts):                                                # (hours after open, cents moved toward home)
-        return {"pin": [(oms + int(h * H), round(3.5 + c / sl, 4), -3.5) for h, c in pts], "poly": [], "kalshi": []}
-    r = _app._move_read("NFL", nums((0, 0), (0.5, 3.0)), sl, sms, oms + int(3 * H))
-    check("move rule: 3¢ toward home = PLAY home", r["state"] == "play" and r["dir"] == 1 and r["cents"] == 3.0, str(r))
-    r = _app._move_read("NFL", nums((0, 0), (0.4, 0.5), (90, -1.5)), sl, sms, oms + int(100 * H))
-    check("move rule: the first move can come days later — 1.5¢ toward away at 90h = LEAN away",
-          r["state"] == "lean" and r["dir"] == -1 and r["at_h"] == 90.0, str(r))
-    r = _app._move_read("NFL", nums((0, 0), (1, -1.2), (5, 4.0)), sl, sms, oms + int(10 * H))
-    check("move rule: the FIRST move decides, not a bigger later one", r["dir"] == -1 and r["state"] == "lean", str(r))
-    r = _app._move_read("NFL", nums((0, 0), (0.5, 0.4)), sl, sms, oms + int(3 * H))
-    check("move rule: under 1¢ so far = watching, no fire", r["state"] == "watching" and not r.get("cents"), str(r))
-    r = _app._move_read("NFL", nums((0, 0), (200, 3.0)), sl, sms, oms + int(300 * H))
-    check("move rule: a move after the start doesn't count", r["state"] == "watching", str(r))
-    check("move rule: no Pinnacle read = no_open",
-          _app._move_read("NFL", {"pin": []}, sl, sms, oms)["state"] == "no_open")
+    def ser(*pts):                                                 # (hours after open, cents moved toward home)
+        return [(oms + int(h * H), round(3.5 + c / sl, 4), -3.5) for h, c in pts]
+    def nums(pin=(), poly=(), kalshi=()):
+        return {"pin": ser(*pin), "poly": ser(*poly), "kalshi": ser(*kalshi)}
+    rd = lambda n, now_h: _app._move_read("NFL", n, sl, sms, oms + int(now_h * H), need=2)
+    r = rd(nums(pin=((0, 0), (0.5, 3.0))), 3)
+    check("2 of 3: Pinnacle moving alone is not a fire — watching, lone names it",
+          r["state"] == "watching" and (r.get("lone") or {}).get("src") == "pin" and r["lone"]["dir"] == 1, str(r))
+    r = rd(nums(pin=((0, 0), (0.5, 3.0)), kalshi=((0, 0), (0.6, 2.5))), 3)
+    check("2 of 3: Pinnacle 3¢ + Kalshi 2.5¢ toward home = PLAY home at the second book's move",
+          r["state"] == "play" and r["dir"] == 1 and r["cents"] == 2.5 and r["at_h"] == 0.6
+          and sorted(r["agree"]) == ["kalshi", "pin"], str(r))
+    r = rd(nums(pin=((0, 0), (0.5, 3.0)), poly=((0, 0), (0.6, 1.4))), 3)
+    check("2 of 3: one book 2¢+ and the other 1-2¢ = LEAN, cents = the confirmed 1.4",
+          r["state"] == "lean" and r["cents"] == 1.4, str(r))
+    r = rd(nums(poly=((0, 0), (1, -1.5)), kalshi=((0, 0), (1.5, -2.0)), pin=((0, 0),)), 3)
+    check("2 of 3: Poly + Kalshi agree without Pinnacle = a fire (any two books)",
+          r["state"] == "lean" and r["dir"] == -1, str(r))
+    r = rd(nums(pin=((0, 0), (0.2, -2.0), (0.5, 1.0)), poly=((1, 0), (2, 1.5))), 3)
+    check("2 of 3: a late venue opens at ITS first read; Pinnacle's first wobble back the other way doesn't count",
+          r["state"] == "lean" and r["dir"] == 1 and r["at_h"] == 2.0, str(r))
+    r = rd(nums(pin=((0, 0), (1, -1.2), (5, 4.0)), poly=((0, 0), (1.5, -1.1), (5, 4.0))), 10)
+    check("2 of 3: the FIRST confirmed move decides, not a bigger later one", r["dir"] == -1 and r["state"] == "lean", str(r))
+    r = rd(nums(pin=((0, 0), (0.5, 0.4)), poly=((0, 0), (0.5, 0.9))), 3)
+    check("2 of 3: under 1¢ on both = watching, no lone", r["state"] == "watching" and "lone" not in r, str(r))
+    r = rd(nums(pin=((0, 0), (200, 3.0)), poly=((0, 0), (200, 3.0))), 300)
+    check("2 of 3: a move after the start doesn't count", r["state"] == "watching", str(r))
+    check("2 of 3: no read from any book = no_open", rd({"pin": [], "poly": [], "kalshi": []}, 1)["state"] == "no_open")
+    r = _app._move_read("NFL", nums(pin=((0, 0), (0.5, 3.0))), sl, sms, oms + int(3 * H), need=1)
+    check("need=1 restores Pinnacle alone (the flag)", r["state"] == "play" and r["dir"] == 1, str(r))
+    t0 = datetime(2026, 11, 1, 22, 36, tzinfo=timezone.utc)
+    rows = [{"at": t0.isoformat(), "src": "poly", "mt": "total", "line": 51.5, "bid_c": 54.5, "ask_c": 59.5},
+            {"at": (t0 + timedelta(minutes=60)).isoformat(), "src": "poly", "mt": "total", "line": 51.5, "bid_c": 55.0, "ask_c": 56.0}]
+    check("2 of 3: a 5¢-wide venue quote is not a price for the 🔥 (its tightening is not a move)",
+          len(_app._steam_numbers("NCAAF", "total", rows, wide=_app._MOVE_VENUE_WIDE_C)["poly"]) == 1
+          and len(_app._steam_numbers("NCAAF", "total", rows)["poly"]) == 2)
 
 def test_steam_scan() -> None:
     """Rob's chart read (Nov 1 2026): Pinnacle + the venues moving one way."""

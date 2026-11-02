@@ -30910,7 +30910,7 @@ def _key_hop_c(sport: str, ln: float, p: float, ref: float) -> float:
 _KEY_HOP_SPORTS = ("NFL", "NCAAF")
 
 
-def _steam_numbers(sport: str, mt: str, rows: list) -> dict:
+def _steam_numbers(sport: str, mt: str, rows: list, wide: float = 6.0) -> dict:
     """Pure. One game-market's line_tape rows (oldest first, home / over
     orientation) → {pin|poly|kalshi: [(t_ms, number, line)]}. number = the
     book's implied home margin (spread) or total (total); line = the home
@@ -30947,7 +30947,7 @@ def _steam_numbers(sport: str, mt: str, rows: list) -> dict:
             p = a / (a + b) * 100.0
         else:
             bd, ak = f(r.get("bid_c")), f(r.get("ask_c"))
-            if bd is None or ak is None or ak < bd or ak - bd > 6:
+            if bd is None or ak is None or ak < bd or ak - bd > wide:
                 continue                      # a one-sided or wide quote is not a price
             p = (bd + ak) / 2.0
         if mt == "ml":
@@ -31174,6 +31174,8 @@ def _sheet_attach_steam(sb, sport: str, games: list) -> None:
 MOVE_RULE_ENABLED = True
 _MOVE_PLAY_C = 2.0
 _MOVE_LEAN_C = 1.0
+_MOVE_NEED_BOOKS = 2          # books that must each move ≥ _MOVE_LEAN_C one way (Rob, Nov 1 2026: "2 out of the 3")
+_MOVE_VENUE_WIDE_C = 3.0      # a venue quote wider than this is not a price for the 🔥 (a fresh 54.5 / 59.5 tightening is not a move)
 _MOVE_WIN_H = (1.0, 2.0)
 _MOVE_OPEN_EPOCH_MS = int(datetime(2026, 11, 1, 16, 0, tzinfo=timezone.utc).timestamp() * 1000)
 _MOVE_OPEN_LEAD_H = 18.0
@@ -31182,6 +31184,13 @@ _MOVE_CACHE: dict = {}
 
 def _move_rule_on() -> bool:
     return bool(_machine_flag("move_rule", MOVE_RULE_ENABLED))
+
+
+def _move_need_books() -> int:
+    try:
+        return max(1, min(3, int(_machine_flag("move_need_books", _MOVE_NEED_BOOKS))))
+    except (TypeError, ValueError):
+        return _MOVE_NEED_BOOKS
 
 
 def _move_open_ok(sport: str, open_ms: int, start_ms: int) -> bool:
@@ -31193,50 +31202,62 @@ def _move_open_ok(sport: str, open_ms: int, start_ms: int) -> bool:
 
 
 def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
-               play_c: float = _MOVE_PLAY_C, lean_c: float = _MOVE_LEAN_C) -> dict:
-    """Pure. 🔥 THE FIRST MOVE (Nov 1 2026, Rob: "whatever we had as the opener is
-    what we have as the opener… Whether that's 10 minutes, 3 hours, 6 days, that's
-    the fire"): the open is Pinnacle's FIRST READ on the tape, whenever we got it;
-    the fire is the first time its price at one line moves ≥ lean_c off that open,
-    before the start — however long that took. Its size at that moment decides
-    PLAY (≥ play_c) or LEAN. No such move yet = `watching`. `nums` =
-    _steam_numbers (each book's (t_ms, number, line), home / over). Returns
-    {state: play|lean|watching|no_open, dir (+1 home/over), cents, at_h (hours
-    after the open), open_ms, decided_ms, books {src: cents toward dir}}."""
-    pin = nums.get("pin") or []
-    if not pin or pin[0][0] >= start_ms:
+               play_c: float = _MOVE_PLAY_C, lean_c: float = _MOVE_LEAN_C, need: int | None = None) -> dict:
+    """Pure. 🔥 THE FIRST MOVE, CONFIRMED BY TWO BOOKS (Nov 1 2026, Rob: "I think
+    we need 2 out of the 3 books to show an actual move off opening"). Each book's
+    open is ITS OWN first read on the tape (Pinnacle, Polymarket, Kalshi — a venue
+    that lists late opens when it lists); the fire is the first moment, before the
+    start, that `need` (2) books have each moved ≥ lean_c the same way off their
+    own opens — however long that took. PLAY when `need` books sit ≥ play_c that
+    way at that moment, else LEAN; `cents` = the need-th biggest agreeing move (the
+    confirmed size). One book moving alone is `watching` with `lone` naming it —
+    until Nov 1 2026 evening Pinnacle alone was enough, and Toledo @ Sac State's
+    first wobble (+25.5 → +24, reversed to +26.5 inside 30 min, the venues not
+    yet listed) put the button on Sac State. `nums` = _steam_numbers (each book's
+    (t_ms, number, line), home / over). Returns {state: play|lean|watching|no_open,
+    dir (+1 home/over), cents, at_h (hours after the open), open_ms, decided_ms,
+    books {src: cents toward dir}, agree [srcs]}."""
+    need = int(need or _move_need_books())
+    srcs = ("pin", "poly", "kalshi")
+    pts = {s: [p for p in (nums.get(s) or []) if p[0] < start_ms] for s in srcs}
+    opens = {s: v[0] for s, v in pts.items() if v}
+    if not opens:
         return {"state": "no_open"}
-    o, base = pin[0][0], pin[0][1]
+    o = opens["pin"][0] if "pin" in opens else min(v[0] for v in opens.values())
     lim = min(now_ms, start_ms)
     H = 3600e3
 
-    def mv(src, t):
-        pts = nums.get(src) or []
-        cur = _steam_at(pts, t)
-        if cur is None or not pts:
-            return None
-        ref = _steam_at(pts, o) or pts[0]
-        if ref[0] > t:
-            return None
-        return round((cur[1] - ref[1]) * slope, 2)
+    def moves_at(t):
+        out = {}
+        for s, op in opens.items():
+            if op[0] > t:
+                continue
+            cur = _steam_at(pts[s], t)
+            if cur is not None:
+                out[s] = round((cur[1] - op[1]) * slope, 2)
+        return out
 
-    last = 0.0
-    for t, num, _ln in pin[1:]:
-        if t > lim:
-            break
-        m = round((num - base) * slope, 2)
-        last = m
-        if abs(m) >= lean_c:
-            d = 1 if m > 0 else -1
-            books = {}
-            for src in ("pin", "poly", "kalshi"):
-                v = mv(src, t)
-                if v is not None:
-                    books[src] = round(v * d, 1)
-            return {"state": "play" if abs(m) >= play_c else "lean", "dir": d, "cents": round(abs(m), 1),
-                    "at_h": round((t - o) / H, 1), "open_ms": o, "decided_ms": int(t), "books": books}
-    return {"state": "watching", "open_ms": o, "so_far_c": last,
-            "dir": (1 if last > 0 else -1) if last else 0}
+    times = sorted({p[0] for v in pts.values() for p in v[1:] if p[0] <= lim})
+    last = {}
+    for t in times:
+        mv = moves_at(t)
+        last = mv
+        for d in (1, -1):
+            agree = sorted((m * d for m in mv.values() if m * d >= lean_c), reverse=True)
+            if len(agree) >= need:
+                strong = sum(1 for m in agree if m >= play_c)
+                return {"state": "play" if strong >= need else "lean", "dir": d,
+                        "cents": round(agree[need - 1], 1), "at_h": round((t - o) / H, 1), "open_ms": o,
+                        "decided_ms": int(t), "books": {s: round(m * d, 1) for s, m in mv.items()},
+                        "agree": [s for s, m in mv.items() if m * d >= lean_c]}
+    out = {"state": "watching", "open_ms": o, "so_far_c": last.get("pin", 0.0),
+           "dir": (1 if last.get("pin", 0) > 0 else -1) if last.get("pin") else 0,
+           "books": {s: round(m, 1) for s, m in last.items()}}
+    lone = [(s, m) for s, m in last.items() if abs(m) >= lean_c]
+    if lone:
+        s, m = max(lone, key=lambda x: abs(x[1]))
+        out["lone"] = {"src": s, "dir": 1 if m > 0 else -1, "cents": round(abs(m), 1)}
+    return out
 
 
 def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
@@ -31289,7 +31310,7 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
             sms = int(sd.timestamp() * 1000)
             mv_all = {}
             for key, mt in keys:
-                rd = _move_read(sport, _steam_numbers(sport, mt, rs), _STEAM_SLOPE_SCAN[(sport, mt)], sms, now_ms)
+                rd = _move_read(sport, _steam_numbers(sport, mt, rs, wide=_MOVE_VENUE_WIDE_C), _STEAM_SLOPE_SCAN[(sport, mt)], sms, now_ms)
                 mv_all[key] = rd
                 pk = g.get(key)
                 if not isinstance(pk, dict):

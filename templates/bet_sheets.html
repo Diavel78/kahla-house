@@ -2539,7 +2539,9 @@
                     .map(b => nm[b] + ' ' + (x.books[b] >= 0 ? '+' : '') + Math.round(x.books[b]) + '¢').join(' · ') + ')</span>' : '';
                 parts.push('🔥 ' + lab[k] + ' <b>' + esc(side(k, x.dir)) + '</b> ' + x.state.toUpperCase() + smoke + bk);
             } else if (x.state === 'watching') {
-                if (full) parts.push(lab[k] + ' no move yet');
+                // one book moved alone: the 🔥 waits for a second (Rob, Nov 1 2026: "2 out of the 3 books")
+                if (full) parts.push(x.lone ? lab[k] + ' ' + nm[x.lone.src] + ' ' + Math.round(x.lone.cents) + '¢ '
+                    + esc(side(k, x.lone.dir)) + ', waiting on a 2nd book' : lab[k] + ' no move yet');
             } else if (x.state === 'pass') {
                 if (full) parts.push(lab[k] + ' no move');
             } else if (x.state === 'no_open') {
@@ -2548,11 +2550,11 @@
         }
         if (!parts.length) {
             if (g._st && g._st !== 'up') return '';      // a started / final game waits on nothing
-            if (waiting) return '<span class="mvl mvw">🔥 waiting on Pinnacle\'s open</span>';
+            if (waiting) return '<span class="mvl mvw">🔥 waiting on the books\' open</span>';
             if (old && old === n) return '<span class="mvl mvw">🔥 opened before we were recording — the buttons follow 💨, the move since</span>';
             return '';
         }
-        return '<span class="mvl" title="🔥 = Pinnacle\'s first move off the first price we recorded, whenever it came: 2¢+ = PLAY that side, 1-2¢ = LEAN. 💨 = the books are still moving that way since the open; no 💨 = they aren\'t.">' + parts.join(' &nbsp; ') + '</span>';
+        return '<span class="mvl" title="🔥 = the first time 2 of the 3 books (Pinnacle, Polymarket, Kalshi) each moved 1¢+ the same way off their own opening price, whenever it came: both 2¢+ = PLAY that side, else LEAN. 💨 = the books are still moving that way since the open; no 💨 = they aren\'t.">' + parts.join(' &nbsp; ') + '</span>';
     }
     function steamLine(g) {
         const s = g.steam; if (!s) return '';
