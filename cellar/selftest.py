@@ -5733,7 +5733,16 @@ def test_bet_sheet_reads() -> None:
     cin = {"model": {"total_raw": 45.2, "total_cal": 45.2, "margin_raw": -1.4, "margin_cal": -1.4}}
     old_blob = _app._bs_sheet_blob
     _app._bs_sheet_blob = lambda sb, sport, mid, ev, cache: cin
+    old_mr = _app._move_rule_on
     try:
+        # the 🔥 era: a tape sport's bet gets NO model read (Nov 2 2026, "Model? Hard pass")
+        _app._move_rule_on = lambda: True
+        row0 = {"status": "pending", "started": False, "order": {"resting": True, "price_c": 48.5, "leaves": 10},
+                "chase": {"hold": None}, "market_type": "total", "side": "over", "sport": "NCAAF", "line": 46.5,
+                "market_id": "m1", "event_name": "X @ Y", "touch_c": 48.5, "cur_c": 48.75, "price_c": 48.5}
+        _app._bet_sheet_reads(None, [row0], cache={})
+        check("under the move rule a football bet carries no model read (no flip off the 🔥)", "read" not in row0, str(row0.get("read")))
+        _app._move_rule_on = lambda: False            # the read itself, as the flag restores it
         row = {"status": "pending", "started": False, "order": {"resting": True, "price_c": 48.5, "leaves": 10},
                "chase": {"hold": None}, "market_type": "total", "side": "over", "sport": "NFL", "line": 46.5,
                "market_id": "m1", "event_name": "Cincinnati Bengals @ Baltimore Ravens", "touch_c": 48.5, "cur_c": 48.75,
@@ -5757,6 +5766,7 @@ def test_bet_sheet_reads() -> None:
     finally:
         _app._power_snapshot = old
         _app._bs_sheet_blob = old_blob
+        _app._move_rule_on = old_mr
     _fs = _ins.getsource(_app._bet_sheet_flip_exec)
     check("the flip op cancels first (verified) and places nothing on a failed or unreadable cancel",
           _fs.index("_bet_sheet_cancel_exec(sb, client, r[\"id\"])") < _fs.index("_hand_order_execute(sb, client, crow, worker)")

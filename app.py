@@ -26717,6 +26717,13 @@ def _bet_sheet_reads(sb, out: list, cache: dict = None) -> None:
     while the OTHER side of the same market reads one at its touch gets
     {hold, flip, rec: flip}, and the page offers the flip."""
     cache = cache if isinstance(cache, dict) else {}
+    # NO MODEL READ WHERE THE 🔥 PICKS (Nov 2 2026, Rob on Ball State +3.5 resting on
+    # the 🔥 with the read starring "Flip to Massachusetts −3.5": "Model? Pffff…
+    # Hard pass"): under the move rule the model names no side, so it advises no
+    # hold / flip / move on a tape sport's bet either; MOVED AGAINST YOU is the 🔥's
+    # own flip. MLB (no tape) keeps the read.
+    fire_sports = {s for (s, _m) in _STEAM_SLOPE_SCAN} if _move_rule_on() else set()
+    out = [b for b in out if (b.get("sport") or "").upper() not in fire_sports]
     try:
         _bs_sheet_blobs_prefetch(sb, out, cache)
     except Exception as e:
