@@ -7338,8 +7338,8 @@ def test_fire_side() -> None:
 
 
 def test_move_rule() -> None:
-    """🔥 THE FIRST MOVE, 2 OF 3 BOOKS (Nov 1 2026): each book's first read is its open; the first
-    moment two books have each moved ≥1¢ the same way off their own opens is the fire."""
+    """🔥 THE FIRST MOVE, PINNACLE PLUS A BOOK (Nov 1 2026): each book's first read is its open; the first
+    moment Pinnacle and a venue have each moved ≥1¢ the same way off their own opens is the fire."""
     import app as _app
     from datetime import datetime, timezone, timedelta
     H = 3600e3
@@ -7363,8 +7363,12 @@ def test_move_rule() -> None:
     check("2 of 3: one book 2¢+ and the other 1-2¢ = LEAN, cents = the confirmed 1.4",
           r["state"] == "lean" and r["cents"] == 1.4, str(r))
     r = rd(nums(poly=((0, 0), (1, -1.5)), kalshi=((0, 0), (1.5, -2.0)), pin=((0, 0),)), 3)
-    check("2 of 3: Poly + Kalshi agree without Pinnacle = a fire (any two books)",
-          r["state"] == "lean" and r["dir"] == -1, str(r))
+    check("2 of 3: Poly + Kalshi without Pinnacle is NOT a fire (Pinnacle plus a book)",
+          r["state"] == "watching", str(r))
+    r = rd(nums(poly=((0, 0), (1, -1.5)), kalshi=((0, 0), (1.5, -2.0)), pin=((0, 0), (2, -1.2))), 3)
+    check("2 of 3: …and fires the moment Pinnacle joins them", r["state"] == "lean" and r["dir"] == -1 and r["at_h"] == 2.0, str(r))
+    r = rd(nums(poly=((0, 0), (1, -1.5)), kalshi=((0, 0), (1.5, -2.0)), pin=((0, 0), (2, 1.5))), 3)
+    check("2 of 3: both venues against Pinnacle is not a fire", r["state"] == "watching", str(r))
     r = rd(nums(pin=((0, 0), (0.2, -2.0), (0.5, 1.0)), poly=((1, 0), (2, 1.5))), 3)
     check("2 of 3: a late venue opens at ITS first read; Pinnacle's first wobble back the other way doesn't count",
           r["state"] == "lean" and r["dir"] == 1 and r["at_h"] == 2.0, str(r))

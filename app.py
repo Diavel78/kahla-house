@@ -31203,12 +31203,13 @@ def _move_open_ok(sport: str, open_ms: int, start_ms: int) -> bool:
 
 def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
                play_c: float = _MOVE_PLAY_C, lean_c: float = _MOVE_LEAN_C, need: int | None = None) -> dict:
-    """Pure. 🔥 THE FIRST MOVE, CONFIRMED BY TWO BOOKS (Nov 1 2026, Rob: "I think
-    we need 2 out of the 3 books to show an actual move off opening"). Each book's
-    open is ITS OWN first read on the tape (Pinnacle, Polymarket, Kalshi — a venue
-    that lists late opens when it lists); the fire is the first moment, before the
-    start, that `need` (2) books have each moved ≥ lean_c the same way off their
-    own opens — however long that took. PLAY when `need` books sit ≥ play_c that
+    """Pure. 🔥 THE FIRST MOVE, PINNACLE PLUS A BOOK (Nov 1 2026, Rob: "2 out of the
+    3 books… Pinnacle plus a book. Not both of the prediction markets going opposite
+    of Pinnacle"). Each book's open is ITS OWN first read on the tape (Pinnacle,
+    Polymarket, Kalshi — a venue that lists late opens when it lists); the fire is
+    the first moment, before the start, that PINNACLE and `need`−1 venues (1) have
+    each moved ≥ lean_c the same way off their own opens — however long that took.
+    Poly + Kalshi moving without Pinnacle is never a fire. PLAY when `need` books sit ≥ play_c that
     way at that moment, else LEAN; `cents` = the need-th biggest agreeing move (the
     confirmed size). One book moving alone is `watching` with `lone` naming it —
     until Nov 1 2026 evening Pinnacle alone was enough, and Toledo @ Sac State's
@@ -31242,14 +31243,17 @@ def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
     for t in times:
         mv = moves_at(t)
         last = mv
-        for d in (1, -1):
-            agree = sorted((m * d for m in mv.values() if m * d >= lean_c), reverse=True)
-            if len(agree) >= need:
-                strong = sum(1 for m in agree if m >= play_c)
-                return {"state": "play" if strong >= need else "lean", "dir": d,
-                        "cents": round(agree[need - 1], 1), "at_h": round((t - o) / H, 1), "open_ms": o,
-                        "decided_ms": int(t), "books": {s: round(m * d, 1) for s, m in mv.items()},
-                        "agree": [s for s, m in mv.items() if m * d >= lean_c]}
+        pm = mv.get("pin")
+        if pm is None or abs(pm) < lean_c:
+            continue                                   # Pinnacle must be one of the books (Rob: "Pinnacle plus a book")
+        d = 1 if pm > 0 else -1
+        agree = sorted((m * d for m in mv.values() if m * d >= lean_c), reverse=True)
+        if len(agree) >= need:
+            strong = sum(1 for m in agree if m >= play_c)
+            return {"state": "play" if strong >= need else "lean", "dir": d,
+                    "cents": round(agree[need - 1], 1), "at_h": round((t - o) / H, 1), "open_ms": o,
+                    "decided_ms": int(t), "books": {s: round(m * d, 1) for s, m in mv.items()},
+                    "agree": [s for s, m in mv.items() if m * d >= lean_c]}
     out = {"state": "watching", "open_ms": o, "so_far_c": last.get("pin", 0.0),
            "dir": (1 if last.get("pin", 0) > 0 else -1) if last.get("pin") else 0,
            "books": {s: round(m, 1) for s, m in last.items()}}
