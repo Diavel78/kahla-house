@@ -17992,7 +17992,7 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
         out["via"] = worker
         return out
     if op == "rerung":
-        out, _st = _bet_sheet_rerung_exec(sb, client, row.get("pick_id"), pl.get("rerung_slug"))
+        out, _st = _bet_sheet_rerung_exec(sb, client, row.get("pick_id"), pl.get("rerung_slug"), worker)
         out["via"] = worker
         return out
     if op == "live":
@@ -22610,7 +22610,7 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
     """The chase for a Kalshi-resting bet: join the touch (never lead it),
     Rob's leash from the anchor, the thin-touch guard, all off the Kalshi
     book; the move is an in-place amend. Same verdicts, same stamps as the
-    Polymarket chase; no re-rung suggestion on Kalshi yet."""
+    Polymarket chase; the re-rung suggestion is read off the Polymarket ladder."""
     import kalshi_venue as _kv
     ticker, by = blob.get("kalshi_ticker"), bool(blob.get("kalshi_buy_yes"))
     if not (ticker and blob.get("kalshi_order_id")) or blob.get("live_snipe"):
@@ -22751,8 +22751,39 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
                 return
     if verdict == "hold":
         st["held"] += 1
-        if (not hold or abs(float(hold.get("touch_c") or -1) - target) >= 0.49 or thin_hold
-                or (note == "chalk") != bool(hold.get("chalk_c"))):
+        # THE NEW LINE FOR A KALSHI BET (Nov 2 2026, Rob on Ohio State −6.5 at
+        # 53¢ with Kalshi's touch at the 55¢ chalk cap: "I can't repeg cuz it's
+        # over chalk, you don't show me −7.5. So all I can do is cancel or go
+        # live?"). The same suggestion the Polymarket chase makes, read off the
+        # Polymarket ladder (its twin rung excluded — that is the same bet, a
+        # venue switch's business); the move itself goes through the ordinary
+        # create path, so the new line lands on whichever venue is cheaper.
+        rr = (hold or {}).get("rerung") if isinstance((hold or {}).get("rerung"), dict) else None
+        moved_touch = not hold or abs(float(hold.get("touch_c") or -1) - target) >= 0.49
+        rr_age = None
+        try:
+            rr_age = (now - datetime.fromisoformat(str((rr or {}).get("at")).replace("Z", "+00:00"))).total_seconds()
+        except (TypeError, ValueError):
+            pass
+        if (kctx.get("client") is not None and st.get("rr_reads", 0) < _HAND_RERUNG_READS
+                and (rr is None or rr_age is None or rr_age > _HAND_RERUNG_REFRESH_S or moved_touch)):
+            st["rr_reads"] = st.get("rr_reads", 0) + 1
+            _a0 = float(anchor_c if anchor_c is not None else price_c)
+            _rl = leash if note != "chalk" else max(0.0, min(float(leash), float(chalk_c) - 0.01 - _a0))
+            try:
+                got = _hand_rerung_suggest(kctx["client"], r, blob.get("pmm_twin_slug"), _a0, _rl, now)
+            except Exception as e:
+                got = {"none": True, "why": f"err: {type(e).__name__}"[:60], "at": now.isoformat()}
+            if got is not None and got.get("line") is not None and r.get("entry_line") is not None:
+                try:
+                    if abs(float(got["line"]) - float(r["entry_line"])) < 1e-6:
+                        got = {"none": True, "why": "same_line", "at": now.isoformat()}
+                except (TypeError, ValueError):
+                    pass
+            if got is not None:
+                rr = got
+                moved_touch = True
+        if (moved_touch or thin_hold or (note == "chalk") != bool((hold or {}).get("chalk_c"))):
             ch = {"touch_c": target, "price_c": price_c, "leash_c": leash, "at": now.isoformat()}
             if note == "chalk":
                 ch["chalk_c"] = chalk_c
@@ -22760,6 +22791,8 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
                     ch["fair_c"] = fair_cap            # the Pinnacle fair cap, not the chalk cap (page: AT FAIR, amber)
             if isinstance(blob.get("auto_price"), dict):
                 ch["auto"] = True
+            if rr:
+                ch["rerung"] = rr
             nb = {**blob, "anchor_c": anchor_c if anchor_c is not None else price_c, "chase_hold": ch}
             nb.pop("thin_hold", None)
             sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
@@ -27484,7 +27517,7 @@ def _bet_sheet_cancel_exec(sb, client, pick_id):
     return {"ok": True, "deleted": False, "held": held}, 200
 
 
-def _bet_sheet_rerung_exec(sb, client, pick_id, want_slug=None):
+def _bet_sheet_rerung_exec(sb, client, pick_id, want_slug=None, worker="box"):
     """RE-RUNG (Oct 7 2026): the line moved past the bet, so move the bet to
     the current line — cancel the resting order (verified; the cancel path's
     own rules for a partial fill), then rest the unfilled size on the rung the
@@ -27496,7 +27529,7 @@ def _bet_sheet_rerung_exec(sb, client, pick_id, want_slug=None):
     if not r:
         return {"ok": False, "error": "pick not found"}, 404
     if _kalshi_pick(blob):
-        return {"ok": False, "error": "re-rung isn't built for Kalshi bets yet — cancel and place the new line"}, 400
+        return _bet_sheet_rerung_kalshi(sb, client, r, blob, want_slug, worker), 200
     try:
         full = (sb.table("bot_picks").select("sport,event_name,market_type,side,entry_line")
                 .eq("id", r["id"]).single().execute().data) or {}
@@ -27611,6 +27644,91 @@ def _bet_sheet_rerung_exec(sb, client, pick_id, want_slug=None):
     if warn:
         ret["warning"] = warn
     return ret, 200
+
+
+def _bet_sheet_rerung_kalshi(sb, client, r: dict, blob: dict, want_slug, worker: str) -> dict:
+    """RE-RUNG FOR A KALSHI BET (Nov 2 2026, Rob on Ohio State −6.5 resting on
+    Kalshi under a chalk-capped touch: "you don't show me −7.5"). The chase's
+    suggestion (`chase_hold.rerung`) names the new line off the Polymarket
+    ladder; the move is the flip's shape: verified cancel FIRST (nothing placed
+    on a failed or unreadable cancel), then the unfilled size through the
+    ordinary create path at the new line — the rung rule, the chalk step and
+    the venue question decide where it rests — booked with `rerung_from`."""
+    rr = ((blob.get("chase_hold") or {}).get("rerung") if isinstance(blob.get("chase_hold"), dict) else None) or {}
+    if rr.get("line") is None:
+        return {"ok": False, "error": "no current-line rung found for this bet — re-peg or cancel instead"}
+    if want_slug and rr.get("slug") and want_slug != rr.get("slug"):
+        return {"ok": False, "error": "the current line changed since you tapped — tap it again"}
+    try:
+        full = (sb.table("bot_picks").select("sport,event_name,market_type,side,entry_line,asked_by")
+                .eq("id", r["id"]).single().execute().data) or {}
+    except Exception as e:
+        return {"ok": False, "error": f"pick read failed: {e}"[:160]}
+    mt, side = full.get("market_type"), full.get("side")
+    if mt not in ("spread", "total") or (rr.get("side") or side) != side:
+        return {"ok": False, "error": "the new rung is not the same side — not moving"}
+    try:
+        new_line = float(rr["line"])
+        ev = datetime.fromisoformat(str(r.get("event_start")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad line or start on the pick"}
+    if ev.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return {"ok": False, "error": "game already started — pre-game only"}
+    if not blob.get("kalshi_order_id"):
+        return {"ok": False, "error": "no resting order on this bet"}
+    try:
+        contracts = int(round(float(blob.get("contracts") or 0)))
+    except (TypeError, ValueError):
+        contracts = 0
+    if contracts < 1:
+        return {"ok": False, "error": "the pick carries no size"}
+    parts = (full.get("event_name") or "").split(" @ ")
+    away, home = (parts + ["", ""])[:2]
+    from_label = blob.get("label") or _bs_flip_label(full.get("event_name"), mt, side, full.get("entry_line"))
+    label = _bs_flip_label(full.get("event_name"), mt, side, new_line)
+    out_c, _st_c = _bet_sheet_cancel_exec(sb, client, r["id"])
+    if not out_c.get("ok"):
+        return {**out_c, "ok": False}                        # nothing placed
+    held = out_c.get("held")
+    if held is None:
+        return {"ok": False, "error": f"{from_label} cancelled, but its held size is unreadable — place {label} from the sheet"}
+    qty = max(0, contracts - int(round(float(held))))
+    if qty < 1:
+        return {"ok": True, "moved": False, "note": "it filled before the move — nothing left to move", "held": held}
+    item = {"sport": full.get("sport"), "away": away, "home": home, "event_start": r.get("event_start"),
+            "market_type": mt, "side": side, "line": new_line, "label": label, "venue": "auto"}
+    bad = _bet_sheet_item_check(item)
+    if bad:
+        return {"ok": False, "error": f"{from_label} cancelled, but {label} can't be placed: {bad} — place it from the sheet", "held": held}
+    crow = {"op": "create", "slug": None, "synthetic": False, "price_c": None, "contracts": qty,
+            "event_start": r.get("event_start"),
+            "payload": {"item": item, "asked_by": full.get("asked_by"), "contracts": qty}}
+    try:
+        out = _hand_order_execute(sb, client, crow, worker)
+    except Exception as e:
+        out = {"ok": False, "error": f"{type(e).__name__}: {e}"[:160]}
+    if not out.get("ok"):
+        _probe_log({"bet_sheet_rerung": True, "pick_id": r["id"], "venue": "KALSHI", "from": from_label,
+                    "to": label, "error": out.get("error"), "held": held})
+        return {"ok": False, "error": (f"{from_label} cancelled, but {label} failed: "
+                                       f"{out.get('error') or 'order failed'} — place it from the sheet"), "held": held}
+    npid = out.get("pick_id")
+    rfrom = {"pick_id": r["id"], "ticker": blob.get("kalshi_ticker"), "line": full.get("entry_line"),
+             "price_c": blob.get("price_c"), "venue": "KALSHI", "at": datetime.now(timezone.utc).isoformat()}
+    if npid:
+        try:
+            nr = (sb.table("bot_picks").select("signal_blob").eq("id", npid).single().execute().data) or {}
+            sb.table("bot_picks").update({"signal_blob": {**(nr.get("signal_blob") or {}), "rerung_from": rfrom}}).eq("id", npid).execute()
+        except Exception as e:
+            out["warning"] = ((out.get("warning") or "") + f" · rerung stamp failed: {e}"[:80]).strip(" ·")
+    _probe_log({"bet_sheet_rerung": True, "pick_id": r["id"], "new_pick_id": npid, "venue_from": "KALSHI",
+                "venue": out.get("venue") or "POLYMARKET", "from": from_label, "to": label,
+                "from_c": blob.get("price_c"), "to_c": out.get("price_c"), "qty": qty, "held_old": held})
+    ret = {**out, "ok": True, "moved": True, "rerung": True, "label": label, "from_line": full.get("entry_line"),
+           "to_line": new_line, "contracts": qty, "pick_id": npid}
+    if held:
+        ret["held"] = held
+    return ret
 
 
 def _bet_sheet_flip_exec(sb, client, row: dict, worker: str) -> dict:

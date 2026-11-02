@@ -3584,6 +3584,17 @@ def test_hand_rerung_target() -> None:
     check("U 59.5 run to 58c re-rungs to U 58.5 (51c, inside price + leash)", e and e["slug"] == "u585" and bc == 51.0)
     e, bc = _app._hand_rerung_target(unders, "total", "under", "u595", 46.0, 2.0)
     check("a lower anchor picks the cheaper line", e and e["slug"] == "u575")
+    # A KALSHI BET GETS THE NEW LINE TOO (Nov 2 2026, Ohio State −6.5 on Kalshi under the chalk cap:
+    # "you don't show me −7.5"): the Kalshi chase asks the Polymarket ladder (its twin excluded) and the
+    # move runs the flip's shape — verified cancel, then the ordinary create at the new line.
+    import inspect as _insp
+    _kc = _insp.getsource(_app._hand_chase_kalshi)
+    check("kalshi chase: a hold asks for the current-line rung", "_hand_rerung_suggest(" in _kc and 'ch["rerung"] = rr' in _kc)
+    _rx = _insp.getsource(_app._bet_sheet_rerung_exec)
+    check("kalshi re-rung: routed, not refused", "_bet_sheet_rerung_kalshi(" in _rx and "isn't built for Kalshi" not in _rx)
+    _rk = _insp.getsource(_app._bet_sheet_rerung_kalshi)
+    check("kalshi re-rung: cancel verified before any create",
+          _rk.index("_bet_sheet_cancel_exec(") < _rk.index("_hand_order_execute(") and '"venue": "auto"' in _rk)
     e, bc = _app._hand_rerung_target(unders, "total", "under", "u595", 40.0, 2.0)
     check("nothing within price + leash = no suggestion", e is None)
     e, bc = _app._hand_rerung_target([E("under", 58.5, 48.0, "a"), E("under", 57.5, 50.0, "b")],
