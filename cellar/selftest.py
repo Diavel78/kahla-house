@@ -7322,6 +7322,12 @@ def test_fire_side() -> None:
     check("fire: no first-move read → the button follows smoke (flipped, quote mirrored)",
           g["total"]["fire"] is True and g["total"]["side"] == "over" and g["total"]["fire_src"] == "smoke"
           and g["venue"]["picks"]["total"]["poly"]["bid"] == 52.0, str(g["total"]) + str(g["venue"]))
+    check("fire: a 💨 button is never a PASS (Rob: \"Why would we be passing on fire and smoke down??\")",
+          g["total"]["verdict"] == "lean", str(g["total"]))
+    check("smoke verdict: Pinnacle + a venue ≥2¢ the steam's way = PLAY",
+          _app._smoke_verdict({"dir": -1, "cents": {"pin": -2.4, "poly": -3.0, "kalshi": 0.5}}, 2.6) == "play")
+    check("smoke verdict: under 2¢ on Pinnacle = LEAN",
+          _app._smoke_verdict({"dir": -1, "moves": {"pin": -0.5, "poly": -1.5}}, 2.6) == "lean")
     g = game(); g["spread"].pop("verdict"); g["steam"] = {}
     _app._sheet_attach_fire("NBA", [g], now)
     check("fire: no smoke reads None", g["spread"]["fire"] is True and g["spread"]["smoke"] is None)

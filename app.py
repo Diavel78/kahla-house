@@ -31587,6 +31587,16 @@ def _fire_want(mt: str, d) -> str | None:
     return ("over" if d > 0 else "under") if mt == "total" else ("home" if d > 0 else "away")
 
 
+def _smoke_verdict(st: dict, slope: float) -> str:
+    """Pure. A 💨-sourced button's verdict: PLAY when Pinnacle and at least one
+    venue each moved ≥ _MOVE_PLAY_C cents the steam's way since the open, else LEAN."""
+    d = st.get("dir") or 0
+    cents = st.get("cents") or {b: (m or 0) * slope for b, m in (st.get("moves") or {}).items()}
+    pin = (cents.get("pin") or 0) * d
+    ven = max([(cents.get(b) or 0) * d for b in ("poly", "kalshi")] or [0])
+    return "play" if d and pin >= _MOVE_PLAY_C and ven >= _MOVE_PLAY_C else "lean"
+
+
 def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
     """Pure (no I/O). See above. Never raises."""
     sport = str(sport or "").upper()
@@ -31643,6 +31653,12 @@ def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
                 pk["fire"] = True
                 pk["fire_src"] = src
                 pk["smoke"] = None if sm is None else ("agrees" if sm == want else "against")
+                if src == "smoke":
+                    # A BUTTON IS NEVER A PASS (Nov 2 2026, Rob: "Why would we be passing on fire
+                    # and smoke down??"). With no first-move read the button follows 💨, and its
+                    # verdict is that move's size on the 🔥's own bar: Pinnacle and a venue both
+                    # ≥ _MOVE_PLAY_C that way = PLAY, else LEAN.
+                    pk["verdict"] = _smoke_verdict(steam.get(mt) or {}, _STEAM_SLOPE_SCAN[(sport, mt)])
         except Exception as e:
             app.logger.warning("fire attach %s %s: %s", sport, g.get("event_name"), e)
 
