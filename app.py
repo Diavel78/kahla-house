@@ -31206,7 +31206,9 @@ def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
     """Pure. 🔥 THE FIRST MOVE, PINNACLE PLUS A BOOK (Nov 1 2026, Rob: "2 out of the
     3 books… Pinnacle plus a book. Not both of the prediction markets going opposite
     of Pinnacle"). Each book's open is ITS OWN first read on the tape (Pinnacle,
-    Polymarket, Kalshi — a venue that lists late opens when it lists); the fire is
+    Polymarket, Kalshi — but a venue whose first price comes AFTER Pinnacle's open is
+    read against PINNACLE'S open level, Nov 2 2026, K-State: Poly's first tight quote
+    landed after Pinnacle had moved, so off its own open it could never move); the fire is
     the first moment, before the start, that PINNACLE and `need`−1 venues (1) have
     each moved ≥ lean_c the same way off their own opens — however long that took.
     Poly + Kalshi moving without Pinnacle is never a fire. PLAY when `need` books sit ≥ play_c that
@@ -31228,6 +31230,17 @@ def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
     lim = min(now_ms, start_ms)
     H = 3600e3
 
+    # A VENUE THAT PRICES LATE IS MEASURED FROM PINNACLE'S OPEN (Nov 2 2026, Rob on
+    # Oklahoma State @ Kansas State +3.5, Pinnacle 46.6 → 50.9 and Poly 35 → 49 on the
+    # chart, the card "no 🔥 yet"). Poly's first quotes were 35/60 — not a price — and
+    # its first tight one landed at ~49, AFTER Pinnacle had already gone; measured off
+    # its own open it could never "move". The market opened where Pinnacle opened, so a
+    # venue whose first price comes after Pinnacle's is read against that level (every
+    # book is on one scale: _steam_numbers / _move_nums_ladder).
+    pin_o = opens.get("pin")
+    base = {s: (pin_o if (pin_o is not None and s != "pin" and op[0] > pin_o[0]) else op)
+            for s, op in opens.items()}
+
     def moves_at(t):
         out = {}
         for s, op in opens.items():
@@ -31235,10 +31248,11 @@ def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
                 continue
             cur = _steam_at(pts[s], t)
             if cur is not None:
-                out[s] = round((cur[1] - op[1]) * slope, 2)
+                out[s] = round((cur[1] - base[s][1]) * slope, 2)
         return out
 
-    times = sorted({p[0] for v in pts.values() for p in v[1:] if p[0] <= lim})
+    times = sorted({p[0] for s, v in pts.items() for p in (v if base.get(s) is not opens.get(s) else v[1:])
+                    if p[0] <= lim})
     last = {}
     for t in times:
         mv = moves_at(t)
@@ -31307,30 +31321,36 @@ _MOVE_LADDER_CACHE: dict = {}
 def _move_nums_ladder(rows: list, anchor: float, slope: float, sign: int = 1,
                       wide: float = _MOVE_VENUE_WIDE_C) -> dict:
     """Pure. Ladder-tape rows → _steam_numbers-shaped {src: [(t_ms, number,
-    line)]} with every book priced AT `anchor` (number = cents / slope, so the
-    move rule's (cur − open) × slope is cents). Pinnacle off its ladder (its
+    line)]} with every book priced AT `anchor`, on _steam_numbers' own scale
+    (spread: −anchor + (p − 50) / slope; total, sign −1: anchor + (p − 50) / slope),
+    so a ladder book and a line-tape book compare level for level — the move
+    rule reads a late venue against Pinnacle's open. Pinnacle off its ladder (its
     nearest line carried ≤3 pts when the ladder doesn't reach); a venue only
     where it LISTS the anchor, two-sided, ≤ `wide` cents wide."""
     out = {"pin": [], "poly": [], "kalshi": []}
     if not rows or not slope:
         return out
     ser = _ladder_series(rows, anchor, slope=slope, sign=sign)
+    lvl = (anchor if sign < 0 else -anchor)
+
+    def num(p):
+        return round(lvl + (float(p) - 50.0) / slope, 4)
     for p in ser.get("pin") or []:
         if p[1] is not None:
-            out["pin"].append((int(p[0]), round(float(p[1]) / slope, 4), anchor))
+            out["pin"].append((int(p[0]), num(p[1]), anchor))
     for src in ("poly", "kalshi"):
         for p in ser.get(src) or []:
             t, bd, ak, exact = p[0], p[1], p[2], p[3]
             if not exact or bd is None or ak is None or ak < bd or ak - bd > wide:
                 continue
-            out[src].append((int(t), round((bd + ak) / 2.0 / slope, 4), anchor))
+            out[src].append((int(t), num((bd + ak) / 2.0), anchor))
     return out
 
 
 def _move_merge_nums(tape: dict, lad: dict) -> dict:
     """Pure. Per book, the source whose first read is EARLIER (the ladder on a
     tie); a book only one source has keeps that one. Each book's series stays
-    whole — its moves are measured off its own open, so the two scales never mix."""
+    whole; both readers share one scale, so a late venue can be read against Pinnacle's open."""
     out = {}
     for s in ("pin", "poly", "kalshi"):
         a, b = list((tape or {}).get(s) or []), list((lad or {}).get(s) or [])

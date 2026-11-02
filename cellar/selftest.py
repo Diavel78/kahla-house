@@ -7368,9 +7368,13 @@ def test_move_ladder() -> None:
     ]
     n = _app._move_nums_ladder(lad, -3.5, sl)
     check("ladder: every book read AT the anchor; Pinnacle off its own ladder",
-          len(n["pin"]) == 2 and n["pin"][0][2] == -3.5 and abs(n["pin"][0][1] * sl - 50.0) < 0.01, str(n["pin"]))
+          len(n["pin"]) == 2 and n["pin"][0][2] == -3.5 and abs(n["pin"][0][1] - 3.5) < 0.01, str(n["pin"]))
     check("ladder: a venue quote wider than 3¢ is skipped (46/52), the −2.5 rung is not the anchor",
-          [round(x[1] * sl, 2) for x in n["poly"]] == [53.0, 50.25], str(n["poly"]))
+          [round((x[1] - 3.5) * sl + 50.0, 2) for x in n["poly"]] == [53.0, 50.25], str(n["poly"]))
+    nt = _app._move_nums_ladder([{"at": iso(0), "src": "poly", "mt": "total", "line": 52.5, "bid_c": 54.0, "ask_c": 56.0}],
+                                52.5, sl, sign=-1)
+    check("ladder: one scale with the line tape (spread −anchor + (p−50)/slope, total anchor + …)",
+          abs(nt["poly"][0][1] - (52.5 + 5.0 / sl)) < 0.01, str(nt["poly"]))
     tape = {"pin": [(int(t0.timestamp() * 1000) - 3600000, 3.5, -3.5)],
             "poly": [(int(t0.timestamp() * 1000) + 9e6, 9.9, -2.5)], "kalshi": []}
     m = _app._move_merge_nums(tape, n)
@@ -7423,6 +7427,12 @@ def test_move_rule() -> None:
     r = rd(nums(pin=((0, 0), (0.2, -2.0), (0.5, 1.0)), poly=((1, 0), (2, 1.5))), 3)
     check("2 of 3: a late venue opens at ITS first read; Pinnacle's first wobble back the other way doesn't count",
           r["state"] == "lean" and r["dir"] == 1 and r["at_h"] == 2.0, str(r))
+    r = rd(nums(pin=((0, 0), (0.1, 1.5), (0.5, 4.3)), poly=((0.33, 2.9), (0.6, 2.4))), 3)
+    check("2 of 3: a venue whose first price comes after Pinnacle moved is read off PINNACLE'S open "
+          "(K-State +3.5: Pin 46.6 → 50.9, Poly's first tight quote ~49.5)",
+          r["state"] in ("play", "lean") and r["dir"] == 1 and "poly" in r["agree"] and r["at_h"] == 0.3, str(r))
+    r = rd(nums(pin=((0, 0), (0.1, 1.5), (0.5, 4.3)), poly=((0.33, -1.0), (0.6, -0.5))), 3)
+    check("2 of 3: …and a late venue sitting under Pinnacle's open is no confirmation", r["state"] == "watching", str(r))
     r = rd(nums(pin=((0, 0), (1, -1.2), (5, 4.0)), poly=((0, 0), (1.5, -1.1), (5, 4.0))), 10)
     check("2 of 3: the FIRST confirmed move decides, not a bigger later one", r["dir"] == -1 and r["state"] == "lean", str(r))
     r = rd(nums(pin=((0, 0), (0.5, 0.4)), poly=((0, 0), (0.5, 0.9))), 3)
