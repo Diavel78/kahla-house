@@ -31264,6 +31264,120 @@ def _move_read(sport: str, nums: dict, slope: float, start_ms: int, now_ms: int,
     return out
 
 
+# THE 🔥 READS THE LADDER TAPE, LIKE THE CHART (Nov 1 2026, Rob on Ball State
+# @ UMass +3.5, every book climbing on the chart, no 🔥: "I CAN READ THIS WHY
+# CANT YOU. EVERY FUCKING BOOK MOVES"). The line tape records a venue only once
+# the SHEET exists and only at the sheet's rung — UMass −2.5, listed 3:37 PM,
+# flat at 55/57 ever since — while the ladder tape has every book's every rung
+# from the listing (Poly 47 → 50.5, Kalshi 48 → 51 at +3.5). Each market is now
+# read at PINNACLE'S OPEN LINE off the ladder tape (`_ladder_series`, the chart's
+# own reader), venues at their OWN listed price there (an estimate carried off
+# Pinnacle's fair would move with Pinnacle, not on its own); per book the
+# source with the EARLIER first read wins (`_move_merge_nums`), so a book the
+# ladder missed still reads off the line tape.
+_MOVE_LADDER_BAND = 3.5       # rungs read around the anchor (the chart's carry reach)
+_MOVE_LADDER_TTL_S = 180
+_MOVE_LADDER_FINAL_TTL_S = 3600
+_MOVE_LADDER_BUDGET_S = 8.0
+_MOVE_LADDER_CACHE: dict = {}
+
+
+def _move_nums_ladder(rows: list, anchor: float, slope: float, sign: int = 1,
+                      wide: float = _MOVE_VENUE_WIDE_C) -> dict:
+    """Pure. Ladder-tape rows → _steam_numbers-shaped {src: [(t_ms, number,
+    line)]} with every book priced AT `anchor` (number = cents / slope, so the
+    move rule's (cur − open) × slope is cents). Pinnacle off its ladder (its
+    nearest line carried ≤3 pts when the ladder doesn't reach); a venue only
+    where it LISTS the anchor, two-sided, ≤ `wide` cents wide."""
+    out = {"pin": [], "poly": [], "kalshi": []}
+    if not rows or not slope:
+        return out
+    ser = _ladder_series(rows, anchor, slope=slope, sign=sign)
+    for p in ser.get("pin") or []:
+        if p[1] is not None:
+            out["pin"].append((int(p[0]), round(float(p[1]) / slope, 4), anchor))
+    for src in ("poly", "kalshi"):
+        for p in ser.get(src) or []:
+            t, bd, ak, exact = p[0], p[1], p[2], p[3]
+            if not exact or bd is None or ak is None or ak < bd or ak - bd > wide:
+                continue
+            out[src].append((int(t), round((bd + ak) / 2.0 / slope, 4), anchor))
+    return out
+
+
+def _move_merge_nums(tape: dict, lad: dict) -> dict:
+    """Pure. Per book, the source whose first read is EARLIER (the ladder on a
+    tie); a book only one source has keeps that one. Each book's series stays
+    whole — its moves are measured off its own open, so the two scales never mix."""
+    out = {}
+    for s in ("pin", "poly", "kalshi"):
+        a, b = list((tape or {}).get(s) or []), list((lad or {}).get(s) or [])
+        if b and (not a or b[0][0] <= a[0][0]):
+            out[s] = b
+        else:
+            out[s] = a
+    return out
+
+
+def _move_ladder_rows(sb, sport: str, jobs: list, deadline: float) -> dict:
+    """{(event_name, mt, anchor): rows} for each job (event_name, mt, anchor,
+    final), cached; one narrow ladder_tape read per game-market (rungs within
+    _MOVE_LADDER_BAND of the anchor), six at a time, stopping at `deadline`
+    (a job not read falls back to the line tape). Never raises."""
+    out, need = {}, []
+    nowm = _time.monotonic()
+    for ev, mt, anc, final in jobs:
+        k = (sport, ev, mt, anc)
+        hit = _MOVE_LADDER_CACHE.get(k)
+        if hit and nowm - hit[0] < (_MOVE_LADDER_FINAL_TTL_S if final else _MOVE_LADDER_TTL_S):
+            out[(ev, mt, anc)] = hit[1]
+        else:
+            need.append((ev, mt, anc))
+    if not need:
+        return out
+
+    def read(job):
+        ev, mt, anc = job
+        if _time.monotonic() > deadline:
+            return job, None
+        try:
+            rows = _sb_paged(lambda: (sb.table("ladder_tape")
+                                      .select("at,src,mt,line,bid_c,ask_c,p_home,p_away")
+                                      .eq("sport", sport).eq("event_name", ev).eq("mt", mt)
+                                      .gte("line", anc - _MOVE_LADDER_BAND).lte("line", anc + _MOVE_LADDER_BAND)
+                                      .order("at").order("id")), 30)
+            return job, rows
+        except Exception as e:
+            app.logger.warning("move ladder %s %s %s: %s", sport, ev, mt, e)
+            return job, None
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            for job, rows in ex.map(read, need):
+                if rows is None:
+                    continue
+                _MOVE_LADDER_CACHE[(sport,) + job] = (_time.monotonic(), rows)
+                out[job] = rows
+    except Exception as e:
+        app.logger.warning("move ladder %s: %s", sport, e)
+    if len(_MOVE_LADDER_CACHE) > 4000:
+        for k in sorted(_MOVE_LADDER_CACHE, key=lambda k: _MOVE_LADDER_CACHE[k][0])[:1000]:
+            _MOVE_LADDER_CACHE.pop(k, None)
+    return out
+
+
+def _move_anchor(rows: list, mt: str):
+    """Pure. Pinnacle's OPEN line for a game-market off its line-tape rows
+    (oldest first): the first Pinnacle read's line. None without one."""
+    for r in rows or []:
+        if r.get("mt") == mt and r.get("src") == "pin" and r.get("line") is not None:
+            try:
+                return round(float(r["line"]), 2)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
     """THE MOVE RULE on every sheet game (see above): `g.move` per market and
     — while the rule is on — each pick's side + verdict from it, finals
@@ -31305,6 +31419,20 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
         return
     now_ms = int(now.timestamp() * 1000)
     vp_of = lambda g: ((g.get("venue") or {}).get("picks") or {}) if isinstance(g.get("venue"), dict) else {}
+    jobs = []
+    for g in games:
+        ev = g.get("event_name")
+        sd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
+        if not ev or sd is None:
+            continue
+        for key, mt in keys:
+            if mt in ("spread", "total"):
+                anc = _move_anchor(by.get(ev) or [], mt)
+                if anc is not None:
+                    jobs.append((ev, mt, anc, sd < now - timedelta(hours=1)))
+    lad_rows = {}
+    if jobs:
+        lad_rows = _move_ladder_rows(sb, sport, jobs, _time.monotonic() + _MOVE_LADDER_BUDGET_S)
     for g in games:
         try:
             sd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
@@ -31314,7 +31442,33 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
             sms = int(sd.timestamp() * 1000)
             mv_all = {}
             for key, mt in keys:
-                rd = _move_read(sport, _steam_numbers(sport, mt, rs, wide=_MOVE_VENUE_WIDE_C), _STEAM_SLOPE_SCAN[(sport, mt)], sms, now_ms)
+                sl = _STEAM_SLOPE_SCAN[(sport, mt)]
+                nums = _steam_numbers(sport, mt, rs, wide=_MOVE_VENUE_WIDE_C)
+                anc = _move_anchor(rs, mt) if mt in ("spread", "total") else None
+                lr = lad_rows.get((g.get("event_name"), mt, anc)) if anc is not None else None
+                if lr:
+                    sg = -1 if mt == "total" else 1
+                    nums = _move_merge_nums(nums, _move_nums_ladder(lr, anc, sl, sign=sg))
+                    # 💨 off the same ladder (its 6¢ width rule), so the smoke and the fire see one tape
+                    try:
+                        sc = _steam_card(_move_merge_nums(_steam_numbers(sport, mt, rs),
+                                                          _move_nums_ladder(lr, anc, sl, sign=sg, wide=6.0)),
+                                         min(now_ms, sms))
+                        st = g.get("steam") if isinstance(g.get("steam"), dict) else {}
+                        if sc:
+                            sc["cents"] = {b: round(m * sl, 1) for b, m in sc["moves"].items()}
+                            st[mt] = sc
+                        else:
+                            st.pop(mt, None)
+                        if st:
+                            g["steam"] = st
+                        else:
+                            g.pop("steam", None)
+                    except Exception:
+                        pass
+                rd = _move_read(sport, nums, sl, sms, now_ms)
+                if anc is not None:
+                    rd["anchor"] = anc
                 mv_all[key] = rd
                 pk = g.get(key)
                 if not isinstance(pk, dict):
