@@ -3595,6 +3595,9 @@ def test_hand_rerung_target() -> None:
     _rk = _insp.getsource(_app._bet_sheet_rerung_kalshi)
     check("kalshi re-rung: cancel verified before any create",
           _rk.index("_bet_sheet_cancel_exec(") < _rk.index("_hand_order_execute(") and '"venue": "auto"' in _rk)
+    _fx = _insp.getsource(_app._bet_sheet_flip_exec)
+    check("an unfilled cancel (deleted, no held) still moves / flips the bet (Nov 1 2026, Ohio State)",
+          'held = 0.0 if out_c.get("deleted")' in _rk and 'held = 0.0 if out_c.get("deleted")' in _fx)
     e, bc = _app._hand_rerung_target(unders, "total", "under", "u595", 40.0, 2.0)
     check("nothing within price + leash = no suggestion", e is None)
     e, bc = _app._hand_rerung_target([E("under", 58.5, 48.0, "a"), E("under", 57.5, 50.0, "b")],

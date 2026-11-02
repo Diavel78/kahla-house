@@ -27689,7 +27689,9 @@ def _bet_sheet_rerung_kalshi(sb, client, r: dict, blob: dict, want_slug, worker:
     out_c, _st_c = _bet_sheet_cancel_exec(sb, client, r["id"])
     if not out_c.get("ok"):
         return {**out_c, "ok": False}                        # nothing placed
-    held = out_c.get("held")
+    # an unfilled cancel DELETES the pick and answers {deleted: True} with no
+    # `held` (Nov 1 2026: Ohio State −6.5 cancelled twice, never moved)
+    held = 0.0 if out_c.get("deleted") else out_c.get("held")
     if held is None:
         return {"ok": False, "error": f"{from_label} cancelled, but its held size is unreadable — place {label} from the sheet"}
     qty = max(0, contracts - int(round(float(held))))
@@ -27771,7 +27773,9 @@ def _bet_sheet_flip_exec(sb, client, row: dict, worker: str) -> dict:
     out_c, _st_c = _bet_sheet_cancel_exec(sb, client, r["id"])
     if not out_c.get("ok"):
         return {**out_c, "ok": False}                        # nothing placed
-    held = out_c.get("held")
+    # an unfilled cancel DELETES the pick and answers {deleted: True} with no
+    # `held` (Nov 1 2026: Ohio State −6.5 cancelled twice, never moved)
+    held = 0.0 if out_c.get("deleted") else out_c.get("held")
     if held is None:
         return {"ok": False, "error": f"{from_label} cancelled, but its held size is unreadable — place {label} from the sheet"}
     qty = max(0, contracts - int(round(float(held))))
