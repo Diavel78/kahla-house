@@ -2988,6 +2988,10 @@ def api_football_picks_debug():
                            "read_merged": _move_read(sport, merged, sl, sms, now_ms) if merged else None,
                            "nums_line_tape": _fmt(tape), "nums_ladder": _fmt(ladn)}
             games_out.append(blk)
+        _FIRE_FROZEN.pop(sport, None)
+        fz = _fire_frozen_load(sb, sport)
+        out["frozen_n"] = None if fz is None else len(fz)
+        out["frozen"] = {f"{ev}|{mt}": v for (ev, mt), v in (fz or {}).items() if ev in tgt[:3]}
         out.update({"sport": sport, "matched": tgt[:3], "games": games_out})
         return jsonify(out)
     if request.args.get("dump"):
