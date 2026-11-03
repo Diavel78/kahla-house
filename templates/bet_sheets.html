@@ -1187,6 +1187,12 @@
                 return { cls: 'rest', short: 'AUTO', detail: pre + rest + ' · under the Pinnacle fair cap' + (hold.chalk_c != null ? ' (' + hold.chalk_c + '¢)' : '') + ' · touch ' + touch + '¢ · the box holds it there and re-prices it every minute' };
             if (hold && hold.touch_c != null && b.read && b.read.rec === 'hold')
                 return { cls: 'rest', short: 'HOLD', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + (hold.chalk_c != null ? ', at or past the ' + hold.chalk_c + '¢ ' + (hold.fair_c != null ? 'Pinnacle fair cap' : 'chalk cap') : past) + ', so the box stopped chasing — ' + recShort(b, rr) };
+            // CHALK IS NOT RED WHERE THE START CHASES (Rob, Nov 3 2026, Ravens +10.5 resting
+            // 54¢ under a 55¢ touch past the 54.55¢ cap, read "needs you"): football and
+            // basketball hand the unfilled part to the live chase at game start up to his
+            // own bid, so the bet just sits — nothing for him to do. MLB/NHL cancel: red.
+            if (hold && hold.touch_c != null && hold.chalk_c != null && b.start_chase && hold.fair_c == null)
+                return { cls: 'rest', short: 'HOLD', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, past the ' + hold.chalk_c + '¢ chalk cap, so the box won\'t chase · it stays at your ' + (o.price_c != null ? cA(o.price_c) : 'bid') + ' and at game start chases live up to it' + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢' : '') + (b.read ? ' — ' + recShort(b, rr) : '') };
             if (hold && hold.touch_c != null && hold.chalk_c != null)
                 return { cls: hold.fair_c != null ? 'rest' : 'warn', short: hold.fair_c != null ? 'AT FAIR' : 'CHALK', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, at or past the ' + hold.chalk_c + '¢ ' + (hold.fair_c != null ? 'Pinnacle fair cap' : 'chalk cap') + ', so the box stopped chasing' + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') : ' — ' + (b.read ? recShort(b, null) : 'no cheaper rung yet — hold or cancel')) };
             // PAST LEASH IS NOT RED WHERE THE START CHASES (Rob, Oct 31 2026, Utah
@@ -1471,7 +1477,10 @@
         if (b.status === 'pending' && o.resting && !b.started) {
             const rp = inSlip(opKey('repeg', b.id)), cn = inSlip(opKey('cancel', b.id)), rx = inSlip(opKey('rerung', b.id)), lv = inSlip(opKey('live', b.id)), fl = inSlip(opKey('flip', b.id));
             const rr = (b.chase && b.chase.hold && b.chase.hold.rerung && b.chase.hold.rerung.slug) ? b.chase.hold.rerung : null;
-            const rd = b.read || null, rec = rd ? rd.rec : (rr ? 'move' : 'repeg');
+            // No read and the touch is past the chalk cap: re-peg would climb INTO chalk,
+            // so nothing is starred unless a cheaper rung is on offer (Nov 3 2026).
+            const chalkHold = !!(b.chase && b.chase.hold && b.chase.hold.chalk_c != null && b.chase.hold.fair_c == null);
+            const rd = b.read || null, rec = rd ? rd.rec : (rr ? 'move' : chalkHold ? null : 'repeg');
             if (rd) h += readBlock(b, rd, rr);
             const star = k => (rd && rd.rec === k ? '★ ' : '');
             // THE FLIP (Rob, Oct 25 2026): the model's side is on offer whenever the

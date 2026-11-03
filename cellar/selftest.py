@@ -4007,6 +4007,9 @@ def test_hand_red_alert() -> None:
     pl = {"anchor_c": 42.0, "chase_hold": {"touch_c": 45.0, "leash_c": 2.0}}
     check("PAST LEASH is not red where the start chases it live (Rob, Oct 31 2026: let it run)",
           R(pl, resting, chases=True) is None and R(pl, resting, chases=False)[0] == "past_leash")
+    ck = {"anchor_c": 54.0, "chase_hold": {"touch_c": 55.0, "chalk_c": 54.55}}
+    check("CHALK is not red where the start chases it live (Ravens +10.5, Nov 3 2026)",
+          R(ck, resting, chases=True) is None and R(ck, resting, chases=False)[0] == "chalk")
     check("the alert tick passes the sport's start-chase answer",
           "chases=_hand_start_chase_on(r.get(\"sport\"))" in _insp.getsource(_app._hand_red_alert_tick))
     _bsh = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "bet_sheets.html")).read()

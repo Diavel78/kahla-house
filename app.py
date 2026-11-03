@@ -18333,6 +18333,8 @@ def _hand_red_state(blob: dict, s: dict, started: bool = False, rec=None, chases
             # under a touch at fair − 1). Nothing for Rob to do, not red.
             return None
         if hold and hold.get("touch_c") is not None and hold.get("chalk_c") is not None:
+            if chases:
+                return None                # CHALK where the start chases (Ravens +10.5, Nov 3 2026): it sits at his bid, chased live from it at the start
             try:
                 tc, cc = float(hold["touch_c"]), float(hold["chalk_c"])
                 txt = f"CHALK · bidders moved up to {tc:g}¢, at or past the {cc:g}¢ chalk cap · the box stopped chasing"
