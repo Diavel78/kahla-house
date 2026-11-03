@@ -2911,6 +2911,85 @@ def api_football_picks_debug():
             sample.append(blk)
         return jsonify({"ok": True, "sport": sport, "games": len(games), "upcoming": n_up, "pin_slate": bool(pin_evs),
                         "thresholds": _price_thresholds(), "counts": counts, "sample": sample})
+    if request.args.get("move"):
+        # THE 🔥 READ, BOTH WAYS (Nov 3 2026 — UCLA @ Minnesota's 🔥 flipped between
+        # page loads). One game: the move read off the line tape alone, off the
+        # ladder merge, and the ladder read's timing for the whole sheet.
+        sport = (request.args.get("sport") or "NCAAF").upper()
+        q = (request.args.get("game") or "").lower()
+        try:
+            wk = (sb.table("football_sheet_weeks").select("week_key").eq("sport", sport)
+                  .order("week_key", desc=True).limit(1).execute().data or [])
+            rows = (sb.table("football_sheets").select("market_id,event_name,event_start,tier,data_blob")
+                    .eq("week_key", wk[0]["week_key"]).eq("sport", sport)
+                    .gte("event_start", (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat())
+                    .order("event_start").limit(200).execute().data or []) if wk else []
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:200]})
+        now = datetime.now(timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+        evs = [r.get("event_name") for r in rows]
+        tgt = [e for e in evs if e and q and all(w in e.lower() for w in q.split())]
+        try:
+            starts = [d for d in (_parse_iso(r.get("event_start")) for r in rows) if d]
+            lo, hi = min(starts) - timedelta(hours=1), max(starts) + timedelta(hours=1)
+            t0 = _time.monotonic()
+            lt = _sb_paged(lambda: (sb.table("line_tape")
+                                    .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_name")
+                                    .eq("sport", sport).in_("mt", ["ml", "spread", "total"])
+                                    .gte("event_start", lo.isoformat()).lt("event_start", hi.isoformat())
+                                    .order("at").order("id")), 120)
+            out["line_tape_rows"] = len(lt)
+            out["line_tape_ms"] = int((_time.monotonic() - t0) * 1000)
+        except Exception as e:
+            return jsonify({"ok": False, "error": "line_tape " + str(e)[:200]})
+        by = {}
+        for r in lt:
+            by.setdefault(r.get("event_name"), []).append(r)
+        jobs = []
+        for r in rows:
+            ev = r.get("event_name")
+            for mt in ("spread", "total"):
+                anc = _move_anchor(by.get(ev) or [], mt)
+                if anc is not None:
+                    jobs.append((ev, mt, anc, False))
+        _MOVE_LADDER_CACHE.clear()
+        t0 = _time.monotonic()
+        lad = _move_ladder_rows(sb, sport, jobs, _time.monotonic() + _MOVE_LADDER_BUDGET_S)
+        out["ladder"] = {"jobs": len(jobs), "read": len(lad), "ms": int((_time.monotonic() - t0) * 1000),
+                         "budget_s": _MOVE_LADDER_BUDGET_S}
+        games_out = []
+        for ev in tgt[:3]:
+            r = next(x for x in rows if x.get("event_name") == ev)
+            sms = int(_parse_iso(r["event_start"]).timestamp() * 1000)
+            rs = by.get(ev) or []
+            blk = {"game": ev}
+            for mt in ("spread", "total"):
+                sl = _STEAM_SLOPE_SCAN.get((sport, mt))
+                if not sl:
+                    continue
+                anc = _move_anchor(rs, mt)
+                tape = _steam_numbers(sport, mt, rs, wide=_MOVE_VENUE_WIDE_C)
+                lr = lad.get((ev, mt, anc)) if anc is not None else None
+                sg = -1 if mt == "total" else 1
+                ladn = _move_nums_ladder(lr, anc, sl, sign=sg) if lr else None
+                merged = _move_merge_nums(tape, ladn) if ladn else None
+
+                def _az(ms):
+                    return datetime.fromtimestamp(ms / 1000, ZoneInfo("America/Phoenix")).strftime("%a %H:%M")
+
+                def _fmt(n):
+                    if not n:
+                        return None
+                    return {s: {"n": len(v), "first": [_az(v[0][0]), round(v[0][1], 3), v[0][2]] if v else None,
+                                "pts": [[_az(p[0]), round(p[1], 3)] for p in v[:40]]} for s, v in n.items()}
+                blk[mt] = {"anchor": anc, "ladder_rows": len(lr) if lr else 0,
+                           "read_line_tape": _move_read(sport, tape, sl, sms, now_ms),
+                           "read_merged": _move_read(sport, merged, sl, sms, now_ms) if merged else None,
+                           "nums_line_tape": _fmt(tape), "nums_ladder": _fmt(ladn)}
+            games_out.append(blk)
+        out.update({"sport": sport, "matched": tgt[:3], "games": games_out})
+        return jsonify(out)
     if request.args.get("dump"):
         # THE MODEL AUDIT DUMP (Oct 26 2026): every sheet row for a sport /
         # week list as _sheet_audit_row records. Read-only.
