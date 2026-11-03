@@ -31632,6 +31632,87 @@ def _move_anchor(rows: list, mt: str):
     return None
 
 
+# THE 🔥 IS DECIDED ONCE (Nov 3 2026, Rob on UCLA @ Minnesota: card 🔥 Minnesota
+# + his UCLA −6.5 reading MOVED AGAINST YOU — "we Fire on the first move… how
+# is that fucking possible???"). The read was recomputed on every page load, and
+# its INPUT changed with the clock: the ladder tape read has an 8s deadline, and
+# a market whose ladder rows didn't land fell back to the line tape alone, which
+# prices Pinnacle's 6 → 6.5 differently at the 6.0 open (0.3¢ vs the ladder's
+# 1.5¢). Ladder read: 🔥 UCLA Sun 10:21 PM. Line tape alone: no UCLA fire, so
+# Minnesota Mon 7:18 AM. Now (1) a read missing its ladder rows never names a
+# side (`reading`), and (2) the first full-read 🔥 is stored in `lookup_cache`
+# (key fire|SPORT|mt|event, first writer wins, fetched_at = start + 6 days so
+# the 1-day pruner keeps it through the grade) and read back from then on —
+# nothing re-decides it. Kill switch `machine_flags fire_freeze`.
+FIRE_FREEZE_ENABLED = True
+_FIRE_FROZEN: dict = {}
+_FIRE_FROZEN_TTL_S = 60
+_FIRE_FREEZE_KEEP_D = 6
+
+
+def _fire_freeze_on() -> bool:
+    return bool(_machine_flag("fire_freeze", FIRE_FREEZE_ENABLED))
+
+
+def _fire_key(sport: str, mt: str, ev: str) -> str:
+    return f"fire|{sport}|{mt}|{ev}"
+
+
+def _move_settle(rd: dict, frozen, partial: bool):
+    """Pure. (the read to show, freeze it?). A stored 🔥 wins over any fresh read;
+    a fresh read missing its ladder rows never names a side; a full read's first
+    PLAY/LEAN is the one to store."""
+    if isinstance(frozen, dict) and frozen.get("state") in ("play", "lean"):
+        out = dict(frozen)
+        out["frozen"] = True
+        return out, False
+    fired = rd.get("state") in ("play", "lean")
+    if partial:
+        if fired:
+            return {"state": "reading", "open_ms": rd.get("open_ms"),
+                    "why": "ladder tape not read this load — the 🔥 waits for a full read"}, False
+        return rd, False
+    return rd, fired
+
+
+def _fire_frozen_load(sb, sport: str):
+    """{(event_name, mt): stored read} for a sport, 60s cache. None = unreadable."""
+    hit = _FIRE_FROZEN.get(sport)
+    if hit and _time.monotonic() - hit[0] < _FIRE_FROZEN_TTL_S:
+        return hit[1]
+    try:
+        rows = _sb_paged(lambda: (sb.table("lookup_cache").select("key,payload")
+                                  .like("key", f"fire|{sport}|%").order("key")), 20)
+    except Exception as e:
+        app.logger.warning("fire frozen load %s: %s", sport, e)
+        return None
+    out = {}
+    for r in rows or []:
+        parts = str(r.get("key") or "").split("|", 3)
+        if len(parts) == 4 and isinstance(r.get("payload"), dict):
+            out[(parts[3], parts[2])] = r["payload"]
+    _FIRE_FROZEN[sport] = (_time.monotonic(), out)
+    return out
+
+
+def _fire_freeze(sb, sport: str, ev: str, mt: str, rd: dict, start) -> None:
+    """Store a market's first 🔥; an existing row is never overwritten. Never raises."""
+    pay = {k: v for k, v in rd.items() if k != "model_side"}
+    pay["frozen_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        sb.table("lookup_cache").upsert(
+            {"key": _fire_key(sport, mt, ev), "sport": sport,
+             "fetched_at": (start + timedelta(days=_FIRE_FREEZE_KEEP_D)).isoformat(), "payload": pay},
+            ignore_duplicates=True, on_conflict="key").execute()
+        hit = _FIRE_FROZEN.get(sport)
+        if hit:
+            hit[1].setdefault((ev, mt), pay)
+        _probe_log({"kind": "fire_freeze", "sport": sport, "event": ev, "mt": mt,
+                    **{k: pay.get(k) for k in ("state", "dir", "cents", "decided_ms", "books", "anchor")}})
+    except Exception as e:
+        app.logger.warning("fire freeze %s %s %s: %s", sport, ev, mt, e)
+
+
 def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
     """THE MOVE RULE on every sheet game (see above): `g.move` per market and
     — while the rule is on — each pick's side + verdict from it, finals
@@ -31687,6 +31768,8 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
     lad_rows = {}
     if jobs:
         lad_rows = _move_ladder_rows(sb, sport, jobs, _time.monotonic() + _MOVE_LADDER_BUDGET_S)
+    freeze_on = rule_on and _fire_freeze_on()
+    frozen = _fire_frozen_load(sb, sport) if freeze_on else None
     for g in games:
         try:
             sd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
@@ -31723,6 +31806,12 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
                 rd = _move_read(sport, nums, sl, sms, now_ms)
                 if anc is not None:
                     rd["anchor"] = anc
+                if freeze_on:
+                    ev = g.get("event_name")
+                    partial = anc is not None and (ev, mt, anc) not in lad_rows
+                    rd, store = _move_settle(rd, (frozen or {}).get((ev, mt)), partial)
+                    if store and frozen is not None:
+                        _fire_freeze(sb, sport, ev, mt, rd, sd)
                 if key == "ml" and sport in _FIRE_ML_SPREAD_SPORTS:
                     spl = _fire_ml_spread(g)
                     if spl is None or abs(spl) > _FIRE_ML_MAX_SPREAD + 1e-9:
@@ -31836,8 +31925,9 @@ def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
                 want = _fire_want(mt, rd.get("dir")) if rd.get("state") in ("play", "lean") else None
                 sm = _fire_want(mt, (steam.get(mt) or {}).get("dir"))
                 src = "fire"
-                if rd.get("state") == "off_rule":
-                    sm = None                          # off the rule (a football ML past a pick'em): no 💨 fallback either
+                if rd.get("state") in ("off_rule", "reading"):
+                    sm = None                          # off the rule (a football ML past a pick'em), or a read
+                    #                                    missing its ladder rows this load: no 💨 fallback either
                 if want is None and sm is not None:
                     # NO FIRST-MOVE READ (an open we didn't record, or none yet) — the button
                     # follows 💨 rather than the board going blank (Rob, Nov 1 2026: "Give me

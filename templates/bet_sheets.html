@@ -2550,6 +2550,9 @@
                 // one book moved alone: the 🔥 waits for a second (Rob, Nov 1 2026: "2 out of the 3 books")
                 if (full) parts.push(x.lone ? lab[k] + ' ' + nm[x.lone.src] + ' ' + Math.round(x.lone.cents) + '¢ '
                     + esc(side(k, x.lone.dir)) + ', waiting on a 2nd book' : lab[k] + ' no move yet');
+            } else if (x.state === 'reading') {
+                // the ladder tape didn't load this time — the 🔥 waits for a full read rather than guess (Nov 3 2026)
+                parts.push('<span class="mvw" title="the line history didn\'t finish loading — refresh">🔥 ' + lab[k] + ' loading…</span>');
             } else if (x.state === 'pass') {
                 if (full) parts.push(lab[k] + ' no move');
             } else if (x.state === 'no_open') {
