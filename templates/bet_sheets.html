@@ -3067,7 +3067,13 @@
         const rec = { win: 0, loss: 0, push: 0 };
         for (const g of _games) {
             for (const k of ['ml', 'spread', 'total']) {
-                const r = g.grade && g.grade[k];
+                // THE BOARD'S RECORD, NOT THE MODEL'S (Nov 5 2026, Rob: "is this following the
+                // model or the new fire and smoke"): g.grade is the box grader's grade of the
+                // MODEL's stored pick; the pick on the card (🔥 side, its own rung) carries its
+                // own grade, and only a PLAY/LEAN on the card counts.
+                const pk = g[k];
+                if (!pk || (pk.verdict !== 'play' && pk.verdict !== 'lean')) continue;
+                const r = pk.grade;
                 if (r in rec) rec[r]++;
             }
         }
