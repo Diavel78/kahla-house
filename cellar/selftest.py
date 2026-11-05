@@ -4013,6 +4013,10 @@ def test_hand_red_alert() -> None:
     pl = {"anchor_c": 42.0, "chase_hold": {"touch_c": 45.0, "leash_c": 2.0}}
     check("PAST LEASH is not red where the start chases it live (Rob, Oct 31 2026: let it run)",
           R(pl, resting, chases=True) is None and R(pl, resting, chases=False)[0] == "past_leash")
+    wiped = {"anchor_c": 51.0, "line_hold": {"why": "venue_reset", "qty": 10}, "chase_hold": {"touch_c": 53.5, "leash_c": 2.0}}
+    check("a wiped bet whose touch is past the leash reads OFF THE BOOK red (ODU +7.5, Nov 5 2026)",
+          (R(wiped, off) or ("",))[0] == "off_book"
+          and R({"anchor_c": 51.0, "line_hold": {"why": "venue_reset", "qty": 10}}, off) is None)
     ck = {"anchor_c": 54.0, "chase_hold": {"touch_c": 55.0, "chalk_c": 54.55}}
     check("CHALK is not red where the start chases it live (Ravens +10.5, Nov 3 2026)",
           R(ck, resting, chases=True) is None and R(ck, resting, chases=False)[0] == "chalk")

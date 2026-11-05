@@ -18369,6 +18369,12 @@ def _hand_red_state(blob: dict, s: dict, started: bool = False, rec=None, chases
         pass
     lh = blob.get("line_hold") if isinstance(blob.get("line_hold"), dict) else None
     if lh:
+        hold0 = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
+        if lh.get("why") == "venue_reset" and hold0 and hold0.get("touch_c") is not None:
+            # the wipe took the order and the touch is past his leash: the rejoin will
+            # not put it back (Nov 5 2026, ODU +7.5 read RE-PLACING all morning)
+            return "off_book", (f"OFF THE BOOK · Polymarket wiped the order and the touch "
+                                f"({hold0.get('touch_c')}¢) is past your leash · re-peg or cancel")
         if lh.get("err"):
             what = "RE-PLACING" if lh.get("why") == "venue_reset" else "SITTING OUT"
             return "hold_err", f"{what} · {str(lh['err'])[:120]}"

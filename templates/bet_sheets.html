@@ -1233,6 +1233,13 @@
             return { cls: 'fill', short: 'SETTLED', detail: fmtQ(fq) + ' @ ' + fpx + ' · the venue closed the lot — grading off its settlement' };
         if (b.line_hold) {
             const lh = b.line_hold;
+            if (lh.why === 'venue_reset' && hold && hold.touch_c != null) {
+                // WIPED AND PAST THE LEASH (Nov 5 2026, ODU +7.5: the wipe took the order, the
+                // touch had climbed past anchor + leash, so the box will not put it back —
+                // it read RE-PLACING forever). Rob's call: re-peg it or cancel it.
+                const tc = b.touch_c != null ? b.touch_c : hold.touch_c, an = ch.anchor_c;
+                return { cls: 'warn', short: 'OFF THE BOOK', detail: 'Polymarket wiped the order and the touch (' + tc + '¢) is past your leash' + (an != null ? ' (' + an + '¢ + ' + (hold.leash_c != null ? hold.leash_c : 2) + '¢)' : '') + ', so the box will not put it back — re-peg it or cancel it' };
+            }
             if (lh.why === 'venue_reset') {
                 const rt = 'Polymarket wiped the order' + (lh.qty ? ' · re-placing ' + lh.qty : '') + ' at the touch';
                 return lh.err ? { cls: 'warn', short: 'RE-PLACING', detail: rt + ' · ' + lh.err }
