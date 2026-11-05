@@ -20457,6 +20457,17 @@ def _hand_move_tick(sb, client, now) -> dict:
                         "at": now.isoformat(), "sitting_out": True}}}).eq("id", r["id"]).execute()
                 continue
             if hold.get("why") == "venue_reset":
+                # A WIPED BOOK IS STILL REBUILDING (Nov 5 2026, 05:25 AZ: Polymarket
+                # wiped every resting order; Jax @ Bal U 43.5 was re-placed at 1¢
+                # because the venue's 1¢ placeholder was the only bid back yet).
+                # Wait until the touch is back within _HAND_DROP_MAX_C of his price.
+                try:
+                    _from = float(hold.get("from_c") if hold.get("from_c") is not None else blob.get("price_c"))
+                except (TypeError, ValueError):
+                    _from = None
+                if _from is not None and touch < _from - _HAND_DROP_MAX_C - 1e-9:
+                    st["reset_wait"] = st.get("reset_wait", 0) + 1
+                    continue
                 # ONE ORDER PER SLUG: a venue that lists late must not get a
                 # twin. Any BUY already resting on the slug is taken over.
                 if fresh_open is None:
@@ -20490,7 +20501,9 @@ def _hand_move_tick(sb, client, now) -> dict:
                 # re-priced and we sat back down at its touch — the leash
                 # measures from here now, not from the pre-move hand price.
                 hold_s = _fl("hand_move_rejoin_hold_s", _HAND_MOVE_REJOIN_HOLD_S)
-                nb.update({"order_id": out["order_id"], "price_c": touch, "anchor_c": touch,
+                # …except after a venue wipe: nothing moved, his own price stays the anchor
+                new_anchor = (anchor if (hold.get("why") == "venue_reset" and anchor is not None) else touch)
+                nb.update({"order_id": out["order_id"], "price_c": touch, "anchor_c": new_anchor,
                            "amended": False,
                            "line_rejoins": int(blob.get("line_rejoins") or 0) + 1,
                            "rejoined_at": now.isoformat(),

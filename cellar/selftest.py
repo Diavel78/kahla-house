@@ -2616,6 +2616,12 @@ def test_hand_move_plan() -> None:
     grew by ≥70% of the high) → cancel. A pure vanish (makers leaving) stays.
     The ask is recorded, not required; `need_ask=True` restores it."""
     import app as _app
+    import inspect as _insp
+    _mt = _insp.getsource(_app._hand_move_tick)
+    check("a venue-wipe rejoin waits for the book to rebuild (Jax @ Bal U 43.5 re-placed at 1¢, Nov 5 2026)",
+          'touch < _from - _HAND_DROP_MAX_C' in _mt and 'st["reset_wait"]' in _mt)
+    check("…and keeps his own price as the anchor",
+          'hold.get("why") == "venue_reset" and anchor is not None' in _mt)
     f, calm, orient = _app._hand_move_plan, _app._hand_calm, _app._hand_side_rows
     N = 10000.0
     def row(ts, bc, bq, ac, aq, d3=None):
