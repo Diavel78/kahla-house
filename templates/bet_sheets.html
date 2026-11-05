@@ -1508,6 +1508,14 @@
             const cn = inSlip(opKey('cancel', b.id));
             h += '<div class="note">This bet has nothing on the book — its order is gone and nothing filled. Remove it to clear CHECK ME. Your other orders are not touched.</div>';
             acts.push('<button class="abtn dng' + (cn ? ' on' : ' pri') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: remove this bet' : 'Remove this bet') + '</button>');
+        } else if (b.status === 'pending' && !o.resting && !(held > 0) && !b.started && b.line_hold) {
+            // OFF THE BOOK, WAITING ON THE BOX (Nov 5 2026, ODU +7.5: the venue wiped the
+            // order, the touch was past the leash, and the sheet offered no button at all —
+            // Rob: "I don't have a fucking cancel button"). Nothing rests and nothing is
+            // filled, so the cancel op just removes the pick.
+            const cn = inSlip(opKey('cancel', b.id));
+            h += '<div class="note">Nothing is resting and nothing is filled. Remove it to stop the box putting it back; to bet this game now, tap the sheet\'s button.</div>';
+            acts.push('<button class="abtn dng' + (cn ? ' on' : ' pri') + '" onclick="sheetOp(\'cancel\')">' + (cn ? '✓ On the slip: remove this bet' : 'Remove this bet') + '</button>');
         } else if (b.status === 'pending' && b.live_snipe && b.live_hold && !o.resting) {
             const cn = inSlip(opKey('cancel', b.id));
             h += '<div class="note">The live chase pulled this order (the rung collapsed) and rejoins at the bid, under the live cap, at ~' + fmtClock(b.live_hold.resume_at) + '. Cancel here to drop the bet instead.</div>';
