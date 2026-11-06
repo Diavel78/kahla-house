@@ -31880,6 +31880,7 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
                 g["puck"].setdefault("model_verdict", g["puck"].get("verdict"))
                 g["puck"]["verdict"] = "pass"
                 g["puck"]["move"] = {"state": "not_on_rule"}
+                _sheet_puck_carry(sport, g)
             if mv_all:
                 g["move"] = mv_all
         except Exception as e:
@@ -31986,8 +31987,50 @@ def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
                     # verdict is that move's size on the 🔥's own bar: Pinnacle and a venue both
                     # ≥ _MOVE_PLAY_C that way = PLAY, else LEAN.
                     pk["verdict"] = _smoke_verdict(steam.get(mt) or {}, _STEAM_SLOPE_SCAN[(sport, mt)])
+            _sheet_puck_carry(sport, g)
         except Exception as e:
             app.logger.warning("fire attach %s %s: %s", sport, g.get("event_name"), e)
+
+
+def _sheet_puck_carry(sport: str, g: dict) -> bool:
+    """Pure. HOCKEY'S CHALK RULE ON THE 🔥 (Nov 5 2026, Rob: "move hockey to
+    show puck line or spread… same rules for odds"): a 🔥/💨 ML PLAY/LEAN on a
+    favorite at −140 or shorter (`_SHEET_CHALK_ML`) is not the bet — the
+    favorite's −1.5 carries the verdict, the 🔥 marks and its own grade, the
+    way an NBA chalky ML hands its verdict to the spread. A dog's ML stays the
+    bet (never +1.5). Until now the move rule forced the puck line to pass, so
+    the card read "too chalky — see the puck line" over a puck line with no
+    button. True when it carried."""
+    if str(sport or "").upper() != "NHL":
+        return False
+    ml, pk = g.get("ml"), g.get("puck")
+    if not isinstance(ml, dict) or not isinstance(pk, dict):
+        return False
+    side = ml.get("side")
+    if ml.get("verdict") not in ("play", "lean") or side not in ("home", "away"):
+        return False
+    px = ml.get("price")
+    if px is None:
+        px = (g.get("line") or {}).get("ml_" + side)
+    try:
+        if float(px) > _SHEET_CHALK_ML:
+            return False
+        if float(pk.get("line")) >= 0 or pk.get("side") != side:
+            return False
+    except (TypeError, ValueError):
+        return False
+    ml["chalky"] = True
+    pk["verdict"] = ml["verdict"]
+    pk["carried"] = "ml_chalk"
+    for k in ("fire", "fire_src", "smoke"):
+        if k in ml:
+            pk[k] = ml[k]
+    if isinstance(ml.get("move"), dict):
+        pk["move"] = ml["move"]
+    gr = _sheet_grade_pick(g, "puck", pk)
+    if gr:
+        pk["grade"] = gr
+    return True
 
 
 def _steam_window_scan(sport: str, mts: tuple, games: list, detail=None) -> dict:

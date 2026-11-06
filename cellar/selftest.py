@@ -7394,6 +7394,33 @@ def test_fire_side() -> None:
          "puck": {"side": "home", "line": -1.5}, "ml": {"side": "away"}}
     _app._sheet_attach_fire("NHL", [g], now)
     check("fire: a puck line whose favorite is not the fire's side has no button", g["puck"]["fire"] is None)
+    # HOCKEY'S CHALK RULE ON THE 🔥 (Nov 5 2026, Rob: "move hockey to show puck line or spread… same rules for odds")
+    def hgame(px):
+        return {"event_start": st, "move": {"ml": {"state": "play", "dir": 1}},
+                "steam": {"ml": {"dir": 1}}, "line": {"ml_home": px},
+                "puck": {"side": "home", "line": -1.5, "price": 160, "verdict": "pass"},
+                "ml": {"side": "home", "verdict": "play", "price": px}}
+    g = hgame(-180)
+    _app._sheet_attach_fire("NHL", [g], now)
+    check("puck carry: a chalky favorite's 🔥 ML hands its verdict + 🔥 to the −1.5",
+          g["ml"].get("chalky") and g["puck"]["verdict"] == "play" and g["puck"]["fire"] is True
+          and g["puck"].get("carried") == "ml_chalk", str(g["puck"]))
+    g = hgame(-120)
+    _app._sheet_attach_fire("NHL", [g], now)
+    check("puck carry: a −120 favorite's ML stays the bet, the −1.5 stays a pass",
+          g["puck"]["verdict"] == "pass" and not g["ml"].get("chalky"), str(g["puck"]))
+    g = hgame(-180); g["ml"]["side"] = "away"; g["ml"]["price"] = 150
+    check("puck carry: a dog's ML is never moved to a puck line",
+          _app._sheet_puck_carry("NHL", g) is False and g["puck"]["verdict"] == "pass")
+    g = hgame(-180); g["grade"] = {"final": {"home": 4, "away": 1}}
+    check("puck carry: the −1.5 is graded off the final",
+          _app._sheet_puck_carry("NHL", g) and g["puck"]["grade"] == "win", str(g["puck"]))
+    check("puck carry: the move attach runs it (finals too)",
+          "_sheet_puck_carry(sport, g)" in __import__("inspect").getsource(_app._sheet_attach_move))
+    for _t in ("bet_sheets.html", "football_picks.html"):
+        _h = open(_os.path.join(_rt, "templates", _t), encoding="utf-8").read()
+        check("record counts the puck line, not a chalky ML (%s)" % _t,
+              "['ml', 'spread', 'total', 'puck']" in _h and "k === 'ml' && (pk.chalky || pk.longshot)" in _h)
     g = game()
     _app._sheet_attach_fire("MLB", [g], now)
     check("fire: a sport the tape doesn't carry is untouched", "fire" not in g["spread"])

@@ -1267,13 +1267,14 @@
         if (_filter === 'plays') games = games.filter(g => hasPick(g));
         const rec = { win: 0, loss: 0, push: 0 };
         for (const g of _games) {
-            for (const k of ['ml', 'spread', 'total']) {
+            for (const k of ['ml', 'spread', 'total', 'puck']) {
                 // THE BOARD'S RECORD, NOT THE MODEL'S (Nov 5 2026, Rob: "is this following the
                 // model or the new fire and smoke"): g.grade is the box grader's grade of the
                 // MODEL's stored pick; the pick on the card (🔥 side, its own rung) carries its
                 // own grade, and only a PLAY/LEAN on the card counts.
                 const pk = g[k];
                 if (!pk || (pk.verdict !== 'play' && pk.verdict !== 'lean')) continue;
+                if (k === 'ml' && (pk.chalky || pk.longshot)) continue;    // the line pick is the bet (hockey: the −1.5)
                 const r = pk.grade;
                 if (r in rec) rec[r]++;
             }
