@@ -3444,6 +3444,48 @@ def test_hand_live_chase() -> None:
     check("1,366 HELD 12s then 366 for 5s = a real collapse, still a pull", v == "cancel" and d["why"] == "collapse", str(d))
     v, d = P(held, lad((55, 1779), (49, 371.8)), 49.0, 5, 49.5, 1.0, now, since_ts=now - 10)
     check("…but a rejoin 10s ago resets the baseline: the level we rejoined into is the new normal", v == "stay", str(d))
+    # THE PRICE IS THE SIGNAL (Nov 7 2026, Rob: "Fucking watch the market"):
+    # our side's price falling onto the bid pulls on the frame it shows
+    fall_rows = [row(8, 53.0, 500.0, 54.0, lad((53, 500), (52, 800))),
+                 row(4, 52.0, 500.0, 53.0, lad((52, 500), (51, 800))),
+                 row(0.5, 50.0, 400.0, 51.0, lad((50, 400), (49, 10)))]
+    v, d = P(fall_rows, lad((50, 400), (49, 10)), 49.0, 10, 49.5, 1.0, now)
+    check("price falling 3¢ in 8s onto our bid = a pull on THIS frame (no 3s confirm)",
+          v == "cancel" and d.get("why") == "market_falling" and d.get("fall_c") == 3.0, str(d))
+    v, d = P(fall_rows, lad((50, 400), (49, 10)), 40.0, 10, 49.5, 1.0, now)
+    check("…but 11¢ under the ask a 3¢ slide is not on us yet", d.get("why") != "market_falling", str(d))
+    on_us = [row(6, 49.0, 400.0, 51.0, lad((49, 400),)), row(0.5, 49.0, 400.0, 50.0, lad((49, 400),))]
+    v, d = P(on_us, lad((49, 400),), 49.0, 10, 49.5, 1.0, now)
+    check("an ask that came down to a tick over our bid = a pull (ask_on_us)", v == "cancel" and d.get("why") == "ask_on_us", str(d))
+    flat = [row(6, 49.0, 400.0, 50.0, lad((49, 400),)), row(0.5, 49.0, 400.0, 50.0, lad((49, 400),))]
+    v, d = P(flat, lad((49, 400),), 49.0, 10, 49.5, 1.0, now)
+    check("a steady one-tick spread is not a fall", v != "cancel", str(d))
+    v, d = P(fall_rows, lad((50, 400), (49, 10)), 49.0, 10, 49.5, 1.0, now, fall=(0.0, 10.0, 5.0))
+    check("hand_live_fall_c 0 switches the price pull off", d.get("why") != "market_falling", str(d))
+    F = _app._hand_live_fall
+    check("the rejoin waits while the price is still falling", F(fall_rows, None, 0, now, 1.0) is not None
+          and F(flat, None, 0, now, 1.0) is None)
+    check("our own size is not the market bid in the fall read",
+          F([row(6, 49.0, 10.0, 52.0, lad((49, 10), (47, 400))), row(0.5, 49.0, 10.0, 52.0, lad((49, 10), (47, 400)))],
+            49.0, 10, now, 1.0) is None)
+    for fn in (_app._hand_live_one, _app._hand_live_one_kalshi):
+        src_f = inspect.getsource(fn)
+        check(f"{fn.__name__}: the planner gets the fall rule, the rejoin waits out a fall, a pull skips the debounce",
+              "fall=fcfg" in src_f and "_hand_live_fall(rows, None, 0, now_ts, tick, *fcfg)" in src_f
+              and 'if verdict != "cancel" and deb:' in src_f)
+    import queue as _qq
+    saved_q, saved_snap = _app.LIVE_Q, dict(_app.LIVE_SNAP)
+    try:
+        _app.LIVE_Q = _qq.Queue()
+        _app.LIVE_SNAP["selftest-coalesce"] = {"pick_id": 0}
+        _app._LIVE_PENDING.pop("selftest-coalesce", None)
+        for _i in range(25):
+            _app._hand_live_frame("selftest-coalesce")
+        check("a burst of 25 frames is ONE queued evaluation of the newest book (no backlog)", _app.LIVE_Q.qsize() == 1)
+    finally:
+        _app.LIVE_Q = saved_q
+        _app.LIVE_SNAP.clear(); _app.LIVE_SNAP.update(saved_snap)
+        _app._LIVE_PENDING.pop("selftest-coalesce", None)
     src_w = inspect.getsource(_app._hand_live_one)
     check("both workers hand the planner the rejoin time", src_w.count('since_ts=snap.get("since_ts")') == 1
           and 'since_ts=snap.get("since_ts")' in inspect.getsource(_app._hand_live_one_kalshi))

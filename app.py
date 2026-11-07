@@ -28225,7 +28225,92 @@ def _hand_live_recheck(key: str) -> None:
         threading.Timer(_HAND_LIVE_CONFIRM_S + 0.3, _hand_live_frame, [key]).start()
     except Exception:
         pass
-_HAND_LIVE_DEBOUNCE_S = 1.5        # one venue write per slug per this many seconds
+_HAND_LIVE_DEBOUNCE_S = 1.5        # one venue write per slug per this many seconds (a market-falling pull ignores it)
+# THE PRICE IS THE SIGNAL (Nov 7 2026, Rob: "I, as a human being, can watch
+# the market collapse live on the application… You have a fucking WebSocket.
+# Fucking watch the market."). The pull used to fire ONLY when the size on
+# our own price level fell 70% and held 3s — a price sliding down onto our
+# bid (asks coming down, bidders backing off) never pulled, the chase just
+# joined the next bid down and was the one sold to. Now our side's price
+# falling `hand_live_fall_c` (2¢) inside `hand_live_fall_s` (10s) while the
+# ask is within `hand_live_fall_near_c` (5¢) of our bid pulls on THAT frame
+# (no confirmation, no debounce), and so does an ask coming down to within
+# one tick of us. The rejoin waits until the price has stopped falling.
+_HAND_LIVE_FALL_C = 2.0
+_HAND_LIVE_FALL_S = 10.0
+_HAND_LIVE_FALL_NEAR_C = 5.0
+
+
+def _hand_live_fall_cfg():
+    out = []
+    for k, d in (("hand_live_fall_c", _HAND_LIVE_FALL_C), ("hand_live_fall_s", _HAND_LIVE_FALL_S),
+                 ("hand_live_fall_near_c", _HAND_LIVE_FALL_NEAR_C)):
+        try:
+            out.append(float(_machine_flag_val(k, d)))
+        except (TypeError, ValueError):
+            out.append(d)
+    return tuple(out)
+
+
+def _hand_live_fall(rows, our_c, our_qty, now_ts: float, tick: float,
+                    fall_c: float = _HAND_LIVE_FALL_C, win_s: float = _HAND_LIVE_FALL_S,
+                    near_c: float = _HAND_LIVE_FALL_NEAR_C):
+    """Pure. Is our side's price falling onto us right now? rows = our-side
+    tape rows (ts, bid_c, bid_q, ask_c, ask_q, d3, ladder) oldest first.
+    The best bid is read with our own size taken out (we are not the
+    market). -> detail dict when it is (why 'market_falling' | 'ask_on_us'),
+    else None. our_c None = no order resting: only 'is it still falling'."""
+    if not rows or fall_c is None or fall_c <= 0:
+        return None
+    try:
+        if now_ts - float(rows[-1][0]) > _HAND_LIVE_STALE_S:
+            return None
+    except (TypeError, ValueError, IndexError):
+        return None
+
+    def mkt_bid(r):
+        lad = r[6] if len(r) > 6 and r[6] else None
+        if lad:
+            for p, q in lad:
+                try:
+                    p, q = float(p), float(q)
+                except (TypeError, ValueError):
+                    continue
+                if our_c is not None and abs(p - float(our_c)) < 0.01:
+                    q -= float(our_qty or 0.0)
+                if q > 0.01:
+                    return p
+            return None
+        try:
+            b = float(r[1]) if r[1] is not None else None
+        except (TypeError, ValueError):
+            return None
+        if b is not None and our_c is not None and abs(b - float(our_c)) < 0.01:
+            return None                                # the top of book may be only us
+        return b
+
+    win = [r for r in rows if now_ts - float(r[0]) <= win_s]
+    if not win:
+        return None
+    asks = [float(r[3]) for r in win if r[3] is not None]
+    bids = [b for b in (mkt_bid(r) for r in win) if b is not None]
+    cur = win[-1]
+    cur_ask = float(cur[3]) if cur[3] is not None else None
+    cur_bid = mkt_bid(cur)
+    fa = (max(asks) - cur_ask) if (asks and cur_ask is not None) else 0.0
+    fb = (max(bids) - cur_bid) if (bids and cur_bid is not None) else 0.0
+    fall = max(fa, fb)
+    det = {"fall_c": round(fall, 2), "ask_fall_c": round(fa, 2), "bid_fall_c": round(fb, 2),
+           "ask_c": cur_ask, "mkt_bid_c": cur_bid, "win_s": win_s}
+    if our_c is None:
+        return {**det, "why": "market_falling"} if fall >= fall_c - 1e-9 else None
+    dist = (cur_ask - float(our_c)) if cur_ask is not None else None
+    det["ask_gap_c"] = round(dist, 2) if dist is not None else None
+    if fall >= fall_c - 1e-9 and (dist is None or dist <= near_c + 1e-9):
+        return {**det, "why": "market_falling"}
+    if dist is not None and dist <= float(tick) + 1e-9 and fa >= float(tick) - 1e-9:
+        return {**det, "why": "ask_on_us"}
+    return None
 _HAND_LIVE_MAX_HOLD_S = 180.0      # a rejoin that keeps failing stops trying after this (the page shows it)
 LIVE_SNAP: dict = {}               # slug -> the live bet the worker may act on
 LIVE_Q = None                      # queue.Queue of slugs with a fresh depth frame
@@ -28772,11 +28857,15 @@ def _hand_live_hi(rows, our_c, our_qty, now_ts: float, since_ts=None,
 
 
 def _hand_live_plan(rows, ladder, our_c, our_qty, cap_c, tick, now_ts: float,
-                    drop_pct: float = _HAND_LIVE_DROP_PCT, since_ts=None):
+                    drop_pct: float = _HAND_LIVE_DROP_PCT, since_ts=None,
+                    fall=(_HAND_LIVE_FALL_C, _HAND_LIVE_FALL_S, _HAND_LIVE_FALL_NEAR_C)):
     """Pure. rows = our-side tape rows (ts, bid_c, bid_q, ask_c, ask_q, d3,
     ladder) oldest first; ladder = our-side (price, qty) best-first NOW;
     our_c/our_qty = the resting bid. -> (verdict, detail):
-      'cancel' — OUR rung's size (ours excluded) fell ≥ drop_pct off its
+      'cancel' — the PRICE is falling onto us (`_hand_live_fall`: our side
+                 down ≥ fall_c in fall_s with the ask near, or the ask came
+                 down to a tick over our bid) — pulled on this frame; or
+                 OUR rung's size (ours excluded) fell ≥ drop_pct off its
                  60s high, and the others held at least our size up there:
                  a pull. Pull the order, sit out the calm.
       'move'   — the live target differs from our price (join down, join
@@ -28797,6 +28886,11 @@ def _hand_live_plan(rows, ladder, our_c, our_qty, cap_c, tick, now_ts: float,
     if ask_c is None and ladder is None:
         return "stay", {"why": "no_book"}
     det = {"our_c": our_c, "our_qty": our_qty, "cap_c": cap_c, "ask_c": ask_c}
+    if our_c is not None and rows and fall is not None:
+        fd = _hand_live_fall(rows, our_c, our_qty, now_ts, tick, *fall)
+        if fd:
+            det.update(fd)
+            return "cancel", det
     if our_c is not None and rows:
         fresh = now_ts - rows[-1][0] <= _HAND_LIVE_STALE_S
         base = [r for r in rows if now_ts - _HAND_LIVE_BASE_S <= r[0] < now_ts - _HAND_LIVE_RECENT_S
@@ -28881,13 +28975,21 @@ def _hand_live_frames(rows, our_c, our_qty, now_ts, n: int = 8) -> list:
     return out
 
 
+_LIVE_PENDING: dict = {}           # key -> monotonic when its first unprocessed frame arrived
+
+
 def _hand_live_frame(slug: str) -> None:
-    """Called by wsfeed._write_depth for every depth frame. Never raises."""
+    """Called for every depth frame (Polymarket + Kalshi sockets). A market
+    already waiting is not queued again: the worker reads the CURRENT tape
+    and book when it gets to it, so a burst of frames is one evaluation of
+    the newest state — never a backlog of old frames worked in order.
+    Never raises."""
     try:
-        if LIVE_Q is not None and slug in LIVE_SNAP:
+        if LIVE_Q is not None and slug in LIVE_SNAP and slug not in _LIVE_PENDING:
+            _LIVE_PENDING[slug] = _time.monotonic()
             LIVE_Q.put_nowait(slug)
     except Exception:
-        pass
+        _LIVE_PENDING.pop(slug, None)
 
 
 def _ensure_live_worker() -> None:
@@ -28916,7 +29018,13 @@ def _hand_live_worker() -> None:
                 slug = None
             if slug is not None:
                 _LIVE_STATS["frames"] += 1
+                t0 = _LIVE_PENDING.pop(slug, None)
+                if t0 is not None:
+                    lag = int((_time.monotonic() - t0) * 1000)
+                    _LIVE_STATS["lag_ms"] = lag
+                    _LIVE_STATS["lag_ms_max"] = max(int(_LIVE_STATS.get("lag_ms_max") or 0), lag)
                 _hand_live_one(sb, client, slug)
+                _LIVE_STATS["work_ms"] = int((_time.monotonic() - t0) * 1000) if t0 is not None else None
             else:
                 for s_ in list(LIVE_SNAP):               # a quiet book still has rejoins to run
                     if (LIVE_SNAP.get(s_) or {}).get("hold"):
@@ -28935,8 +29043,9 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
     rejoin a new GTC order for the UNFILLED size off fresh positions."""
     import kalshi_venue as _kv
     now_m = _time.monotonic()
-    if now_m - _LIVE_LAST.get(ticker, 0.0) < _HAND_LIVE_DEBOUNCE_S and not snap.get("game_pull"):
-        return
+    # the debounce spaces MOVES and rejoins; a pull on a falling market never waits on it
+    deb = now_m - _LIVE_LAST.get(ticker, 0.0) < _HAND_LIVE_DEBOUNCE_S and not snap.get("game_pull")
+    fcfg = _hand_live_fall_cfg()
     now = datetime.now(timezone.utc)
     now_ts = _time.time()
     by = bool(snap.get("buy_yes"))
@@ -28949,9 +29058,12 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
     hold = snap.get("hold")
     if hold:
         snap.pop("game_pull", None)                    # nothing resting — a game pull is moot while sitting out
-        if now_ts < float(hold.get("resume_ts") or 0):
+        if now_ts < float(hold.get("resume_ts") or 0) or deb:
             return
         if now_ts - float(hold.get("at_ts") or now_ts) > _HAND_LIVE_MAX_HOLD_S and hold.get("err"):
+            return
+        if _hand_live_fall(rows, None, 0, now_ts, tick, *fcfg):
+            hold["resume_ts"] = now_ts + 3.0           # still falling — back in only once it stops
             return
         # THE REJOIN READS THE VENUE (Nov 7 2026, BYU +6.5): a live order is
         # priced off Kalshi's own book read now, never the socket copy alone.
@@ -29066,7 +29178,7 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
     except (TypeError, ValueError):
         drop = _HAND_LIVE_DROP_PCT
     verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop,
-                                   since_ts=snap.get("since_ts"))
+                                   since_ts=snap.get("since_ts"), fall=fcfg)
     gp = snap.pop("game_pull", None)
     if gp and verdict != "cancel":
         verdict, det = "cancel", {**(det or {}), "why": "game_event", "game_event": gp, "book_verdict": verdict}
@@ -29075,6 +29187,10 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
         if det.get("why") == "collapse_unconfirmed":
             _hand_live_recheck(ticker)
         return
+    if verdict != "cancel" and deb:
+        return
+    if det.get("why") in ("market_falling", "ask_on_us"):
+        _LIVE_STATS["fall_pulls"] = _LIVE_STATS.get("fall_pulls", 0) + 1
     _LIVE_LAST[ticker] = now_m
     r, blob = _bet_sheet_pick(sb, snap["pick_id"])
     if not r or r.get("status") != "pending" or blob.get("kalshi_order_id") != oid:
@@ -29103,7 +29219,7 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
             qty = max(1, int(round(leaves)))
             lh = {"at": now.isoformat(), "resume_at": (now + timedelta(seconds=calm)).isoformat(),
                   "from_c": our_c, "qty": qty, "venue": "KALSHI",
-                  "detail": {k: det.get(k) for k in ("hi_q", "cur_q", "drop_pct")}}
+                  "detail": {k: det.get(k) for k in ("why", "hi_q", "cur_q", "drop_pct", "fall_c", "ask_c", "ask_gap_c")}}
             nb = {**blob, "kalshi_order_id": None, "live_hold": lh}
             lc = dict(blob.get("live_chase") or {})
             lc.update({"pulls": int(lc.get("pulls") or 0) + 1, "at": now.isoformat()})
@@ -29167,8 +29283,9 @@ def _hand_live_one(sb, client, slug: str) -> None:
     if snap.get("venue") == "KALSHI":
         return _hand_live_one_kalshi(sb, client, slug, snap)
     now_m = _time.monotonic()
-    if now_m - _LIVE_LAST.get(slug, 0.0) < _HAND_LIVE_DEBOUNCE_S and not snap.get("game_pull"):
-        return
+    # the debounce spaces MOVES and rejoins; a pull on a falling market never waits on it
+    deb = now_m - _LIVE_LAST.get(slug, 0.0) < _HAND_LIVE_DEBOUNCE_S and not snap.get("game_pull")
+    fcfg = _hand_live_fall_cfg()
     now = datetime.now(timezone.utc)
     now_ts = _time.time()
     syn, tick, cap = bool(snap.get("synth")), float(snap.get("tick") or 0.5), float(snap.get("cap_c"))
@@ -29178,10 +29295,13 @@ def _hand_live_one(sb, client, slug: str) -> None:
     if hold:
         snap.pop("game_pull", None)                    # nothing resting — a game pull is moot while sitting out
         # SITTING OUT → REJOIN after the calm, at the rule's price, unfilled size
-        if now_ts < float(hold.get("resume_ts") or 0):
+        if now_ts < float(hold.get("resume_ts") or 0) or deb:
             return
         if now_ts - float(hold.get("at_ts") or now_ts) > _HAND_LIVE_MAX_HOLD_S and hold.get("err"):
             return                                     # kept failing — the page shows it, Rob decides
+        if _hand_live_fall(rows, None, 0, now_ts, tick, *fcfg):
+            hold["resume_ts"] = now_ts + 3.0           # still falling — back in only once it stops
+            return
         ask_c = rows[-1][3] if rows else None
         target, why = _hand_live_target(ladder, ask_c, None, 0, cap, tick)
         if target is None:
@@ -29274,7 +29394,7 @@ def _hand_live_one(sb, client, slug: str) -> None:
     except (TypeError, ValueError):
         drop = _HAND_LIVE_DROP_PCT
     verdict, det = _hand_live_plan(rows, ladder, our_c, leaves, cap, tick, now_ts, drop,
-                                   since_ts=snap.get("since_ts"))
+                                   since_ts=snap.get("since_ts"), fall=fcfg)
     gp = snap.pop("game_pull", None)
     if gp and verdict != "cancel":
         # THE GAME SAID SO (Oct 25 2026): a score against our side — pull now,
@@ -29285,6 +29405,10 @@ def _hand_live_one(sb, client, slug: str) -> None:
         if det.get("why") == "collapse_unconfirmed":
             _hand_live_recheck(slug)
         return
+    if verdict != "cancel" and deb:
+        return
+    if det.get("why") in ("market_falling", "ask_on_us"):
+        _LIVE_STATS["fall_pulls"] = _LIVE_STATS.get("fall_pulls", 0) + 1
     _LIVE_LAST[slug] = now_m
     r, blob = _bet_sheet_pick(sb, snap["pick_id"])
     if not r or r.get("status") != "pending" or blob.get("order_id") != oid:
@@ -29302,7 +29426,7 @@ def _hand_live_one(sb, client, slug: str) -> None:
         if gone:
             qty = max(1, int(round(leaves)))
             lh = {"at": now.isoformat(), "resume_at": (now + timedelta(seconds=calm)).isoformat(),
-                  "from_c": our_c, "qty": qty, "detail": {k: det.get(k) for k in ("hi_q", "cur_q", "drop_pct")}}
+                  "from_c": our_c, "qty": qty, "detail": {k: det.get(k) for k in ("why", "hi_q", "cur_q", "drop_pct", "fall_c", "ask_c", "ask_gap_c")}}
             nb = {**blob, "order_id": None, "live_hold": lh}
             lc = dict(blob.get("live_chase") or {})
             lc.update({"pulls": int(lc.get("pulls") or 0) + 1, "at": now.isoformat()})
