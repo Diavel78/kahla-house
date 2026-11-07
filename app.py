@@ -19083,7 +19083,16 @@ def _touch_watch_push(want: set, now_t: float):
     return "ok"
 
 
-_TOUCH_SEED: dict = {"loaded": False, "at": 0.0, "slugs": {}}
+_TOUCH_SEED: dict = {"loaded": False, "at": 0.0, "slugs": {}, "base": {}}
+# THE PRE-START BUCKETS SURVIVE A RESTART TOO (Nov 7 2026, Duke @ NC State
+# O 50.5: the money daemon was kicked at 10:36:03 AZ, six minutes after the
+# 10:30 listed start; the saved tape held only the newest 240 frames — all
+# after the start on a busy college book — and `TAPE_BASE` lived in memory
+# only, so the new process had no pre-start book and the bet rested into the
+# game as BOX CAN'T SEE GAME START). Every publish also saves each watched
+# market's 10s touch buckets from the last `_TAPE_BASE_SAVE_S`, and the first
+# publish after boot puts them back.
+_TAPE_BASE_SAVE_S = 1800.0
 
 
 def _touch_tape_seed_load(sb) -> int:
@@ -19106,9 +19115,49 @@ def _touch_tape_seed_load(sb) -> int:
             return 0
         _TOUCH_SEED["at"] = _time.time()
         _TOUCH_SEED["slugs"] = {k: v for k, v in (tp.get("slugs") or {}).items() if v}
+        _TOUCH_SEED["base"] = {k: v for k, v in (tp.get("base") or {}).items() if v}
         return sum(len(v) for v in _TOUCH_SEED["slugs"].values())
     except Exception:
         return 0
+
+
+def _tape_base_snapshot(keys, now_t: float) -> dict:
+    """The last `_TAPE_BASE_SAVE_S` of 10s touch buckets per market, as
+    [bucket_ts, q] pairs — what a restart needs to read the pre-start book."""
+    out = {}
+    lo = now_t - _TAPE_BASE_SAVE_S
+    for k in keys:
+        rows = [[round(float(r[0]), 1), round(float(r[2]), 1)]
+                for r in list(TAPE_BASE.get(k) or []) if r and r[0] is not None and r[0] >= lo and r[2] is not None]
+        if rows:
+            out[k] = rows
+    return out
+
+
+def _tape_base_seed_apply() -> int:
+    """Put the saved buckets back under whatever this process has recorded
+    since boot (older buckets first, never a duplicate bucket). Once."""
+    base = _TOUCH_SEED.get("base") or {}
+    n = 0
+    for k, rows in list(base.items()):
+        have = TAPE_BASE.get(k)
+        first = have[0][0] if have else None
+        old = []
+        for r in rows or []:
+            try:
+                ts, q = float(r[0]), float(r[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if first is None or ts < first:
+                old.append([ts, None, q, None, 0.0])
+        if not old:
+            continue
+        old.sort(key=lambda r: r[0])
+        dq = _deque(old + list(have or []), maxlen=_TAPE_BASE_MAX)
+        TAPE_BASE[k] = dq
+        n += len(old)
+    base.clear()
+    return n
 
 
 def _touch_tape_seed_apply(want: set) -> int:
@@ -19142,6 +19191,7 @@ def _touch_tape_publish(sb) -> dict:
     out: dict = {}
     if not _TOUCH_SEED["loaded"]:
         out["seed_rows"] = _touch_tape_seed_load(sb)
+        out["seed_base"] = _tape_base_seed_apply()
     try:
         cfg = _machine_flag_val("touch_watch", {}) or {}
         want = set(str(x) for x in (cfg.get("slugs") or []) if x)
@@ -19176,7 +19226,9 @@ def _touch_tape_publish(sb) -> dict:
         payload = {"at": datetime.now(timezone.utc).isoformat(),
                    "adopt": dict(_HAND_APP_LAST) if isinstance(_HAND_APP_LAST, dict) else None,
                    "up_s": round(now_t - _TOUCH_PROC_T0),
-                   "slugs": {s: list(TOUCH_TAPE.get(s) or [])[-240:] for s in sorted(want)}}
+                   "slugs": {s: list(TOUCH_TAPE.get(s) or [])[-240:] for s in sorted(want)},
+                   "base": _tape_base_snapshot(["p:" + s for s in want]
+                                               + ["k:" + t for t in set(KALSHI_WATCH_TICKERS)], now_t)}
         sb.table("lookup_cache").upsert({
             "key": _TOUCH_TAPE_KEY, "sport": "ANY",
             "fetched_at": payload["at"], "payload": payload}).execute()

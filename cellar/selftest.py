@@ -3588,6 +3588,31 @@ def test_touch_tape_seed() -> None:
     finally:
         _app._TOUCH_SEED.clear(); _app._TOUCH_SEED.update(saved[0])
         _app.TOUCH_TAPE.clear(); _app.TOUCH_TAPE.update(saved[1])
+    # THE BUCKETS SURVIVE TOO (Nov 7 2026, Duke @ NC State: a kick six minutes
+    # after the start, the saved tape all post-start frames → BOX CAN'T SEE)
+    saved_b = (dict(_app.TAPE_BASE), dict(_app._TOUCH_SEED))
+    try:
+        now = _t.time()
+        start = now - 360.0
+        _app.TAPE_BASE.clear()
+        for i in range(12):                                   # 2 min of book before the start, 9,000 a frame
+            _app._tape_base_note("p:duke", start - 120 + i * 10, 9000.0)
+        snap = _app._tape_base_snapshot(["p:duke", "p:none"], now)
+        check("the publish saves the pre-start buckets", "p:duke" in snap and "p:none" not in snap
+              and len(snap["p:duke"]) == 12)
+        _app.TAPE_BASE.clear()                                 # the restart
+        _app._tape_base_note("p:duke", now - 5, 300.0)         # the new process's first frame: post-start
+        _app._TOUCH_SEED["base"] = snap
+        n = _app._tape_base_seed_apply()
+        check("the boot puts them back under the new frames", n == 12 and len(_app.TAPE_BASE["p:duke"]) == 13
+              and _app.TAPE_BASE["p:duke"][0][0] < _app.TAPE_BASE["p:duke"][-1][0])
+        rows = _app._start_samples("p:duke", [(now - 5, 50, 150.0, 51, 150.0, 1, 1), (now - 2, 50, 150.0, 51, 150.0, 1, 1)], start)
+        v = _app._hand_start_plan(rows, start, now, 95.0)
+        check("…and the start rule reads the drop instead of BOX CAN'T SEE", v[0] != "no_baseline", str(v))
+        check("the seed is spent once", not _app._TOUCH_SEED.get("base"))
+    finally:
+        _app.TAPE_BASE.clear(); _app.TAPE_BASE.update(saved_b[0])
+        _app._TOUCH_SEED.clear(); _app._TOUCH_SEED.update(saved_b[1])
 
 
 def test_touch_watch_push() -> None:
