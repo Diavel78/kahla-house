@@ -25210,6 +25210,36 @@ KALSHI_WS: dict = {"up": False, "rx": 0.0, "tickers": set(), "msgs": 0}
 _KALSHI_MISMATCH_AT: dict = {}        # ticker → last socket-vs-REST disagreement stamp (monotonic)
 KALSHI_BOOKS: dict = {}                # ticker → (time.time(), book) — the socket's latest book
 _KALSHI_WS_FRESH_S = 20.0
+# A BOOK IS TRUSTED ONLY ON THE CONNECTION THAT SNAPSHOTTED IT (Nov 7 2026,
+# BYU +6.5: the chase rejoined at 49¢ off a copy that still showed pre-play
+# bids; Kalshi refused 52¢ and 50¢ as crossing asks that had already moved).
+# cellar/kalshifeed.py writes the connection epoch per snapshot here;
+# `_kalshi_ws_fresh` requires it to match the live connection's epoch.
+KALSHI_SNAP_EPOCH: dict = {}          # ticker → feed epoch whose snapshot built the book
+KALSHI_RESNAP: set = set()            # tickers the feed must re-snapshot (a refused order proved the copy wrong)
+KALSHI_DISTRUST: dict = {}            # ticker → time.time() until which the socket copy is not used
+_KALSHI_DISTRUST_S = 30.0
+
+
+def _kalshi_book_suspect(ticker: str, why: str, det: dict | None = None) -> None:
+    """The venue just contradicted the socket's copy of this book (an order
+    refused as crossing an ask the copy didn't show): stop trusting it, ask
+    the feed for a fresh snapshot, read REST meanwhile. Never raises."""
+    try:
+        KALSHI_DISTRUST[ticker] = _time.time() + _KALSHI_DISTRUST_S
+        KALSHI_RESNAP.add(ticker)
+        _probe_log({"kalshi_book_suspect": True, "ticker": ticker, "why": why, **(det or {}),
+                    "at": datetime.now(timezone.utc).isoformat()})
+    except Exception:
+        pass
+
+
+def _kalshi_refused_cross(det) -> bool:
+    """Pure. Did Kalshi refuse a post-only order for crossing the book?"""
+    try:
+        return "post only cross" in str((det or {}).get("error") or "").lower()
+    except Exception:
+        return False
 
 
 def _kalshi_tape_record(ticker: str, ob: dict) -> None:
@@ -25240,6 +25270,10 @@ def _kalshi_ws_fresh(ticker: str) -> bool:
         p = KALSHI_WS
         if not p.get("up") or _time.time() - float(p.get("rx") or 0) > _KALSHI_WS_FRESH_S:
             return False
+        if _time.time() < float(KALSHI_DISTRUST.get(ticker) or 0.0):
+            return False                          # the venue contradicted this copy moments ago
+        if p.get("epoch") is not None and KALSHI_SNAP_EPOCH.get(ticker) != p.get("epoch"):
+            return False                          # built on an earlier connection, or no snapshot yet
         hit = KALSHI_BOOKS.get(ticker)
         return bool(hit and ticker in (p.get("tickers") or set()))
     except Exception:
@@ -28919,6 +28953,13 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
             return
         if now_ts - float(hold.get("at_ts") or now_ts) > _HAND_LIVE_MAX_HOLD_S and hold.get("err"):
             return
+        # THE REJOIN READS THE VENUE (Nov 7 2026, BYU +6.5): a live order is
+        # priced off Kalshi's own book read now, never the socket copy alone.
+        vbook = _kalshi_hand_book(ticker, fresh=True)[0]
+        if vbook:
+            book = vbook
+            ladder = _hand_ladder_from_book(book, syn)
+            ask_c = _manual_side_book(book, syn)[1]
         target, why = _hand_live_target(ladder, ask_c, None, 0, cap, tick)
         if target is None:
             return
@@ -28978,6 +29019,20 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
             nb.update({"kalshi_order_id": new_id, "price_c": float(target), "anchor_c": float(target)})
             sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
             LIVE_SNAP.pop(ticker, None)
+        elif _kalshi_refused_cross(det):
+            # A REFUSAL IS A STOP, NEVER A STEP DOWN (Nov 7 2026, BYU +6.5: refused at
+            # 52¢, refused at 50¢, rested at 49¢ and was sold to in 16s — the asks were
+            # falling through every price we tried). Sit out the full calm again and
+            # make the feed re-snapshot this market.
+            try:
+                calm = float(_machine_flag_val("hand_live_calm_s", _HAND_LIVE_CALM_S))
+            except (TypeError, ValueError):
+                calm = _HAND_LIVE_CALM_S
+            hold["resume_ts"] = now_ts + calm
+            hold["at_ts"] = now_ts
+            stamp["why"] = "refused_cross_sat_out"
+            _kalshi_book_suspect(ticker, "rejoin_refused_cross", {"target_c": target, "pick_id": r["id"]})
+            _LIVE_STATS["refused"] = _LIVE_STATS.get("refused", 0) + 1
         else:
             _LIVE_STATS["errors"] += 1
             err = str(det.get("error") or det.get("status") or "create failed")[:120]
@@ -29066,7 +29121,23 @@ def _hand_live_one_kalshi(sb, client, ticker: str, snap: dict) -> None:
                            det.get("drop_pct"), det.get("hi_q"), det.get("cur_q"), gone)
         return
     target = float(det["target_c"])
+    # EVERY LIVE PRICE MOVE READS THE VENUE FIRST (Nov 7 2026): the socket copy
+    # proposes, Kalshi's own book decides — and a disagreement distrusts the copy.
+    vbook = _kalshi_hand_book(ticker, fresh=True)[0]
+    if vbook:
+        vlad = _hand_ladder_from_book(vbook, syn)
+        vask = _manual_side_book(vbook, syn)[1]
+        vt, vwhy = _hand_live_target(vlad, vask, our_c, leaves, cap, tick)
+        if vt is None:
+            return
+        if abs(vt - target) >= tick - 1e-9:
+            _kalshi_book_suspect(ticker, "move_target_disagrees", {"socket_c": target, "venue_c": vt})
+        target, det["target_why"] = float(vt), vwhy
+        if abs(float(our_c) - target) < tick - 1e-9:
+            return                                     # the venue says we are already right
     v, new_id, adet = _kalshi_amend_pick(blob, target, o=o)
+    if v != "amended" and _kalshi_refused_cross(adet):
+        _kalshi_book_suspect(ticker, "amend_refused_cross", {"target_c": target, "pick_id": r["id"]})
     if v == "amended":
         lc = dict(blob.get("live_chase") or {})
         lc.update({"moves": int(lc.get("moves") or 0) + 1, "last_c": target, "from_c": our_c,

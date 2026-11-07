@@ -16,9 +16,19 @@ the socket speaks.
 DOCTRINE (the same as wsfeed): the socket is a TAPE, never a decision. A
 dead socket degrades to the REST sample each handbets tick.
 
-Resubscribe = reconnect: the watched set changes rarely (a placement, a
-switch, a fill) and the venue replays a full snapshot per market on
-subscribe, so a fresh connection is the simplest correct resync.
+THE MARKET LIST CHANGES ON THE LIVE CONNECTION (Nov 7 2026, BYU +6.5 on
+Kalshi: the chase rejoined at 49¢ off a book that still showed pre-play
+bids while Kalshi refused 52¢ and 50¢ as crossing the real asks; Rob:
+"You have a WebSocket… why can't you read the fucking WebSocket?"). Until
+then every change to the watched set — a placement, a fill, a pre-subscribe
+expiring — HUNG UP and reconnected (84 times in one morning), and between
+the reconnect and each market's new snapshot the app kept serving that
+market's book from the OLD connection as fresh. Now a change is an
+`update_subscription` (add_markets / delete_markets) on the same socket,
+an added market is untrusted until ITS snapshot lands (`get_snapshot` if
+it doesn't come, reconnect as the last resort), and every book carries the
+connection epoch that built it (`app.KALSHI_SNAP_EPOCH`) — `_kalshi_ws_fresh`
+only vouches for a book snapshotted on the live connection.
 """
 from __future__ import annotations
 
@@ -37,6 +47,8 @@ BACKOFF_S = (2, 4, 8, 15, 30, 60)
 FAIL_STAMP_MIN_S = 3600
 WATCH_POLL_S = 2.0
 RESUB_MIN_S = 5.0
+SNAP_WAIT_S = 5.0        # an added market with no snapshot this long: ask for one (get_snapshot)
+SNAP_GIVEUP_S = 15.0     # still none: reconnect (full snapshots) — the old path, last resort
 
 
 class KalshiFeed:
@@ -55,6 +67,12 @@ class KalshiFeed:
         self.seq_gaps = 0
         self.suspect = 0                 # snapshots whose shape we could not read
         self.snapshots = 0
+        self.epoch = 0                   # one per connection; a book is trusted only on its own epoch
+        self.sid = None                  # the orderbook_delta subscription id (update_subscription needs it)
+        self._cmd_id = 1
+        self._pending: dict = {}         # ticker → (monotonic sent, asked_snapshot) awaiting a snapshot
+        self.updates = 0                 # market-list changes made on the live connection
+        self.update_fail = 0
 
     def start(self) -> bool:
         try:
@@ -97,6 +115,7 @@ class KalshiFeed:
                 "result": {"kalshi_ws": state, "state": state, "err": (err or "")[:300], "msgs": self.msgs,
                            "reconnects": self.reconnects, "snapshots": self.snapshots,
                            "seq_gaps": self.seq_gaps, "shape_unknown": self.suspect,
+                           "epoch": self.epoch, "updates": self.updates, "update_fail": self.update_fail,
                            "tickers": sorted(self.subscribed)[:40]},
             }).execute()
         except Exception:
@@ -110,6 +129,8 @@ class KalshiFeed:
             if rx:
                 p["rx"] = time.time()
             p["tickers"] = set(self.subscribed)
+            p["epoch"] = self.epoch
+            p["updates"] = self.updates
             p["msgs"] = self.msgs
             p["snapshots"] = self.snapshots
             p["seq_gaps"] = self.seq_gaps
@@ -163,6 +184,7 @@ class KalshiFeed:
             if tk:
                 st = kv.ws_snapshot(body)
                 self.books[tk] = st
+                self._pending.pop(tk, None)
                 if kv.ws_snapshot_suspect(body, st):
                     # a renamed wire: the body carries levels we did not read.
                     # Never a quiet empty book again (Oct 18 2026 — `yes_dollars_fp`).
@@ -173,6 +195,11 @@ class KalshiFeed:
                     self.books.pop(tk, None)         # no book is better than a wrong one
                     return
                 self.snapshots += 1
+                try:
+                    import app as _app
+                    _app.KALSHI_SNAP_EPOCH[tk] = self.epoch      # this connection built this book
+                except Exception:
+                    pass
                 self._record(tk)
         elif t == "orderbook_delta":
             tk = body.get("market_ticker")
@@ -184,8 +211,73 @@ class KalshiFeed:
                 self._record(tk)
         elif t == "error":
             log.warning("kalshi ws error frame: %s", str(msg)[:300])
+            if msg.get("id") is not None and int(msg.get("id") or 0) > 1:
+                # a market-list change the venue refused: resync the old way
+                self.update_fail += 1
+                raise ConnectionError(f"update_subscription refused: {str(body or msg)[:120]}")
         elif t == "subscribed":
             log.info("kalshi ws subscribed: %s", str(msg)[:200])
+            if body.get("channel") in (None, "orderbook_delta") and body.get("sid") is not None:
+                try:
+                    self.sid = int(body.get("sid"))
+                except (TypeError, ValueError):
+                    self.sid = None
+
+    def _send(self, ws, action: str, tickers) -> None:
+        self._cmd_id += 1
+        ws.send(json.dumps({"id": self._cmd_id, "cmd": "update_subscription",
+                            "params": {"sids": [self.sid], "market_tickers": sorted(tickers),
+                                       "action": action}}))
+
+    def _update_markets(self, ws, new: set) -> None:
+        """Pure-ish: the watched set changed — add/remove markets on the live
+        connection. An added market's book is untrusted until its snapshot."""
+        add, rem = new - self.subscribed, self.subscribed - new
+        import app as _app
+        if rem:
+            self._send(ws, "delete_markets", rem)
+            for tk in rem:
+                self.books.pop(tk, None)
+                self._pending.pop(tk, None)
+                _app.KALSHI_SNAP_EPOCH.pop(tk, None)
+        if add:
+            self._send(ws, "add_markets", add)
+            now_m = time.monotonic()
+            for tk in add:
+                self.books.pop(tk, None)
+                _app.KALSHI_SNAP_EPOCH.pop(tk, None)
+                self._pending[tk] = (now_m, False)
+        self.subscribed = set(new)
+        self.updates += 1
+        self._presence(True)
+
+    def _snap_watch(self, ws) -> None:
+        """Added markets whose snapshot never came: ask once, then give up
+        (reconnect = full snapshots). Plus any ticker the app distrusts
+        (a refused order proved its copy wrong): re-snapshot it."""
+        import app as _app
+        now_m = time.monotonic()
+        ask = set()
+        try:
+            want = set(getattr(_app, "KALSHI_RESNAP", set()) or set())
+            if want:
+                _app.KALSHI_RESNAP.difference_update(want)
+                for tk in want & self.subscribed:
+                    _app.KALSHI_SNAP_EPOCH.pop(tk, None)
+                    self._pending[tk] = (now_m, True)
+                    ask.add(tk)
+        except Exception:
+            pass
+        for tk, (at, asked) in list(self._pending.items()):
+            if tk not in self.subscribed:
+                self._pending.pop(tk, None)
+            elif not asked and now_m - at >= SNAP_WAIT_S:
+                self._pending[tk] = (at, True)
+                ask.add(tk)
+            elif asked and now_m - at >= SNAP_GIVEUP_S:
+                raise ConnectionError(f"no snapshot for {tk} in {SNAP_GIVEUP_S:.0f}s")
+        if ask and self.sid is not None:
+            self._send(ws, "get_snapshot", ask)
 
     def _record(self, tk: str) -> None:
         try:
@@ -206,6 +298,10 @@ class KalshiFeed:
                 continue
             ws = None
             try:
+                self.epoch += 1               # every book from the last connection is now untrusted
+                self.sid = None
+                self._pending = {}
+                self._cmd_id = 1
                 ws = self._connect(want)
                 self.subscribed = set(want)
                 self.books = {}
@@ -248,13 +344,19 @@ class KalshiFeed:
                     if now_m - last_check >= WATCH_POLL_S:
                         last_check = now_m
                         new = self._want()
-                        if new != self.subscribed and now_m - (getattr(self, "_sub_at", 0.0)) > RESUB_MIN_S:
-                            self._sub_at = now_m
-                            log.info("kalshi ws watch set changed (%d → %d) — resubscribing",
-                                     len(self.subscribed), len(new))
-                            break                # reconnect with the new set (full snapshots)
                         if not new:
                             break
+                        if new != self.subscribed:
+                            if self.sid is not None:
+                                log.info("kalshi ws watch set changed (%d → %d) — updating on the live connection",
+                                         len(self.subscribed), len(new))
+                                self._update_markets(ws, new)
+                            elif now_m - (getattr(self, "_sub_at", 0.0)) > RESUB_MIN_S:
+                                self._sub_at = now_m
+                                log.info("kalshi ws watch set changed (%d → %d), no sid yet — resubscribing",
+                                         len(self.subscribed), len(new))
+                                break            # reconnect with the new set (full snapshots)
+                        self._snap_watch(ws)
                 try:
                     ws.close()
                 except Exception:
