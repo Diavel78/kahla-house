@@ -863,9 +863,9 @@
                            : ai.POLYMARKET != null && ai.KALSHI != null ? ' · all-in Poly ' + Number(ai.POLYMARKET).toFixed(2) + '¢ vs Kalshi ' + Number(ai.KALSHI).toFixed(2) + '¢'
                            : (i.q.kalshi && i.q.kalshi.ok === false && i.q.kalshi.reason ? ' · ' + esc(i.q.kalshi.reason) : (i.q.poly && i.q.poly.reason ? ' · Poly: ' + esc(i.q.poly.reason) : ''))) + ' · ') : '';
                     q = '<div class="q ok">' + vtxt + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
-                      + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.stack_q || i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + pinQuoteTxt(i) + '</div>';
+                      + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.stack_q || i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + pinQuoteTxt(i) + gemQuoteTxt(i) + '</div>';
                     cost += n * i.q.price_c / 100; known++;
-                } else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + pinQuoteTxt(i) + '</div>';
+                } else q = '<div class="q bad">✕ ' + esc(i.q.reason || 'failed') + pinQuoteTxt(i) + gemQuoteTxt(i) + '</div>';
             }
             return '<div class="si"><div class="lab">' + (i.live ? '<span class="tag live">LIVE</span>' : '') + '<b>' + esc(i.label) + '</b> <span class="g">· ' + esc(i.game) + ' · ' + esc(i.sport) + ' · ' + fmtTime(i.event_start) + ' ' + fmtClock(i.event_start) + '</span>' + q + '</div>'
                  + '<button class="x" title="remove" onclick="removeSlip(' + JSON.stringify(i.key).replace(/"/g, '&quot;') + ')">✕</button></div>';
@@ -885,6 +885,16 @@
     // The slip's third quote (Rob, Oct 19 2026: "poly, Kalshi, and pin"):
     // Pinnacle's price for the same bet = Bet105's. `cents` = implied with
     // the vig in, to hold against the seat; a different line is said so.
+    // GEMINI ON THE QUOTE (Nov 8 2026, step 1 of Gemini replacing Kalshi) —
+    // shown, never picked yet. "opens" = no Gemini bid, Rob's Poly − 5¢ seat.
+    function gemQuoteTxt(i) {
+        const g = i.q && i.q.gemini;
+        if (!g) return '';
+        if (!g.ok) return ' · <span class="g">Gemini: ' + esc(String(g.reason || 'no market').replace(/^Gemini: /, '')) + '</span>';
+        return ' · <b>Gemini</b> ' + (g.rung_why === 'favorable' ? rungTxt(i, g.rung_line) + ' ' : '')
+             + g.price_c + '¢' + (g.opened ? ' (no bid — opens 5¢ under Poly)' : '')
+             + (g.touch_c != null ? ' · bid ' + g.touch_c + '¢' : '') + (g.ask_c != null ? ' / ask ' + g.ask_c + '¢' : '');
+    }
     function pinQuoteTxt(i) {
         const p = i.q && i.q.pin;
         if (!p || p.price == null) return '';

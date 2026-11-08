@@ -17449,6 +17449,17 @@ def api_bet_sheets_place():
                     res.pop("reason", None)
             elif want == "kalshi":
                 res = {"key": key, "ok": False, "reason": "Kalshi is switched off (machine_flags hand_kalshi_enabled)"}
+            # GEMINI ON THE QUOTE (Nov 8 2026, step 1 of Gemini replacing Kalshi):
+            # shown beside the others, never picked yet.
+            if _machine_flag("hand_gemini_quote", True):
+                try:
+                    _ps = (res.get("poly") or {}).get("price_c") if res.get("venue") == "KALSHI" else res.get("price_c")
+                    gq = _bet_sheet_resolve_gemini(it or {}, poly_seat_c=_ps)
+                except Exception as e:
+                    gq = {"ok": False, "reason": f"Gemini: {type(e).__name__}: {e}"[:120]}
+                gq.pop("_book", None)
+                res["gemini"] = {kk: gq.get(kk) for kk in ("ok", "reason", "symbol", "buy_yes", "price_c", "touch_c",
+                                                            "ask_c", "rung_line", "rung_why", "opened", "thin")}
             results.append(res)
         return jsonify({"ok": True, "preview": True, "placed": 0,
                         "contracts": contracts, "results": results})
@@ -22308,6 +22319,56 @@ def _bet_sheet_resolve_kalshi(item: dict) -> dict:
             "price_c": seat, "touch_c": s_bid, "ask_c": s_ask,
             "thin": (sdet if sdet.get("thin") else None), "fee": rs.get("fee"),
             "series": rs.get("series"), "event_ticker": rs.get("event_ticker"), "_book": book}
+
+
+_GEM_OPEN_UNDER_C = 5.0      # Rob, Nov 8 2026: no market on Gemini → open 5¢ under Polymarket's seat
+
+
+def _bet_sheet_resolve_gemini(item: dict, poly_seat_c=None) -> dict:
+    """GEMINI REPLACES KALSHI (Rob, Nov 8 2026: "IT REPLACES KALSHI… SAME
+    CHASE"). One slip item → its Gemini contract + the seat on our side by the
+    SAME seat rule as Polymarket and Kalshi (join the touch; the fat rung under
+    a thin one). With NO bid on our side the seat opens at Polymarket's seat −
+    5¢ (`poly_seat_c`; `gemini_venue.opening_seat_c`), and the chase takes it
+    from there. {ok, venue GEMINI, symbol, buy_yes, rung_line, rung_why,
+    price_c, touch_c, ask_c, opened, _book} or {ok: False, reason}. Read only."""
+    import gemini_venue as _gv
+    sport = str(item.get("sport") or "").upper()
+    try:
+        rs = _gv.resolve(sport, item.get("away"), item.get("home"), item.get("event_start"), item)
+    except Exception as e:
+        return {"ok": False, "reason": f"Gemini lookup failed: {e}"[:120]}
+    if not rs.get("ok"):
+        return {"ok": False, "reason": f"Gemini: {rs.get('why') or 'no market'}"[:160]}
+    sym, buy_yes = rs["symbol"], bool(rs["buy_yes"])
+    ob = _gv.orderbook(sym)
+    book = _gv.poly_book(ob)
+    if book is None:
+        return {"ok": False, "reason": f"Gemini book unreadable — {ob.get('error') or 'try again'}"[:160],
+                "symbol": sym}
+    syn = not buy_yes
+    s_bid, s_ask = _manual_side_book(book, syn)
+    opened = None
+    if s_bid is None:
+        seat = _gv.opening_seat_c(None, poly_seat_c, _GEM_OPEN_UNDER_C)
+        if seat is None:
+            return {"ok": False, "reason": "no bids on Gemini and no Polymarket seat to open under",
+                    "symbol": sym, "rung_line": rs.get("line")}
+        if s_ask is not None and seat >= s_ask:
+            seat = float(max(1, math.floor(s_ask - 1)))
+        opened, sdet = "poly_minus", {}
+    else:
+        mp, oh = _hand_thin_cfg()
+        seat, sdet = _hand_seat_price(book, syn, item.get("event_start"), datetime.now(timezone.utc), mp, oh)
+        if seat is None:
+            seat = s_bid
+        seat = round(_grid_dn(float(seat), _gv.TICK_C), 2)
+    return {"ok": True, "venue": "GEMINI", "symbol": sym, "buy_yes": buy_yes,
+            "rung_line": rs.get("line"), "rung_why": rs.get("why"),
+            "price_c": seat, "touch_c": s_bid, "ask_c": s_ask, "opened": opened,
+            "thin": (sdet if (sdet or {}).get("thin") else None),
+            "fee_rest_c": _gv.fee_per_contract_c("rest", seat),
+            "event": rs.get("event"), "_book": book}
 
 
 def _hand_same_line(a, b) -> bool:
@@ -31428,114 +31489,31 @@ _GEM_TAPE_LAST: dict = {}
 _GEM_RUNG_SPAN = 3.0
 
 
+# The matching lives in gemini_venue (one copy — the tape and the bet lane read
+# the same game / rung rules).
 def _gem_norm(x) -> str:
-    import unicodedata as _ud
-    t = _ud.normalize("NFKD", str(x or "")).encode("ascii", "ignore").decode().lower()
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", t).split())
+    import gemini_venue as _gv
+    return _gv.norm(x)
 
 
 def _gem_game_index(evs) -> dict:
-    """Pure. Gemini sports events → {(PREFIX, t1, t2, code): {"start": epoch, "a": title
-    team 1, "b": title team 2, "T": {line: (sym, bid_c, ask_c)}, "S": {(team, line): …},
-    "M": {team: …}}}. Ticker `NFL-2611081800-CIN-ATL-T`: code = UTC start, t1 = the
-    title's first team (the away side), t2 the second. Title "Denver vs Carolina: Point
-    Spread" → a/b off the part before ':'."""
-    out: dict = {}
-    for e in evs or []:
-        parts = (e.get("ticker") or "").split("-")
-        if len(parts) < 5 or not parts[1].isdigit() or len(parts[1]) < 10:
-            continue
-        try:
-            utc = datetime.strptime(parts[1][:10], "%y%m%d%H%M").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        g = out.setdefault((parts[0].upper(), parts[2].lower(), parts[3].lower(), parts[1][:10]),
-                           {"start": utc.timestamp(), "a": None, "b": None, "T": {}, "S": {}, "M": {}})
-        title = str(e.get("title") or "").split(":")[0]
-        if " vs " in title and g["a"] is None:
-            a, b = title.split(" vs ", 1)
-            g["a"], g["b"] = _gem_norm(a), _gem_norm(b)
-        kind = "-".join(parts[4:]).upper()
-        for c in e.get("contracts") or []:
-            sym = c.get("instrumentSymbol") or ""
-            tail = sym.rsplit("-", 1)[-1]
-            pr = c.get("prices") or {}
-
-            def cc(v):
-                try:
-                    return round(float(v) * 100.0, 2) if v not in (None, "") else None
-                except (TypeError, ValueError):
-                    return None
-            q = (sym, cc(pr.get("bestBid")), cc(pr.get("bestAsk")))
-            if kind == "T":
-                m = re.match(r"^O(\d+)$", tail)
-                if m:
-                    g["T"][float(m.group(1)) + 0.5] = q
-            elif kind == "S":
-                m = re.match(r"^([A-Z]+?)(\d+)$", tail)
-                if m:
-                    g["S"][(m.group(1).lower(), float(m.group(2)) + 0.5)] = q
-            elif kind == "M":
-                if re.match(r"^[A-Z]+$", tail):
-                    g["M"][tail.lower()] = q
-    return out
+    import gemini_venue as _gv
+    return _gv.game_index(evs)
 
 
 def _gem_name_hit(gem_name, our_name) -> bool:
-    """Pure. Gemini titles name a team by city / school ('Los Angeles C', 'Western
-    Michigan', 'New York J'); ours are full names. A prefix of ours = a hit."""
-    gn, on = _gem_norm(gem_name), _gem_norm(our_name)
-    return bool(gn) and (on == gn or on.startswith(gn + " ") or (on.startswith(gn) and len(gn) >= 4))
+    import gemini_venue as _gv
+    return _gv.name_hit(gem_name, our_name)
 
 
 def _gem_find_game(idx: dict, away, home, start) -> tuple:
-    """Pure. Our game (full names + start) → (gemini game, away code, home code),
-    else (None, None, None). Both names must hit the title, start within 12h."""
-    t = _aware_ts(start)
-    if t is None:
-        return None, None, None
-    best = None
-    for (pre, t1, t2, code), g in idx.items():
-        if abs(g["start"] - t.timestamp()) > 12 * 3600 or not g.get("a"):
-            continue
-        if _gem_name_hit(g["a"], away) and _gem_name_hit(g["b"], home):
-            cand = (g, t1, t2)
-        elif _gem_name_hit(g["a"], home) and _gem_name_hit(g["b"], away):
-            cand = (g, t2, t1)
-        else:
-            continue
-        d = abs(g["start"] - t.timestamp())
-        if best is None or d < best[0]:
-            best = (d, cand)
-    return best[1] if best else (None, None, None)
+    import gemini_venue as _gv
+    return _gv.find_game(idx, away, home, start)
 
 
-def _gem_quotes(g: dict, mt: str, away: str, home: str, center, span: float = _GEM_RUNG_SPAN) -> list:
-    """Pure. One Gemini game → [(line, bid_c, ask_c, sym)] home / over orientation:
-    total rungs near `center`; spread rungs as the HOME line (home −L = home's S
-    contract YES; home +L = the away S contract's NO, mirrored); ml = home M."""
-    out = []
-    if mt == "total":
-        for L, q in g["T"].items():
-            if center is None or abs(L - float(center)) <= span:
-                out.append((L, q[1], q[2], q[0]))
-    elif mt == "spread":
-        for (team, L), q in g["S"].items():
-            if team == home:
-                hl, b, a = -L, q[1], q[2]
-            elif team == away:
-                hl = L
-                b = round(100.0 - q[2], 2) if q[2] is not None else None
-                a = round(100.0 - q[1], 2) if q[1] is not None else None
-            else:
-                continue
-            if center is None or abs(hl - float(center)) <= span:
-                out.append((hl, b, a, q[0]))
-    elif mt == "ml":
-        q = g["M"].get(home)
-        if q:
-            out.append((None, q[1], q[2], q[0]))
-    return sorted(out, key=lambda x: (x[0] is None, x[0] or 0))
+def _gem_quotes(g: dict, mt: str, away: str, home: str, center, span: float = 3.0) -> list:
+    import gemini_venue as _gv
+    return _gv.quotes(g, mt, away, home, center, span)
 
 
 def _gem_touch_rows(sport: str, r: dict, items: list, picks: dict, cache: dict, at: str) -> list:
@@ -31545,13 +31523,12 @@ def _gem_touch_rows(sport: str, r: dict, items: list, picks: dict, cache: dict, 
     import gemini_pm as _gpm
     if _time.time() - _GEM_TOUCH["at"] > 60.0:
         _GEM_TOUCH["at"] = _time.time()
-        try:
-            evs = _gpm.events_all("sports", "active")
+        import gemini_venue as _gv
+        evs, err = _gv.sports_events()
+        if evs:
             _GEM_TOUCH["idx"] = _gem_game_index(evs)
             _GEM_TOUCH["events"] = len(evs)
-            _GEM_TOUCH["idx_err"] = None
-        except Exception as e:
-            _GEM_TOUCH["idx_err"] = f"{type(e).__name__}: {e}"[:120]
+        _GEM_TOUCH["idx_err"] = err
     it0 = items[0]
     _GEM_TOUCH["games"] += 1
     g, away, home = _gem_find_game(_GEM_TOUCH["idx"], it0.get("away"), it0.get("home"),
@@ -51410,6 +51387,23 @@ def api_gemini_coverage():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
     import gemini_pm as _gpm
+    if request.args.get("side"):
+        # ?sport=&away=&home=&start=&mt=&side=&line=[&poly=50] — one bet resolved the way
+        # the slip Quote will (gemini_venue + the seat rule), live
+        item = {"sport": request.args.get("sport"), "away": request.args.get("away"),
+                "home": request.args.get("home"), "event_start": request.args.get("start"),
+                "market_type": request.args.get("mt"), "side": request.args.get("side"),
+                "line": request.args.get("line")}
+        try:
+            ps = float(request.args.get("poly")) if request.args.get("poly") else None
+        except ValueError:
+            ps = None
+        import gemini_venue as _gv
+        rs = _gv.resolve(str(item["sport"] or "").upper(), item["away"], item["home"], item["event_start"], item)
+        q = _bet_sheet_resolve_gemini(item, poly_seat_c=ps)
+        bk = q.pop("_book", None)
+        return jsonify({"ok": True, "item": item, "resolve": rs, "quote": q,
+                        "book_top": {"bids": (bk or {}).get("bids", [])[:5], "asks": (bk or {}).get("asks", [])[:5]}})
     q = (request.args.get("q") or "").strip().lower()
     try:
         evs = _gpm.events_all(request.args.get("category") or "sports", "active")
