@@ -1278,9 +1278,9 @@
                           : { cls: 'rest', short: 'PULLED', detail: txt + ' — rejoins at the bid, under the live cap' };
         }
         if (b.poly_cancel_sent)
-            return { cls: 'rest', short: 'SWITCHING', detail: 'Polymarket cancel sent · the box is completing the move to Kalshi' };
+            return { cls: 'rest', short: 'SWITCHING', detail: 'Polymarket cancel sent · the box is completing the move to ' + (isGemT(b.kalshi_twin_ticker) || !b.kalshi_twin_ticker ? 'Gemini' : 'Kalshi') };
         if (b.kalshi_cancel_sent)
-            return { cls: 'rest', short: 'CANCELLING', detail: 'Kalshi cancel sent · the box is waiting for the book to agree' };
+            return { cls: 'rest', short: 'CANCELLING', detail: venueName(b) + ' cancel sent · the box is waiting for the book to agree' };
         return { cls: 'warn', short: 'OFF THE BOOK', detail: 'no order resting and nothing held' };
     }
     function fmtQ(x) { return String(Math.round(Number(x || 0) * 100) / 100); }
@@ -1463,7 +1463,7 @@
             ['Rests at', target >= 1 ? cA(target) : 'no room'],
         ];
         let h = '<div class="grab"></div>'
-              + '<div><div class="at">' + esc(betLabel(m)) + ' <span class="tag red">NO FILL · CANCELLED</span>' + (kal ? '<span class="tag kal">KALSHI</span>' : '') + (m.app ? '<span class="tag gry">APP</span>' : '') + '</div>'
+              + '<div><div class="at">' + esc(betLabel(m)) + ' <span class="tag red">NO FILL · CANCELLED</span>' + (kal ? (isGemT(m.ticker || m.kalshi_ticker) ? '<span class="tag gem">GEMINI</span>' : '<span class="tag kal">KALSHI</span>') : '') + (m.app ? '<span class="tag gry">APP</span>' : '') + '</div>'
               + '<div class="ag">' + esc(gameShort(m)) + ' · ' + fmtTime(m.event_start) + ' ' + clk(m.event_start) + (_scoreLine(m) ? ' · ' + esc(_scoreLine(m)) : '') + '</div></div>'
               + '<div class="grid">' + cells.map(c => '<div class="cell"><span class="k">' + c[0] + '</span><span class="v">' + esc(c[1]) + '</span></div>').join('') + '</div>';
         const warn = [];
@@ -1471,7 +1471,7 @@
         if (want != null && bid != null && bid <= want - 5) warn.push('⚠ The bid is ' + bid + '¢ now, ' + (want - bid).toFixed(1) + '¢ UNDER the ' + want + '¢ you wanted — your side is losing out there. Don\'t click this, dumbass… unless you want it anyway at ' + target + '¢.');
         else if (want != null && bid != null && bid >= want + 5) warn.push('The bid is ' + bid + '¢ now, ' + (bid - want).toFixed(1) + '¢ OVER what you wanted — your side is winning; ' + target + '¢ sits behind the market and may never fill.');
         if (ask != null && ask <= cap) warn.push('The ask (' + ask + '¢) is already under ' + cap + '¢ — this rests a tick under it, it does not take.');
-        h += '<div class="note">Rests ' + (m.contracts || '?') + ' on ' + esc(betLabel(m)) + ' at ' + why + ', GTC, in-play, on ' + (kal ? 'KALSHI (where it rested — the chase never changes venue)' : 'Polymarket') + '. The box runs the live chase on it with no clock — no chase, no game-start cancel; cancel it in the app or here.</div>';
+        h += '<div class="note">Rests ' + (m.contracts || '?') + ' on ' + esc(betLabel(m)) + ' at ' + why + ', GTC, in-play, on ' + (kal ? (isGemT(m.ticker || m.kalshi_ticker) ? 'GEMINI' : 'KALSHI') + ' (where it rested — the chase never changes venue)' : 'Polymarket') + '. The box runs the live chase on it with no clock — no chase, no game-start cancel; cancel it in the app or here.</div>';
         warn.forEach(w => { h += '<div class="note" style="color:var(--r-bd)">' + esc(w) + '</div>'; });
         const acts = [];
         acts.push('<button class="abtn' + (on ? ' on' : ' pri') + '" onclick="sheetOp(\'getlive\')">' + (on ? '✓ On the slip: chase it again' : 'Chase it again · ' + (m.contracts || '?') + ' @ ' + (target >= 1 ? target + '¢' : '?')) + '</button>');
@@ -1875,7 +1875,7 @@
             // the box is re-trying the take inside the 1¢ cap until the window ends
             const chz = b.chase && b.chase.until ? ' · ends ~' + esc(fmtClock(b.chase.until)) : '';
             const tag = (mine && b.live_hold) ? '<span class="tag ' + (b.live_hold.err ? 'red' : 'amb') + '">PULLED · back ~' + esc(fmtClock(b.live_hold.resume_at)) + chz + '</span>'
-                      : mine ? '<span class="tag amb">CHASING' + ((b.chase && b.chase.chase_venue === 'KALSHI') || b.venue === 'KALSHI' ? ' · KALSHI' : '') + (b.chase && b.chase.cap_c != null ? ' · to ' + esc(String(b.chase.cap_c)) + '¢' : '') + (b.chase && b.chase.until ? chz : ' · no clock') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
+                      : mine ? '<span class="tag amb">CHASING' + ((b.chase && b.chase.chase_venue === 'KALSHI') || b.venue === 'KALSHI' ? ' · ' + (isGemT(b.kalshi_ticker) ? 'GEMINI' : 'KALSHI') : '') + (b.chase && b.chase.cap_c != null ? ' · to ' + esc(String(b.chase.cap_c)) + '¢' : '') + (b.chase && b.chase.until ? chz : ' · no clock') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
                       : tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
                       : limbo(b) ? '<span class="tag gry">LISTED ' + esc(fmtClock(b.event_start)) + ' · WAITING FOR THE DROP</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
@@ -2088,7 +2088,7 @@
         if (fc != null) { vq = vq || {}; vq.fair = 100 - fc; }
         // the mirror is the other side's price only on the sheet's own rung; off it,
         // the box quotes the other side at ITS nearest more favorable rung (`other`)
-        if (vq) ['poly', 'kalshi'].forEach(vn => {
+        if (vq) ['poly', 'kalshi', 'gemini'].forEach(vn => {
             const own = vp[vn], o = vp.other && vp.other[vn];
             if (o) vq[vn] = o;
             else if (own && own.line != null && mt !== 'ml' && Math.abs(Number(own.line) - Number(line)) >= 0.01) vq[vn] = null;
@@ -2683,8 +2683,8 @@
             const fc = fairC(p);
             const opp = { home: 'away', away: 'home', over: 'under', under: 'over' }[p.side];
             const oline = mt === 'spread' ? -line : line;
-            rows = [{ side: p.side, line, q: { poly: vp.poly, kalshi: vp.kalshi }, fair: fc },
-                    { side: opp, line: oline, q: { poly: fullMirror(vp.poly, mt), kalshi: fullMirror(vp.kalshi, mt) }, fair: fc != null ? 100 - fc : null }];
+            rows = [{ side: p.side, line, q: { poly: vp.poly, kalshi: vp.kalshi, gemini: vp.gemini }, fair: fc },
+                    { side: opp, line: oline, q: { poly: fullMirror(vp.poly, mt), kalshi: fullMirror(vp.kalshi, mt), gemini: fullMirror(vp.gemini, mt) }, fair: fc != null ? 100 - fc : null }];
         } else if (key === 'ml' && L.ml_away != null && L.ml_home != null) {
             // no ML pick on the sheet (football): Pinnacle's two prices, devigged
             const a = impl(L.ml_away), h = impl(L.ml_home);
@@ -2705,7 +2705,7 @@
             return (r.fair != null && !off && Number(q.bid) <= r.fair - 1) ? '<span class="ok">' + t + '</span>' : t;
         };
         const parts = [r.fair != null ? '<span class="fv">fair ' + c(r.fair) + '¢ ' + centsAm(r.fair) + '</span>' : '',
-                       one('Poly', r.q.poly), one('Kalshi', r.q.kalshi)].filter(Boolean);
+                       one('Poly', r.q.poly), r.q.gemini ? one('Gemini', r.q.gemini) : one('Kalshi', r.q.kalshi)].filter(Boolean);
         return parts.join(' · ') || '<span class="no">no price</span>';
     }
     function renderFull() {
