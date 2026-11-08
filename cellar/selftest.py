@@ -7377,6 +7377,12 @@ def test_hand_game_feed() -> None:
     check("game feed: ML away, home scores → pull", P("ml", "away", sc("home"))[0] == "pull")
     check("game feed: a status event is never a pull", P("spread", "home", {"kind": "status", "status": "closed"})[0] == "none")
     check("game feed: an unknown market is never a pull", P("prop", "yes", sc("home"))[0] == "none")
+    check("game feed: basketball scores never pull (Lakers @ Pistons U 221.5, pulled on every basket)",
+          P("total", "under", sc("home"), game_type="basketball_game")[0] == "none"
+          and P("spread", "home", sc("away"), game_type="basketball_game")[0] == "none"
+          and P("total", "under", sc("home"), game_type="football_game")[0] == "pull"
+          and P("total", "under", sc("home"), game_type="hockey_match")[0] == "pull"
+          and P("total", "under", sc("home"), game_type="basketball_game", score_pull=True)[0] == "pull")
     a = {"status": "inprogress", "home_score": 3.0, "away_score": 0.0, "period": 2, "clock": "4:00"}
     b = {"status": "inprogress", "home_score": 3.0, "away_score": 7.0, "period": 2, "clock": "3:42"}
     ev = E(a, b)

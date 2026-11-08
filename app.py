@@ -31064,7 +31064,15 @@ def _hand_game_book_lead(rows, now_ts: float, window_s: float = _GAME_LEAD_WINDO
             "last_move_age_s": (min(m["age_s"] for m in moves) if moves else None)}
 
 
-def _hand_game_event_plan(market_type, side, event: dict, punt_pull: bool = True) -> tuple:
+# NO SCORE PULLS IN BASKETBALL (Nov 8 2026, Lakers @ Pistons U 221.5: the chase pulled
+# the order on every basket — pulled / back 20s later / pulled, seven times in six
+# minutes, off the book half the time; Rob: "turn off score pulls for basketball").
+# A score there is the game's normal rhythm, not news; the book rules still pull.
+_HAND_GAME_NO_SCORE_TYPES = frozenset({"basketball_game"})
+
+
+def _hand_game_event_plan(market_type, side, event: dict, punt_pull: bool = True,
+                          game_type: str | None = None, score_pull: bool | None = None) -> tuple:
     """PURE. Our resting BID against a game event → ('pull' | 'none', why).
     A score against our side (the opponent of a spread/ML side; any score
     on an under) → pull: the market is about to fall through the bid.
@@ -31086,6 +31094,10 @@ def _hand_game_event_plan(market_type, side, event: dict, punt_pull: bool = True
         return "pull", f"our_{kind}"
     if kind != "score":
         return "none", "not_a_score"
+    if score_pull is None:
+        score_pull = str(game_type or "") not in _HAND_GAME_NO_SCORE_TYPES
+    if not score_pull:
+        return "none", f"no_score_pull:{game_type or 'game'}"
     if mt in ("total",):
         if sd == "under":
             return "pull", f"{team}_scored_vs_under"
@@ -31167,7 +31179,10 @@ def _hand_game_poll(now_ts: float) -> list:
                 snap = LIVE_SNAP.get(key)
                 if not snap:
                     continue
-                v, why = _hand_game_event_plan(snap.get("mt"), snap.get("side"), ev, punt_pull)
+                v, why = _hand_game_event_plan(
+                    snap.get("mt"), snap.get("side"), ev, punt_pull, game_type=gtype,
+                    score_pull=(True if (str(gtype or "") in _HAND_GAME_NO_SCORE_TYPES
+                                         and _machine_flag("hand_game_score_pull_basketball", False)) else None))
                 try:
                     if (snap.get("venue") or "POLYMARKET") == "KALSHI":
                         _rows = _hand_side_rows(KALSHI_TAPE.get(key), not bool(snap.get("buy_yes")))
