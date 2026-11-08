@@ -6191,6 +6191,10 @@ def test_snipe_shadow() -> None:
     check("snipe trigger: a 1¢ wobble does not", T([(100.0, 35.0, 36.0, 1), (101.0, 35.5, 37.0, 1)], 101.0, 2.0, 5.0) is None)
     check("snipe trigger: a rise older than the window does not",
           T([(90.0, 30.0, 31.0, 1), (100.0, 35.0, 36.0, 1), (101.0, 35.0, 36.5, 1)], 101.0, 2.0, 5.0) is None)
+    check("snipe trigger: at the 1s default a 3-second drift does not fire",
+          _app._SNIPE_WIN_S == 1.0 and T([(100.0, 35.0, 36.0, 1), (101.5, 36.0, 37.0, 1), (103.0, 36.5, 38.0, 1)], 103.0, 2.0, _app._SNIPE_WIN_S) is None)
+    check("snipe trigger: a jump inside one frame gap fires on that frame",
+          T([(100.0, 35.0, 36.0, 1), (100.2, 39.0, 40.0, 1)], 100.2, 2.0, _app._SNIPE_WIN_S) is not None)
     check("snipe trigger: the price FALLING never fires (over bets only buy a jump up)",
           T([(100.0, 45.0, 46.0, 1), (101.0, 38.0, 39.0, 1)], 101.0, 2.0, 5.0) is None)
     ev = {"t0": 1000.0, "key": "p:x", "other": "k:y", "trigger": {},
@@ -6201,6 +6205,8 @@ def test_snipe_shadow() -> None:
     check("snipe grade: settled mid at +30s = 44.5", g["mid_30"] == 44.5, str(g))
     check("snipe grade: the same-venue take at the trigger is 37 and beats the settle after fee",
           t[("same", 0.0)]["ask_c"] == 37.0 and t[("same", 0.0)]["value_30_c"] > 5, str(t[("same", 0.0)]))
+    check("snipe grade: sub-second takes are graded (+0.25s, +0.5s)",
+          t[("same", 0.25)]["ask_c"] == 37.0 and t[("same", 0.5)]["ask_c"] == 37.0)
     check("snipe grade: +3s on the same venue is the 41 ask",
           t[("same", 3.0)]["ask_c"] == 41.0, str(t[("same", 3.0)]))
     check("snipe grade: the other venue's stale 36 is graded too, with its age",

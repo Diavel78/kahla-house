@@ -29098,16 +29098,16 @@ def _hand_live_frame(slug: str) -> None:
 # gone, but 37 is better than 49"). Over bets in play only, NOTHING PLACED.
 # Every socket frame on a watched over market (Polymarket by slug, Kalshi by
 # ticker — both venues of one bet) updates a small our-side history; when
-# the over jumps ≥ `hand_snipe_jump_c` (2¢) inside `hand_snipe_win_s` (5s) on
+# the over jumps ≥ `hand_snipe_jump_c` (2¢) inside `hand_snipe_win_s` (1s) on
 # either venue, an EVENT opens with the take we could have had right then:
 # the same venue's best ask (the follow-the-first-sweep take — 37 after the
 # 36 is gone) and the other venue's ask (the stale book). Every later frame
 # on either venue appends to the event; at +125s the tick grades each take
-# (now, +1s, +3s) against the our-side mid at +30s and +120s, after the
+# (now, +0.25s, +0.5s, +1s, +3s) against the our-side mid at +30s and +120s, after the
 # taker fee, and stamps `exec_probe_runs hand_snipe_shadow`. Frame work is a
 # dict lookup and a few tuple appends under one lock; all I/O is the tick's.
 _SNIPE_JUMP_C = 2.0
-_SNIPE_WIN_S = 5.0
+_SNIPE_WIN_S = 1.0
 _SNIPE_COOLDOWN_S = 20.0
 _SNIPE_HOLD_S = 125.0
 _SNIPE_HIST_S = 30.0
@@ -29197,7 +29197,7 @@ def _snipe_grade(ev: dict) -> dict:
         if not key:
             continue
         venue = "POLYMARKET" if key.startswith("p:") else "KALSHI"
-        for lag in (0.0, 1.0, 3.0):
+        for lag in (0.0, 0.25, 0.5, 1.0, 3.0):
             s = _snipe_at(tape.get(key) or [], t0 + lag)
             if not s or s[2] is None:
                 out["takes"].append({"who": who, "venue": venue, "lag_s": lag, "ask_c": None})
