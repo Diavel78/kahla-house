@@ -6253,6 +6253,36 @@ def test_snipe_shadow() -> None:
           "set(SNIPE_POLY_SLUGS)" in _ins.getsource(_app._touch_tape_publish)
           and "set(SNIPE_K_TICKERS)" in _ins.getsource(_app._hand_status_publish))
     check("snipe: the handbets tick runs it", "_hand_snipe_shadow_tick(sb, now)" in _ins.getsource(_app._hand_orders_tick))
+    # WHICH TRIGGER + ARE WE FAST ENOUGH (Rob, Nov 8 2026: "2 cents is too
+    # small… we could only ever take on Polymarket… I don't know if we're
+    # fast enough"). The Bengals 50-yard TD, frame by frame: Kalshi's ask
+    # 69 → 71 opened the event, Polymarket's 70.5 was repriced to 81.5 a
+    # quarter-second later — exactly when a 4¢ trigger would have fired.
+    td = {"t0": 1000.0, "key": "k:td", "other": "p:td", "trigger": {"win_s": 1.0},
+          "pre": [(999.4, 68.0, 69.0, 1), (999.9, 68.0, 70.0, 1)],
+          "tape": {"k:td": [(1000.0, 68.0, 71.0, 0.4), (1000.25, 70.0, 74.0, 5.5), (1000.5, 72.0, 76.0, 0.5),
+                            (1001.0, 78.0, 79.0, 75), (1003.0, 79.0, 80.0, 50)],
+                   "p:td": [(999.97, 68.0, 70.5, 15.1), (1000.24, 70.0, 81.5, 300), (1002.0, 79.0, 80.0, 100)]}}
+    gp = _app._snipe_grade_poly(td, {"mid_15": 79.5, "mid_30": 79.5}, rtt_ms=300)["poly"]
+    j2, j4, j6 = gp["by_jump"]["2"], gp["by_jump"]["4"], gp["by_jump"]["6"]
+    check("snipe poly: a 2¢ trigger fires on the first tick and takes the stale 70.5",
+          j2["fired"] and j2["at_s"] == 0.0 and j2["at_fire"]["ask_c"] == 70.5 and j2["at_fire"]["value_15_c"] > 7, str(j2))
+    check("snipe poly: a 4¢ trigger fires a quarter-second later, into the 81.5 reprice",
+          j4["fired"] and j4["at_s"] == 0.25 and j4["at_fire"]["ask_c"] == 81.5 and j4["at_fire"]["value_15_c"] < 0, str(j4))
+    check("snipe poly: a 300ms round trip after the 2¢ fire lands on the 81.5",
+          j2["after_rtt"]["ask_c"] == 81.5, str(j2))
+    check("snipe poly: the 6¢ trigger is graded too", j6["fired"] and j6["at_s"] == 0.5, str(j6))
+    check("snipe poly: Polymarket's stale ask lived 240ms after Kalshi moved", gp["stale_ms"] == 240, str(gp))
+    check("snipe poly: Polymarket takes only", "KALSHI" not in str(gp["by_jump"]))
+    ie = _app._iso_epoch
+    check("snipe speed: transactTime parses with Z and nanoseconds",
+          ie("2026-11-08T14:48:41.123456789Z") is not None and abs(ie("2026-11-08T14:48:41.5Z") - ie("2026-11-08T14:48:41Z") - 0.5) < 1e-6)
+    blk = _ins.getsource(_app._snipe_frame) + _ins.getsource(_app._hand_snipe_shadow_tick)
+    check("snipe: its counters never touch the sell sniper's _SNIPE_STATS",
+          "_SNIPE_STATS[" not in blk and "_SNIPE_SH_STATS" in blk and "moves" in _app._SNIPE_STATS)
+    check("snipe speed: every venue write is timed, and depth frames record socket lag",
+          "_VENUE_WRITE_MS[name].append" in _ins.getsource(_app._SerialOrders)
+          and "_snipe_sock_lag(" in _ins.getsource(__import__("cellar.wsfeed", fromlist=["x"])._write_depth))
 
 
 def test_kalshi_socket_trust() -> None:

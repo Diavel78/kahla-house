@@ -3286,6 +3286,10 @@ def get_client():
 # and future. `CELLAR_LANE_LOCK=1` restores the whole-run lock.
 _VENUE_WRITE_LOCK = threading.RLock()
 _VENUE_WRITE_STATS = {"create": 0, "cancel": 0, "modify": 0, "wait_s": 0.0}
+# every write's venue round trip in ms (lock wait excluded) — the shadow
+# sniper's "are we fast enough" (Nov 8 2026)
+import collections as _collections_vw
+_VENUE_WRITE_MS = {k: _collections_vw.deque(maxlen=300) for k in ("create", "cancel", "modify")}
 
 
 class _SerialOrders:
@@ -3306,7 +3310,14 @@ class _SerialOrders:
             with _VENUE_WRITE_LOCK:
                 _VENUE_WRITE_STATS["wait_s"] += _time.monotonic() - t0
                 _VENUE_WRITE_STATS[name] = _VENUE_WRITE_STATS.get(name, 0) + 1
-                return fn(*a, **k)
+                t1 = _time.monotonic()
+                try:
+                    return fn(*a, **k)
+                finally:
+                    try:
+                        _VENUE_WRITE_MS[name].append(round((_time.monotonic() - t1) * 1000.0, 1))
+                    except Exception:
+                        pass
         return _serial
 
 
@@ -29108,7 +29119,7 @@ def _hand_live_frame(slug: str) -> None:
 # dict lookup and a few tuple appends under one lock; all I/O is the tick's.
 _SNIPE_JUMP_C = 2.0
 _SNIPE_WIN_S = 1.0
-_SNIPE_COOLDOWN_S = 20.0
+_SNIPE_COOLDOWN_S = 5.0        # 20s swallowed a TD that came 10s after a drift tick
 _SNIPE_HOLD_S = 35.0
 _SNIPE_HIST_S = 30.0
 _SNIPE_SETTLE_S = (15.0, 30.0)     # Rob, Nov 8 2026: "15 seconds and 30 seconds. 2 minutes is multiple plays later"
@@ -29120,7 +29131,59 @@ _SNIPE_HIST: dict = {}             # key → deque[(ts, bid_c, ask_c, ask_q)] (o
 _SNIPE_EVENTS: list = []           # open events
 _SNIPE_LAST: dict = {}             # pick id → ts of its last event
 _SNIPE_LOCK = threading.Lock()
-_SNIPE_STATS = {"frames": 0, "events": 0, "graded": 0, "errors": 0}
+_SNIPE_SH_STATS = {"frames": 0, "events": 0, "graded": 0, "errors": 0}   # NOT _SNIPE_STATS — the sell sniper owns that name
+# WHICH TRIGGER (Rob, Nov 8 2026: "2 cents is too small it appears"): events
+# still open on every 2¢ start — on the Bengals TD the first tick was 69→71
+# and Polymarket's stale 70.5 ask was gone 0.25s later, when a 4¢ trigger
+# would only just have fired — and each is graded as if it had fired at 2, 4
+# and 6¢, Polymarket takes only ("we could only ever take on Polymarket").
+_SNIPE_GRADE_JUMPS = (2.0, 4.0, 6.0)
+_SNIPE_GRADE_REACH_S = 3.0
+# ARE WE FAST ENOUGH: Polymarket's depth frames carry the venue's own
+# `transactTime` (socket lag = our receive − that), every venue write is
+# timed in _SerialOrders, and each event measures how long the other
+# venue's stale ask lived.
+_SNIPE_SOCK_LAG: "_deque" = _deque(maxlen=600)
+
+
+def _iso_epoch(v):
+    """An ISO time ('2026-11-08T14:48:41.123456789Z') → epoch seconds, else None."""
+    try:
+        t = str(v).strip().replace("Z", "+00:00")
+        m = re.match(r"^(.*?\.\d{1,6})\d*([+-]\d\d:\d\d)?$", t)
+        if m:
+            t = m.group(1) + (m.group(2) or "")
+        d = datetime.fromisoformat(t)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d.timestamp()
+    except Exception:
+        return None
+
+
+def _snipe_sock_lag(transact_time) -> None:
+    """Depth frame on a sniped market: how far behind the venue we heard it."""
+    e = _iso_epoch(transact_time)
+    if e is not None:
+        lag = (_time.time() - e) * 1000.0
+        if -2000.0 < lag < 60000.0:
+            _SNIPE_SOCK_LAG.append(round(lag, 1))
+
+
+def _pctl(xs, q):
+    xs = sorted(x for x in (xs or []) if x is not None)
+    if not xs:
+        return None
+    return round(xs[min(len(xs) - 1, int(q * (len(xs) - 1) + 0.5))], 1)
+
+
+def _snipe_speed() -> dict:
+    """socket lag + every venue write's round trip, p50/p90 ms."""
+    out = {"sock_lag_ms": {"n": len(_SNIPE_SOCK_LAG), "p50": _pctl(_SNIPE_SOCK_LAG, 0.5),
+                           "p90": _pctl(_SNIPE_SOCK_LAG, 0.9)}}
+    for k, dq in list(_VENUE_WRITE_MS.items()):
+        out[k + "_ms"] = {"n": len(dq), "p50": _pctl(dq, 0.5), "p90": _pctl(dq, 0.9)}
+    return out
 
 
 def _snipe_side(row, syn: bool):
@@ -29211,6 +29274,72 @@ def _snipe_grade(ev: dict) -> dict:
                 m = out.get(f"mid_{lag2}")
                 row[f"value_{lag2}_c"] = round(m - ask - fee, 2) if m is not None else None
             out["takes"].append(row)
+    out.update(_snipe_grade_poly(ev, out))
+    return out
+
+
+def _snipe_grade_poly(ev: dict, g: dict, rtt_ms=None) -> dict:
+    """Pure. Polymarket-only read of one event (Rob: "we could only ever take
+    on Polymarket"): for a trigger of 2, 4 and 6¢ — when would it have fired
+    (first frame on the trigger venue where the rise reaches it inside the
+    window, ≤3s after the event opened), Polymarket's ask then and after one
+    venue round trip, valued against Polymarket's mid at +15s/+30s (the
+    trigger venue's when Polymarket has none) less the taker fee. Plus how
+    long Polymarket's ask stayed where it was after a Kalshi-led start."""
+    import kalshi_venue as _kv
+    t0 = ev["t0"]
+    tape = ev.get("tape") or {}
+    key = ev["key"]
+    pk = key if key.startswith("p:") else (ev.get("other") if str(ev.get("other") or "").startswith("p:") else None)
+    if not pk:
+        return {"poly": None}
+    ptape = tape.get(pk) or []
+    win = float((ev.get("trigger") or {}).get("win_s") or _SNIPE_WIN_S)
+    mids = {}
+    for lag in _SNIPE_SETTLE_S:
+        m = _snipe_mid(_snipe_at(ptape, t0 + lag))
+        mids[int(lag)] = m if m is not None else g.get(f"mid_{int(lag)}")
+    seq = sorted({x[0]: x for x in list(ev.get("pre") or []) + list(tape.get(key) or [])}.values(),
+                 key=lambda x: x[0])
+    if rtt_ms is None:
+        rtt_ms = _pctl(_VENUE_WRITE_MS.get("create") or [], 0.5)
+    rtt_s = (rtt_ms or 0.0) / 1000.0
+
+    def take(t):
+        s_ = _snipe_at(ptape, t)
+        if not s_ or s_[2] is None:
+            return None
+        ask = float(s_[2])
+        fee = _kv.fee_per_contract_c("POLYMARKET", "take", ask)
+        r = {"ask_c": ask, "ask_q": s_[3], "fee_c": round(fee, 2)}
+        for lg, m in mids.items():
+            r[f"value_{lg}_c"] = round(m - ask - fee, 2) if m is not None else None
+        return r
+    by = {}
+    for jc in _SNIPE_GRADE_JUMPS:
+        fired = None
+        for i, fr in enumerate(seq):
+            if fr[0] < t0 - 1e-9 or fr[0] > t0 + _SNIPE_GRADE_REACH_S:
+                continue
+            if _snipe_trigger(seq[:i + 1], fr[0], jc, win):
+                fired = fr[0]
+                break
+        if fired is None:
+            by[str(int(jc))] = {"fired": False}
+            continue
+        by[str(int(jc))] = {"fired": True, "at_s": round(fired - t0, 2),
+                            "at_fire": take(fired), "after_rtt": take(fired + rtt_s)}
+    out = {"poly": {"key": pk, "mid_15": mids.get(15), "mid_30": mids.get(30), "rtt_ms": rtt_ms,
+                    "by_jump": by}}
+    if pk != key:
+        a0 = _snipe_at(ptape, t0)
+        life = None
+        if a0 and a0[2] is not None:
+            for fr in ptape:
+                if fr[0] > t0 and fr[2] is not None and fr[2] > a0[2] + 1e-9:
+                    life = round((fr[0] - t0) * 1000.0)
+                    break
+        out["poly"]["stale_ms"] = life           # how long Polymarket's ask sat after Kalshi moved
     return out
 
 
@@ -29226,7 +29355,7 @@ def _snipe_frame(key: str, row) -> None:
         if s is None:
             return
         with _SNIPE_LOCK:
-            _SNIPE_STATS["frames"] += 1
+            _SNIPE_SH_STATS["frames"] += 1
             h = _SNIPE_HIST.get(key)
             if h is None:
                 h = _SNIPE_HIST[key] = _deque(maxlen=400)
@@ -29243,6 +29372,7 @@ def _snipe_frame(key: str, row) -> None:
             trg = _snipe_trigger(h, s[0], meta["jump_c"], meta["win_s"])
             if not trg:
                 return
+            trg["win_s"] = meta["win_s"]
             _SNIPE_LAST[meta["pick"]] = _time.time()
             other = meta.get("other")
             tape = {key: [s]}
@@ -29252,9 +29382,9 @@ def _snipe_frame(key: str, row) -> None:
                                   "game": meta.get("game"), "line": meta.get("line"),
                                   "trigger": trg, "tape": tape,
                                   "pre": [x for x in h if x[0] >= s[0] - meta["win_s"]][-12:]})
-            _SNIPE_STATS["events"] += 1
+            _SNIPE_SH_STATS["events"] += 1
     except Exception:
-        _SNIPE_STATS["errors"] += 1
+        _SNIPE_SH_STATS["errors"] += 1
 
 
 def _hand_snipe_shadow_tick(sb, now) -> dict:
@@ -29314,12 +29444,13 @@ def _hand_snipe_shadow_tick(sb, now) -> dict:
                         "t0": datetime.fromtimestamp(e["t0"], timezone.utc).isoformat(),
                         "trigger": e["trigger"], "pre": e.get("pre"), "grade": g,
                         "frames": {k: len(v) for k, v in (e.get("tape") or {}).items()},
-                        "at": now.isoformat()})
-            _SNIPE_STATS["graded"] += 1
+                        "speed": _snipe_speed(), "at": now.isoformat()})
+            _SNIPE_SH_STATS["graded"] += 1
         except Exception as ex:
-            _SNIPE_STATS["errors"] += 1
+            _SNIPE_SH_STATS["errors"] += 1
             app.logger.warning("snipe shadow grade: %s", str(ex)[:120])
-    st.update({k: v for k, v in _SNIPE_STATS.items()})
+    st.update({k: v for k, v in _SNIPE_SH_STATS.items()})
+    st["speed"] = _snipe_speed()
     return st
 
 

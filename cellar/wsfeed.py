@@ -232,6 +232,8 @@ def _write_depth(slug: str, pv: dict, conn: int = 0) -> None:
         bids = sorted(lv(pv.get("bids")), key=lambda x: -x[0])
         asks = sorted(lv(pv.get("offers")), key=lambda x: x[0])
         ts = time.monotonic()
+        if slug in _app.SNIPE_POLY_SLUGS and pv.get("transactTime"):
+            _app._snipe_sock_lag(pv.get("transactTime"))     # how far behind the venue (Nov 8 2026)
         _app.WS_DEPTH[slug] = (bids, asks, ts)
         try:
             _app._touch_tape_record(slug, bids, asks)
