@@ -3948,9 +3948,9 @@ def test_bet_sheet_live_section() -> None:
           "if (b.status === 'void') return false;" in html and "myBetLive(b)" in _cp)
     check("…and the bets cancelled at game start / chase end ride along, deduped",
           "/api/bet-sheets/cancelled-today" in _cp and "mine.concat(gone)" in _cp and "b.getlive_from === c.pick_id" in _cp)
-    check("Copy picks is PRE-GAME only (Rob, Oct 31 2026: \"Copy Picks is pre-game\")",
-          "bets = t.bets.filter(betPreGame)" in _cp and "todaysBets(false)" in _cp
-          and "gameStatus(g) === 'up'" in _cp)
+    check("Copy picks = this tab's sport, every OPEN bet incl. in-play and the box's cancels until graded (Rob, Nov 8 2026: \"it's all sports in the NFL tab… where are the falcons bengals picks\")",
+          "betOpen(b) && String(b.sport || '').toUpperCase() === sp && !gradeOffFinal(b, finalFor(b))" in _cp
+          and "myPicksText(bets, 'My picks · ' + sp)" in _cp and "betPreGame" not in html)
     check("Settled picks = this tab's sport, graded bets incl. the box's game-start cancels, with the record",
           "onclick=\"copySettled()\"" in html and "todaysBets(true)" in _cp
           and "String(b.sport || '').toUpperCase() === sp" in _cp

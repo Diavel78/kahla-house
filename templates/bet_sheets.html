@@ -2479,20 +2479,24 @@
         }
         return ok;
     }
-    function betPreGame(b) {
-        if (b.status && b.status !== 'pending') return false;
-        if (b.in_play || b.live_snipe) return false;
-        const g = myBetGame(b);
-        if (g) return gameStatus(g) === 'up';
-        return !!b.event_start && new Date(b.event_start) > new Date();
+    // THIS TAB'S SPORT, AND A STARTED GAME STAYS (Rob, Nov 8 2026: "it's all
+    // sports in the NFL tab… where the fuck are the falcons bengals picks??" —
+    // the copy was every sport and pre-game only, so a bet still resting or
+    // chasing after game start dropped out). Every open bet today on this tab's
+    // sport, pre-game or in play, plus what the box cancelled at the drop or
+    // chase end (he plays those live on Bet105) until the final grades them —
+    // then they move to Settled picks.
+    function betOpen(b) {
+        return !b.status || b.status === 'pending';
     }
     async function copyPicks() {
         if (!_lastBetsPayload) { toast('Your bets are still loading — try again in a second', true); return; }
-        const t = await todaysBets(false);
-        const bets = t.bets.filter(betPreGame);
-        if (!bets.length) { toast(t.words.length ? 'None of your pre-game bets today match the search' : 'No pre-game bets of yours today to copy', true); return; }
-        const ok = await copyText(myPicksText(bets, 'My picks'));
-        toast(ok ? 'Copied your pre-game picks · ' + bets.length + ' bet' + (bets.length === 1 ? '' : 's') : 'Copy failed', !ok);
+        const t = await todaysBets(true);
+        const sp = String(_sport || '').toUpperCase();
+        const bets = t.bets.filter(b => betOpen(b) && String(b.sport || '').toUpperCase() === sp && !gradeOffFinal(b, finalFor(b)));
+        if (!bets.length) { toast(t.words.length ? 'None of your open ' + sp + ' bets today match the search' : 'No open ' + sp + ' bets of yours today to copy', true); return; }
+        const ok = await copyText(myPicksText(bets, 'My picks · ' + sp));
+        toast(ok ? 'Copied your ' + sp + ' picks · ' + bets.length + ' bet' + (bets.length === 1 ? '' : 's') : 'Copy failed', !ok);
     }
     // A bet on a FINAL game is settled whether or not the venue has paid it
     // yet (Rob, Oct 31 2026: "All SETTLED BET…. Not filled…") — graded here
