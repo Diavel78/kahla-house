@@ -3546,8 +3546,11 @@ def test_hand_live_chase() -> None:
           and "_kalshi_live_create(" in src_k and "_kalshi_amend_pick(" in src_k)
     # THE CHASE NEVER CHANGES VENUE (Rob, Oct 24 2026: "if it didn't fill on Kalshi, it stays on Kalshi")
     check("the Kalshi chase hand-off places nothing on Polymarket and never reshapes the pick's venue",
-          "_manual_order_place(" not in src_k and '"to": "POLYMARKET"' not in src_k and '"venue": "POLYMARKET"' not in src_k
-          and "pmm_twin_slug" not in src_k)
+          "_manual_order_place(" not in src_k and '"to": "POLYMARKET"' not in src_k and '"venue": "POLYMARKET"' not in src_k)
+    # …except a GEMINI bet (Nov 8 2026, Rob: option 2 — nobody quotes Gemini in-game)
+    check("only a GEMI contract hands its chase to Polymarket (real Kalshi still chases on Kalshi)",
+          'str(ticker).startswith("GEMI-") and blob.get("pmm_twin_slug")' in src_k
+          and "_hand_gem_chase_to_poly(" in src_k)
     check("the live chase has a Kalshi worker fed by Kalshi's socket frames",
           "_hand_live_one_kalshi(" in inspect.getsource(_app._hand_live_one)
           and "_hand_live_frame(ticker)" in inspect.getsource(_app._kalshi_tape_record)
@@ -6531,6 +6534,64 @@ def test_gemini_in_kalshi_slot() -> None:
               and _sb.ups[0][1]["signal_blob"].get("pmm_game_slug") == "asc-nfl-buf-min-neg-3pt5")
     finally:
         _app._bet_sheet_slug = _sbk
+    # GEMINI → POLYMARKET LIVE CHASE (Nov 8 2026, Rob chose option 2)
+    class _U:
+        def __init__(self, ups): self.ups = ups
+        def update(self, d): self._d = d; return self
+        def eq(self, k, v): self._id = v; return self
+        def execute(self): self.ups.append((self._id, self._d)); return type("R", (), {"data": []})()
+    class _SBU:
+        def __init__(self): self.ups = []
+        def table(self, n): return _U(self.ups)
+    svh = {k: getattr(_app, k) for k in ("_pmm_tick_c", "_hand_poly_book", "_manual_order_place",
+                                          "_hand_start_cancel_alert", "_probe_log", "_hand_chase_s_r")}
+    svk = {k: getattr(_kv, k) for k in ("cancel_order", "order_resting", "positions")}
+    placed: list = []
+    try:
+        _kv.cancel_order = lambda oid, t=None: {"ok": True}
+        _kv.order_resting = lambda oid, t=None: {"resting": False}
+        _kv.positions = lambda: {}
+        _app._pmm_tick_c = lambda c, sl: 0.5
+        _app._hand_poly_book = lambda c, sl, tries=3: {"best_bid": 0.47, "best_ask": 0.49, "bids": [], "asks": []}
+        _app._manual_order_place = lambda c, sl, syn, px, q, es, **k: (placed.append((sl, syn, px, q, k.get("allow_started")))
+                                                                     or ({"ok": True, "order_id": "P1", "price_c": px}, 201))
+        _app._hand_start_cancel_alert = lambda st: None
+        _app._probe_log = lambda d: None
+        _app._hand_chase_s_r = lambda r: 3600.0
+        sbu = _SBU()
+        blob = {"bet_sheet": True, "venue": "KALSHI", "kalshi_ticker": "GEMI-NFL-X-T-O44", "kalshi_buy_yes": False,
+                "kalshi_order_id": "G9", "pmm_twin_slug": "tsc-nfl-gb-ne-total-44pt5", "pmm_twin_synthetic": True,
+                "price_c": 48.0, "contracts": 10}
+        st_: dict = {}
+        stamp: dict = {}
+        res = _app._hand_gem_chase_to_poly(sbu, object(), {"id": 7, "event_start": "2026-11-08T21:25:00Z"}, blob, stamp,
+                                           datetime.now(timezone.utc), st_, "GEMI-NFL-X-T-O44", "G9",
+                                           {"yes_c": 52.0}, 48.0, 10)
+        nb = sbu.ups[-1][1]["signal_blob"] if sbu.ups else {}
+        check("Gemini unfilled at the drop: verified cancel, then 10 rest on the Polymarket twin in-play, never over the cap",
+              res == (True, True) and placed and placed[0][0] == "tsc-nfl-gb-ne-total-44pt5" and placed[0][1] is True
+              and placed[0][3] == 10 and placed[0][4] is True and placed[0][2] <= 49.5, str(placed))
+        check("…and the pick becomes a Polymarket live chase (pmm_slug/order_id, Gemini cleared, the hour's clock)",
+              nb.get("venue") == "POLYMARKET" and nb.get("pmm_slug") == "tsc-nfl-gb-ne-total-44pt5"
+              and nb.get("order_id") == "P1" and nb.get("kalshi_ticker") is None
+              and (nb.get("live_snipe") or {}).get("auto") and (nb.get("gemini_handoff") or {}).get("ticker") == "GEMI-NFL-X-T-O44")
+        _kv.order_resting = lambda oid, t=None: {"resting": True}
+        placed.clear()
+        res2 = _app._hand_gem_chase_to_poly(_SBU(), object(), {"id": 7, "event_start": "x"}, blob, {}, datetime.now(timezone.utc),
+                                            {}, "GEMI-NFL-X-T-O44", "G9", {"yes_c": 52.0}, 48.0, 10)
+        check("a Gemini cancel the venue hasn't confirmed places nothing on Polymarket (retry next tick)",
+              res2 == (None, False) and not placed)
+        _kv.order_resting = lambda oid, t=None: {"resting": False}
+        _kv.positions = lambda: {"GEMI-NFL-X-T-O44": -10.0}
+        res3 = _app._hand_gem_chase_to_poly(_SBU(), object(), {"id": 7, "event_start": "x"}, blob, {}, datetime.now(timezone.utc),
+                                            {}, "GEMI-NFL-X-T-O44", "G9", {"yes_c": 52.0}, 48.0, 10)
+        check("…and a fill that landed under the cancel books the Gemini lot, no Polymarket order",
+              res3 == (False, True) and not placed)
+    finally:
+        for k_, v_ in svh.items():
+            setattr(_app, k_, v_)
+        for k_, v_ in svk.items():
+            setattr(_kv, k_, v_)
     # ROB'S OPENING SEAT IN THE SLOT (Nov 8 2026, Memphis @ USF +5.5 rested on Poly
     # at 50¢ while Gemini listed the rung with an empty book): no bid on our side
     # → Polymarket's seat − 5¢, and the cheaper all-in puts the bet on Gemini.

@@ -29239,6 +29239,120 @@ def _kalshi_live_create(ticker: str, by: bool, target_c: float, qty: int) -> tup
     return oid, det
 
 
+def _hand_gem_chase_to_poly(sb, client, r: dict, blob: dict, stamp: dict, now, st: dict,
+                            ticker, koid, o, k_c, unfilled: int) -> tuple:
+    """A GEMINI BET UNFILLED AT THE DROP IS CHASED ON POLYMARKET (Nov 8 2026,
+    Rob, choosing option 2 after the Packers/Pats U 44.5 card read 48% at 24-14:
+    Gemini has nobody quoting in-game). Only for a bet with a SAME-LINE
+    Polymarket twin and nothing filled on Gemini: verified Gemini cancel →
+    one GTC order on the twin at the live rule's price, capped at his Gemini
+    bid (`_hand_auto_chase_cap`) → the pick BECOMES a Polymarket bet
+    (`pmm_slug`/`order_id`, venue POLYMARKET, `gemini_handoff` keeps where it
+    came from) with the live chase's clock, so the Polymarket live chase owns
+    it. Returns the Kalshi start chase's (handled, cancelled) tuple: an
+    unreadable or unconfirmed Gemini cancel → (None, False), retried next
+    tick; a fill under the cancel or a refused Polymarket create → (False,
+    True), the finish books what is held / reports NOT FILLED."""
+    import kalshi_venue as _kv
+    twin, syn = blob["pmm_twin_slug"], bool(blob.get("pmm_twin_synthetic"))
+    if client is None:
+        stamp["chase_retry"] = {"why": "no_poly_client"}
+        return None, False
+    by = bool(blob.get("kalshi_buy_yes"))
+    if o is not None and koid:
+        try:
+            _kv.cancel_order(koid, ticker)
+        except Exception as e:
+            app.logger.warning("gemini handoff cancel %s: %s", koid, e)
+        vr = {}
+        for _i in range(6):
+            try:
+                vr = _kv.order_resting(koid, ticker)
+            except Exception as e:
+                vr = {"resting": None, "error": str(e)[:120]}
+            if vr.get("resting") is False:
+                break
+            _time.sleep(0.75)
+        if vr.get("resting") is not False:
+            stamp["chase_retry"] = {"why": "gemini_cancel_unconfirmed", "resting": vr.get("resting")}
+            return None, False
+    try:
+        pos = _kv.positions()
+    except Exception:
+        pos = None
+    gh = _kv.held_for(pos, ticker, by) if pos is not None else None
+    if gh is None:
+        stamp["chase_retry"] = {"why": "gemini_held_unreadable", "cancelled": True}
+        # the Gemini order is gone: mark it so the gone sweep never deletes the bet
+        try:
+            sb.table("bot_picks").update({"signal_blob": {**blob, "kalshi_order_id": None,
+                                                          "kalshi_cancel_sent": now.isoformat()}}).eq("id", r["id"]).execute()
+        except Exception:
+            pass
+        return None, False
+    if gh > 0:
+        stamp["chase_skipped"] = {"why": "gemini_filled_under_cancel", "held": round(gh, 2)}
+        return False, True
+    try:
+        snipe = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
+    except (TypeError, ValueError):
+        snipe = _HAND_LIVE_SNIPE_C
+    cap = _hand_auto_chase_cap(k_c, snipe)
+    tick = _pmm_tick_c(client, twin)
+    book = _hand_poly_book(client, twin)
+    ladder = _hand_ladder_from_book(book, syn) if book else _hand_side_ladder(twin, syn)
+    ask_c = _manual_side_book(book, syn)[1] if book else None
+    target, why = _hand_live_target(ladder, ask_c, None, 0, cap, tick)
+    if target is None:
+        target, why = _grid_dn(float(cap), tick), f"at_cap:{why or 'no_book'}"
+        if ask_c is not None and target >= ask_c:
+            target = _grid_dn(float(ask_c) - tick, tick)
+    out, _code = _manual_order_place(client, twin, syn, float(target), int(unfilled), r.get("event_start"),
+                                     book=book, verify="fresh", allow_started=True)
+    if not out.get("ok"):
+        _probe_log({"kind": "hand_start_chase", "hand_start_chase": True, "pick_id": r["id"], "venue": "POLYMARKET",
+                    "handoff": "gemini", "ticker": ticker, "slug": twin, "result": "poly_create_refused",
+                    "error": out.get("error"), "target_c": target, "at": now.isoformat()})
+        try:
+            sb.table("bot_picks").update({"signal_blob": {**blob, "kalshi_order_id": None}}).eq("id", r["id"]).execute()
+        except Exception:
+            pass
+        return False, True
+    price_c = float(out.get("price_c") or target)
+    nb = {k: v for k, v in blob.items()
+          if k not in ("kalshi_cancel_sent", "kalshi_move_cancel_sent", "chase_err", "start_take_window")}
+    nb.update({"venue": "POLYMARKET", "pmm_slug": twin, "pmm_synthetic": syn, "order_id": out.get("order_id"),
+               "kalshi_ticker": None, "kalshi_order_id": None, "kalshi_buy_yes": None,
+               "gemini_handoff": {"at": now.isoformat(), "ticker": ticker, "order_id": koid, "from_c": k_c}})
+    nb = _hand_chase_blob(nb, now, price_c, k_c, int(unfilled), (stamp.get("window") or {}).get("closed"),
+                          amended=False, cap_c=cap, chase_s=_hand_chase_s_r(r))
+    nb["live_snipe"]["venue"] = "POLYMARKET"
+    nb["live_snipe"]["from_venue"] = "GEMINI"
+    upd = {"signal_blob": nb}
+    am_ = _cents_to_american_py(price_c)
+    if am_ is not None:
+        upd["entry_price"] = am_
+    sb.table("bot_picks").update(upd).eq("id", r["id"]).execute()
+    HAND_LIVE_SLUGS.add(twin)
+    stamp.update({"kind": "hand_start_chase", "hand_start_chase": True, "hand_start_cancel": False,
+                  "venue": "POLYMARKET", "slug": twin, "order_id": out.get("order_id"),
+                  "chase": {"from_c": k_c, "price_c": price_c, "why": why, "amend": "handoff",
+                            "leaves": int(unfilled), "qty_total": int(unfilled), "cap_c": cap,
+                            "until": nb["live_snipe"]["until"], "minutes": int(round(_hand_chase_s_r(r) / 60.0)),
+                            "venue": "POLYMARKET", "from_venue": "GEMINI"},
+                  "result": {"ok": True, "chasing": True, "price_c": price_c, "leaves": int(unfilled)}, "http": 200})
+    st["chased"] = st.get("chased", 0) + 1
+    st["gem_handoff"] = st.get("gem_handoff", 0) + 1
+    _hand_start_cancel_alert(stamp)
+    try:
+        _probe_log(stamp)
+    except Exception:
+        pass
+    app.logger.warning("hand start → GEMINI→POLY LIVE CHASE pick %s %s → %s %s¢ (cap %s, %s) until %s",
+                       r["id"], ticker, twin, price_c, cap, why, nb["live_snipe"]["until"])
+    return True, True
+
+
 def _hand_start_chase_kalshi(sb, client, r: dict, stamp: dict, now, st: dict) -> tuple:
     """The Kalshi twin of `_hand_start_chase_poly`, ON KALSHI. THE CHASE NEVER
     CHANGES VENUE (Rob, Oct 24 2026: "if you're going to do the chase,
@@ -29290,6 +29404,12 @@ def _hand_start_chase_kalshi(sb, client, r: dict, stamp: dict, now, st: dict) ->
         stamp["chase_skipped"] = {"why": "lot_held", "held": round(held, 2), "contracts": contracts}
         return False, gone                           # the finish books the lot (skip its cancel when nothing rests)
     k_c = _kv.our_c(o.get("yes_c"), by) if o else blob.get("price_c")
+    if (str(ticker).startswith("GEMI-") and blob.get("pmm_twin_slug") and held <= 0
+            and _machine_flag("gemini_chase_to_poly", True)):
+        # GEMINI HANDS THE CHASE TO POLYMARKET (Nov 8 2026, Rob picked option 2):
+        # nobody quotes Gemini in-game, so a chase there is a bid alone in an empty
+        # book. The one exception to "the chase never changes venue".
+        return _hand_gem_chase_to_poly(sb, client, r, blob, stamp, now, st, ticker, koid, o, k_c, unfilled)
     try:
         cap = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
     except (TypeError, ValueError):
