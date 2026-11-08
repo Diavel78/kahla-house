@@ -22307,6 +22307,16 @@ def _kalshi_hand_book(ticker: str, fresh: bool = False, record: bool = True):
     """The Kalshi book shaped like `_pmm_book` (YES-canonical), cached 3s.
     Every fresh read appends a KALSHI_TAPE row — the Kalshi bet's own touch
     tape, what the start rule reads. Returns (book or None, raw)."""
+    _is_gem_t = str(ticker or "").startswith("GEMI-")
+    if not fresh and _is_gem_t:
+        gb = _gem_ws_book(ticker)
+        if gb is not None:
+            _GEM_WS_SRC["ws"] += 1
+            _HAND_BOOK_SRC["gemini_ws"] = _HAND_BOOK_SRC.get("gemini_ws", 0) + 1
+            raw = {"ok": True, "src": "gemini_ws", "yes": list(gb["bids"]),
+                   "no": [(round(100.0 - c, 2), q) for c, q in gb["asks"]]}
+            return gb, raw
+        _GEM_WS_SRC["rest"] += 1
     if not fresh and _kalshi_ws_fresh(ticker):
         # THE SOCKET IS THE TAPE (Oct 18 2026): while the Kalshi feed speaks
         # for this market its book is current to the frame and already on
@@ -22332,6 +22342,9 @@ def _kalshi_hand_book(ticker: str, fresh: bool = False, record: bool = True):
     book = _kv.poly_book(ob)
     if book is None:
         return None, ob
+    if _is_gem_t:
+        _HAND_BOOK_SRC["gemini_rest"] = _HAND_BOOK_SRC.get("gemini_rest", 0) + 1
+        _gem_depth_seed(ticker, ob)
     # the socket's copy vs the venue: a disagreement at the touch is stamped
     # (rate-limited per ticker) — the read that finds the feed's bug
     try:
@@ -30114,6 +30127,7 @@ def _gem_ws_run() -> None:
             ws = _ws.create_connection("wss://ws.gemini.com?snapshot=-1", timeout=10, sslopt=_sslopt)
             ws.settimeout(2)
             _GEM_STATE["connects"] += 1
+            _GEM_STATE["epoch"] = int(_GEM_STATE.get("epoch") or 0) + 1
             subs: set = set()
             chk = 0.0
             try:
@@ -30127,11 +30141,20 @@ def _gem_ws_run() -> None:
                         add, drop = sorted(want - subs), sorted(subs - want)
                         for meth, syms in (("SUBSCRIBE", add), ("UNSUBSCRIBE", drop)):
                             for i in range(0, len(syms), 25):
+                                # THE BOOK COMES OFF THE SOCKET (Nov 8 2026, Rob: "use the goddamn
+                                # WebSocket whenever you fucking can"): the full ladder (`@depth`)
+                                # rides beside the top (`@bookTicker`); `_gem_ws_book` serves it.
                                 ws.send(_json.dumps({"id": meth[:3] + str(i), "method": meth,
-                                                     "params": [x.lower() + "@bookTicker" for x in syms[i:i + 25]]}))
+                                                     "params": [x.lower() + st_ for x in syms[i:i + 25]
+                                                                for st_ in ("@bookTicker", "@depth")]}))
+                                if meth == "UNSUBSCRIBE":
+                                    for x in syms[i:i + 25]:
+                                        GEM_DEPTH.pop(x, None)
+                                        GEM_TOP.pop(x, None)
                         subs = set(want)
                         _GEM_STATE["canon"] = {x.lower(): x for x in want}
                         _GEM_STATE["subs"] = len(subs)
+                    _GEM_STATE["loop_at"] = _time.time()
                     try:
                         msg = ws.recv()
                     except _ws.WebSocketTimeoutException:
@@ -30140,7 +30163,11 @@ def _gem_ws_run() -> None:
                         d = _json.loads(msg)
                     except Exception:
                         continue
-                    sy = d.get("s") if isinstance(d, dict) else None
+                    if not isinstance(d, dict):
+                        continue
+                    if _gem_depth_frame(d):
+                        continue
+                    sy = d.get("s")
                     if not sy or "b" not in d or "a" not in d or "e" in d:
                         continue
                     sym = _GEM_STATE["canon"].get(str(sy).lower()) or str(sy).upper()
@@ -30156,6 +30183,7 @@ def _gem_ws_run() -> None:
                             return 0.0
                     _GEM_STATE["frames"] += 1
                     _row = (_time.time(), _cc(d.get("b")), _qq(d.get("B")), _cc(d.get("a")), _qq(d.get("A")))
+                    GEM_TOP[sym] = (_GEM_STATE.get("epoch"), _row)
                     if sym in GEM_PICK_SYMS:
                         _gem_tape_note(sym, _row)          # the Gemini v0 game-start rule reads this
                     if sym in KALSHI_WATCH_TICKERS:
@@ -30169,9 +30197,150 @@ def _gem_ws_run() -> None:
             _time.sleep(3)
 
 
+# ── GEMINI ORDER BOOK OFF THE SOCKET (Nov 8 2026) ──────────────────────────
+# `@depth` frames keep a full ladder per contract (absolute size per price;
+# size 0 removes the level). A book is SERVED only when (a) the socket loop
+# spoke within 10s, (b) the book was SEEDED on this connection (a socket
+# snapshot, or the first REST read after subscribe — never a ladder built from
+# deltas alone, the Kalshi Oct 18 lesson), and (c) its top equals the latest
+# `@bookTicker` frame on the same connection. Anything else → REST, and the
+# REST read re-seeds the book.
+GEM_DEPTH: dict = {}     # SYM → {"epoch", "seeded", "bids": {c: q}, "asks": {c: q}, "at"}
+GEM_TOP: dict = {}       # SYM → (epoch, (ts, bid_c, bid_q, ask_c, ask_q)) — the bookTicker
+_GEM_WS_SRC = {"ws": 0, "rest": 0, "unseeded": 0, "mismatch": 0, "stale": 0, "seeds": 0,
+               "depth_frames": 0, "depth_odd": 0}
+
+
+def _gem_lv(rows) -> list:
+    out = []
+    for r in rows or []:
+        try:
+            if isinstance(r, dict):
+                p, q = r.get("price", r.get("p")), r.get("quantity", r.get("amount", r.get("q")))
+            else:
+                p, q = r[0], r[1]
+            c, qq = round(float(p) * 100.0, 2), float(q)
+            if 0 < c < 100:
+                out.append((c, qq))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
+
+
+def _gem_depth_frame(d: dict) -> bool:
+    """One socket frame → the depth book, if it IS a depth frame. Returns True
+    when the frame was depth (consumed), False for anything else (bookTicker,
+    acks). Pure apart from GEM_DEPTH / counters."""
+    if "data" in d and isinstance(d.get("data"), dict):
+        inner = dict(d["data"])
+        if "s" not in inner and isinstance(d.get("stream"), str):
+            inner["s"] = d["stream"].split("@")[0]
+        d = inner
+    ev = d.get("e")
+    bl, al = d.get("b"), d.get("a")
+    snap_b, snap_a = d.get("bids"), d.get("asks")
+    is_delta = isinstance(bl, list) and isinstance(al, list)
+    is_snap = isinstance(snap_b, list) and isinstance(snap_a, list)
+    if not (is_delta or is_snap or ev == "depthUpdate"):
+        return False
+    _GEM_WS_SRC["depth_frames"] += 1
+    if _GEM_WS_SRC["depth_frames"] <= 3 or _GEM_WS_SRC["depth_frames"] % 500 == 0:
+        _GEM_STATE["depth_sample"] = str(d)[:400]
+    sy = d.get("s")
+    if not sy:
+        _GEM_WS_SRC["depth_odd"] += 1
+        _GEM_STATE["depth_odd_sample"] = str(d)[:300]
+        return True
+    sym = (_GEM_STATE.get("canon") or {}).get(str(sy).lower()) or str(sy).upper()
+    ep = _GEM_STATE.get("epoch")
+    bk = GEM_DEPTH.get(sym)
+    if bk is None or bk.get("epoch") != ep:
+        bk = GEM_DEPTH[sym] = {"epoch": ep, "seeded": False, "bids": {}, "asks": {}, "at": 0.0}
+    if is_snap:
+        bk["bids"] = {c: q for c, q in _gem_lv(snap_b) if q > 0}
+        bk["asks"] = {c: q for c, q in _gem_lv(snap_a) if q > 0}
+        bk["seeded"] = True
+        _GEM_WS_SRC["seeds"] += 1
+    else:
+        for side, rows in (("bids", bl or []), ("asks", al or [])):
+            lv = bk[side]
+            for c, q in _gem_lv(rows):
+                if q <= 0:
+                    lv.pop(c, None)
+                else:
+                    lv[c] = q
+    bk["at"] = _time.time()
+    if sym in KALSHI_WATCH_TICKERS and bk.get("seeded"):
+        top = GEM_TOP.get(sym)
+        if top and top[0] == ep:
+            _gem_kalshi_tape(sym, (bk["at"],) + tuple(top[1][1:]))
+    return True
+
+
+def _gem_depth_seed(sym: str, ob: dict) -> None:
+    """A REST read (Kalshi-shaped {yes, no}) seeds the socket's book for `sym`
+    on the live connection — the deltas from here on keep it current."""
+    try:
+        if not ob or not ob.get("ok"):
+            return
+        if _time.time() - float(_GEM_STATE.get("loop_at") or 0) > 10.0:
+            return
+        if sym not in (_GEM_STATE.get("canon") or {}).values():
+            return
+        ep = _GEM_STATE.get("epoch")
+        GEM_DEPTH[sym] = {"epoch": ep, "seeded": True, "at": _time.time(),
+                          "bids": {c: q for c, q in (ob.get("yes") or []) if q > 0},
+                          "asks": {round(100.0 - c, 2): q for c, q in (ob.get("no") or []) if q > 0}}
+        _GEM_WS_SRC["seeds"] += 1
+    except Exception:
+        pass
+
+
+def _gem_ws_book(sym: str, count: bool = True):
+    """The socket's book for a GEMI contract in the `_pmm_book` shape, or None
+    (caller reads REST). See the block comment above for the trust rule."""
+    if _time.time() - float(_GEM_STATE.get("loop_at") or 0) > 10.0:
+        if count:
+            _GEM_WS_SRC["stale"] += 1
+        return None
+    ep = _GEM_STATE.get("epoch")
+    bk, top = GEM_DEPTH.get(sym), GEM_TOP.get(sym)
+    if not bk or bk.get("epoch") != ep or not bk.get("seeded"):
+        if count:
+            _GEM_WS_SRC["unseeded"] += 1
+        return None
+    bids = sorted(bk["bids"].items(), key=lambda x: -x[0])
+    asks = sorted(bk["asks"].items(), key=lambda x: x[0])
+    bb = bids[0][0] if bids else None
+    ba = asks[0][0] if asks else None
+    if top and top[0] == ep:
+        tb, ta = top[1][1], top[1][3]
+        if ((tb is None) != (bb is None) or (tb is not None and abs(float(tb) - float(bb)) > 0.01)
+                or (ta is None) != (ba is None) or (ta is not None and abs(float(ta) - float(ba)) > 0.01)):
+            if count:
+                _GEM_WS_SRC["mismatch"] += 1
+                _GEM_STATE["mismatch_sample"] = {"sym": sym, "depth": [bb, ba], "ticker": [tb, ta]}
+            return None
+    return {"bids": bids, "asks": asks, "best_bid": bb, "best_ask": ba}
+
+
 def _gem_kalshi_tape(sym: str, row: tuple) -> None:
     """A Gemini socket frame on a lane contract → a KALSHI_TAPE row in the
     tape shape the start rule / move rule read (top of book only)."""
+    try:
+        gb = _gem_ws_book(sym, count=False)
+        if gb is not None:
+            import kalshi_venue as _kv
+            r = _kv.tape_row(gb, row[0])
+            if r:
+                dq = KALSHI_TAPE.get(sym)
+                if dq is None:
+                    dq = KALSHI_TAPE[sym] = _deque(maxlen=_KALSHI_TAPE_MAX)
+                dq.append(r)
+                _tape_base_note("k:" + sym, r[0], (r[2] or 0.0) + (r[4] or 0.0))
+                return
+    except Exception:
+        pass
     try:
         ts, b, bq, a, aq = row
         r = (round(float(ts), 2), b, round(bq or 0.0, 1), a, round(aq or 0.0, 1),
@@ -30367,7 +30536,10 @@ def _hand_snipe_shadow_tick(sb, now) -> dict:
     st["watch"] = len(shadow)
     if _machine_flag("hand_snipe_gemini", True):
         _gem_ensure_thread()                             # from boot, not first over in play — it proves the socket early
-    st["gemini"] = {k: _GEM_STATE.get(k) for k in ("frames", "subs", "connects", "err", "probe_ok")}
+    st["gemini"] = {k: _GEM_STATE.get(k) for k in ("frames", "subs", "connects", "err", "probe_ok", "epoch",
+                                                   "depth_sample", "depth_odd_sample", "mismatch_sample")}
+    st["gemini"]["book_src"] = dict(_GEM_WS_SRC)
+    st["gemini"]["depth_books"] = sum(1 for v in GEM_DEPTH.values() if v.get("seeded"))
     st["gemini"]["linked"] = len(SNIPE_GEM_META)
     with _SNIPE_LOCK:
         for k in list(_SNIPE_HIST):
