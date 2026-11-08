@@ -31419,8 +31419,8 @@ def _entry_ask_c(e: dict):
 # its OWN table `gemini_tape` (one row per change) — never line_tape, so no 🔥 / 💨 /
 # chart reader ever sees it. The question it answers: at the moment of each 🔥, what
 # did Gemini quote next to Polymarket, and was it cheaper? The match is off the
-# Polymarket event slug's team codes + ET date (`nfl-cin-atl-2026-11-08`, the first
-# code the away team) against Gemini's game tickers (`NFL-2611081800-CIN-ATL-T`);
+# team NAMES in Gemini's event title ('Denver vs Carolina', away first; college by
+# school) + start within 12h — never team codes, which differ across venues in college;
 # contract tails: T `O51` = over 51.5, S `ATL3` = ATL −3.5 covers, M `ATL` = ATL wins.
 _GEM_TOUCH: dict = {"idx": {}, "at": 0.0, "games": 0, "matched": 0, "events": 0,
                     "errors": 0, "last_error": None, "idx_err": None}
@@ -31428,9 +31428,18 @@ _GEM_TAPE_LAST: dict = {}
 _GEM_RUNG_SPAN = 3.0
 
 
+def _gem_norm(x) -> str:
+    import unicodedata as _ud
+    t = _ud.normalize("NFKD", str(x or "")).encode("ascii", "ignore").decode().lower()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", t).split())
+
+
 def _gem_game_index(evs) -> dict:
-    """Pure. Gemini sports events → {(PREFIX, frozenset(codes), ET date):
-    {"T": {line: (sym, bid_c, ask_c)}, "S": {(team, line): …}, "M": {team: …}}}."""
+    """Pure. Gemini sports events → {(PREFIX, t1, t2, code): {"start": epoch, "a": title
+    team 1, "b": title team 2, "T": {line: (sym, bid_c, ask_c)}, "S": {(team, line): …},
+    "M": {team: …}}}. Ticker `NFL-2611081800-CIN-ATL-T`: code = UTC start, t1 = the
+    title's first team (the away side), t2 the second. Title "Denver vs Carolina: Point
+    Spread" → a/b off the part before ':'."""
     out: dict = {}
     for e in evs or []:
         parts = (e.get("ticker") or "").split("-")
@@ -31440,9 +31449,12 @@ def _gem_game_index(evs) -> dict:
             utc = datetime.strptime(parts[1][:10], "%y%m%d%H%M").replace(tzinfo=timezone.utc)
         except ValueError:
             continue
-        d = utc.astimezone(ZoneInfo("America/New_York")).date().isoformat()
-        g = out.setdefault((parts[0].upper(), frozenset((parts[2].lower(), parts[3].lower())), d),
-                           {"T": {}, "S": {}, "M": {}})
+        g = out.setdefault((parts[0].upper(), parts[2].lower(), parts[3].lower(), parts[1][:10]),
+                           {"start": utc.timestamp(), "a": None, "b": None, "T": {}, "S": {}, "M": {}})
+        title = str(e.get("title") or "").split(":")[0]
+        if " vs " in title and g["a"] is None:
+            a, b = title.split(" vs ", 1)
+            g["a"], g["b"] = _gem_norm(a), _gem_norm(b)
         kind = "-".join(parts[4:]).upper()
         for c in e.get("contracts") or []:
             sym = c.get("instrumentSymbol") or ""
@@ -31469,15 +31481,33 @@ def _gem_game_index(evs) -> dict:
     return out
 
 
-def _gem_slug_key(event_slug: str):
-    """Pure. A Polymarket event slug → (PREFIX, away, home, ET date), else None."""
-    parts = [x for x in str(event_slug or "").lower().split("-") if x]
-    if len(parts) < 6 or not re.match(r"^\d{4}$", parts[-3]):
-        return None
-    codes = [x for x in parts[1:-3] if x != "vs"]
-    if len(codes) != 2:
-        return None
-    return parts[0].upper(), codes[0], codes[1], "-".join(parts[-3:])
+def _gem_name_hit(gem_name, our_name) -> bool:
+    """Pure. Gemini titles name a team by city / school ('Los Angeles C', 'Western
+    Michigan', 'New York J'); ours are full names. A prefix of ours = a hit."""
+    gn, on = _gem_norm(gem_name), _gem_norm(our_name)
+    return bool(gn) and (on == gn or on.startswith(gn + " ") or (on.startswith(gn) and len(gn) >= 4))
+
+
+def _gem_find_game(idx: dict, away, home, start) -> tuple:
+    """Pure. Our game (full names + start) → (gemini game, away code, home code),
+    else (None, None, None). Both names must hit the title, start within 12h."""
+    t = _aware_ts(start)
+    if t is None:
+        return None, None, None
+    best = None
+    for (pre, t1, t2, code), g in idx.items():
+        if abs(g["start"] - t.timestamp()) > 12 * 3600 or not g.get("a"):
+            continue
+        if _gem_name_hit(g["a"], away) and _gem_name_hit(g["b"], home):
+            cand = (g, t1, t2)
+        elif _gem_name_hit(g["a"], home) and _gem_name_hit(g["b"], away):
+            cand = (g, t2, t1)
+        else:
+            continue
+        d = abs(g["start"] - t.timestamp())
+        if best is None or d < best[0]:
+            best = (d, cand)
+    return best[1] if best else (None, None, None)
 
 
 def _gem_quotes(g: dict, mt: str, away: str, home: str, center, span: float = _GEM_RUNG_SPAN) -> list:
@@ -31523,13 +31553,9 @@ def _gem_touch_rows(sport: str, r: dict, items: list, picks: dict, cache: dict, 
         except Exception as e:
             _GEM_TOUCH["idx_err"] = f"{type(e).__name__}: {e}"[:120]
     it0 = items[0]
-    pmm = cache.get((sport, str(it0.get("away")), str(it0.get("home")), str(it0.get("event_start")))) or {}
-    sk = _gem_slug_key(pmm.get("event_slug"))
     _GEM_TOUCH["games"] += 1
-    if not sk:
-        return []
-    pre, away, home, d = sk
-    g = _GEM_TOUCH["idx"].get((pre, frozenset((away, home)), d))
+    g, away, home = _gem_find_game(_GEM_TOUCH["idx"], it0.get("away"), it0.get("home"),
+                                   it0.get("event_start") or r.get("event_start"))
     if not g:
         return []
     _GEM_TOUCH["matched"] += 1

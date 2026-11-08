@@ -6179,26 +6179,33 @@ def test_sheet_pinnacle_line() -> None:
 def test_gemini_tape() -> None:
     """THE GEMINI TAPE (Nov 8 2026, Rob: "why in the hell are we using
     Kalshi?"): the touch walk records Gemini's book beside each sheet game,
-    in its OWN table, home / over orientation. Record only."""
+    in its OWN table, home / over orientation, matched on team NAMES + start
+    (college codes differ across venues). Record only."""
     import app as _app
     print("\n[Gemini tape on the touch walk]")
-    evs = [{"ticker": "NFL-2611081800-CIN-ATL-T", "contracts": [
+    evs = [{"ticker": "NFL-2611081800-CIN-ATL-T", "title": "Cincinnati vs Atlanta: Total Points", "contracts": [
                 {"instrumentSymbol": "G-T-O51", "prices": {"bestBid": "0.47", "bestAsk": "0.52"}},
                 {"instrumentSymbol": "G-T-O44", "prices": {"bestBid": "0.80", "bestAsk": "0.84"}}]},
-           {"ticker": "NFL-2611081800-CIN-ATL-S", "contracts": [
+           {"ticker": "NFL-2611081800-CIN-ATL-S", "title": "Cincinnati vs Atlanta: Point Spread", "contracts": [
                 {"instrumentSymbol": "G-S-ATL3", "prices": {"bestBid": "0.50", "bestAsk": "0.55"}},
                 {"instrumentSymbol": "G-S-CIN2", "prices": {"bestBid": "0.30", "bestAsk": "0.34"}}]},
-           {"ticker": "NFL-2611081800-CIN-ATL-M", "contracts": [
+           {"ticker": "NFL-2611081800-CIN-ATL-M", "title": "Cincinnati vs Atlanta", "contracts": [
                 {"instrumentSymbol": "G-M-ATL", "prices": {"bestBid": "0.60", "bestAsk": "0.63"}}]},
-           {"ticker": "NFLFUT-SUPERBOWL", "contracts": []}]
+           {"ticker": "NFL-2611082125-LAC-LV-M", "title": "Los Angeles C vs Las Vegas", "contracts": []},
+           {"ticker": "NCAAF-2611141700-WMU-AKR-T", "title": "Western Michigan vs Akron: Total Points", "contracts": []},
+           {"ticker": "NFLFUT-SUPERBOWL", "title": "Champion", "contracts": []}]
     idx = _app._gem_game_index(evs)
-    g = idx.get(("NFL", frozenset(("cin", "atl")), "2026-11-08"))
-    check("Gemini game events index by sport prefix + team pair + ET date; futures skipped",
-          g is not None and len(idx) == 1 and g["T"][51.5][1:] == (47.0, 52.0))
-    check("a Polymarket event slug reads (prefix, away, home, date), 'vs' slugs too",
-          _app._gem_slug_key("nfl-cin-atl-2026-11-08") == ("NFL", "cin", "atl", "2026-11-08")
-          and _app._gem_slug_key("nba-cle-vs-det-2026-11-08") == ("NBA", "cle", "det", "2026-11-08")
-          and _app._gem_slug_key("junk") is None)
+    g, aw, hm = _app._gem_find_game(idx, "Cincinnati Bengals", "Atlanta Falcons", "2026-11-08T18:00:00Z")
+    check("Gemini games match on title names + start: Bengals @ Falcons → CIN away, ATL home",
+          g is not None and (aw, hm) == ("cin", "atl") and g["T"][51.5][1:] == (47.0, 52.0))
+    g2, aw2, hm2 = _app._gem_find_game(idx, "Atlanta Falcons", "Cincinnati Bengals", "2026-11-08T18:00:00Z")
+    check("…a title in the other order still orients home / away from OUR game",
+          g2 is g and (aw2, hm2) == ("atl", "cin"))
+    check("…'Los Angeles C' finds the Chargers, not the Rams; college by school; >12h off misses",
+          _app._gem_find_game(idx, "Los Angeles Chargers", "Las Vegas Raiders", "2026-11-08T21:25:00Z")[1] == "lac"
+          and _app._gem_find_game(idx, "Los Angeles Rams", "Las Vegas Raiders", "2026-11-08T21:25:00Z")[0] is None
+          and _app._gem_find_game(idx, "Western Michigan Broncos", "Akron Zips", "2026-11-14T17:00:00Z")[1] == "wmu"
+          and _app._gem_find_game(idx, "Cincinnati Bengals", "Atlanta Falcons", "2026-11-10T18:00:00Z")[0] is None)
     tot = _app._gem_quotes(g, "total", "cin", "atl", 51.5)
     check("totals: only rungs within 3 of the sheet line, over orientation",
           tot == [(51.5, 47.0, 52.0, "G-T-O51")])
