@@ -79,11 +79,7 @@ _EV_CACHE: dict = {"at": 0.0, "evs": None, "err": None}
 _EV_LOCK = threading.Lock()
 
 
-def sports_events(ttl_s: float = 30.0) -> tuple[list, Optional[str]]:
-    """Every active sports event (one paged REST walk), cached `ttl_s`."""
-    with _EV_LOCK:
-        if _EV_CACHE["evs"] is not None and time.time() - _EV_CACHE["at"] < ttl_s:
-            return _EV_CACHE["evs"], None
+def _fetch_events() -> tuple[list, Optional[str]]:
     try:
         evs = _g.events_all("sports", "active")
     except Exception as e:
@@ -92,8 +88,60 @@ def sports_events(ttl_s: float = 30.0) -> tuple[list, Optional[str]]:
             stale = _EV_CACHE["evs"]
         return (stale or []), _EV_CACHE["err"]
     with _EV_LOCK:
-        _EV_CACHE.update(at=time.time(), evs=evs, err=None)
+        _EV_CACHE.update(at=time.time(), evs=evs, err=None, fetch_s=round(time.time() - _EV_CACHE.get("t0", time.time()), 2))
     return evs, None
+
+
+def _bg_refresh() -> None:
+    try:
+        with _EV_LOCK:
+            _EV_CACHE["t0"] = time.time()
+        _fetch_events()
+    finally:
+        with _EV_LOCK:
+            _EV_CACHE["bg"] = False
+
+
+def sports_events(ttl_s: float = 30.0, stale_ok_s: float = 0.0) -> tuple[list, Optional[str]]:
+    """Every active sports event (one paged REST walk), cached `ttl_s`.
+
+    THE WALK IS SLOW (Nov 8 2026: ~14s from the site, ~26s on the box — every
+    sport, every game, every contract, 500 events a page — and a bet placed
+    more than 30s after the last one paid all of it: Rob, "taking so damn
+    long"). With `stale_ok_s` a cache older than `ttl_s` but younger than
+    `stale_ok_s` is returned AT ONCE and refreshed in the background; the
+    contract names barely change and every placement reads the live book for
+    its price anyway."""
+    with _EV_LOCK:
+        have = _EV_CACHE["evs"] is not None
+        age = time.time() - _EV_CACHE["at"]
+        if have and age < ttl_s:
+            return _EV_CACHE["evs"], None
+        if have and stale_ok_s > 0 and age < stale_ok_s:
+            if not _EV_CACHE.get("bg"):
+                _EV_CACHE["bg"] = True
+                threading.Thread(target=_bg_refresh, name="gemini-events", daemon=True).start()
+            return _EV_CACHE["evs"], None
+        _EV_CACHE["t0"] = time.time()
+    return _fetch_events()
+
+
+def events_age_s() -> Optional[float]:
+    with _EV_LOCK:
+        return None if _EV_CACHE["evs"] is None else round(time.time() - _EV_CACHE["at"], 1)
+
+
+_IDX_MEMO: dict = {"key": None, "idx": None}
+
+
+def game_index_cached(evs) -> dict:
+    """game_index(evs) built once per events list (the list is replaced, never
+    mutated, on each refresh)."""
+    k = id(evs)
+    if _IDX_MEMO["key"] != k or _IDX_MEMO["idx"] is None:
+        _IDX_MEMO["idx"] = game_index(evs)
+        _IDX_MEMO["key"] = k
+    return _IDX_MEMO["idx"]
 
 
 # ───────────────────────── matching (pure) ─────────────────────────
@@ -290,10 +338,13 @@ def resolve(sport: str, away: str, home: str, start_iso, item: dict) -> dict:
     """One slip item → its Gemini contract + our-side quote off the cached events
     list. {ok, symbol, buy_yes, line, why, quote{bid, ask}, ladder, event} or
     {ok: False, why}."""
-    evs, err = sports_events()
+    evs, err = sports_events(ttl_s=60.0, stale_ok_s=1800.0)
     if not evs:
         return {"ok": False, "why": f"Gemini events unreadable: {err}" if err else "Gemini lists no sports events"}
-    g, aw, hm = find_game(game_index(evs), away, home, start_iso)
+    g, aw, hm = find_game(game_index_cached(evs), away, home, start_iso)
+    if g is None and (events_age_s() or 0) > 60.0:
+        evs, err = sports_events(ttl_s=0.0)          # a game listed since the last walk: one fresh read
+        g, aw, hm = find_game(game_index_cached(evs), away, home, start_iso) if evs else (None, None, None)
     if g is None:
         return {"ok": False, "why": "Gemini does not list this game"}
     r = rung_for(item, g, aw, hm)

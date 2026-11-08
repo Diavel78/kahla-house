@@ -168,6 +168,16 @@ def compare_rest(poly_touch_c, kalshi_touch_c, qty: int, kalshi_fee: dict | None
         return None, {"why": "no_quote"}
     best = min(opts, key=opts.get)
     det = {"all_in": opts, "best": best}
+    if (isinstance(kalshi_fee, dict) and kalshi_fee.get("fee_type") == "gemini"
+            and len(opts) == 2 and abs(opts["POLYMARKET"] - opts["KALSHI"]) <= 1e-9):
+        # A TIE GOES TO GEMINI (Nov 8 2026, Rob: "if they're both a tie and one's paying a
+        # maker reward, well, then it should go to Gemini"): Gemini pays makers a rebate
+        # on every fill (30% of the taker fee — $0.10 landed on two 10-lots at 48¢ the
+        # same day); Polymarket US charges makers nothing and pays nothing on the fill.
+        # Gemini consistently wins the tie, so a resting bet never ping-pongs.
+        det["best"] = "KALSHI"
+        det["why"] = "tie_gemini"
+        return "KALSHI", det
     if current and current in opts and best != current:
         gain = opts[current] - opts[best]
         if gain <= 1e-9:

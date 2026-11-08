@@ -6600,6 +6600,15 @@ def test_gemini_in_kalshi_slot() -> None:
     check("the side flip mirrors Gemini like Polymarket (MIL +12.5 46/47 → BOS −12.5 53/54)",
           mq["gemini"]["bid"] == 53.0 and mq["gemini"]["ask"] == 54.0 and mq["gemini"]["line"] == -12.5
           and mq["poly"]["bid"] == 52.0 and mq["poly"]["line"] == -12.5)
+    # A TIE GOES TO GEMINI (Nov 8 2026, Rob: Gemini pays makers a rebate on fills)
+    gf = {"fee_type": "gemini", "maker_ratio": 0.0, "mult": 1.0}
+    check("a tie rests on Gemini — new bet, a bet on Polymarket, and a bet already on Gemini stays",
+          _kv.compare_rest(53, 53, 10, gf)[0] == "KALSHI"
+          and _kv.compare_rest(53, 53, 10, gf, current="POLYMARKET")[0] == "KALSHI"
+          and _kv.compare_rest(53, 53, 10, gf, current="KALSHI")[0] == "KALSHI")
+    check("…a cheaper Polymarket still wins, and a real-Kalshi tie still stays put",
+          _kv.compare_rest(52.5, 53, 10, gf, current="KALSHI")[0] == "POLYMARKET"
+          and _kv.compare_rest(53, 53, 10, {"fee_type": "quadratic", "mult": 1.0}, current="POLYMARKET")[0] == "POLYMARKET")
     # ROB'S OPENING SEAT IN THE SLOT (Nov 8 2026, Memphis @ USF +5.5 rested on Poly
     # at 50¢ while Gemini listed the rung with an empty book): no bid on our side
     # → Polymarket's seat − 5¢, and the cheaper all-in puts the bet on Gemini.

@@ -18037,6 +18037,8 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                 except Exception as e:
                     k_rs = {"ok": False, "reason": f"Kalshi: {type(e).__name__}: {e}"[:120]}
                 _lap("kalshi")
+                if isinstance(k_rs, dict) and isinstance(k_rs.get("t"), dict):
+                    ms["kalshi_parts"] = k_rs["t"]             # where the second-venue seconds go
             venue, vdet = _hand_venue_pick(want if k_on else "poly", rs, k_rs, row.get("contracts"),
                                            _hand_venue_min_gain_c(),
                                            fairs=_hand_rung_fairs(sb, item, rs, k_rs) if (k_on and want != "poly") else None)
@@ -22396,16 +22398,22 @@ def _bet_sheet_resolve_kalshi(item: dict, poly_seat_c=None) -> dict:
     (Memphis @ USF +5.5: Gemini listed, empty, 45¢ open vs Poly 50¢)."""
     import kalshi_venue as _kv
     sport = str(item.get("sport") or "").upper()
+    _t = {}
+    _t0 = _time.monotonic()
     try:
         _second_venue_sync()
+        _t["sync"] = int((_time.monotonic() - _t0) * 1000)
         rs = _kv.lane_resolve(sport, item.get("away"), item.get("home"), item.get("event_start"), item)
+        _t["resolve"] = int((_time.monotonic() - _t0) * 1000) - _t["sync"]
     except Exception as e:
         return {"ok": False, "reason": f"Kalshi lookup failed: {e}"[:120]}
     if not rs.get("ok"):
         return {"ok": False, "reason": f"Kalshi: {rs.get('why') or 'no market'}"[:160],
-                "tried": rs.get("tried")}
+                "tried": rs.get("tried"), "t": _t}
     ticker, buy_yes = rs["ticker"], bool(rs["buy_yes"])
+    _t1 = _time.monotonic()
     book, _ob = _kalshi_hand_book(ticker)              # socket when it vouches, else REST
+    _t["book"] = int((_time.monotonic() - _t1) * 1000)
     if book is None:
         return {"ok": False, "reason": "Kalshi book unreadable — try again", "ticker": ticker}
     syn = not buy_yes
@@ -22422,7 +22430,7 @@ def _bet_sheet_resolve_kalshi(item: dict, poly_seat_c=None) -> dict:
                 "rung_line": rs.get("line"), "rung_why": rs.get("why"),
                 "price_c": seat, "touch_c": None, "ask_c": s_ask, "opened": "poly_minus",
                 "thin": None, "fee": rs.get("fee"),
-                "series": rs.get("series"), "event_ticker": rs.get("event_ticker"), "_book": book}
+                "series": rs.get("series"), "event_ticker": rs.get("event_ticker"), "_book": book, "t": _t}
     if s_bid is None:
         return {"ok": False, "reason": "no bids on the Kalshi market yet", "ticker": ticker,
                 "rung_line": rs.get("line")}
@@ -22435,7 +22443,7 @@ def _bet_sheet_resolve_kalshi(item: dict, poly_seat_c=None) -> dict:
             "rung_line": rs.get("line"), "rung_why": rs.get("why"),
             "price_c": seat, "touch_c": s_bid, "ask_c": s_ask,
             "thin": (sdet if sdet.get("thin") else None), "fee": rs.get("fee"),
-            "series": rs.get("series"), "event_ticker": rs.get("event_ticker"), "_book": book}
+            "series": rs.get("series"), "event_ticker": rs.get("event_ticker"), "_book": book, "t": _t}
 
 
 _GEM_OPEN_UNDER_C = 5.0      # Rob, Nov 8 2026: no market on Gemini → open 5¢ under Polymarket's seat
