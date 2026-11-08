@@ -31565,12 +31565,70 @@ def _gem_touch_rows(sport: str, r: dict, items: list, picks: dict, cache: dict, 
             continue
         center = _line_tape_canon(k, str(p.get("side") or ""), p.get("line"), None, None)[0]
         for line, b, a, sym in _gem_quotes(g, k, away, home, center):
-            if b is None and a is None:
-                continue
+            # an EMPTY book is recorded too (null / null): "no market on Gemini" is the
+            # case Rob's start-5¢-under-Polymarket rule is for (Nov 8 2026)
             out.append({"at": at, "sport": sport, "event_name": r.get("event_name"),
                         "event_start": r.get("event_start"), "mt": k, "line": line,
                         "bid_c": b, "ask_c": a, "symbol": sym})
+            if line == center or (k == "ml"):
+                _gem_trades_read(sym, sport, r.get("event_name"), k, line)
     return out
+
+
+# GEMINI'S TRADES ON THE SHEET LINE (Nov 8 2026, Rob: "we'll start at 5 cents cheaper
+# than Polymarket… if there's no market"). Would a bid at Poly − 5 ever have filled?
+# Every trade on the contract at the sheet's line, one row per trade id (`taker` =
+# the aggressor side on the YES contract: a SELL at p filled a YES bid at ≥ p; a BUY
+# at p filled a NO bid at ≥ 100 − p). Record only, ≤1 read per contract per 3 min.
+_GEM_TRADE_ROWS: list = []
+_GEM_TRADE_AT: dict = {}
+
+
+def _gem_trades_read(sym, sport, event_name, mt, line) -> None:
+    if not sym or not _machine_flag("gemini_trades", True):
+        return
+    if _time.time() - _GEM_TRADE_AT.get(sym, 0.0) < 180.0:
+        return
+    _GEM_TRADE_AT[sym] = _time.time()
+    try:
+        import gemini_pm as _gpm
+        for t in _gpm.trades(sym, 100) or []:
+            try:
+                tid = int(t.get("tid"))
+                ms = t.get("timestampms") or (float(t.get("timestamp")) * 1000.0)
+                _GEM_TRADE_ROWS.append({
+                    "tid": tid, "at": datetime.fromtimestamp(float(ms) / 1000.0, timezone.utc).isoformat(),
+                    "symbol": sym, "price_c": round(float(t.get("price")) * 100.0, 2),
+                    "qty": float(t.get("amount") or 0), "taker": str(t.get("type") or "")[:8],
+                    "sport": sport, "event_name": event_name, "mt": mt, "line": line})
+            except (TypeError, ValueError):
+                continue
+    except Exception as e:
+        _GEM_TOUCH["errors"] += 1
+        _GEM_TOUCH["last_error"] = f"trades: {e}"[:120]
+
+
+def _gem_trades_write(sb) -> int:
+    """Insert the buffered trades, one row per trade id (duplicates ignored)."""
+    global _GEM_TRADE_ROWS
+    rows, _GEM_TRADE_ROWS = _GEM_TRADE_ROWS, []
+    if not rows or sb is None:
+        return 0
+    seen, uniq = set(), []
+    for r in rows:
+        if r["tid"] not in seen:
+            seen.add(r["tid"])
+            uniq.append(r)
+    n = 0
+    for i in range(0, len(uniq), 500):
+        chunk = uniq[i:i + 500]
+        try:
+            sb.table("gemini_trades").upsert(chunk, on_conflict="tid", ignore_duplicates=True).execute()
+            n += len(chunk)
+        except Exception as e:
+            _GEM_TOUCH["errors"] += 1
+            _GEM_TOUCH["last_error"] = f"trades write: {e}"[:120]
+    return n
 
 
 def _gem_tape_write(sb, rows: list) -> int:
@@ -31971,6 +32029,7 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
         st["ladder"] = _ladder_write(sb, ladder)
         _LINE_TAPE_STATS["venue_at"] = now_iso
         st["gemini"] = {"rows": len(gem_rows), "written": _gem_tape_write(sb, gem_rows),
+                        "trades": _gem_trades_write(sb),
                         **{k: _GEM_TOUCH.get(k) for k in ("games", "matched", "events", "errors", "last_error", "idx_err")}}
     except Exception as e:
         st["tape"] = f"err: {e}"[:60]

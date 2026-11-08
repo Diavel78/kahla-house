@@ -74,3 +74,22 @@ create table if not exists gemini_tape (
 );
 create index if not exists gemini_tape_game_idx on gemini_tape (sport, event_name, at);
 notify pgrst, 'reload schema';
+
+-- GEMINI'S TRADES on the sheet's line (Nov 8 2026): would a resting bid at
+-- Polymarket − 5¢ have filled? One row per Gemini trade id. `taker` = the
+-- aggressor on the YES contract (sell at p fills a YES bid ≥ p; buy at p fills a
+-- NO bid ≥ 100 − p). Record only.
+create table if not exists gemini_trades (
+  tid         bigint primary key,
+  at          timestamptz not null,
+  symbol      text not null,
+  price_c     numeric,
+  qty         numeric,
+  taker       text,
+  sport       text,
+  event_name  text,
+  mt          text,
+  line        numeric
+);
+create index if not exists gemini_trades_game_idx on gemini_trades (sport, event_name, at);
+notify pgrst, 'reload schema';

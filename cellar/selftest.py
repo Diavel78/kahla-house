@@ -6218,6 +6218,9 @@ def test_gemini_tape() -> None:
                                  "kahla-scanner", "supabase", "line_tape.sql")).read()
     src = open(_app.__file__).read()
     gfn = src[src.index("def _gem_touch_rows"):src.index("def _sheet_touch_poly(")]
+    check("Gemini's trades on the sheet line land in their own table, one row per trade id",
+          "create table if not exists gemini_trades" in sql and 'on_conflict="tid", ignore_duplicates=True' in src
+          and "_gem_trades_read(sym" in gfn)
     check("its own table (applied with the line tape DDL at boot); never written to line_tape",
           "create table if not exists gemini_tape" in sql and 'table("gemini_tape")' in gfn
           and 'table("line_tape")' not in gfn and "place_order" not in gfn)
