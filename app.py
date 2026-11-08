@@ -52167,9 +52167,17 @@ def api_gemini_coverage():
             b["games"] += 1
             k = "-".join(parts[4:])
             b["kinds"][k] = b["kinds"].get(k, 0) + 1
-            if request.args.get("all"):
-                games.append({"ticker": t, "title": title, "start": e.get("startTime"),
-                              "contracts": len(cs)})
+            if request.args.get("all") or request.args.get("contracts"):
+                gi = {"ticker": t, "title": title, "start": e.get("startTime"), "contracts": len(cs)}
+                if request.args.get("contracts"):
+                    # the contracts' own words (Nov 8 2026: is "MIL12" Milwaukee −12.5 or +12.5?)
+                    gi["list"] = [{"symbol": c.get("instrumentSymbol"),
+                                   "name": c.get("contractName") or (c.get("contractMetadata") or {}).get("contractName"),
+                                   "strike": c.get("strike") or (c.get("contractMetadata") or {}).get("strike"),
+                                   "bid": (c.get("prices") or {}).get("bestBid"),
+                                   "ask": (c.get("prices") or {}).get("bestAsk"),
+                                   "keys": sorted(c.keys())[:30]} for c in cs[:60]]
+                games.append(gi)
         if len(b["sample"]) < 4:
             b["sample"].append(title[:90])
     out = {"ok": True, "events": len(evs),
