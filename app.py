@@ -17810,6 +17810,7 @@ def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int, 
                          "pmm_slug": None, "pmm_synthetic": False,
                          "pmm_twin_slug": rs.get("pmm_twin_slug"),
                          "pmm_twin_synthetic": rs.get("pmm_twin_synthetic"),
+                         "pmm_game_slug": rs.get("pmm_game_slug"),
                          "poly_quote_c": rs.get("poly_quote_c")})
         # PINNACLE AT BET TIME (Oct 27 2026): the fair this bet is measured
         # against from now on — `pin_bet` + the edge at placement. A miss
@@ -22939,6 +22940,10 @@ def _hand_order_execute_kalshi(sb, row: dict, pl: dict, item: dict, k_rs: dict,
               "pmm_twin_slug": poly_rs.get("slug") if twin_ok else None,
               "pmm_twin_synthetic": bool(poly_rs.get("synthetic")) if twin_ok else None,
               "poly_quote_c": poly_rs.get("price_c") if twin_ok else None,
+              # ANY Polymarket market on the game (any line): a Gemini bet with no
+              # same-line twin reads game start off it — the makers leave every
+              # market of a game together (Nov 8 2026, Buffalo −2.5 vs Poly's −3.5)
+              "pmm_game_slug": poly_rs.get("slug") if (poly_rs and poly_rs.get("ok")) else None,
               "venue_pick": res["venue_pick"]}
     pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), item, rs_log, res, contracts, extra=extra)
     res["pick_id"] = pick_id
@@ -23698,15 +23703,16 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
     if now_ts >= start_ts - 1200.0 and not _kalshi_ws_fresh(ticker):
         _kalshi_hand_book(ticker, fresh=True)           # REST sample through the start window only while the socket is dark
     twin = blob.get("pmm_twin_slug")
-    if str(ticker).startswith("GEMI-") and twin:
+    gem_start = twin or blob.get("pmm_game_slug")
+    if str(ticker).startswith("GEMI-") and gem_start:
         # A GEMINI BET READS GAME START OFF POLYMARKET (Nov 8 2026, Rob: "How are you
         # determining the live cancel on Gemini? Small markets…"): Gemini's book can be
         # a few hundred contracts or just OUR bid (Memphis @ USF +5.5), so its touch
         # never shows the makers leave and the bet would rest into the game. The
         # Polymarket twin's book is where the 95% drop is real; Gemini's own tape is the
         # fallback only when the twin has no pre-start baseline.
-        tape_src = "poly_twin"
-        verdict, base, cur, seen = _hand_start_plan(_start_samples("p:" + twin, TOUCH_TAPE.get(twin), start_ts), start_ts, now_ts, _d)
+        tape_src = "poly_twin" if twin else "poly_game"
+        verdict, base, cur, seen = _hand_start_plan(_start_samples("p:" + gem_start, TOUCH_TAPE.get(gem_start), start_ts), start_ts, now_ts, _d)
         if verdict == "no_baseline":
             v2 = _hand_start_plan(_start_samples("k:" + ticker, KALSHI_TAPE.get(ticker), start_ts), start_ts, now_ts, _d)
             if v2[0] != "no_baseline":
@@ -25096,6 +25102,76 @@ def _auto_price_execute(sb, client, row: dict, pl: dict, item: dict, ap: dict, w
     return res
 
 
+_HAND_GEM_GAME_PER_TICK = 2
+_HAND_GEM_GAME_RETRY_S = 1800.0
+
+
+def _hand_gem_game_backfill(sb, now, client) -> dict:
+    """A GEMINI BET'S START BOOK (Nov 8 2026, Rob: "build it"): a Gemini-slot
+    pick with no same-line Polymarket twin (Buffalo −2.5 on Gemini, −3.5 on
+    Polymarket) had only Gemini's own small book to read game start off. This
+    stamps `pmm_game_slug` = a Polymarket market on the same game (its nearest
+    rung, else the moneyline) for ≤2 such picks a tick; a miss retries every
+    30 min (`gem_game_miss`). No book read — the watch set picks the slug up."""
+    st = {"cands": 0, "stamped": 0, "miss": 0}
+    try:
+        rows = (sb.table("bot_picks").select("id,event_start,event_name,sport,market_type,side,entry_line,signal_blob")
+                .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                .limit(300).execute().data or [])
+    except Exception as e:
+        st["gate"] = f"picks: {e}"[:120]
+        return st
+    done = 0
+    for r in rows:
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if not str(blob.get("kalshi_ticker") or "").startswith("GEMI-"):
+            continue
+        if blob.get("pmm_twin_slug") or blob.get("pmm_game_slug"):
+            continue
+        try:
+            if _parse_iso(r.get("event_start")) <= now:
+                continue
+        except Exception:
+            continue
+        miss = blob.get("gem_game_miss") if isinstance(blob.get("gem_game_miss"), dict) else None
+        if miss:
+            try:
+                if (now - _parse_iso(miss.get("at"))).total_seconds() < _HAND_GEM_GAME_RETRY_S:
+                    continue
+            except Exception:
+                pass
+        st["cands"] += 1
+        if done >= _HAND_GEM_GAME_PER_TICK:
+            continue
+        item = _hand_twin_item(r, blob)
+        if item is None:
+            continue
+        done += 1
+        slug, why = None, None
+        for it in (item, {**item, "market_type": "ml", "side": "home", "line": 0}):
+            try:
+                rs = _bet_sheet_slug(client, it)
+            except Exception as e:
+                rs = {"ok": False, "reason": f"{type(e).__name__}: {e}"[:120]}
+            if rs.get("ok") and rs.get("slug"):
+                slug = rs["slug"]
+                break
+            why = rs.get("reason")
+        nb = dict(blob)
+        if slug:
+            nb.pop("gem_game_miss", None)
+            nb["pmm_game_slug"] = slug
+            st["stamped"] += 1
+        else:
+            nb["gem_game_miss"] = {"at": now.isoformat(), "why": str(why or "no market")[:120]}
+            st["miss"] += 1
+        try:
+            sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+        except Exception as e:
+            st["err"] = str(e)[:80]
+    return st
+
+
 def _hand_twin_backfill(sb, now) -> dict:
     """THE TWIN BACKFILL (Oct 18 2026): the venue switch and the Kalshi
     socket both key on `kalshi_twin_ticker`, which only PLACEMENT stamped —
@@ -26366,6 +26442,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
             stats["twins"] = _hand_twin_backfill(sb, now)        # Kalshi twins for pre-lane bets → watch set + switch
         except Exception as e:
             stats["twins"] = {"err": str(e)[:80]}
+        try:
+            stats["gem_game"] = _hand_gem_game_backfill(sb, now, client)   # Gemini bets' game-start book
+        except Exception as e:
+            stats["gem_game"] = {"err": str(e)[:80]}
         try:
             stats["pin"] = _hand_pin_tick(sb, now, client)       # Pinnacle fair on every resting bet: now / first / close / the pull
         except Exception as e:
@@ -35521,6 +35601,8 @@ def _hand_chase_tick(sb, client, now) -> dict:
         if _kalshi_pick(blob):
             if blob.get("pmm_twin_slug"):
                 live.add(blob["pmm_twin_slug"])       # the Polymarket twin rides the tape: the start rule's fallback
+            elif blob.get("pmm_game_slug"):
+                live.add(blob["pmm_game_slug"])       # a Gemini bet with no twin reads game start off its game's book
             try:
                 _hand_chase_kalshi(sb, r, blob, now, st,
                                    (_AUTO_PRICE_LEASH_C if isinstance(blob.get("auto_price"), dict) else leash),

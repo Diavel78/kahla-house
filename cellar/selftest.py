@@ -6489,8 +6489,48 @@ def test_gemini_in_kalshi_slot() -> None:
           'not str(x).upper().startswith("GEMI-")' in ksrc)
     sk = src[src.index("def _hand_start_kalshi("):src.index("def _hand_start_kalshi(") + 9000]
     check("a GEMI bet reads game start off the Polymarket twin first (Gemini's own book only as fallback)",
-          'str(ticker).startswith("GEMI-") and twin' in sk
-          and sk.index('"p:" + twin') < sk.index('tape_src = "gemini"'))
+          'str(ticker).startswith("GEMI-") and gem_start' in sk
+          and sk.index('"p:" + gem_start') < sk.index('tape_src = "gemini"'))
+    # A GEMINI BET WITH NO SAME-LINE TWIN READS GAME START OFF ANY POLYMARKET MARKET ON THE GAME
+    check("…and with no twin, off the game's Polymarket market (pmm_game_slug), watched by the chase",
+          'gem_start = twin or blob.get("pmm_game_slug")' in sk
+          and 'live.add(blob["pmm_game_slug"])' in src
+          and '"pmm_game_slug": poly_rs.get("slug")' in src)
+
+    class _Q:
+        def __init__(self, rows, ups): self.rows, self.ups, self._id = rows, ups, None
+        def select(self, *a, **k): return self
+        def eq(self, k, v):
+            if k == "id": self._id = v
+            return self
+        def limit(self, *a): return self
+        def update(self, d): self._d = d; return self
+        def execute(self):
+            if self._id is not None:
+                self.ups.append((self._id, self._d)); return type("R", (), {"data": []})()
+            return type("R", (), {"data": self.rows})()
+    class _SB:
+        def __init__(self, rows): self.rows, self.ups = rows, []
+        def table(self, n): return _Q(self.rows, self.ups)
+    from datetime import datetime, timezone, timedelta
+    _fut = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    _rows = [{"id": 1, "event_start": _fut, "event_name": "Buffalo Bills @ Minnesota Vikings", "sport": "NFL",
+              "market_type": "spread", "side": "away", "entry_line": -2.5,
+              "signal_blob": {"bet_sheet": True, "kalshi_ticker": "GEMI-NFL-X-BUF-MIN-S-BUF2", "rung_line": -2.5}},
+             {"id": 2, "event_start": _fut, "event_name": "A @ B", "sport": "NFL", "market_type": "total",
+              "side": "under", "entry_line": 44.5,
+              "signal_blob": {"bet_sheet": True, "kalshi_ticker": "GEMI-NFL-X-T-O44", "pmm_twin_slug": "tsc-x"}}]
+    _sbk = _app._bet_sheet_slug
+    try:
+        _app._bet_sheet_slug = lambda c, it: ({"ok": True, "slug": "asc-nfl-buf-min-neg-3pt5"}
+                                              if it.get("market_type") == "spread" else {"ok": False})
+        _sb = _SB(_rows)
+        bst = _app._hand_gem_game_backfill(_sb, datetime.now(timezone.utc), None)
+        check("backfill: a twinless Gemini bet gets its game's Polymarket slug; one with a twin is left alone",
+              bst.get("stamped") == 1 and len(_sb.ups) == 1 and _sb.ups[0][0] == 1
+              and _sb.ups[0][1]["signal_blob"].get("pmm_game_slug") == "asc-nfl-buf-min-neg-3pt5")
+    finally:
+        _app._bet_sheet_slug = _sbk
     # ROB'S OPENING SEAT IN THE SLOT (Nov 8 2026, Memphis @ USF +5.5 rested on Poly
     # at 50¢ while Gemini listed the rung with an empty book): no bid on our side
     # → Polymarket's seat − 5¢, and the cheaper all-in puts the bet on Gemini.
