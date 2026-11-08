@@ -55,3 +55,22 @@ create table if not exists ladder_tape (
 create index if not exists ladder_tape_game_idx on ladder_tape (sport, event_name, at);
 create index if not exists ladder_tape_at_idx on ladder_tape (at);
 notify pgrst, 'reload schema';
+
+-- THE GEMINI TAPE (Nov 8 2026, Rob: "if Gemini has got zero maker fees, why in the
+-- hell are we using Kalshi?"). RECORD ONLY, its own table so no 🔥 / 💨 / chart reader
+-- of line_tape ever sees it. Gemini's best bid/ask (cents, home / over orientation)
+-- at every rung within 3 of the sheet's line, one row per change, off the touch walk.
+create table if not exists gemini_tape (
+  id          bigserial primary key,
+  at          timestamptz not null default now(),
+  sport       text not null,
+  event_name  text not null,
+  event_start timestamptz,
+  mt          text not null,          -- ml | spread | total
+  line        numeric,                -- home spread / over total; null on ml
+  bid_c       numeric,
+  ask_c       numeric,
+  symbol      text
+);
+create index if not exists gemini_tape_game_idx on gemini_tape (sport, event_name, at);
+notify pgrst, 'reload schema';

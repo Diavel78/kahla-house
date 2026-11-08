@@ -31412,6 +31412,165 @@ def _entry_ask_c(e: dict):
     return round(a * 100.0, 2) if a <= 1.0 else round(a, 2)
 
 
+# GEMINI ON THE TOUCH WALK (Nov 8 2026, Rob: "if Gemini has got zero maker fees, why in
+# the hell are we using Kalshi?… I'll pull the money out of Kalshi and throw it in Gemini
+# if we can get better odds"). RECORD ONLY: every sheet game the walk reads, Gemini's
+# best bid/ask at every rung within 3 of the sheet's line, home / over orientation, into
+# its OWN table `gemini_tape` (one row per change) — never line_tape, so no 🔥 / 💨 /
+# chart reader ever sees it. The question it answers: at the moment of each 🔥, what
+# did Gemini quote next to Polymarket, and was it cheaper? The match is off the
+# Polymarket event slug's team codes + ET date (`nfl-cin-atl-2026-11-08`, the first
+# code the away team) against Gemini's game tickers (`NFL-2611081800-CIN-ATL-T`);
+# contract tails: T `O51` = over 51.5, S `ATL3` = ATL −3.5 covers, M `ATL` = ATL wins.
+_GEM_TOUCH: dict = {"idx": {}, "at": 0.0, "games": 0, "matched": 0, "events": 0,
+                    "errors": 0, "last_error": None, "idx_err": None}
+_GEM_TAPE_LAST: dict = {}
+_GEM_RUNG_SPAN = 3.0
+
+
+def _gem_game_index(evs) -> dict:
+    """Pure. Gemini sports events → {(PREFIX, frozenset(codes), ET date):
+    {"T": {line: (sym, bid_c, ask_c)}, "S": {(team, line): …}, "M": {team: …}}}."""
+    out: dict = {}
+    for e in evs or []:
+        parts = (e.get("ticker") or "").split("-")
+        if len(parts) < 5 or not parts[1].isdigit() or len(parts[1]) < 10:
+            continue
+        try:
+            utc = datetime.strptime(parts[1][:10], "%y%m%d%H%M").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        d = utc.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        g = out.setdefault((parts[0].upper(), frozenset((parts[2].lower(), parts[3].lower())), d),
+                           {"T": {}, "S": {}, "M": {}})
+        kind = "-".join(parts[4:]).upper()
+        for c in e.get("contracts") or []:
+            sym = c.get("instrumentSymbol") or ""
+            tail = sym.rsplit("-", 1)[-1]
+            pr = c.get("prices") or {}
+
+            def cc(v):
+                try:
+                    return round(float(v) * 100.0, 2) if v not in (None, "") else None
+                except (TypeError, ValueError):
+                    return None
+            q = (sym, cc(pr.get("bestBid")), cc(pr.get("bestAsk")))
+            if kind == "T":
+                m = re.match(r"^O(\d+)$", tail)
+                if m:
+                    g["T"][float(m.group(1)) + 0.5] = q
+            elif kind == "S":
+                m = re.match(r"^([A-Z]+?)(\d+)$", tail)
+                if m:
+                    g["S"][(m.group(1).lower(), float(m.group(2)) + 0.5)] = q
+            elif kind == "M":
+                if re.match(r"^[A-Z]+$", tail):
+                    g["M"][tail.lower()] = q
+    return out
+
+
+def _gem_slug_key(event_slug: str):
+    """Pure. A Polymarket event slug → (PREFIX, away, home, ET date), else None."""
+    parts = [x for x in str(event_slug or "").lower().split("-") if x]
+    if len(parts) < 6 or not re.match(r"^\d{4}$", parts[-3]):
+        return None
+    codes = [x for x in parts[1:-3] if x != "vs"]
+    if len(codes) != 2:
+        return None
+    return parts[0].upper(), codes[0], codes[1], "-".join(parts[-3:])
+
+
+def _gem_quotes(g: dict, mt: str, away: str, home: str, center, span: float = _GEM_RUNG_SPAN) -> list:
+    """Pure. One Gemini game → [(line, bid_c, ask_c, sym)] home / over orientation:
+    total rungs near `center`; spread rungs as the HOME line (home −L = home's S
+    contract YES; home +L = the away S contract's NO, mirrored); ml = home M."""
+    out = []
+    if mt == "total":
+        for L, q in g["T"].items():
+            if center is None or abs(L - float(center)) <= span:
+                out.append((L, q[1], q[2], q[0]))
+    elif mt == "spread":
+        for (team, L), q in g["S"].items():
+            if team == home:
+                hl, b, a = -L, q[1], q[2]
+            elif team == away:
+                hl = L
+                b = round(100.0 - q[2], 2) if q[2] is not None else None
+                a = round(100.0 - q[1], 2) if q[1] is not None else None
+            else:
+                continue
+            if center is None or abs(hl - float(center)) <= span:
+                out.append((hl, b, a, q[0]))
+    elif mt == "ml":
+        q = g["M"].get(home)
+        if q:
+            out.append((None, q[1], q[2], q[0]))
+    return sorted(out, key=lambda x: (x[0] is None, x[0] or 0))
+
+
+def _gem_touch_rows(sport: str, r: dict, items: list, picks: dict, cache: dict, at: str) -> list:
+    """The walk's Gemini read for one sheet game → gemini_tape rows (record only)."""
+    if not items or not _machine_flag("gemini_tape", True):
+        return []
+    import gemini_pm as _gpm
+    if _time.time() - _GEM_TOUCH["at"] > 60.0:
+        _GEM_TOUCH["at"] = _time.time()
+        try:
+            evs = _gpm.events_all("sports", "active")
+            _GEM_TOUCH["idx"] = _gem_game_index(evs)
+            _GEM_TOUCH["events"] = len(evs)
+            _GEM_TOUCH["idx_err"] = None
+        except Exception as e:
+            _GEM_TOUCH["idx_err"] = f"{type(e).__name__}: {e}"[:120]
+    it0 = items[0]
+    pmm = cache.get((sport, str(it0.get("away")), str(it0.get("home")), str(it0.get("event_start")))) or {}
+    sk = _gem_slug_key(pmm.get("event_slug"))
+    _GEM_TOUCH["games"] += 1
+    if not sk:
+        return []
+    pre, away, home, d = sk
+    g = _GEM_TOUCH["idx"].get((pre, frozenset((away, home)), d))
+    if not g:
+        return []
+    _GEM_TOUCH["matched"] += 1
+    out = []
+    for k, p in (picks or {}).items():
+        if k not in ("ml", "spread", "total") or not isinstance(p, dict):
+            continue
+        center = _line_tape_canon(k, str(p.get("side") or ""), p.get("line"), None, None)[0]
+        for line, b, a, sym in _gem_quotes(g, k, away, home, center):
+            if b is None and a is None:
+                continue
+            out.append({"at": at, "sport": sport, "event_name": r.get("event_name"),
+                        "event_start": r.get("event_start"), "mt": k, "line": line,
+                        "bid_c": b, "ask_c": a, "symbol": sym})
+    return out
+
+
+def _gem_tape_write(sb, rows: list) -> int:
+    """Changed-only insert into gemini_tape. Never raises."""
+    if not rows or sb is None:
+        return 0
+    new = []
+    for r in rows:
+        k = (r["sport"], r["event_name"], r["mt"], r["line"])
+        v = (r["bid_c"], r["ask_c"])
+        if _GEM_TAPE_LAST.get(k) != v:
+            new.append(r)
+    n = 0
+    for i in range(0, len(new), 500):
+        chunk = new[i:i + 500]
+        try:
+            sb.table("gemini_tape").insert(chunk).execute()
+            n += len(chunk)
+            for r in chunk:
+                _GEM_TAPE_LAST[(r["sport"], r["event_name"], r["mt"], r["line"])] = (r["bid_c"], r["ask_c"])
+        except Exception as e:
+            _GEM_TOUCH["errors"] += 1
+            _GEM_TOUCH["last_error"] = f"write: {e}"[:120]
+    return n
+
+
 def _sheet_touch_poly(client, item: dict, cache: dict, max_age_s: float = 600.0) -> dict:
     """The Polymarket rung + our-side bid/ask for one sheet pick. One venue
     event lookup per GAME (shared across the game's picks through `cache`,
@@ -31611,6 +31770,7 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
     far_s = float(far_s if far_s is not None else _SHEET_TOUCH_EVERY_S)
     tape: list = []
     ladder: list = []
+    gem_rows: list = []
     cache: dict = {}
     # THE WALK ROTATES (Oct 27 2026, Rob: "no pin quote from noon after on
     # college football"): nearest-first under a 240s budget read ~38 of 84
@@ -31724,6 +31884,11 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
                       "picks": picks}
         tape += _line_tape_venue_rows(sport, r.get("event_name"), r.get("market_id"), r.get("event_start"),
                                       picks, now_iso)
+        try:                                              # GEMINI beside them, its own table (record only)
+            gem_rows += _gem_touch_rows(sport, r, items, picks, cache, now_iso)
+        except Exception as e:
+            _GEM_TOUCH["errors"] += 1
+            _GEM_TOUCH["last_error"] = f"{type(e).__name__}: {e}"[:120]
         if "ml" not in picks:
             try:
                 tape += _sheet_touch_ml_tape(client, sport, r, g, cache, now_iso,
@@ -31779,6 +31944,8 @@ def _sheet_touch_pass(sb, client, now=None, far_s: float | None = None) -> dict:
         st["tape"] = _line_tape_write(sb, tape)
         st["ladder"] = _ladder_write(sb, ladder)
         _LINE_TAPE_STATS["venue_at"] = now_iso
+        st["gemini"] = {"rows": len(gem_rows), "written": _gem_tape_write(sb, gem_rows),
+                        **{k: _GEM_TOUCH.get(k) for k in ("games", "matched", "events", "errors", "last_error", "idx_err")}}
     except Exception as e:
         st["tape"] = f"err: {e}"[:60]
     payload = {"at": now_iso, "ms": int((_time.monotonic() - t0) * 1000), **st, "resume": resume, "games": games,
@@ -31880,7 +32047,7 @@ def _sheet_touch_health(sb) -> dict:
                 tape[src] = "no_table"
         return {"age_s": age_s, "stale": (age_s is None or age_s > _SHEET_TOUCH_FRESH_S),
                 "games": pl.get("games") if isinstance(pl.get("games"), int) else len(pl.get("games") or {}),
-                "items": pl.get("items"), "poly": pl.get("poly"), "kalshi": pl.get("kalshi"),
+                "items": pl.get("items"), "poly": pl.get("poly"), "kalshi": pl.get("kalshi"), "gemini": pl.get("gemini"),
                 "kept": pl.get("kept"), "fresh": pl.get("fresh"), "partial": pl.get("partial"), "ms": pl.get("ms"),
                 "tape_rows": pl.get("tape"), "ladder_rows": pl.get("ladder"), "nopick": pl.get("nopick"), "dropped": pl.get("dropped"),
                 "presheet": pl.get("presheet"), "presheet_games": pl.get("presheet_games"),

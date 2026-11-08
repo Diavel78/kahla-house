@@ -6176,6 +6176,46 @@ def test_sheet_pinnacle_line() -> None:
           set(spenders) == {"_pin_daily_refresh"}, f"got {spenders}")
 
 
+def test_gemini_tape() -> None:
+    """THE GEMINI TAPE (Nov 8 2026, Rob: "why in the hell are we using
+    Kalshi?"): the touch walk records Gemini's book beside each sheet game,
+    in its OWN table, home / over orientation. Record only."""
+    import app as _app
+    print("\n[Gemini tape on the touch walk]")
+    evs = [{"ticker": "NFL-2611081800-CIN-ATL-T", "contracts": [
+                {"instrumentSymbol": "G-T-O51", "prices": {"bestBid": "0.47", "bestAsk": "0.52"}},
+                {"instrumentSymbol": "G-T-O44", "prices": {"bestBid": "0.80", "bestAsk": "0.84"}}]},
+           {"ticker": "NFL-2611081800-CIN-ATL-S", "contracts": [
+                {"instrumentSymbol": "G-S-ATL3", "prices": {"bestBid": "0.50", "bestAsk": "0.55"}},
+                {"instrumentSymbol": "G-S-CIN2", "prices": {"bestBid": "0.30", "bestAsk": "0.34"}}]},
+           {"ticker": "NFL-2611081800-CIN-ATL-M", "contracts": [
+                {"instrumentSymbol": "G-M-ATL", "prices": {"bestBid": "0.60", "bestAsk": "0.63"}}]},
+           {"ticker": "NFLFUT-SUPERBOWL", "contracts": []}]
+    idx = _app._gem_game_index(evs)
+    g = idx.get(("NFL", frozenset(("cin", "atl")), "2026-11-08"))
+    check("Gemini game events index by sport prefix + team pair + ET date; futures skipped",
+          g is not None and len(idx) == 1 and g["T"][51.5][1:] == (47.0, 52.0))
+    check("a Polymarket event slug reads (prefix, away, home, date), 'vs' slugs too",
+          _app._gem_slug_key("nfl-cin-atl-2026-11-08") == ("NFL", "cin", "atl", "2026-11-08")
+          and _app._gem_slug_key("nba-cle-vs-det-2026-11-08") == ("NBA", "cle", "det", "2026-11-08")
+          and _app._gem_slug_key("junk") is None)
+    tot = _app._gem_quotes(g, "total", "cin", "atl", 51.5)
+    check("totals: only rungs within 3 of the sheet line, over orientation",
+          tot == [(51.5, 47.0, 52.0, "G-T-O51")])
+    spr = _app._gem_quotes(g, "spread", "cin", "atl", -3.5, span=10)
+    check("spreads as the HOME line: home −3.5 = ATL3 YES; home +2.5 = CIN2's NO mirrored",
+          (-3.5, 50.0, 55.0, "G-S-ATL3") in spr and (2.5, 66.0, 70.0, "G-S-CIN2") in spr)
+    check("ml = the home team's M contract",
+          _app._gem_quotes(g, "ml", "cin", "atl", None) == [(None, 60.0, 63.0, "G-M-ATL")])
+    sql = open(_app.os.path.join(_app.os.path.dirname(_app.os.path.abspath(_app.__file__)),
+                                 "kahla-scanner", "supabase", "line_tape.sql")).read()
+    src = open(_app.__file__).read()
+    gfn = src[src.index("def _gem_touch_rows"):src.index("def _sheet_touch_poly(")]
+    check("its own table (applied with the line tape DDL at boot); never written to line_tape",
+          "create table if not exists gemini_tape" in sql and 'table("gemini_tape")' in gfn
+          and 'table("line_tape")' not in gfn and "place_order" not in gfn)
+
+
 def test_snipe_gemini() -> None:
     """GEMINI, THE THIRD BOOK (Nov 8 2026, Rob: "You have 15 minutes… Go"):
     an over bet's Gemini twin is found off the NFL total event, its frames
@@ -7950,7 +7990,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_gemini_tape, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
