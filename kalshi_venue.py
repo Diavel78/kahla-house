@@ -2245,3 +2245,20 @@ def ensure_shard_funded(ticker: str, need_c: float, wait_s: float = 8.0, round_c
     if is_gem(ticker):
         return {"ok": True, "ticker": ticker, "skipped": "gemini has no shards"}
     return _K_ensure_shard_funded(ticker, need_c, wait_s, round_c)
+
+
+
+# ── settlements: Gemini's settled positions join Kalshi's (behind GEM_SETTLE) ──
+GEM_SETTLE = False             # the app sets this off `machine_flags gemini_settle`
+_K_settlements = settlements
+
+
+def settlements(min_ts: int | None = None, max_pages: int = 3) -> dict | None:   # noqa: F811
+    k = _K_settlements(min_ts, max_pages)
+    if not (GEM_SETTLE and _need_gem()):
+        return k
+    import gemini_orders as _go
+    g = _go.settlements_map()
+    if k is None or g is None:
+        return None
+    return {**k, **g}

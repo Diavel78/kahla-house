@@ -99,6 +99,21 @@ def probe(place: bool = False, symbol: Optional[str] = None, contracts: int = 1,
         out["positions"] = {"n": len(pos), "sample": pos[:2]}
     except Exception as e:
         out["positions"] = {"error": f"{type(e).__name__}: {e}"[:300]}
+    # SHAPES FOR SETTLEMENT + SOLD DETECTION (Nov 8 2026): raw samples, read only
+    for name, fn in (("settled_sample", lambda: (_g.positions_settled(limit=3) or [])[:3]),
+                     ("history_sample", lambda: (_g.order_history(limit=3) or [])[:3])):
+        try:
+            out[name] = fn()
+        except Exception as e:
+            out[name] = {"error": f"{type(e).__name__}: {e}"[:300]}
+    try:
+        ss = out.get("settled_sample") if isinstance(out.get("settled_sample"), list) else []
+        sym = (ss[0].get("symbol") or ss[0].get("instrumentSymbol")) if ss else None
+        if sym:
+            out["mytrades_symbol"] = sym
+            out["mytrades_sample"] = (_g._private("POST", "/v1/mytrades", {"symbol": sym, "limit_trades": 5}) or [])[:5]
+    except Exception as e:
+        out["mytrades_sample"] = {"error": f"{type(e).__name__}: {e}"[:300]}
     try:
         out["body_mode"] = _g.detect_body_mode()
     except Exception as e:
@@ -280,3 +295,89 @@ def cancel_verified(order_id: str, symbol: Optional[str] = None) -> tuple:
             last_err = f"{type(e).__name__}: {e}"[:200]
     det["read_error"] = last_err
     return (None if last_err else False), det
+
+
+
+# ───────────────── settlement + sales, in Kalshi's shapes (behind flags) ─────────────────
+# Field names below come from the Sep 2026 hedge daemon (`totalQuantity`, `avgPrice`,
+# `outcome`) and Gemini's spot /v1/mytrades doc (`price`, `amount`, `type` Buy|Sell,
+# `timestampms`, `fee_amount`); the settled-position row is NOT yet measured — the probe's
+# `settled_sample` is the truth, and the app keeps both readers off until it is checked.
+
+def _ts_iso(r: dict) -> Optional[str]:
+    for k in ("settledAt", "settlementTime", "updatedAt", "closedAt", "createdAt"):
+        if r.get(k):
+            return str(r.get(k))
+    ms = _f(r.get("timestampms"))
+    if ms:
+        return datetime.fromtimestamp(ms / 1000.0, timezone.utc).isoformat()
+    t = _f(r.get("timestamp"))
+    return datetime.fromtimestamp(t, timezone.utc).isoformat() if t else None
+
+
+def parse_settled(r: dict) -> Optional[dict]:
+    """One settled-position row → Kalshi's parsed settlement shape {ticker,
+    result yes|no, yes_q, no_q, yes_cost, no_cost, revenue_usd, fee_usd,
+    settled_time}; None when the result can't be read."""
+    sym = r.get("symbol") or r.get("instrumentSymbol")
+    oc = str(r.get("outcome") or "").lower()
+    q = None
+    for k in ("totalQuantity", "quantity", "settledQuantity", "size"):
+        q = _f(r.get(k)) if q is None else q
+    if not sym or oc not in ("yes", "no") or q is None:
+        return None
+    q = abs(q)
+    avg = _f(r.get("avgPrice"))
+    sp = None
+    for k in ("settlementPrice", "settlePrice", "finalPrice", "payoutPrice", "resolutionPrice"):
+        sp = _f(r.get(k)) if sp is None else sp
+    res = str(r.get("result") or r.get("resolution") or r.get("winningOutcome") or "").lower()
+    if res in ("yes", "no"):
+        won = (res == oc)
+    elif sp is not None and (sp >= 0.99 or sp <= 0.01):
+        won = sp >= 0.99            # the settle price in OUR outcome's terms (to verify on the probe)
+    else:
+        return None
+    market = oc if won else ("no" if oc == "yes" else "yes")
+    cost = round(q * avg, 2) if avg is not None else None
+    return {"ticker": sym, "event_ticker": None, "result": market,
+            "yes_q": q if oc == "yes" else 0.0, "no_q": q if oc == "no" else 0.0,
+            "yes_cost": cost if oc == "yes" else 0.0, "no_cost": cost if oc == "no" else 0.0,
+            "revenue_usd": round(q, 2) if won else 0.0, "fee_usd": 0.0, "settled_time": _ts_iso(r)}
+
+
+def settlements_map(limit: int = 200) -> Optional[dict]:
+    """{symbol: parsed settlement}; None when the read fails."""
+    try:
+        rows = _g.positions_settled(limit=limit) or []
+    except Exception:
+        return None
+    out: dict = {}
+    for r in rows:
+        p = parse_settled(r)
+        if p and p["ticker"] not in out:
+            out[p["ticker"]] = p
+    return out
+
+
+def fills_kshape(symbol: str, limit: int = 100) -> Optional[list]:
+    """/v1/mytrades for one contract → Kalshi fill rows {ticker, outcome_side
+    (the exposure the fill ADDED), count, yes/no_price_dollars, fee_cost,
+    created_time}. None when the read fails."""
+    try:
+        rows = _g._private("POST", "/v1/mytrades", {"symbol": symbol, "limit_trades": int(limit)}) or []
+    except Exception:
+        return None
+    out = []
+    for t in rows if isinstance(rows, list) else []:
+        q, px = _f(t.get("amount") if t.get("amount") is not None else t.get("quantity")), _f(t.get("price"))
+        if not q or px is None:
+            continue
+        side = str(t.get("type") or t.get("side") or "").lower()
+        oc = str(t.get("outcome") or "yes").lower()
+        added = oc if side == "buy" else ("no" if oc == "yes" else "yes")
+        price_yes = px if oc == "yes" else round(1.0 - px, 4)
+        out.append({"ticker": symbol, "outcome_side": added, "count": q,
+                    "yes_price_dollars": price_yes, "no_price_dollars": round(1.0 - price_yes, 4),
+                    "fee_cost": _f(t.get("fee_amount")) or 0.0, "created_time": _ts_iso(t)})
+    return out

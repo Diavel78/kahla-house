@@ -21729,6 +21729,7 @@ def _hand_kalshi_settle_tick(sb, now, apply: bool = True, force: bool = False) -
     if not cands:
         return st
     try:
+        _second_venue_sync()
         sets = _kv.settlements(min_ts=int((now - timedelta(days=_HAND_KSETTLE_LOOKBACK_D)).timestamp()))
     except Exception as e:
         sets = None
@@ -22024,12 +22025,26 @@ def _hand_kalshi_sold_tick(sb, now, apply: bool = True, force: bool = False) -> 
         min_ts = int((oldest - timedelta(minutes=5)).timestamp())
     except (TypeError, ValueError):
         min_ts = int((now - timedelta(days=2)).timestamp())
-    res = _kalshi_authed_get("/portfolio/fills", params={"ticker": ",".join(tickers), "min_ts": min_ts,
-                                                          "limit": 1000})
-    if not res.get("ok"):
-        st["gate"] = f"fills unreadable: {res.get('error') or res.get('status')}"[:120]
-        return st
-    fills = (res.get("data") or {}).get("fills") or []
+    k_tickers = [t for t in tickers if not _is_gem(t)]          # Kalshi never sees a GEMI contract
+    fills = []
+    if k_tickers:
+        res = _kalshi_authed_get("/portfolio/fills", params={"ticker": ",".join(k_tickers), "min_ts": min_ts,
+                                                              "limit": 1000})
+        if not res.get("ok"):
+            st["gate"] = f"fills unreadable: {res.get('error') or res.get('status')}"[:120]
+            return st
+        fills = (res.get("data") or {}).get("fills") or []
+    # GEMINI SALES (Nov 8 2026): a lot sold in the Gemini app — its fills off /v1/mytrades,
+    # in Kalshi's fill shape, behind `machine_flags gemini_sold`
+    gem_t = [t for t in tickers if _is_gem(t)]
+    if gem_t and _machine_flag("gemini_sold", False):
+        import gemini_orders as _go
+        for t in gem_t[:20]:
+            gf = _go.fills_kshape(t)
+            if gf is None:
+                st["gemini_fills_err"] = st.get("gemini_fills_err", 0) + 1
+                continue
+            fills = list(fills) + gf
     st["fills"] = len(fills)
     rows = []
     for r, b in live:
@@ -22258,6 +22273,7 @@ def _second_venue_sync() -> None:
     try:
         import kalshi_venue as _kv
         _kv.SECOND = _second_venue()
+        _kv.GEM_SETTLE = bool(_machine_flag("gemini_settle", False))   # Gemini settlements grade Gemini lots
     except Exception:
         pass
 
