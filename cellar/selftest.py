@@ -6487,6 +6487,33 @@ def test_gemini_in_kalshi_slot() -> None:
     ksrc = open(_kf.__file__).read()
     check("the Kalshi socket never subscribes a GEMI- contract",
           'not str(x).upper().startswith("GEMI-")' in ksrc)
+    # ROB'S OPENING SEAT IN THE SLOT (Nov 8 2026, Memphis @ USF +5.5 rested on Poly
+    # at 50¢ while Gemini listed the rung with an empty book): no bid on our side
+    # → Polymarket's seat − 5¢, and the cheaper all-in puts the bet on Gemini.
+    sv2 = {"lane_resolve": _kv.lane_resolve}
+    sva = {"_kalshi_hand_book": _app._kalshi_hand_book, "_second_venue_sync": _app._second_venue_sync}
+    try:
+        _kv.lane_resolve = lambda *a, **k: {"ok": True, "ticker": "GEMI-NCAAF-X-MEM-USF-S-MEM5", "buy_yes": False,
+                                            "line": 5.5, "why": "exact", "fee": _kv.gem_fee()}
+        _app._second_venue_sync = lambda: None
+        _app._kalshi_hand_book = lambda t, fresh=False: ({"best_bid": None, "best_ask": None, "bids": [], "asks": []}, {})
+        it = {"sport": "NCAAF", "away": "Memphis", "home": "South Florida", "market_type": "spread",
+              "side": "home", "line": 5.5, "event_start": "2026-11-13T01:00:00Z"}
+        k = _app._bet_sheet_resolve_kalshi(it, poly_seat_c=50.0)
+        check("empty Gemini book: the slot opens at Poly's seat − 5¢ (50 → 45)",
+              k.get("ok") and k.get("price_c") == 45.0 and k.get("opened") == "poly_minus")
+        v, _d = _app._hand_venue_pick("auto", {"ok": True, "price_c": 50.0, "rung_line": 5.5}, k, 10, 0.0)
+        check("…and the cheaper all-in rests it on Gemini, not Polymarket", v == "KALSHI")
+        check("no Polymarket seat → no open (never guess a price)",
+              not _app._bet_sheet_resolve_kalshi(it, poly_seat_c=None).get("ok"))
+        _kv.lane_resolve = lambda *a, **k: {"ok": True, "ticker": "KXNCAAFSPREAD-X", "buy_yes": False,
+                                            "line": 5.5, "why": "exact", "fee": None}
+        check("a real Kalshi market with no bids still refuses (the rule is Gemini's)",
+              not _app._bet_sheet_resolve_kalshi(it, poly_seat_c=50.0).get("ok"))
+    finally:
+        _kv.lane_resolve = sv2["lane_resolve"]
+        for k_, v_ in sva.items():
+            setattr(_app, k_, v_)
 
 
 def test_gemini_settle_sold() -> None:

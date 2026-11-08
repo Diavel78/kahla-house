@@ -17433,7 +17433,7 @@ def api_bet_sheets_place():
                 # BOTH VENUES QUOTED (Oct 18 2026): the slip shows each seat
                 # all-in and which one the box would rest on.
                 try:
-                    k = _bet_sheet_resolve_kalshi(it or {})
+                    k = _bet_sheet_resolve_kalshi(it or {}, poly_seat_c=(res.get("price_c") if res.get("ok") else None))
                 except Exception as e:
                     k = {"ok": False, "reason": f"Kalshi: {type(e).__name__}: {e}"[:120]}
                 k.pop("_book", None)
@@ -18025,7 +18025,8 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                 # in, the cheaper all-in rests the bet; Polymarket is home
                 # and Kalshi must beat it by `hand_venue_min_gain_c`.
                 try:
-                    k_rs = _bet_sheet_resolve_kalshi(item)
+                    k_rs = _bet_sheet_resolve_kalshi(
+                        item, poly_seat_c=(rs.get("price_c") if isinstance(rs, dict) and rs.get("ok") else None))
                 except Exception as e:
                     k_rs = {"ok": False, "reason": f"Kalshi: {type(e).__name__}: {e}"[:120]}
                 _lap("kalshi")
@@ -22375,11 +22376,17 @@ def _kalshi_acct(fresh: bool = False):
     return orders, pos
 
 
-def _bet_sheet_resolve_kalshi(item: dict) -> dict:
+def _bet_sheet_resolve_kalshi(item: dict, poly_seat_c=None) -> dict:
     """One slip item → its Kalshi contract + the seat on our side, by the
     SAME seat rule as Polymarket (join the touch; the fat rung under a thin
     one). {ok, ticker, buy_yes, rung_line, rung_why, price_c, touch_c,
-    ask_c, fee, thin, _book} or {ok: False, reason}."""
+    ask_c, fee, thin, _book} or {ok: False, reason}.
+
+    A GEMINI contract in this slot with NO bid on our side opens at
+    Polymarket's seat − 5¢ (`poly_seat_c`, Rob's opening rule) — until Nov 8
+    2026 only the old v0 toggle path had it, so this path read an empty
+    Gemini book as "no bids" and every such bet rested on Polymarket
+    (Memphis @ USF +5.5: Gemini listed, empty, 45¢ open vs Poly 50¢)."""
     import kalshi_venue as _kv
     sport = str(item.get("sport") or "").upper()
     try:
@@ -22396,6 +22403,19 @@ def _bet_sheet_resolve_kalshi(item: dict) -> dict:
         return {"ok": False, "reason": "Kalshi book unreadable — try again", "ticker": ticker}
     syn = not buy_yes
     s_bid, s_ask = _manual_side_book(book, syn)
+    if s_bid is None and str(ticker).startswith("GEMI-"):
+        import gemini_venue as _gv
+        seat = _gv.opening_seat_c(None, poly_seat_c, _GEM_OPEN_UNDER_C)
+        if seat is None:
+            return {"ok": False, "reason": "no bids on Gemini and no Polymarket seat to open under",
+                    "ticker": ticker, "rung_line": rs.get("line")}
+        if s_ask is not None and seat >= s_ask:
+            seat = float(max(1, math.floor(s_ask - 1)))
+        return {"ok": True, "venue": "KALSHI", "ticker": ticker, "buy_yes": buy_yes,
+                "rung_line": rs.get("line"), "rung_why": rs.get("why"),
+                "price_c": seat, "touch_c": None, "ask_c": s_ask, "opened": "poly_minus",
+                "thin": None, "fee": rs.get("fee"),
+                "series": rs.get("series"), "event_ticker": rs.get("event_ticker"), "_book": book}
     if s_bid is None:
         return {"ok": False, "reason": "no bids on the Kalshi market yet", "ticker": ticker,
                 "rung_line": rs.get("line")}
