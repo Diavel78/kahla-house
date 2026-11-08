@@ -27040,6 +27040,10 @@ def api_bet_sheets_mine():
             "gemini_opened": blob.get("gemini_opened") if gemini else None,
             "kalshi_ticker": blob.get("kalshi_ticker") if kalshi else None,
             "kalshi_buy_yes": bool(blob.get("kalshi_buy_yes")) if kalshi else None,
+            # A GEMINI LOT IS PRICED LIVE OFF ITS POLYMARKET TWIN (Nov 8 2026, Rob on Packers/Pats
+            # U 44.5 reading 48% at 24-14 in the 2nd: "there's just no market at 44.5 on Gemini")
+            "twin_slug": blob.get("pmm_twin_slug") if (kalshi and str(blob.get("kalshi_ticker") or "").startswith("GEMI-")) else None,
+            "twin_syn": bool(blob.get("pmm_twin_synthetic")),
             "held_unknown": bool((bx or {}).get("held_unknown")) if kalshi else False,
             "venue_pick": blob.get("venue_pick"),
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
@@ -27674,7 +27678,21 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
                                      "entry_line": b.get("line")}, m)
             if wp is not None:
                 src = "decided"
-        if wp is None and b.get("cur_c") is not None:
+        if wp is None and b.get("twin_slug") and reads < _BS_LIVE_READS and not _venue_rl_active():
+            # Gemini's in-play book is empty or our own stale bid — the same bet on
+            # Polymarket is the live price (the box's cur_c for it is Gemini's).
+            if client is None:
+                try:
+                    client = get_client()
+                except Exception:
+                    client = None
+            if client is not None:
+                reads += 1
+                v = _live_book_mid(client, b["twin_slug"], bool(b.get("twin_syn")))
+                if v is not None:
+                    wp, src = v, "poly_twin"
+                    b["cur_c"] = round(v * 100.0, 2)
+        if wp is None and b.get("cur_c") is not None and not b.get("twin_slug"):
             wp, src = round(float(b["cur_c"]) / 100.0, 4), "box"
         if wp is None and b.get("venue") == "KALSHI" and b.get("kalshi_ticker") and k_reads < _BS_LIVE_READS:
             # A KALSHI LOT HAS NO POLYMARKET SLUG (Oct 24 2026 — every Kalshi-held
