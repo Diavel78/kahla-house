@@ -3091,8 +3091,8 @@ def test_hand_start_plan() -> None:
     _app.TAPE_BASE.pop("k:TEST", None)
     import inspect as _ib
     src_ = _ib.getsource(_app)
-    check("start rule: all three start-plan call sites read _start_samples",
-          src_.count("_hand_start_plan(_start_samples(") == 3 and "_hand_start_plan(list(" not in src_)
+    check("start rule: the Polymarket and Kalshi/Gemini start-plan call sites read _start_samples",
+          src_.count("_hand_start_plan(_start_samples(") == 5 and "_hand_start_plan(list(" not in src_)
 
 def test_hand_chase_plan() -> None:
     """The hand-bet chase (Oct 4 2026): JOIN the touch, only UP, and a
@@ -6487,6 +6487,10 @@ def test_gemini_in_kalshi_slot() -> None:
     ksrc = open(_kf.__file__).read()
     check("the Kalshi socket never subscribes a GEMI- contract",
           'not str(x).upper().startswith("GEMI-")' in ksrc)
+    sk = src[src.index("def _hand_start_kalshi("):src.index("def _hand_start_kalshi(") + 9000]
+    check("a GEMI bet reads game start off the Polymarket twin first (Gemini's own book only as fallback)",
+          'str(ticker).startswith("GEMI-") and twin' in sk
+          and sk.index('"p:" + twin') < sk.index('tape_src = "gemini"'))
     # ROB'S OPENING SEAT IN THE SLOT (Nov 8 2026, Memphis @ USF +5.5 rested on Poly
     # at 50¢ while Gemini listed the rung with an empty book): no bid on our side
     # → Polymarket's seat − 5¢, and the cheaper all-in puts the bet on Gemini.

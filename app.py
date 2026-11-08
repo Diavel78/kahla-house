@@ -23697,14 +23697,29 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
     _d = max(drop, _d)
     if now_ts >= start_ts - 1200.0 and not _kalshi_ws_fresh(ticker):
         _kalshi_hand_book(ticker, fresh=True)           # REST sample through the start window only while the socket is dark
-    tape_src = "kalshi"
-    verdict, base, cur, seen = _hand_start_plan(_start_samples("k:" + ticker, KALSHI_TAPE.get(ticker), start_ts), start_ts, now_ts, _d)
     twin = blob.get("pmm_twin_slug")
-    if verdict == "no_baseline" and twin:
-        v2 = _hand_start_plan(_start_samples("p:" + twin, TOUCH_TAPE.get(twin), start_ts), start_ts, now_ts, _d)
-        if v2[0] != "no_baseline":
-            verdict, base, cur, seen = v2
-            tape_src = "poly_twin"
+    if str(ticker).startswith("GEMI-") and twin:
+        # A GEMINI BET READS GAME START OFF POLYMARKET (Nov 8 2026, Rob: "How are you
+        # determining the live cancel on Gemini? Small markets…"): Gemini's book can be
+        # a few hundred contracts or just OUR bid (Memphis @ USF +5.5), so its touch
+        # never shows the makers leave and the bet would rest into the game. The
+        # Polymarket twin's book is where the 95% drop is real; Gemini's own tape is the
+        # fallback only when the twin has no pre-start baseline.
+        tape_src = "poly_twin"
+        verdict, base, cur, seen = _hand_start_plan(_start_samples("p:" + twin, TOUCH_TAPE.get(twin), start_ts), start_ts, now_ts, _d)
+        if verdict == "no_baseline":
+            v2 = _hand_start_plan(_start_samples("k:" + ticker, KALSHI_TAPE.get(ticker), start_ts), start_ts, now_ts, _d)
+            if v2[0] != "no_baseline":
+                verdict, base, cur, seen = v2
+                tape_src = "gemini"
+    else:
+        tape_src = "kalshi"
+        verdict, base, cur, seen = _hand_start_plan(_start_samples("k:" + ticker, KALSHI_TAPE.get(ticker), start_ts), start_ts, now_ts, _d)
+        if verdict == "no_baseline" and twin:
+            v2 = _hand_start_plan(_start_samples("p:" + twin, TOUCH_TAPE.get(twin), start_ts), start_ts, now_ts, _d)
+            if v2[0] != "no_baseline":
+                verdict, base, cur, seen = v2
+                tape_src = "poly_twin"
     if verdict != "started":
         st["wait" if verdict in ("wait", "pre") else "no_baseline"] += 1
         if verdict == "no_baseline" and now_ts - start_ts > 120.0 and not blob.get("start_blind"):
