@@ -6592,6 +6592,14 @@ def test_gemini_in_kalshi_slot() -> None:
             setattr(_app, k_, v_)
         for k_, v_ in svk.items():
             setattr(_kv, k_, v_)
+    # A FLIPPED PICK TURNS GEMINI'S QUOTE OVER TOO (Nov 8 2026, Celtics @ Bucks: the card read
+    # "Poly 53¢ · Gemini 46¢ @ +12.5" under BOS −12.5 — Gemini's still showed Milwaukee)
+    mq = _app._sheet_mirror_quote({"poly": {"bid": 47.0, "ask": 48.0, "line": 12.5},
+                                   "gemini": {"bid": 46.0, "ask": 47.0, "line": 12.5, "symbol": "GEMI-X-S-BOS12"},
+                                   "side": "home"}, "spread", "spread")
+    check("the side flip mirrors Gemini like Polymarket (MIL +12.5 46/47 → BOS −12.5 53/54)",
+          mq["gemini"]["bid"] == 53.0 and mq["gemini"]["ask"] == 54.0 and mq["gemini"]["line"] == -12.5
+          and mq["poly"]["bid"] == 52.0 and mq["poly"]["line"] == -12.5)
     # ROB'S OPENING SEAT IN THE SLOT (Nov 8 2026, Memphis @ USF +5.5 rested on Poly
     # at 50¢ while Gemini listed the rung with an empty book): no bid on our side
     # → Polymarket's seat − 5¢, and the cheaper all-in puts the bet on Gemini.

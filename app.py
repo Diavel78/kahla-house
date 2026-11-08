@@ -1603,6 +1603,9 @@ def _sheet_flip_pick(g: dict, key: str, pick: dict, pv: dict, sport=None) -> dic
     return out
 
 
+_SHEET_MIRROR_VENUES = ("poly", "kalshi", "gemini")
+
+
 def _sheet_mirror_quote(q: dict, mt: str, key: str) -> dict:
     """Pure. The venue touch for the OTHER side of a market off the quoted
     side's book: our bid = 100 − their ask, our ask = 100 − their bid, the
@@ -1610,7 +1613,10 @@ def _sheet_mirror_quote(q: dict, mt: str, key: str) -> dict:
     market's cap (Oct 26 2026: a flipped card showed the model side's 84¢
     'chalk' under a +468 dog's button)."""
     out = {}
-    for v in ("poly", "kalshi"):
+    # GEMINI FLIPS TOO (Nov 8 2026, Rob on Celtics @ Bucks: the card read "Poly 53¢ · Gemini
+    # 46¢ @ +12.5" under BOS −12.5 — the 🔥 flipped the pick to Boston and turned Poly's
+    # quote over, while Gemini's still showed Milwaukee +12.5)
+    for v in _SHEET_MIRROR_VENUES:
         q0 = q.get(v) if isinstance(q.get(v), dict) else None
         if not q0:
             out[v] = q0
@@ -1635,7 +1641,7 @@ def _sheet_mirror_quote(q: dict, mt: str, key: str) -> dict:
         chalk = bool(nb_ is not None and cap is not None and nb_ >= float(cap) - 1e-9)
         out[v] = {**q0, "bid": nb_, "ask": na_, "line": nl, "chalk": chalk, "mirrored": True}
     for k, v in q.items():
-        if k not in ("poly", "kalshi"):
+        if k not in _SHEET_MIRROR_VENUES:
             out[k] = v
     return out
 
