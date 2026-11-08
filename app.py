@@ -29387,16 +29387,29 @@ def _gem_ws_run() -> None:
     import websocket as _ws
     while True:
         try:
-            _gem_relink()
-            want = {k[2:] for k in SNIPE_GEM_META}
-            if not want or not _machine_flag("hand_snipe_shadow", True) or not _machine_flag("hand_snipe_gemini", True):
-                _time.sleep(5)
-                continue
             try:                                         # the box's framework Python has no system CA store (Nov 8 2026: CERTIFICATE_VERIFY_FAILED)
                 import certifi as _certifi
                 _sslopt = {"ca_certs": _certifi.where()}
             except Exception:
                 _sslopt = None
+            _gem_relink()
+            want = {k[2:] for k in SNIPE_GEM_META}
+            if not want or not _machine_flag("hand_snipe_shadow", True) or not _machine_flag("hand_snipe_gemini", True):
+                # PROVE THE SOCKET BEFORE IT'S NEEDED (Rob, Nov 8 2026: "That's why I asked you to
+                # check the shit before it fucking started") — the first cut only dialled Gemini once
+                # an over was in play, so the TLS failure surfaced after game start. With nothing to
+                # watch, dial and hang up every 10 min so `connects` / `err` read true at boot.
+                if _time.time() - _GEM_STATE.get("probe_at", 0.0) > 600:
+                    _GEM_STATE["probe_at"] = _time.time()
+                    try:
+                        _w = _ws.create_connection("wss://ws.gemini.com?snapshot=-1", timeout=10, sslopt=_sslopt)
+                        _w.close()
+                        _GEM_STATE["probe_ok"] = datetime.now(timezone.utc).isoformat()
+                        _GEM_STATE["err"] = None
+                    except Exception as ex:
+                        _GEM_STATE["err"] = "probe: " + str(ex)[:150]
+                _time.sleep(5)
+                continue
             ws = _ws.create_connection("wss://ws.gemini.com?snapshot=-1", timeout=10, sslopt=_sslopt)
             ws.settimeout(2)
             _GEM_STATE["connects"] += 1
@@ -29617,9 +29630,9 @@ def _hand_snipe_shadow_tick(sb, now) -> dict:
     SNIPE_POLY_SLUGS = {k[2:] for k in shadow if k.startswith("p:")}
     SNIPE_K_TICKERS = {k[2:] for k in shadow if k.startswith("k:")}
     st["watch"] = len(shadow)
-    if shadow and _machine_flag("hand_snipe_gemini", True):
-        _gem_ensure_thread()
-    st["gemini"] = {k: _GEM_STATE[k] for k in ("frames", "subs", "connects", "err")}
+    if _machine_flag("hand_snipe_gemini", True):
+        _gem_ensure_thread()                             # from boot, not first over in play — it proves the socket early
+    st["gemini"] = {k: _GEM_STATE.get(k) for k in ("frames", "subs", "connects", "err", "probe_ok")}
     st["gemini"]["linked"] = len(SNIPE_GEM_META)
     with _SNIPE_LOCK:
         for k in list(_SNIPE_HIST):
