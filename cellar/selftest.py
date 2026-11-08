@@ -6292,6 +6292,121 @@ def test_gemini_probe() -> None:
           fn.index('"value": False') < fn.index("_go.probe("))
 
 
+def test_gemini_v0_lane() -> None:
+    """GEMINI v0 (Nov 8 2026, Rob: "See if we can get some Gemini shit bet
+    today"): the slip's Gemini toggle places ONE verified post-only order and
+    logs a pick under its OWN marker (no bet_sheet — no Polymarket/Kalshi loop
+    sees it); the Gemini tick deletes it when cancelled in the app (two reads),
+    and cancels the unfilled part when the makers leave at game start."""
+    import time as _t
+    import app as _app
+    import gemini_orders as _go
+    print("\n[Gemini v0 lane]")
+
+    class _Q:
+        def __init__(self, db, name):
+            self.db, self.name, self.op, self.row, self.f = db, name, None, None, {}
+        def select(self, *a, **k): self.op = "select"; return self
+        def insert(self, row): self.op, self.row = "insert", row; return self
+        def update(self, row): self.op, self.row = "update", row; return self
+        def delete(self): self.op = "delete"; return self
+        def eq(self, k, v): self.f[k] = v; return self
+        def limit(self, n): return self
+        def execute(self):
+            class R: pass
+            r = R()
+            if self.name != "bot_picks":
+                r.data = []
+                return r
+            if self.op == "insert":
+                row = {**self.row, "id": len(self.db) + 1, "status": "pending"}
+                self.db[row["id"]] = row
+                r.data = [row]
+            elif self.op == "select":
+                r.data = [x for x in self.db.values() if x.get("status") == "pending"
+                          and (x.get("signal_blob") or {}).get("gemini_bet")]
+            elif self.op == "update":
+                if self.f.get("id") in self.db:
+                    self.db[self.f["id"]].update(self.row)
+                r.data = []
+            elif self.op == "delete":
+                self.db.pop(self.f.get("id"), None)
+                r.data = []
+            return r
+
+    class _SB:
+        def __init__(self): self.db = {}
+        def table(self, name): return _Q(self.db, name)
+    sb = _SB()
+    sv = {k: getattr(_app, k) for k in ("_bet_sheet_market_id", "_pin_sheet_slate", "_probe_log", "_send_fill_telegram",
+                                        "_gem_ensure_thread")}
+    svg = {k: getattr(_go, k) for k in ("place_rest", "orders_by_id", "positions_map", "cancel_verified")}
+    sent: list = []
+    try:
+        _app._bet_sheet_market_id = lambda *a, **k: 77
+        _app._pin_sheet_slate = lambda *a, **k: (None, None)
+        _app._probe_log = lambda *a, **k: None
+        _app._send_fill_telegram = lambda m, *a, **k: sent.append(m)
+        _app._gem_ensure_thread = lambda: None
+        _go.place_rest = lambda sym, by, px, q, cid=None: ("900000000000000001", {"verified": True})
+        start = _app.datetime.now(_app.timezone.utc) + _app.timedelta(hours=2)
+        item = {"sport": "NFL", "away": "Tampa Bay Buccaneers", "home": "Chicago Bears", "event_start": start.isoformat(),
+                "market_type": "spread", "side": "home", "line": -6.5, "label": "Bears -6.5"}
+        g_rs = {"ok": True, "symbol": "GEMI-NFL-X-S-CHI6", "buy_yes": True, "price_c": 47.0, "rung_line": -6.5,
+                "rung_why": "exact", "opened": None}
+        out = _app._hand_order_execute_gemini(sb, {"id": 5, "contracts": 10}, {"asked_by": "u1"}, item, g_rs,
+                                              {"ok": True, "slug": "asc-x", "rung_line": -6.5, "price_c": 48.0}, "box")
+        pk = sb.db.get(out.get("pick_id")) or {}
+        b = pk.get("signal_blob") or {}
+        check("the toggle places one verified Gemini order and logs the pick under gemini_bet, NOT bet_sheet",
+              out.get("ok") and out.get("venue") == "GEMINI" and b.get("gemini_bet") and not b.get("bet_sheet")
+              and b.get("gemini_order_id") == "900000000000000001" and b.get("order_id") is None
+              and b.get("pmm_slug") is None and pk.get("entry_book") == "GEMINI")
+        live = dict(item, event_start=(_app.datetime.now(_app.timezone.utc) - _app.timedelta(minutes=1)).isoformat())
+        check("…a game already started is refused (v0 rests pre-game only)",
+              _app._hand_order_execute_gemini(sb, {"id": 6, "contracts": 10}, {}, live, dict(g_rs), None, "box").get("ok") is False)
+        # the app cancel: order gone, nothing held, pre-game — deleted only on the SECOND read
+        _go.orders_by_id = lambda: {}
+        _go.positions_map = lambda: {}
+        now = _app.datetime.now(_app.timezone.utc)
+        _app._GEM_TICK_AT["t"] = 0.0
+        _app._hand_gemini_tick(sb, now)
+        first = out["pick_id"] in sb.db
+        _app._GEM_TICK_AT["t"] = 0.0
+        _app._hand_gemini_tick(sb, now)
+        check("an order gone pre-game with nothing held is an app cancel — pick deleted on the 2nd read, not the 1st",
+              first and out["pick_id"] not in sb.db)
+        # the game-start cancel at the drop
+        out2 = _app._hand_order_execute_gemini(sb, {"id": 7, "contracts": 10}, {"asked_by": "u1"}, item, dict(g_rs), None, "box")
+        pid = out2["pick_id"]
+        st_dt = _app.datetime.now(_app.timezone.utc) - _app.timedelta(seconds=40)
+        sb.db[pid]["event_start"] = st_dt.isoformat()
+        s0 = st_dt.timestamp()
+        _app.GEM_TAPE["GEMI-NFL-X-S-CHI6"] = _app._deque([(s0 - 60, 47.0, 480.0, 48.0, 389.0), (s0 - 30, 47.0, 480.0, 48.0, 389.0),
+                                                          (s0 + 5, 40.0, 3.0, 60.0, 2.0), (s0 + 10, 40.0, 3.0, 60.0, 2.0),
+                                                          (_t.time() - 1, 40.0, 3.0, 60.0, 2.0)])
+        _go.orders_by_id = lambda: {"900000000000000001": {"id": "900000000000000001", "leaves": 10.0, "filled": 0.0}}
+        cancels: list = []
+        _go.cancel_verified = lambda oid, sym=None: (cancels.append(oid) or True, {})
+        _app._GEM_TICK_AT["t"] = 0.0
+        st = _app._hand_gemini_tick(sb, _app.datetime.now(_app.timezone.utc))
+        check("after the start, the makers leaving (95% drop) cancels the unfilled order, deletes the pick, pings 🔴 once",
+              cancels == ["900000000000000001"] and pid not in sb.db and st.get("start_cancel") == 1
+              and sent and sent[-1].startswith("🔴 GEMINI NOT FILLED"))
+    finally:
+        for k, v in sv.items():
+            setattr(_app, k, v)
+        for k, v in svg.items():
+            setattr(_go, k, v)
+        _app.GEM_TAPE.pop("GEMI-NFL-X-S-CHI6", None)
+        _app._GEM_STATUS_ROWS = {}
+        _app.GEM_PICK_SYMS = set()
+    src = open(_app.__file__).read()
+    check("Gemini bets accept only the CANCEL op from the slip in v0",
+          '_bet_sheet_pick(sb, (it or {}).get("pick_id"), allow_gemini=(op == "cancel"))' in src
+          and "Gemini bets: cancel only for now" in src)
+
+
 def test_gemini_tape() -> None:
     """THE GEMINI TAPE (Nov 8 2026, Rob: "why in the hell are we using
     Kalshi?"): the touch walk records Gemini's book beside each sheet game,
@@ -8116,7 +8231,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_gemini_tape, test_gemini_venue_read, test_gemini_probe, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_gemini_tape, test_gemini_venue_read, test_gemini_probe, test_gemini_v0_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

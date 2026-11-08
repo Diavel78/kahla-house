@@ -17427,7 +17427,7 @@ def api_bet_sheets_place():
             # never changes the venue pick.
             res["pin"] = _bet_sheet_pin_quote(sb, it or {}, datetime.now(timezone.utc), pin_slates)
             want = str((it or {}).get("venue") or "auto").lower()
-            if _hand_kalshi_on() and want != "poly":
+            if _hand_kalshi_on() and want not in ("poly", "gemini"):
                 # BOTH VENUES QUOTED (Oct 18 2026): the slip shows each seat
                 # all-in and which one the box would rest on.
                 try:
@@ -17460,6 +17460,18 @@ def api_bet_sheets_place():
                 gq.pop("_book", None)
                 res["gemini"] = {kk: gq.get(kk) for kk in ("ok", "reason", "symbol", "buy_yes", "price_c", "touch_c",
                                                             "ask_c", "rung_line", "rung_why", "opened", "thin")}
+                if want == "gemini":
+                    # THE SLIP'S GEMINI TOGGLE: the Gemini seat IS the bet
+                    res["poly"] = {kk: res.get(kk) for kk in ("ok", "reason", "price_c", "touch_c", "ask_c", "rung_line")}
+                    if gq.get("ok"):
+                        res.update({"ok": True, "venue": "GEMINI", "price_c": gq.get("price_c"),
+                                    "touch_c": gq.get("touch_c"), "ask_c": gq.get("ask_c"),
+                                    "rung_line": gq.get("rung_line"), "rung_why": gq.get("rung_why"),
+                                    "thin": gq.get("thin")})
+                        res.pop("reason", None)
+                    else:
+                        res = {**res, "ok": False, "venue": "GEMINI",
+                               "reason": gq.get("reason") or "no Gemini market"}
             results.append(res)
         return jsonify({"ok": True, "preview": True, "placed": 0,
                         "contracts": contracts, "results": results})
@@ -17750,6 +17762,7 @@ def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int, 
         if mid is None:
             raise RuntimeError("no markets row")
         kalshi = str(rs.get("venue") or "").upper() == "KALSHI"
+        gemini = str(rs.get("venue") or "").upper() == "GEMINI"
         blob = {"bet_sheet": True, "manual_web_bet": True,
                 "pmm_slug": rs.get("slug"), "pmm_synthetic": bool(rs.get("synthetic")),
                 "order_id": out.get("order_id"), "contracts": contracts,
@@ -17773,6 +17786,18 @@ def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int, 
                 blob.update({"venue": "POLYMARKET", "kalshi_twin_ticker": rs["kalshi_twin_ticker"],
                              "kalshi_twin_buy_yes": bool(rs.get("kalshi_twin_buy_yes")),
                              "kalshi_fee": rs.get("kalshi_fee")})
+        if gemini:
+            # A GEMINI v0 BET: its OWN marker, no `bet_sheet` — no Polymarket / Kalshi
+            # loop may touch it; `_hand_gemini_tick` owns it.
+            blob.pop("bet_sheet", None)
+            blob.update({"gemini_bet": True, "venue": "GEMINI", "gemini_symbol": rs.get("gemini_symbol"),
+                         "gemini_buy_yes": bool(rs.get("gemini_buy_yes")),
+                         "gemini_order_id": out.get("order_id"), "order_id": None,
+                         "gemini_opened": rs.get("gemini_opened"),
+                         "pmm_slug": None, "pmm_synthetic": False,
+                         "pmm_twin_slug": rs.get("pmm_twin_slug"),
+                         "pmm_twin_synthetic": rs.get("pmm_twin_synthetic"),
+                         "poly_quote_c": rs.get("poly_quote_c")})
         if kalshi:
             # A KALSHI BET: its identity lives in kalshi_*; pmm_slug/order_id
             # stay NULL so every Polymarket path skips it (see the lane note).
@@ -17808,13 +17833,13 @@ def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int, 
                "event_name": f"{it.get('away')} @ {it.get('home')}",
                "event_start": it.get("event_start"),
                "market_type": "moneyline" if mt == "ml" else mt,
-               "side": it.get("side"), "entry_book": "KALSHI" if kalshi else "POLYMARKET",
+               "side": it.get("side"), "entry_book": "GEMINI" if gemini else ("KALSHI" if kalshi else "POLYMARKET"),
                "entry_price": _cents_to_american_py(price_c),
                "entry_line": (float(rs["rung_line"]) if mt != "ml"
                               and rs.get("rung_line") is not None else None),
                "units": 1, "confidence": "low",
                "reasons": [f"Bet sheet — {contracts} contracts resting at {price_c:g}¢"
-                           + (" on Kalshi" if kalshi else "")],
+                           + (" on Kalshi" if kalshi else " on Gemini" if gemini else "")],
                "signal_blob": blob}
         ins = sb.table("bot_picks").insert(row).execute()
         return (ins.data or [{}])[0].get("id"), None
@@ -17972,6 +17997,19 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                     out_ap["ms"] = ms
                 return out_ap
             want = str(item.get("venue") or "auto").lower()
+            if want == "gemini":
+                # GEMINI v0 (Nov 8 2026, Rob: "See if we can get some Gemini shit bet today"):
+                # the Polymarket seat first (Rob's opening seat = Poly − 5¢ on an empty
+                # Gemini book), then the Gemini contract + seat, one verified post-only order.
+                rs = _bet_sheet_resolve(client, item)
+                _lap("resolve")
+                g_rs = _bet_sheet_resolve_gemini(item, poly_seat_c=(rs.get("price_c") if rs.get("ok") else None))
+                _lap("gemini")
+                g_out = _hand_order_execute_gemini(sb, row, pl, item, g_rs, rs, worker)
+                _lap("place_log")
+                if isinstance(g_out, dict):
+                    g_out["ms"] = ms
+                return g_out
             k_on = _hand_kalshi_on()
             if want == "kalshi" and not k_on:
                 return {"ok": False, "error": "Kalshi is switched off (machine_flags hand_kalshi_enabled)"}
@@ -18265,6 +18303,7 @@ def _hand_status_publish(sb, client) -> dict:
     HAND_HELD_SLUGS = held_slugs
     KALSHI_WATCH_TICKERS = k_watch | _hand_pre_tickers() | set(SNIPE_K_TICKERS)   # cellar/kalshifeed.py subscribes this set (+ the slip's pre-subscribed tickers)
     _HAND_STATUS_LAST.update({"at": _time.time(), "rows": out, "venue_ok": venue_ok})   # the red alert reads this tick's strip
+    out = {**out, **{k: v for k, v in _GEM_STATUS_ROWS.items() if k not in out}}       # Gemini v0 rows ride the same blob
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
         sb.table("lookup_cache").upsert({
@@ -22598,6 +22637,206 @@ def _kalshi_order_place(ticker: str, buy_yes: bool, price_c, contracts, event_st
             "fill_count": cr.get("fill_count")}, 200
 
 
+def _gemini_lane_on() -> bool:
+    return bool(_machine_flag("hand_gemini_enabled", True))
+
+
+def _hand_order_execute_gemini(sb, row: dict, pl: dict, item: dict, g_rs: dict, poly_rs: dict | None,
+                               worker: str) -> dict:
+    """GEMINI v0 create: one post-only GTC BUY at the seat, verified on the
+    active list, logged as a pick with its OWN marker (`gemini_bet`, no
+    `bet_sheet`) so no Polymarket / Kalshi loop touches it — `_hand_gemini_tick`
+    owns it (status, app-cancel, the game-start cancel)."""
+    if not _gemini_lane_on():
+        return {"ok": False, "error": "Gemini is switched off (machine_flags hand_gemini_enabled)", "venue": "GEMINI"}
+    contracts = int(row.get("contracts") or pl.get("contracts") or 0)
+    if not g_rs or not g_rs.get("ok"):
+        return {"ok": False, "error": (g_rs or {}).get("reason") or "no Gemini market", "venue": "GEMINI"}
+    g_rs.pop("_book", None)
+    try:
+        if _aware_ts(item.get("event_start")) <= datetime.now(timezone.utc):
+            return {"ok": False, "error": "game already started — Gemini v0 rests pre-game only", "venue": "GEMINI"}
+    except Exception:
+        pass
+    price_c = int(round(float(g_rs["price_c"])))
+    if not (1 <= contracts <= 250) or not (1 <= price_c <= 99):
+        return {"ok": False, "error": f"bad size/price ({contracts} @ {price_c}¢)", "venue": "GEMINI"}
+    if contracts * price_c / 100.0 > 500.0:
+        return {"ok": False, "error": "over the $500 a bet rail", "venue": "GEMINI"}
+    import gemini_orders as _go
+    oid, det = _go.place_rest(g_rs["symbol"], bool(g_rs["buy_yes"]), price_c, contracts,
+                              cid=f"kh-{str(row.get('id') or '')[:20]}-{int(_time.time())}")
+    _probe_log(json.loads(json.dumps({"kind": "gemini_place", "gemini_place": True, "row": row.get("id"),
+                                      "symbol": g_rs["symbol"], "buy_yes": bool(g_rs["buy_yes"]),
+                                      "price_c": price_c, "contracts": contracts, "opened": g_rs.get("opened"),
+                                      "order_id": oid, "det": det}, default=str)))
+    if not oid:
+        return {"ok": False, "error": f"Gemini: {det.get('error') or 'order failed'}"[:220], "venue": "GEMINI"}
+    res = {"ok": True, "via": worker, "venue": "GEMINI", "order_id": oid, "resting": bool(det.get("verified")),
+           "price_c": price_c, "cost": round(price_c * contracts / 100.0, 2), "symbol": g_rs["symbol"],
+           "rung_line": g_rs.get("rung_line"), "opened": g_rs.get("opened")}
+    if not det.get("verified"):
+        res["warning"] = "order sent but not seen on Gemini's order list — check the Gemini app"
+    twin_ok = bool(poly_rs and poly_rs.get("ok")) and _hand_same_line((poly_rs or {}).get("rung_line"), g_rs.get("rung_line"))
+    rs_log = {"venue": "GEMINI", "gemini_symbol": g_rs["symbol"], "gemini_buy_yes": bool(g_rs["buy_yes"]),
+              "gemini_opened": g_rs.get("opened"), "rung_line": g_rs.get("rung_line"),
+              "rung_why": g_rs.get("rung_why"), "price_c": price_c,
+              "event_title": (poly_rs or {}).get("event_title"),
+              "pmm_twin_slug": poly_rs.get("slug") if twin_ok else None,
+              "pmm_twin_synthetic": bool(poly_rs.get("synthetic")) if twin_ok else None,
+              "poly_quote_c": poly_rs.get("price_c") if twin_ok else None}
+    pick_id, warn = _bet_sheet_log_pick(sb, pl.get("asked_by"), item, rs_log, res, contracts)
+    res["pick_id"] = pick_id
+    if warn:
+        res["warning"] = ((res.get("warning") or "") + " · " + warn).strip(" ·")
+    return res
+
+
+GEM_PICK_SYMS: set = set()            # Gemini v0 picks' contracts — the Gemini socket watches these
+GEM_TAPE: dict = {}                   # symbol → deque[(ts, yes_bid_c, bid_q, yes_ask_c, ask_q)]
+_GEM_STATUS_ROWS: dict = {}           # pick id → strip row (merged into the bet_sheet_status blob)
+_GEM_TICK_AT = {"t": 0.0}
+
+
+def _gem_tape_note(sym: str, row: tuple) -> None:
+    try:
+        d = GEM_TAPE.get(sym)
+        if d is None:
+            d = GEM_TAPE[sym] = _deque(maxlen=900)
+        d.append(row)
+    except Exception:
+        pass
+
+
+def _gem_held(pos: dict | None, sym, buy_yes: bool):
+    if pos is None or not sym:
+        return None
+    return float(pos.get((sym, "yes" if buy_yes else "no"), 0.0))
+
+
+def _hand_gemini_tick(sb, now) -> dict:
+    """GEMINI v0 MANAGER (Nov 8 2026). Every ~20s: the pending `gemini_bet`
+    picks → the strip rows (resting / leaves / held off Gemini's own orders and
+    positions, the touch off the Gemini socket), a fill stamps `filled_qty`, an
+    order gone pre-game with nothing held on TWO reads = cancelled in the app
+    (pick deleted), and after the listed start the unfilled part is CANCELLED
+    when the makers leave (`_hand_start_plan` at the drop pct off the Gemini
+    socket's touch sizes) or `_GEM_START_BACKSTOP_S` past the listed start —
+    whichever comes first; a partial keeps the pick at the held size. No chase
+    in v0 (the bet sits at its price); every cancel pings 🔴 and stamps
+    `exec_probe_runs gemini_start_cancel` with the bet."""
+    global GEM_PICK_SYMS, _GEM_STATUS_ROWS
+    st: dict = {}
+    if _time.time() - _GEM_TICK_AT["t"] < 15.0:
+        return {"skip": "cadence"}
+    _GEM_TICK_AT["t"] = _time.time()
+    rows = (sb.table("bot_picks").select("id,sport,event_name,event_start,market_type,side,entry_line,signal_blob,status")
+            .eq("signal_blob->>gemini_bet", "true").eq("status", "pending").limit(200).execute().data or [])
+    st["picks"] = len(rows)
+    if not rows:
+        GEM_PICK_SYMS, _GEM_STATUS_ROWS = set(), {}
+        return st
+    GEM_PICK_SYMS = {(r.get("signal_blob") or {}).get("gemini_symbol") for r in rows} - {None}
+    _gem_ensure_thread()
+    import gemini_orders as _go
+    orders = _go.orders_by_id()
+    pos = _go.positions_map()
+    st["orders"] = None if orders is None else len(orders)
+    st["positions"] = None if pos is None else len(pos)
+    drop = _HAND_START_DROP_PCT
+    try:
+        drop = float(_machine_flag_val("hand_start_drop_pct", _HAND_START_DROP_PCT))
+    except (TypeError, ValueError):
+        pass
+    out_rows: dict = {}
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        sym, by, oid = b.get("gemini_symbol"), bool(b.get("gemini_buy_yes")), b.get("gemini_order_id")
+        contracts = float(b.get("contracts") or 0)
+        o = (orders or {}).get(str(oid)) if (orders is not None and oid) else None
+        resting = bool(o and (o.get("leaves") or 0) > 0)
+        held = _gem_held(pos, sym, by)
+        t = list(GEM_TAPE.get(sym) or [])
+        touch_c = None
+        if t:
+            yb, ya = t[-1][1], t[-1][3]
+            touch_c = yb if by else (round(100.0 - ya, 2) if ya is not None else None)
+        out_rows[str(r["id"])] = {
+            "venue": "GEMINI",
+            "order": ({"resting": True, "leaves": o.get("leaves"), "cum": o.get("filled"), "price_c": b.get("price_c")}
+                      if resting else {"resting": False}),
+            "held": round(held or 0.0, 2), "held_unknown": held is None,
+            "touch_c": touch_c, "cur_c": touch_c,
+            "outbid": bool(resting and touch_c is not None and b.get("price_c") is not None
+                           and float(b["price_c"]) < float(touch_c) - 0.01)}
+        upd: dict = {}
+        if held is not None and held > 0 and abs(float(b.get("filled_qty") or 0) - held) > 0.01:
+            upd.update({"filled_qty": round(held, 2), "filled": held >= contracts - 0.01})
+        start = _aware_ts(r.get("event_start"))
+        started = start is not None and start <= now
+        if orders is not None and pos is not None and not resting and (held or 0) <= 0 and not started:
+            n = int(b.get("gem_gone_n") or 0) + 1
+            if n >= 2:
+                try:
+                    sb.table("bot_picks").delete().eq("id", r["id"]).execute()
+                    _probe_log({"kind": "gemini_app_cancel", "gemini_app_cancel": True, "pick_id": r["id"],
+                                "bet": {"label": b.get("label"), "symbol": sym, "price_c": b.get("price_c")}})
+                    st["app_cancel"] = st.get("app_cancel", 0) + 1
+                    out_rows.pop(str(r["id"]), None)
+                    continue
+                except Exception as e:
+                    st["err"] = str(e)[:100]
+            upd["gem_gone_n"] = n
+        elif b.get("gem_gone_n"):
+            upd["gem_gone_n"] = 0
+        if started and resting and orders is not None:
+            plan = _hand_start_plan([x for x in t], start.timestamp(), _time.time(), drop)
+            over = (now - start).total_seconds() >= _GEM_START_BACKSTOP_S
+            if plan[0] == "started" or over:
+                gone, cdet = _go.cancel_verified(str(oid), sym)
+                why = "drop" if plan[0] == "started" else "backstop"
+                stamp = {"kind": "gemini_start_cancel", "gemini_start_cancel": True, "pick_id": r["id"],
+                         "why": why, "plan": list(plan), "gone": gone, "held": held,
+                         "bet": {"label": b.get("label"), "game": r.get("event_name"), "symbol": sym,
+                                 "price_c": b.get("price_c"), "contracts": contracts},
+                         "cancel": cdet}
+                if gone is True:
+                    if (held or 0) <= 0:
+                        try:
+                            sb.table("bot_picks").delete().eq("id", r["id"]).execute()
+                        except Exception as e:
+                            stamp["delete_err"] = str(e)[:100]
+                        msg = f"🔴 GEMINI NOT FILLED · {b.get('label')} · {r.get('event_name')} · cancelled at game start"
+                        out_rows.pop(str(r["id"]), None)
+                    else:
+                        upd.update({"contracts": round(held, 2), "gemini_order_id": None, "filled": True,
+                                    "gem_partial": {"wanted": contracts, "held": held}})
+                        msg = (f"🔴 GEMINI PARTIAL {held:g} of {contracts:g} · {b.get('label')} · "
+                               f"{r.get('event_name')} · rest cancelled at game start")
+                else:
+                    msg = (f"🔴 GEMINI CANCEL FAILED · {b.get('label')} · {r.get('event_name')} · "
+                           f"still resting on Gemini — cancel it in the app")
+                _probe_log(json.loads(json.dumps(stamp, default=str)))
+                if not b.get("gem_start_alerted"):
+                    try:
+                        _send_fill_telegram(msg)
+                    except Exception:
+                        pass
+                    upd["gem_start_alerted"] = True
+                st["start_cancel"] = st.get("start_cancel", 0) + 1
+        if upd:
+            try:
+                sb.table("bot_picks").update({"signal_blob": {**b, **upd}}).eq("id", r["id"]).execute()
+            except Exception:
+                pass
+    _GEM_STATUS_ROWS = out_rows
+    st["rows"] = len(out_rows)
+    return st
+
+
+_GEM_START_BACKSTOP_S = 600.0        # no drop seen → cancel the unfilled part 10 min past the listed start
+
+
 def _hand_order_execute_kalshi(sb, row: dict, pl: dict, item: dict, k_rs: dict,
                                poly_rs: dict | None, worker: str, vdet: dict, extra: dict | None = None) -> dict:
     """The create branch when the venue pick is Kalshi: place, verify, log
@@ -26054,6 +26293,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
             stats["snipe"] = _hand_snipe_shadow_tick(sb, now)    # THE SHADOW SNIPER: over bets in play, nothing placed
         except Exception as e:
             stats["snipe"] = {"err": f"{type(e).__name__}: {e}"[:120]}
+        try:
+            stats["gemini"] = _hand_gemini_tick(sb, now)       # GEMINI v0: status, app-cancel, the game-start cancel
+        except Exception as e:
+            stats["gemini"] = {"err": f"{type(e).__name__}: {e}"[:120]}
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
         # THE DASHBOARD'S ORDERS SNAPSHOT (Oct 28 2026): only the retired repeg
         # lap wrote venue_orders_cache, so with handbets alone it went stale and
@@ -26449,6 +26692,16 @@ def api_bet_sheets_mine():
                   .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
                   .limit(300).execute().data or []):
             rows[r["id"]] = r
+        # GEMINI v0 picks carry their own marker (no bet_sheet) — today's + pending
+        for r in (sb.table("bot_picks").select(cols)
+                  .eq("signal_blob->>gemini_bet", "true")
+                  .gte("event_start", az_day0.astimezone(timezone.utc).isoformat())
+                  .limit(200).execute().data or []):
+            rows[r["id"]] = r
+        for r in (sb.table("bot_picks").select(cols)
+                  .eq("signal_blob->>gemini_bet", "true").eq("status", "pending")
+                  .limit(200).execute().data or []):
+            rows[r["id"]] = r
     except Exception as e:
         return jsonify({"ok": False, "error": f"picks read failed: {e}"}), 500
     # THE BOX'S BLOB FIRST (Oct 3 2026): sockets → memory → one DB row;
@@ -26520,6 +26773,10 @@ def api_bet_sheets_mine():
         oid = blob.get("order_id")
         bx = box_rows.get(str(r["id"])) if box is not None else None
         kalshi = _kalshi_pick(blob)
+        gemini = bool(blob.get("gemini_bet"))
+        if gemini and bx is None:
+            bx = {"venue": "GEMINI", "order": {"resting": False}, "held": float(blob.get("filled_qty") or 0.0),
+                  "held_unknown": True}
         if kalshi and bx is None:
             # the box is not publishing: read Kalshi from here (reads only)
             try:
@@ -26611,8 +26868,10 @@ def api_bet_sheets_mine():
             "line": r.get("entry_line"), "label": blob.get("label"),
             "entry_price": r.get("entry_price"), "price_c": price_c,
             "contracts": contracts, "slug": slug, "synthetic": syn,
-            "order_id": oid if not kalshi else blob.get("kalshi_order_id"),
-            "venue": "KALSHI" if kalshi else "POLYMARKET",
+            "order_id": blob.get("gemini_order_id") if gemini else (oid if not kalshi else blob.get("kalshi_order_id")),
+            "venue": "GEMINI" if gemini else ("KALSHI" if kalshi else "POLYMARKET"),
+            "gemini_symbol": blob.get("gemini_symbol") if gemini else None,
+            "gemini_opened": blob.get("gemini_opened") if gemini else None,
             "kalshi_ticker": blob.get("kalshi_ticker") if kalshi else None,
             "kalshi_buy_yes": bool(blob.get("kalshi_buy_yes")) if kalshi else None,
             "held_unknown": bool((bx or {}).get("held_unknown")) if kalshi else False,
@@ -27816,7 +28075,7 @@ def _bet_sheet_cancel(client, oid: str, slug: str):
     return False, ords
 
 
-def _bet_sheet_pick(sb, pick_id):
+def _bet_sheet_pick(sb, pick_id, allow_gemini: bool = False):
     try:
         r = (sb.table("bot_picks").select("id,asked_by,status,event_start,signal_blob")
              .eq("id", int(pick_id)).single().execute().data)
@@ -27825,19 +28084,45 @@ def _bet_sheet_pick(sb, pick_id):
     if not r:
         return None, None
     blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
-    if not blob.get("bet_sheet"):
+    if blob.get("gemini_bet") and not allow_gemini:
+        return None, None              # Gemini v0 bets: cancel only (no re-peg / move / flip / live yet)
+    if not blob.get("bet_sheet") and not blob.get("gemini_bet"):
         return None, None
     return r, blob
+
+
+def _gemini_cancel_exec(sb, r: dict, blob: dict):
+    """A Gemini v0 bet cancelled from the slip: verified cancel; nothing held →
+    the pick goes; a partial keeps the pick at the held size. (payload, status)."""
+    import gemini_orders as _go
+    oid, sym, by = blob.get("gemini_order_id"), blob.get("gemini_symbol"), bool(blob.get("gemini_buy_yes"))
+    if oid:
+        gone, det = _go.cancel_verified(str(oid), sym)
+        if gone is not True:
+            return {"ok": False, "error": "Gemini did not confirm the cancel — check the Gemini app", "detail": det}, 502
+    pos = _go.positions_map()
+    held = _gem_held(pos, sym, by)
+    _probe_log({"kind": "gemini_cancel", "gemini_cancel": True, "pick_id": r["id"], "symbol": sym, "held": held})
+    if held is not None and held <= 0 and r.get("status") == "pending":
+        sb.table("bot_picks").delete().eq("id", r["id"]).execute()
+        return {"ok": True, "deleted": True, "venue": "GEMINI"}, 200
+    nb = {**blob, "cancelled_at": datetime.now(timezone.utc).isoformat(), "gemini_order_id": None}
+    if held:
+        nb.update({"filled_qty": round(held, 2), "contracts": round(held, 2)})
+    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
+    return {"ok": True, "deleted": False, "held": held, "venue": "GEMINI"}, 200
 
 
 def _bet_sheet_cancel_exec(sb, client, pick_id):
     """Cancel a resting sheet order. Nothing filled → the pick row goes too;
     a partial fill keeps the pick at the held size. (payload, status)."""
-    r, blob = _bet_sheet_pick(sb, pick_id)
+    r, blob = _bet_sheet_pick(sb, pick_id, allow_gemini=True)
     if not r:
         return {"ok": False, "error": "pick not found"}, 404
     if _kalshi_pick(blob):
         return _kalshi_cancel_exec(sb, client, pick_id)
+    if blob.get("gemini_bet"):
+        return _gemini_cancel_exec(sb, r, blob)
     oid, slug, syn = blob.get("order_id"), blob.get("pmm_slug"), bool(blob.get("pmm_synthetic"))
     gone = True
     if oid:
@@ -29491,8 +29776,8 @@ def _gem_ws_run() -> None:
             except Exception:
                 _sslopt = None
             _gem_relink()
-            want = {k[2:] for k in SNIPE_GEM_META}
-            if not want or not _machine_flag("hand_snipe_shadow", True) or not _machine_flag("hand_snipe_gemini", True):
+            want = _gem_ws_want()
+            if not want:
                 # PROVE THE SOCKET BEFORE IT'S NEEDED (Rob, Nov 8 2026: "That's why I asked you to
                 # check the shit before it fucking started") — the first cut only dialled Gemini once
                 # an over was in play, so the TLS failure surfaced after game start. With nothing to
@@ -29518,7 +29803,7 @@ def _gem_ws_run() -> None:
                     if _time.time() - chk > 5:
                         chk = _time.time()
                         _gem_relink()
-                        want = {k[2:] for k in SNIPE_GEM_META}
+                        want = _gem_ws_want()
                         if not want:
                             break
                         add, drop = sorted(want - subs), sorted(subs - want)
@@ -29552,13 +29837,26 @@ def _gem_ws_run() -> None:
                         except (TypeError, ValueError):
                             return 0.0
                     _GEM_STATE["frames"] += 1
-                    _snipe_frame("g:" + sym, (_time.time(), _cc(d.get("b")), _qq(d.get("B")), _cc(d.get("a")), _qq(d.get("A"))))
+                    _row = (_time.time(), _cc(d.get("b")), _qq(d.get("B")), _cc(d.get("a")), _qq(d.get("A")))
+                    if sym in GEM_PICK_SYMS:
+                        _gem_tape_note(sym, _row)          # the Gemini v0 game-start rule reads this
+                    _snipe_frame("g:" + sym, _row)
             finally:
                 try: ws.close()
                 except Exception: pass
         except Exception as ex:
             _GEM_STATE["err"] = str(ex)[:160]
             _time.sleep(3)
+
+
+def _gem_ws_want() -> set:
+    """The Gemini socket's set: the shadow's twins (while the shadow is on) +
+    every Gemini v0 bet's contract (always — the game-start rule needs it)."""
+    want = set()
+    if _machine_flag("hand_snipe_shadow", True) and _machine_flag("hand_snipe_gemini", True):
+        want |= {k[2:] for k in SNIPE_GEM_META}
+    want |= set(GEM_PICK_SYMS)
+    return want
 
 
 def _gem_ensure_thread() -> None:
@@ -35485,9 +35783,10 @@ def api_bet_sheets_ops():
             res["queue_id"] = rid
             queued.append((rid, res))
             continue
-        r, blob = _bet_sheet_pick(sb, (it or {}).get("pick_id"))
+        r, blob = _bet_sheet_pick(sb, (it or {}).get("pick_id"), allow_gemini=(op == "cancel"))
         if not r:
-            res.update({"ok": False, "reason": "bet not found (already settled or removed?)"}); results.append(res); continue
+            res.update({"ok": False, "reason": ("Gemini bets: cancel only for now" if op != "cancel"
+                                                 else "bet not found (already settled or removed?)")}); results.append(res); continue
         row = {"op": op, "pick_id": r["id"], "slug": blob.get("pmm_slug"),
                "synthetic": bool(blob.get("pmm_synthetic")), "order_id": blob.get("order_id"),
                "payload": {"asked_by": g.uid,

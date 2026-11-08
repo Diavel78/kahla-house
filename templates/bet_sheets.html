@@ -113,6 +113,8 @@
         .tag.grn { background: var(--g-bg); color: var(--g-tx); }
         .tag.gry { background: var(--card2); color: var(--text2); }
         .tag.kal { background: #2a1f4d; color: #c9b6ff; }
+        .tag.gem { background: #0f3340; color: #7fe3ff; }
+        .gemsel { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #7fe3ff; }
         .c-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
         .c-top .tags { display: flex; gap: 6px; flex-wrap: wrap; }
         .hidebtn { background: none; border: none; color: var(--text3); font-size: 15px; min-width: 44px; height: 32px; cursor: pointer; }
@@ -461,6 +463,7 @@
                 <div id="slipItems"></div>
                 <div class="slip-f">
                     <label>Contracts <input id="contracts" type="number" min="1" max="250" step="1" value="10" oninput="saveSlip();renderSlip()"></label>
+                    <label class="gemsel" title="rest these bets on Gemini (Poly's seat − 5¢ when Gemini has no bid)"><input type="checkbox" id="gemVenue" onchange="setGem(this.checked)"> Gemini</label>
                     <button class="btn" id="btnQuote" onclick="quoteSlip()">Quote</button>
                     <button class="btn go" id="btnPlace" onclick="placeSlip()">Place bets</button>
                     <button class="btn sm" onclick="clearSlip()">Clear</button>
@@ -755,9 +758,14 @@
     // THE VENUE (Oct 18 2026): auto = the box quotes both venues, adds each
     // one's maker fee and rests on the cheaper seat (Polymarket is home;
     // Kalshi has to win by half a cent); poly / kalshi force it.
-    function venueSel() { return 'auto'; }           // no knob — the machine picks the venue (Rob, Oct 18 2026)
-    function venueName(b) { return (b && b.venue === 'KALSHI') ? 'Kalshi' : 'Poly'; }
-    function venueTag(b) { return (b && b.venue === 'KALSHI') ? '<span class="tag kal">KALSHI</span>' : '<span class="tag gry">POLY</span>'; }
+    // GEMINI v0 (Nov 8 2026, Rob: "See if we can get some Gemini shit bet today"): one
+    // slip toggle — on, every pre-game bet on the slip rests on Gemini (the seat, or
+    // Polymarket's seat − 5¢ when Gemini has no bid). Off = the machine picks, as before.
+    function gemOn() { try { return localStorage.getItem('kh_slip_gem_v1') === '1'; } catch (e) { return false; } }
+    function setGem(v) { try { localStorage.setItem('kh_slip_gem_v1', v ? '1' : '0'); } catch (e) {} renderSlip(); }
+    function venueSel() { return gemOn() ? 'gemini' : 'auto'; }
+    function venueName(b) { return (b && b.venue === 'KALSHI') ? 'Kalshi' : (b && b.venue === 'GEMINI') ? 'Gemini' : 'Poly'; }
+    function venueTag(b) { return (b && b.venue === 'KALSHI') ? '<span class="tag kal">KALSHI</span>' : (b && b.venue === 'GEMINI') ? '<span class="tag gem">GEMINI</span>' : '<span class="tag gry">POLY</span>'; }
     function toggleSlip(force) {
         _slipOpen = (force === undefined) ? !_slipOpen : !!force;
         if (force === undefined) _slipUserHid = !_slipOpen;   // a tap on the header is the user's choice
@@ -817,6 +825,7 @@
     }
     function contractsN() { const n = parseInt(document.getElementById('contracts').value, 10); return (n >= 1 && n <= 250) ? n : 10; }
     function renderSlip() {
+        try { const gv = document.getElementById('gemVenue'); if (gv) gv.checked = gemOn(); } catch (e) {}
         document.getElementById('slipCnt').textContent = _slip.length;
         if (!_slip.length) _slipUserHid = false;
         const n = contractsN();
@@ -857,7 +866,7 @@
             } else if (i.q) {
                 if (i.q.ok) {
                     const vp = i.q.venue_pick || {}, ai = vp.all_in || {};
-                    const vtxt = i.q.venue ? ('<b>' + (i.q.venue === 'KALSHI' ? 'KALSHI' : 'Polymarket') + '</b>'
+                    const vtxt = i.q.venue ? ('<b>' + (i.q.venue === 'KALSHI' ? 'KALSHI' : i.q.venue === 'GEMINI' ? 'GEMINI' : 'Polymarket') + '</b>'
                         + (vp.why === 'line_differs_fair' && vp.edge && vp.lines ? ' · Poly ' + rungTxt(i, vp.lines.POLYMARKET) + ' ' + Number(ai.POLYMARKET).toFixed(1) + '¢ (' + fairGapTxt(vp.edge.POLYMARKET, vp.fair.POLYMARKET) + ') vs Kalshi ' + rungTxt(i, vp.lines.KALSHI) + ' ' + Number(ai.KALSHI).toFixed(1) + '¢ (' + fairGapTxt(vp.edge.KALSHI, vp.fair.KALSHI) + ')'
                            : /^line_differs/.test(vp.why || '') && i.q.kalshi && i.q.kalshi.ok && i.q.poly === undefined ? ' · Kalshi ' + rungTxt(i, i.q.kalshi.rung_line) + ' ' + i.q.kalshi.price_c + '¢ (no Pinnacle fair to compare lines)'
                            : ai.POLYMARKET != null && ai.KALSHI != null ? ' · all-in Poly ' + Number(ai.POLYMARKET).toFixed(2) + '¢ vs Kalshi ' + Number(ai.KALSHI).toFixed(2) + '¢'
