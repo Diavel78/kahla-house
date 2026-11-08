@@ -29392,7 +29392,12 @@ def _gem_ws_run() -> None:
             if not want or not _machine_flag("hand_snipe_shadow", True) or not _machine_flag("hand_snipe_gemini", True):
                 _time.sleep(5)
                 continue
-            ws = _ws.create_connection("wss://ws.gemini.com?snapshot=-1", timeout=10)
+            try:                                         # the box's framework Python has no system CA store (Nov 8 2026: CERTIFICATE_VERIFY_FAILED)
+                import certifi as _certifi
+                _sslopt = {"ca_certs": _certifi.where()}
+            except Exception:
+                _sslopt = None
+            ws = _ws.create_connection("wss://ws.gemini.com?snapshot=-1", timeout=10, sslopt=_sslopt)
             ws.settimeout(2)
             _GEM_STATE["connects"] += 1
             subs: set = set()
