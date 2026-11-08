@@ -6202,7 +6202,9 @@ def test_snipe_shadow() -> None:
                    "k:y": [(999.0, 35.0, 36.0, 500), (1004.0, 43.0, 44.0, 100)]}}
     g = _app._snipe_grade(ev)
     t = {(x["who"], x["lag_s"]): x for x in g["takes"]}
-    check("snipe grade: settled mid at +30s = 44.5", g["mid_30"] == 44.5, str(g))
+    check("snipe grade: settle reads are +15s and +30s (no 2-minute read)",
+          g["mid_15"] == 44.5 and g["mid_30"] == 44.5 and "mid_120" not in g
+          and _app._SNIPE_SETTLE_S == (15.0, 30.0) and _app._SNIPE_HOLD_S <= 40, str(g))
     check("snipe grade: the same-venue take at the trigger is 37 and beats the settle after fee",
           t[("same", 0.0)]["ask_c"] == 37.0 and t[("same", 0.0)]["value_30_c"] > 5, str(t[("same", 0.0)]))
     check("snipe grade: sub-second takes are graded (+0.25s, +0.5s)",

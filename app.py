@@ -29102,15 +29102,16 @@ def _hand_live_frame(slug: str) -> None:
 # either venue, an EVENT opens with the take we could have had right then:
 # the same venue's best ask (the follow-the-first-sweep take — 37 after the
 # 36 is gone) and the other venue's ask (the stale book). Every later frame
-# on either venue appends to the event; at +125s the tick grades each take
-# (now, +0.25s, +0.5s, +1s, +3s) against the our-side mid at +30s and +120s, after the
+# on either venue appends to the event; at +35s the tick grades each take
+# (now, +0.25s, +0.5s, +1s, +3s) against the our-side mid at +15s and +30s, after the
 # taker fee, and stamps `exec_probe_runs hand_snipe_shadow`. Frame work is a
 # dict lookup and a few tuple appends under one lock; all I/O is the tick's.
 _SNIPE_JUMP_C = 2.0
 _SNIPE_WIN_S = 1.0
 _SNIPE_COOLDOWN_S = 20.0
-_SNIPE_HOLD_S = 125.0
+_SNIPE_HOLD_S = 35.0
 _SNIPE_HIST_S = 30.0
+_SNIPE_SETTLE_S = (15.0, 30.0)     # Rob, Nov 8 2026: "15 seconds and 30 seconds. 2 minutes is multiple plays later"
 _SNIPE_LIVE_H = 5.0
 SNIPE_SHADOW: dict = {}           # "p:<slug>" | "k:<ticker>" → {pick, syn, venue, other, game, line}
 SNIPE_POLY_SLUGS: set = set()      # rides the depth socket's watch set
@@ -29181,14 +29182,14 @@ def _snipe_mid(s):
 def _snipe_grade(ev: dict) -> dict:
     """Pure. Every take the event offered — the trigger venue's ask and the
     other venue's ask, at the trigger, +1s and +3s — valued against the
-    trigger venue's our-side mid at +30s and +120s, less the taker fee.
+    trigger venue's our-side mid at +15s and +30s, less the taker fee.
     value_c > 0 = the take beat where the market settled."""
     import kalshi_venue as _kv
     t0 = ev["t0"]
     tape = ev.get("tape") or {}
     out: dict = {"takes": []}
     trig = tape.get(ev["key"]) or []
-    for lag in (30.0, 120.0):
+    for lag in _SNIPE_SETTLE_S:
         s = _snipe_at(trig, t0 + lag)
         out[f"mid_{int(lag)}"] = _snipe_mid(s)
         o = _snipe_at(tape.get(ev.get("other") or "", []), t0 + lag) if ev.get("other") else None
@@ -29206,7 +29207,7 @@ def _snipe_grade(ev: dict) -> dict:
             fee = _kv.fee_per_contract_c(venue, "take", ask)
             row = {"who": who, "venue": venue, "lag_s": lag, "ask_c": ask, "ask_q": s[3],
                    "fee_c": round(fee, 2), "seen_age_s": round(t0 + lag - s[0], 2)}
-            for lag2 in (30, 120):
+            for lag2 in (int(x) for x in _SNIPE_SETTLE_S):
                 m = out.get(f"mid_{lag2}")
                 row[f"value_{lag2}_c"] = round(m - ask - fee, 2) if m is not None else None
             out["takes"].append(row)
@@ -29258,7 +29259,7 @@ def _snipe_frame(key: str, row) -> None:
 
 def _hand_snipe_shadow_tick(sb, now) -> dict:
     """Handbets tick: refresh which markets are over bets in play (both
-    venues of each), then grade and stamp the events whose 125s are up."""
+    venues of each), then grade and stamp the events whose 35s are up."""
     global SNIPE_SHADOW, SNIPE_POLY_SLUGS, SNIPE_K_TICKERS
     st: dict = {"watch": 0}
     if not _machine_flag("hand_snipe_shadow", True):
