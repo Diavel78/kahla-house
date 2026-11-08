@@ -51145,6 +51145,59 @@ def api_parlay_probe():
     return jsonify(out)
 
 
+@app.route("/api/gemini/coverage")
+def api_gemini_coverage():
+    """Shared-secret, read-only (Nov 8 2026, Rob: "In September, it was NFL
+    only. That's bullshit"): what Gemini Predictions lists RIGHT NOW in
+    sports — per series prefix (the event ticker's first part) the number of
+    events, game events (a numeric date code), contracts, two-sided books,
+    the event kinds (M / S / T / …) and a few titles. `q=` filters titles;
+    `all=1` adds every game event's ticker + title + start."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    import gemini_pm as _gpm
+    q = (request.args.get("q") or "").strip().lower()
+    try:
+        evs = _gpm.events_all(request.args.get("category") or "sports", "active")
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}), 502
+    by: dict = {}
+    games: list = []
+    for e in evs:
+        t = e.get("ticker") or ""
+        title = e.get("title") or ""
+        if q and q not in (title + " " + t).lower():
+            continue
+        parts = t.split("-")
+        pre = parts[0] if parts else "?"
+        is_game = len(parts) >= 5 and parts[1].isdigit()
+        b = by.setdefault(pre, {"events": 0, "games": 0, "contracts": 0, "two_sided": 0,
+                                "kinds": {}, "sample": []})
+        b["events"] += 1
+        cs = e.get("contracts") or []
+        b["contracts"] += len(cs)
+        for c in cs:
+            pr = c.get("prices") or {}
+            if pr.get("bestBid") not in (None, "") and pr.get("bestAsk") not in (None, ""):
+                b["two_sided"] += 1
+        if is_game:
+            b["games"] += 1
+            k = "-".join(parts[4:])
+            b["kinds"][k] = b["kinds"].get(k, 0) + 1
+            if request.args.get("all"):
+                games.append({"ticker": t, "title": title, "start": e.get("startTime"),
+                              "contracts": len(cs)})
+        if len(b["sample"]) < 4:
+            b["sample"].append(title[:90])
+    out = {"ok": True, "events": len(evs),
+           "series": dict(sorted(by.items(), key=lambda kv: -kv[1]["events"]))}
+    if games:
+        out["games"] = sorted(games, key=lambda g: str(g.get("start")))[:400]
+    return jsonify(out)
+
+
 @app.route("/api/pinnacle/probe")
 def api_pinnacle_probe():
     """Shared-secret, read-only: does Pinnacle's own public feed answer from
