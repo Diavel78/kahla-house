@@ -29132,6 +29132,17 @@ _SNIPE_EVENTS: list = []           # open events
 _SNIPE_LAST: dict = {}             # pick id → ts of its last event
 _SNIPE_LOCK = threading.Lock()
 _SNIPE_SH_STATS = {"frames": 0, "events": 0, "graded": 0, "errors": 0}   # NOT _SNIPE_STATS — the sell sniper owns that name
+# GEMINI, THE THIRD BOOK (Rob, Nov 8 2026, on whether a third venue is slower:
+# "You have 15 minutes before kickoff… Go"). RECORD ONLY — Gemini never opens
+# an event and nothing is ever placed there. Its own socket thread
+# (_gem_ws_run) holds `<symbol>@bookTicker` for the NFL total contract twin of
+# every over bet in play; every frame goes through _snipe_frame as "g:<SYM>",
+# so open events tape it beside Polymarket and Kalshi and the grade prices a
+# Gemini take (7¢·p(1−p)) and how long its ask sat after the trigger.
+SNIPE_GEM_META: dict = {}          # "g:<SYM>" → {pick, syn, notrig}
+SNIPE_GEM_LINK: dict = {}          # "p:<slug>" | "k:<ticker>" → "g:<SYM>"
+_GEM_STATE = {"thread": None, "index": {}, "index_at": 0.0, "canon": {}, "err": None,
+              "frames": 0, "subs": 0, "connects": 0}
 # WHICH TRIGGER (Rob, Nov 8 2026: "2 cents is too small it appears"): events
 # still open on every 2¢ start — on the Bengals TD the first tick was 69→71
 # and Polymarket's stale 70.5 ask was gone 0.25s later, when a 4¢ trigger
@@ -29275,7 +29286,175 @@ def _snipe_grade(ev: dict) -> dict:
                 row[f"value_{lag2}_c"] = round(m - ask - fee, 2) if m is not None else None
             out["takes"].append(row)
     out.update(_snipe_grade_poly(ev, out))
+    out.update(_snipe_grade_gem(ev, out))
     return out
+
+
+def _snipe_grade_gem(ev: dict, g: dict) -> dict:
+    """Pure. Gemini's ask at the trigger and after, valued like the other
+    takes (7¢·p(1−p) taker fee), and how long its pre-trigger ask sat."""
+    gk = ev.get("gem")
+    if not gk:
+        return {"gemini": None}
+    t0 = ev["t0"]
+    tape = (ev.get("tape") or {}).get(gk) or []
+    takes = []
+    for lag in (0.0, 0.25, 0.5, 1.0, 3.0):
+        s = _snipe_at(tape, t0 + lag)
+        if not s or s[2] is None:
+            takes.append({"lag_s": lag, "ask_c": None})
+            continue
+        ask = float(s[2])
+        fee = 7.0 * (ask / 100.0) * (1.0 - ask / 100.0)
+        row = {"lag_s": lag, "ask_c": ask, "ask_q": s[3], "fee_c": round(fee, 2),
+               "seen_age_s": round(t0 + lag - s[0], 2)}
+        for lag2 in (int(x) for x in _SNIPE_SETTLE_S):
+            m = g.get(f"mid_{lag2}")
+            row[f"value_{lag2}_c"] = round(m - ask - fee, 2) if m is not None else None
+        takes.append(row)
+    s0 = _snipe_at(tape, t0)
+    stale_ms = None
+    if s0 and s0[2] is not None:
+        for x in tape:
+            if x[0] > t0 and x[2] != s0[2]:
+                stale_ms = int(round((x[0] - t0) * 1000))
+                break
+    return {"gemini": {"key": gk, "takes": takes, "stale_ms": stale_ms,
+                       "frames": len(tape), "seen": bool(s0)}}
+
+
+def _gem_total_index(evs) -> dict:
+    """Pure. Gemini sports events → {(frozenset(team codes), ET date): {line: SYMBOL}}
+    for NFL full-game totals (event kind T, contract tail O<n> = over n+0.5)."""
+    import gemini_pm as _gpm
+    out: dict = {}
+    for e in evs or []:
+        parts = _gpm.nfl_game_ticker_parts(e.get("ticker") or "")
+        if not parts or parts.get("kind") != "T":
+            continue
+        try:
+            utc = datetime.strptime(parts["code"], "%y%m%d%H%M").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        d = utc.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        k = (frozenset((parts["t1"].lower(), parts["t2"].lower())), d)
+        for c in e.get("contracts") or []:
+            sym = c.get("instrumentSymbol") or ""
+            m = re.match(r"^O(\d+)$", sym.rsplit("-", 1)[-1])
+            if m:
+                out.setdefault(k, {})[float(m.group(1)) + 0.5] = sym
+    return out
+
+
+def _gem_link_for_slug(slug: str, index: dict):
+    """Pure. A Polymarket NFL total slug → its Gemini over contract, else None."""
+    m = re.match(r"^tsc-nfl-([a-z]+)-([a-z]+)-(\d{4}-\d{2}-\d{2})-total-(\d+)(?:pt(\d+))?$", slug or "")
+    if not m:
+        return None
+    line = float(m.group(4) + "." + (m.group(5) or "0"))
+    return (index.get((frozenset((m.group(1), m.group(2))), m.group(3))) or {}).get(line)
+
+
+def _gem_relink() -> None:
+    """Map every over bet in play to its Gemini twin (index refreshed ≤10 min)."""
+    global SNIPE_GEM_META, SNIPE_GEM_LINK
+    import gemini_pm as _gpm
+    if _time.time() - _GEM_STATE["index_at"] > 600:
+        try:
+            _GEM_STATE["index"] = _gem_total_index(_gpm.events_all("sports", "active"))
+            _GEM_STATE["err"] = None
+        except Exception as ex:
+            _GEM_STATE["err"] = str(ex)[:160]
+        _GEM_STATE["index_at"] = _time.time()
+    link, meta = {}, {}
+    for k, m in list(SNIPE_SHADOW.items()):
+        if not k.startswith("p:"):
+            continue
+        sym = _gem_link_for_slug(k[2:], _GEM_STATE["index"])
+        if not sym or m.get("syn"):                      # over = Gemini YES; a synthetic Poly side is not an over twin
+            continue
+        gk = "g:" + sym
+        link[k] = gk
+        if m.get("other"):
+            link[m["other"]] = gk
+        meta[gk] = {"pick": m["pick"], "syn": False, "notrig": True}
+    SNIPE_GEM_LINK, SNIPE_GEM_META = link, meta
+
+
+def _gem_ws_run() -> None:
+    """Gemini's public book socket for the shadow's Gemini twins. Read-only."""
+    import json as _json
+    import websocket as _ws
+    while True:
+        try:
+            _gem_relink()
+            want = {k[2:] for k in SNIPE_GEM_META}
+            if not want or not _machine_flag("hand_snipe_shadow", True) or not _machine_flag("hand_snipe_gemini", True):
+                _time.sleep(5)
+                continue
+            ws = _ws.create_connection("wss://ws.gemini.com?snapshot=-1", timeout=10)
+            ws.settimeout(2)
+            _GEM_STATE["connects"] += 1
+            subs: set = set()
+            chk = 0.0
+            try:
+                while True:
+                    if _time.time() - chk > 5:
+                        chk = _time.time()
+                        _gem_relink()
+                        want = {k[2:] for k in SNIPE_GEM_META}
+                        if not want:
+                            break
+                        add, drop = sorted(want - subs), sorted(subs - want)
+                        for meth, syms in (("SUBSCRIBE", add), ("UNSUBSCRIBE", drop)):
+                            for i in range(0, len(syms), 25):
+                                ws.send(_json.dumps({"id": meth[:3] + str(i), "method": meth,
+                                                     "params": [x.lower() + "@bookTicker" for x in syms[i:i + 25]]}))
+                        subs = set(want)
+                        _GEM_STATE["canon"] = {x.lower(): x for x in want}
+                        _GEM_STATE["subs"] = len(subs)
+                    try:
+                        msg = ws.recv()
+                    except _ws.WebSocketTimeoutException:
+                        continue
+                    try:
+                        d = _json.loads(msg)
+                    except Exception:
+                        continue
+                    sy = d.get("s") if isinstance(d, dict) else None
+                    if not sy or "b" not in d or "a" not in d or "e" in d:
+                        continue
+                    sym = _GEM_STATE["canon"].get(str(sy).lower()) or str(sy).upper()
+                    def _cc(v):
+                        try:
+                            return float(v) * 100.0 if v not in (None, "") else None
+                        except (TypeError, ValueError):
+                            return None
+                    def _qq(v):
+                        try:
+                            return float(v)
+                        except (TypeError, ValueError):
+                            return 0.0
+                    _GEM_STATE["frames"] += 1
+                    _snipe_frame("g:" + sym, (_time.time(), _cc(d.get("b")), _qq(d.get("B")), _cc(d.get("a")), _qq(d.get("A"))))
+            finally:
+                try: ws.close()
+                except Exception: pass
+        except Exception as ex:
+            _GEM_STATE["err"] = str(ex)[:160]
+            _time.sleep(3)
+
+
+def _gem_ensure_thread() -> None:
+    t = _GEM_STATE.get("thread")
+    if t is not None and t.is_alive():
+        return
+    try:
+        t = threading.Thread(target=_gem_ws_run, name="snipe-gemini", daemon=True)
+        t.start()
+        _GEM_STATE["thread"] = t
+    except Exception:
+        pass
 
 
 def _snipe_grade_poly(ev: dict, g: dict, rtt_ms=None) -> dict:
@@ -29348,7 +29527,7 @@ def _snipe_frame(key: str, row) -> None:
     `k:<ticker>`). A no-op unless the market belongs to an over bet in play.
     Never raises, never does I/O."""
     try:
-        meta = SNIPE_SHADOW.get(key)
+        meta = SNIPE_SHADOW.get(key) or SNIPE_GEM_META.get(key)
         if meta is None or row is None:
             return
         s = _snipe_side(row, meta["syn"])
@@ -29363,10 +29542,12 @@ def _snipe_frame(key: str, row) -> None:
             while h and h[0][0] < s[0] - _SNIPE_HIST_S:
                 h.popleft()
             for ev in _SNIPE_EVENTS:                      # open events record every frame on their markets
-                if key in (ev["key"], ev.get("other")) and s[0] <= ev["t0"] + _SNIPE_HOLD_S:
+                if key in (ev["key"], ev.get("other"), ev.get("gem")) and s[0] <= ev["t0"] + _SNIPE_HOLD_S:
                     tp = ev["tape"].setdefault(key, [])
                     if not tp or tp[-1][1:3] != s[1:3]:
                         tp.append(s)
+            if meta.get("notrig"):                       # Gemini only watches
+                return
             if _time.time() - _SNIPE_LAST.get(meta["pick"], 0.0) < _SNIPE_COOLDOWN_S:
                 return
             trg = _snipe_trigger(h, s[0], meta["jump_c"], meta["win_s"])
@@ -29378,7 +29559,10 @@ def _snipe_frame(key: str, row) -> None:
             tape = {key: [s]}
             if other and _SNIPE_HIST.get(other):
                 tape[other] = [_SNIPE_HIST[other][-1]]   # the other venue's book as we last saw it
-            _SNIPE_EVENTS.append({"t0": s[0], "key": key, "other": other, "pick": meta["pick"],
+            gem = SNIPE_GEM_LINK.get(key) or (SNIPE_GEM_LINK.get(other) if other else None)
+            if gem and _SNIPE_HIST.get(gem):
+                tape[gem] = [_SNIPE_HIST[gem][-1]]
+            _SNIPE_EVENTS.append({"t0": s[0], "key": key, "other": other, "gem": gem, "pick": meta["pick"],
                                   "game": meta.get("game"), "line": meta.get("line"),
                                   "trigger": trg, "tape": tape,
                                   "pre": [x for x in h if x[0] >= s[0] - meta["win_s"]][-12:]})
@@ -29428,9 +29612,13 @@ def _hand_snipe_shadow_tick(sb, now) -> dict:
     SNIPE_POLY_SLUGS = {k[2:] for k in shadow if k.startswith("p:")}
     SNIPE_K_TICKERS = {k[2:] for k in shadow if k.startswith("k:")}
     st["watch"] = len(shadow)
+    if shadow and _machine_flag("hand_snipe_gemini", True):
+        _gem_ensure_thread()
+    st["gemini"] = {k: _GEM_STATE[k] for k in ("frames", "subs", "connects", "err")}
+    st["gemini"]["linked"] = len(SNIPE_GEM_META)
     with _SNIPE_LOCK:
         for k in list(_SNIPE_HIST):
-            if k not in shadow:
+            if k not in shadow and k not in SNIPE_GEM_META:
                 _SNIPE_HIST.pop(k, None)
         due = [e for e in _SNIPE_EVENTS if _time.time() >= e["t0"] + _SNIPE_HOLD_S]
         for e in due:
@@ -29442,6 +29630,7 @@ def _hand_snipe_shadow_tick(sb, now) -> dict:
             _probe_log({"kind": "hand_snipe_shadow", "hand_snipe_shadow": True, "pick_id": e["pick"],
                         "game": e.get("game"), "line": e.get("line"), "key": e["key"], "other": e.get("other"),
                         "t0": datetime.fromtimestamp(e["t0"], timezone.utc).isoformat(),
+                        "gem": e.get("gem"),
                         "trigger": e["trigger"], "pre": e.get("pre"), "grade": g,
                         "frames": {k: len(v) for k, v in (e.get("tape") or {}).items()},
                         "speed": _snipe_speed(), "at": now.isoformat()})

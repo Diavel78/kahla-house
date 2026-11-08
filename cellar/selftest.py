@@ -6176,6 +6176,62 @@ def test_sheet_pinnacle_line() -> None:
           set(spenders) == {"_pin_daily_refresh"}, f"got {spenders}")
 
 
+def test_snipe_gemini() -> None:
+    """GEMINI, THE THIRD BOOK (Nov 8 2026, Rob: "You have 15 minutes… Go"):
+    an over bet's Gemini twin is found off the NFL total event, its frames
+    tape beside the event but never open one, and the grade prices a Gemini
+    take and how long its ask sat. Record only — nothing is placed."""
+    import time as _t
+    import app as _app
+    print("\n[shadow sniper — Gemini third book]")
+    evs = [{"ticker": "NFL-2611081730-CIN-ATL-T",
+            "contracts": [{"instrumentSymbol": "GEMI-NFL2611081730-CIN-ATL-T-O51"},
+                          {"instrumentSymbol": "GEMI-NFL2611081730-CIN-ATL-T-O48"}]},
+           {"ticker": "NFL-2611081730-CIN-ATL-S", "contracts": [{"instrumentSymbol": "GEMI-X-CIN3"}]}]
+    idx = _app._gem_total_index(evs)
+    check("a Gemini NFL total event indexes by team pair + ET date, contract O51 = over 51.5",
+          idx.get((frozenset(("cin", "atl")), "2026-11-08"), {}).get(51.5) == "GEMI-NFL2611081730-CIN-ATL-T-O51")
+    check("…and a Polymarket total slug finds it (either team order), a spread or other line does not",
+          _app._gem_link_for_slug("tsc-nfl-cin-atl-2026-11-08-total-51pt5", idx) == "GEMI-NFL2611081730-CIN-ATL-T-O51"
+          and _app._gem_link_for_slug("tsc-nfl-atl-cin-2026-11-08-total-48pt5", idx) == "GEMI-NFL2611081730-CIN-ATL-T-O48"
+          and _app._gem_link_for_slug("tsc-nfl-cin-atl-2026-11-08-total-50pt5", idx) is None
+          and _app._gem_link_for_slug("asc-nfl-cin-atl-2026-11-08-pos-3pt5", idx) is None)
+    sv = (_app.SNIPE_SHADOW, _app.SNIPE_GEM_META, _app.SNIPE_GEM_LINK, list(_app._SNIPE_EVENTS),
+          dict(_app._SNIPE_HIST), dict(_app._SNIPE_LAST))
+    try:
+        _app._SNIPE_EVENTS.clear(); _app._SNIPE_HIST.clear(); _app._SNIPE_LAST.clear()
+        base = {"pick": "gp1", "game": "x", "line": 51.5, "jump_c": 2.0, "win_s": 1.0}
+        _app.SNIPE_SHADOW = {"p:g1": {**base, "syn": False, "other": None}}
+        _app.SNIPE_GEM_META = {"g:G1": {"pick": "gp1", "syn": False, "notrig": True}}
+        _app.SNIPE_GEM_LINK = {"p:g1": "g:G1"}
+        now = _t.time()
+        _app._snipe_frame("g:G1", (now - 3, 60.0, 50, 62.0, 30))
+        _app._snipe_frame("g:G1", (now - 2.5, 50.0, 50, 70.0, 30))   # a Gemini jump opens nothing
+        check("a Gemini frame never opens an event", not _app._SNIPE_EVENTS)
+        _app._snipe_frame("g:G1", (now - 1.5, 60.0, 50, 62.0, 30))
+        _app._snipe_frame("p:g1", (now - 1.0, 60.0, 900, 61.0, 50))
+        _app._snipe_frame("p:g1", (now, 64.0, 900, 65.0, 50))          # Poly jumps 4¢
+        ev = _app._SNIPE_EVENTS[-1] if _app._SNIPE_EVENTS else {}
+        check("a Polymarket jump opens the event with Gemini's book riding along",
+              ev.get("gem") == "g:G1" and (ev.get("tape") or {}).get("g:G1"))
+        _app._snipe_frame("g:G1", (now + 0.8, 66.0, 50, 70.0, 10))      # Gemini reprices 0.8s later
+        _app._snipe_frame("p:g1", (now + 15, 72.0, 900, 73.0, 50))
+        ev["tape"]["p:g1"].append((now + 30, 72.0, 73.0, 50))
+        g = _app._snipe_grade_gem(ev, {"mid_15": 72.5, "mid_30": 72.5})["gemini"]
+        t0 = g["takes"][0]
+        check("…its ask at the trigger is graded after the 7¢·p(1−p) fee, and how long it sat is measured",
+              t0["ask_c"] == 62.0 and abs(t0["fee_c"] - 7 * 0.62 * 0.38) < 0.01
+              and abs(t0["value_15_c"] - round(72.5 - 62.0 - 7 * 0.62 * 0.38, 2)) < 0.01 and g["stale_ms"] == 800)
+    finally:
+        (_app.SNIPE_SHADOW, _app.SNIPE_GEM_META, _app.SNIPE_GEM_LINK, ev_, h_, l_) = sv
+        _app._SNIPE_EVENTS[:] = ev_; _app._SNIPE_HIST.clear(); _app._SNIPE_HIST.update(h_)
+        _app._SNIPE_LAST.clear(); _app._SNIPE_LAST.update(l_)
+    src = open(_app.__file__).read()
+    gsrc = src[src.index("def _gem_ws_run"):src.index("def _gem_ensure_thread")]
+    check("the Gemini socket only reads (no order call anywhere in it)",
+          all(x not in gsrc for x in ("order.place", "place_order", "orders.create", "cancel")))
+
+
 def test_snipe_shadow() -> None:
     """THE SHADOW SNIPER (Nov 8 2026, Rob: "We only use the market… just on
     over bets… 37 is better than 49"): an over that jumps on one venue opens
@@ -7894,7 +7950,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:
