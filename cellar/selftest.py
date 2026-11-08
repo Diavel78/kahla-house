@@ -6172,6 +6172,81 @@ def test_sheet_pinnacle_line() -> None:
           set(spenders) == {"_pin_daily_refresh"}, f"got {spenders}")
 
 
+def test_snipe_shadow() -> None:
+    """THE SHADOW SNIPER (Nov 8 2026, Rob: "We only use the market… just on
+    over bets… 37 is better than 49"): an over that jumps on one venue opens
+    an event with the same venue's next ask and the other venue's stale ask,
+    graded against where the market settled after the taker fee. Nothing
+    is ever placed."""
+    import time as _t
+    import inspect as _ins
+    import app as _app
+    S = _app._snipe_side
+    check("snipe side: a YES over reads the book as is", S((1.0, 40.0, 5, 42.0, 7), False) == (1.0, 40.0, 42.0, 7))
+    check("snipe side: a NO side inverts (our bid = 100 − YES ask)", S((1.0, 40.0, 5, 42.0, 7), True) == (1.0, 58.0, 60.0, 5))
+    T = _app._snipe_trigger
+    h = [(100.0, 35.0, 36.0, 50), (101.0, 35.0, 37.0, 50), (102.0, 36.0, 39.0, 40)]
+    tr = T(h, 102.0, 2.0, 5.0)
+    check("snipe trigger: the ask lifted 36 → 39 inside 5s fires", tr is not None and tr["on"] == "ask" and tr["rise_c"] == 3.0, str(tr))
+    check("snipe trigger: a 1¢ wobble does not", T([(100.0, 35.0, 36.0, 1), (101.0, 35.5, 37.0, 1)], 101.0, 2.0, 5.0) is None)
+    check("snipe trigger: a rise older than the window does not",
+          T([(90.0, 30.0, 31.0, 1), (100.0, 35.0, 36.0, 1), (101.0, 35.0, 36.5, 1)], 101.0, 2.0, 5.0) is None)
+    check("snipe trigger: the price FALLING never fires (over bets only buy a jump up)",
+          T([(100.0, 45.0, 46.0, 1), (101.0, 38.0, 39.0, 1)], 101.0, 2.0, 5.0) is None)
+    ev = {"t0": 1000.0, "key": "p:x", "other": "k:y", "trigger": {},
+          "tape": {"p:x": [(1000.0, 36.0, 37.0, 20), (1001.5, 40.0, 41.0, 20), (1010.0, 44.0, 45.0, 30)],
+                   "k:y": [(999.0, 35.0, 36.0, 500), (1004.0, 43.0, 44.0, 100)]}}
+    g = _app._snipe_grade(ev)
+    t = {(x["who"], x["lag_s"]): x for x in g["takes"]}
+    check("snipe grade: settled mid at +30s = 44.5", g["mid_30"] == 44.5, str(g))
+    check("snipe grade: the same-venue take at the trigger is 37 and beats the settle after fee",
+          t[("same", 0.0)]["ask_c"] == 37.0 and t[("same", 0.0)]["value_30_c"] > 5, str(t[("same", 0.0)]))
+    check("snipe grade: +3s on the same venue is the 41 ask",
+          t[("same", 3.0)]["ask_c"] == 41.0, str(t[("same", 3.0)]))
+    check("snipe grade: the other venue's stale 36 is graded too, with its age",
+          t[("other", 0.0)]["ask_c"] == 36.0 and t[("other", 0.0)]["seen_age_s"] == 1.0
+          and t[("other", 0.0)]["venue"] == "KALSHI", str(t[("other", 0.0)]))
+    check("snipe grade: values are after the taker fee",
+          abs(t[("same", 0.0)]["value_30_c"] - (44.5 - 37.0 - t[("same", 0.0)]["fee_c"])) < 0.01)
+    # end to end through the frame hook, no I/O
+    old = (dict(_app.SNIPE_SHADOW), list(_app._SNIPE_EVENTS), dict(_app._SNIPE_HIST), dict(_app._SNIPE_LAST))
+    try:
+        _app.SNIPE_SHADOW = {"p:o1": {"pick": -7, "syn": False, "other": "k:o1", "jump_c": 2.0, "win_s": 5.0},
+                             "k:o1": {"pick": -7, "syn": False, "other": "p:o1", "jump_c": 2.0, "win_s": 5.0}}
+        _app._SNIPE_EVENTS.clear(); _app._SNIPE_HIST.clear(); _app._SNIPE_LAST.pop(-7, None)
+        now = _t.time()
+        _app._snipe_frame("k:o1", (now - 2, 35.0, 900, 36.0, 400))
+        _app._snipe_frame("p:o1", (now - 1.5, 35.5, 900, 36.0, 400))
+        _app._snipe_frame("p:o1", (now - 1.0, 36.0, 900, 37.0, 20))
+        _app._snipe_frame("p:o1", (now, 40.0, 900, 41.0, 20))
+        evs = [e for e in _app._SNIPE_EVENTS if e["pick"] == -7]
+        check("snipe frame: a 5¢ Polymarket jump opens one event carrying Kalshi's last book",
+              len(evs) == 1 and evs[0]["key"] == "p:o1" and evs[0]["tape"]["k:o1"][-1][2] == 36.0, str(evs))
+        _app._snipe_frame("p:o1", (now + 0.5, 41.0, 900, 42.0, 20))
+        check("snipe frame: the cooldown keeps it to one event per bet",
+              len([e for e in _app._SNIPE_EVENTS if e["pick"] == -7]) == 1)
+        _app._snipe_frame("k:o1", (now + 1.0, 42.0, 300, 43.0, 100))
+        check("snipe frame: later frames on either venue land on the open event",
+              evs[0]["tape"]["k:o1"][-1][2] == 43.0 and evs[0]["tape"]["p:o1"][-1][2] == 42.0)
+        _app._snipe_frame("p:zz", (now, 1.0, 1, 99.0, 1))
+        check("snipe frame: a market that is no over bet in play is ignored", "p:zz" not in _app._SNIPE_HIST)
+    finally:
+        _app.SNIPE_SHADOW = old[0]
+        _app._SNIPE_EVENTS[:] = old[1]
+        _app._SNIPE_HIST.clear(); _app._SNIPE_HIST.update(old[2])
+        _app._SNIPE_LAST.clear(); _app._SNIPE_LAST.update(old[3])
+    src = _ins.getsource(_app._touch_tape_record) + _ins.getsource(_app._kalshi_tape_record)
+    check("snipe: both venues' frame recorders feed it", '_snipe_frame("p:" + slug, row)' in src and '_snipe_frame("k:" + ticker, row)' in src)
+    tick = _ins.getsource(_app._hand_snipe_shadow_tick)
+    check("snipe: over bets in play only", '.eq("market_type", "total").eq("side", "over")' in tick and "lte(\"event_start\"" in tick)
+    check("snipe: never places anything",
+          not any(w in tick + _ins.getsource(_app._snipe_frame) for w in ("orders.create", "create_order", "_manual_order_place", "_kalshi_live_create")))
+    check("snipe: its markets ride both sockets' watch sets",
+          "set(SNIPE_POLY_SLUGS)" in _ins.getsource(_app._touch_tape_publish)
+          and "set(SNIPE_K_TICKERS)" in _ins.getsource(_app._hand_status_publish))
+    check("snipe: the handbets tick runs it", "_hand_snipe_shadow_tick(sb, now)" in _ins.getsource(_app._hand_orders_tick))
+
+
 def test_kalshi_socket_trust() -> None:
     """THE STALE-BOOK CHASE (Nov 7 2026, BYU +6.5 on Kalshi, Rob: "You have
     a WebSocket… Why can't you read the fucking WebSocket?"): the feed hung
@@ -7777,7 +7852,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

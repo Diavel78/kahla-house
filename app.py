@@ -18241,7 +18241,7 @@ def _hand_status_publish(sb, client) -> dict:
     # join the socket watch set (the touch tape publishes it each tick).
     global HAND_HELD_SLUGS, KALSHI_WATCH_TICKERS
     HAND_HELD_SLUGS = held_slugs
-    KALSHI_WATCH_TICKERS = k_watch | _hand_pre_tickers()   # cellar/kalshifeed.py subscribes this set (+ the slip's pre-subscribed tickers)
+    KALSHI_WATCH_TICKERS = k_watch | _hand_pre_tickers() | set(SNIPE_K_TICKERS)   # cellar/kalshifeed.py subscribes this set (+ the slip's pre-subscribed tickers)
     _HAND_STATUS_LAST.update({"at": _time.time(), "rows": out, "venue_ok": venue_ok})   # the red alert reads this tick's strip
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
@@ -19022,6 +19022,7 @@ def _touch_tape_record(slug: str, bids: list, asks: list) -> None:
             dq = TOUCH_TAPE[slug] = _deque(maxlen=_TOUCH_TAPE_MAX)
         dq.append(row)
         _tape_base_note("p:" + slug, row[0], (row[2] or 0.0) + (row[4] or 0.0))
+        _snipe_frame("p:" + slug, row)               # the shadow sniper (over bets in play)
     except Exception:
         pass
 
@@ -19199,6 +19200,7 @@ def _touch_tape_publish(sb) -> dict:
         want |= set(HAND_HELD_SLUGS)                   # and every held lot (live quotes for the strip)
         want |= _hand_pre_slugs()                      # and every slug a slip is about to bet (pre-subscribed)
         want |= set(LIVE_SNAP)                         # and every live bet, through its pull-and-rejoin
+        want |= set(SNIPE_POLY_SLUGS)                  # and every over bet in play (the shadow sniper)
         now_t = _time.time()
         for s_ in TOUCH_WATCH_SLUGS - want:            # just left: linger, keep recording
             _TOUCH_LINGER.setdefault(s_, now_t + _TOUCH_TAPE_LINGER_S)
@@ -25342,6 +25344,7 @@ def _kalshi_tape_record(ticker: str, ob: dict) -> None:
                 dq = KALSHI_TAPE[ticker] = _deque(maxlen=_KALSHI_TAPE_MAX)
             dq.append(row)
             _tape_base_note("k:" + ticker, row[0], (row[2] or 0.0) + (row[4] or 0.0))
+            _snipe_frame("k:" + ticker, row)          # the shadow sniper (over bets in play)
         _hand_live_frame(ticker)                     # the live chase runs on Kalshi's socket too
     except Exception:
         pass
@@ -25938,6 +25941,10 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
         except Exception as e:
             stats["auto"] = {"err": f"{type(e).__name__}: {e}"[:120]}
         _drain()
+        try:
+            stats["snipe"] = _hand_snipe_shadow_tick(sb, now)    # THE SHADOW SNIPER: over bets in play, nothing placed
+        except Exception as e:
+            stats["snipe"] = {"err": f"{type(e).__name__}: {e}"[:120]}
         stats["status"] = _hand_status_publish(sb, client)   # the My-bets strip, from memory
         # THE DASHBOARD'S ORDERS SNAPSHOT (Oct 28 2026): only the retired repeg
         # lap wrote venue_orders_cache, so with handbets alone it went stale and
@@ -29084,6 +29091,235 @@ def _hand_live_frame(slug: str) -> None:
             LIVE_Q.put_nowait(slug)
     except Exception:
         _LIVE_PENDING.pop(slug, None)
+
+
+# ── THE SHADOW SNIPER (Nov 8 2026, Rob: "We only use the market right, not
+# the description feed… just on over bets… It's gonna be FAST… 36 will be
+# gone, but 37 is better than 49"). Over bets in play only, NOTHING PLACED.
+# Every socket frame on a watched over market (Polymarket by slug, Kalshi by
+# ticker — both venues of one bet) updates a small our-side history; when
+# the over jumps ≥ `hand_snipe_jump_c` (2¢) inside `hand_snipe_win_s` (5s) on
+# either venue, an EVENT opens with the take we could have had right then:
+# the same venue's best ask (the follow-the-first-sweep take — 37 after the
+# 36 is gone) and the other venue's ask (the stale book). Every later frame
+# on either venue appends to the event; at +125s the tick grades each take
+# (now, +1s, +3s) against the our-side mid at +30s and +120s, after the
+# taker fee, and stamps `exec_probe_runs hand_snipe_shadow`. Frame work is a
+# dict lookup and a few tuple appends under one lock; all I/O is the tick's.
+_SNIPE_JUMP_C = 2.0
+_SNIPE_WIN_S = 5.0
+_SNIPE_COOLDOWN_S = 20.0
+_SNIPE_HOLD_S = 125.0
+_SNIPE_HIST_S = 30.0
+_SNIPE_LIVE_H = 5.0
+SNIPE_SHADOW: dict = {}           # "p:<slug>" | "k:<ticker>" → {pick, syn, venue, other, game, line}
+SNIPE_POLY_SLUGS: set = set()      # rides the depth socket's watch set
+SNIPE_K_TICKERS: set = set()       # rides the Kalshi socket's watch set
+_SNIPE_HIST: dict = {}             # key → deque[(ts, bid_c, ask_c, ask_q)] (our side)
+_SNIPE_EVENTS: list = []           # open events
+_SNIPE_LAST: dict = {}             # pick id → ts of its last event
+_SNIPE_LOCK = threading.Lock()
+_SNIPE_STATS = {"frames": 0, "events": 0, "graded": 0, "errors": 0}
+
+
+def _snipe_side(row, syn: bool):
+    """Pure. One tape row (ts, yes_bid_c, yes_bid_q, yes_ask_c, yes_ask_q, …)
+    → OUR side's (ts, bid_c, ask_c, ask_q). A NO side reads the YES book
+    inverted: our bid = 100 − YES ask, our ask = 100 − YES bid."""
+    try:
+        ts, bc, bq, ac, aq = row[0], row[1], row[2], row[3], row[4]
+    except (TypeError, IndexError):
+        return None
+    if syn:
+        return (ts, (100.0 - ac) if ac is not None else None,
+                (100.0 - bc) if bc is not None else None, bq or 0.0)
+    return (ts, bc, ac, aq or 0.0)
+
+
+def _snipe_trigger(hist, now_ts: float, jump_c: float, win_s: float):
+    """Pure. Did OUR side jump UP ≥ jump_c inside the last win_s seconds?
+    Read on the ask (buyers lifting the offers is the first sign) and the
+    bid alike, from the lowest point in the window to now. Returns
+    {rise_c, on, from_c, to_c, secs} or None."""
+    pts = [h for h in (hist or []) if h[0] >= now_ts - win_s]
+    if len(pts) < 2:
+        return None
+    best = None
+    for idx, on in ((2, "ask"), (1, "bid")):
+        now_v = pts[-1][idx]
+        vals = [(h[0], h[idx]) for h in pts[:-1] if h[idx] is not None]
+        if now_v is None or not vals:
+            continue
+        t_lo, lo = min(vals, key=lambda x: x[1])
+        rise = float(now_v) - float(lo)
+        if rise >= jump_c - 1e-9 and (best is None or rise > best["rise_c"]):
+            best = {"rise_c": round(rise, 2), "on": on, "from_c": lo, "to_c": now_v,
+                    "secs": round(pts[-1][0] - t_lo, 2)}
+    return best
+
+
+def _snipe_at(samples, t: float):
+    """Pure. The newest (ts, bid, ask, ask_q) at or before t, else None."""
+    out = None
+    for s in samples or []:
+        if s[0] <= t + 1e-9:
+            out = s
+        else:
+            break
+    return out
+
+
+def _snipe_mid(s):
+    if not s:
+        return None
+    b, a = s[1], s[2]
+    if b is not None and a is not None:
+        return round((b + a) / 2.0, 2)
+    return b if b is not None else a
+
+
+def _snipe_grade(ev: dict) -> dict:
+    """Pure. Every take the event offered — the trigger venue's ask and the
+    other venue's ask, at the trigger, +1s and +3s — valued against the
+    trigger venue's our-side mid at +30s and +120s, less the taker fee.
+    value_c > 0 = the take beat where the market settled."""
+    import kalshi_venue as _kv
+    t0 = ev["t0"]
+    tape = ev.get("tape") or {}
+    out: dict = {"takes": []}
+    trig = tape.get(ev["key"]) or []
+    for lag in (30.0, 120.0):
+        s = _snipe_at(trig, t0 + lag)
+        out[f"mid_{int(lag)}"] = _snipe_mid(s)
+        o = _snipe_at(tape.get(ev.get("other") or "", []), t0 + lag) if ev.get("other") else None
+        out[f"other_mid_{int(lag)}"] = _snipe_mid(o)
+    for key, who in ((ev["key"], "same"), (ev.get("other"), "other")):
+        if not key:
+            continue
+        venue = "POLYMARKET" if key.startswith("p:") else "KALSHI"
+        for lag in (0.0, 1.0, 3.0):
+            s = _snipe_at(tape.get(key) or [], t0 + lag)
+            if not s or s[2] is None:
+                out["takes"].append({"who": who, "venue": venue, "lag_s": lag, "ask_c": None})
+                continue
+            ask = float(s[2])
+            fee = _kv.fee_per_contract_c(venue, "take", ask)
+            row = {"who": who, "venue": venue, "lag_s": lag, "ask_c": ask, "ask_q": s[3],
+                   "fee_c": round(fee, 2), "seen_age_s": round(t0 + lag - s[0], 2)}
+            for lag2 in (30, 120):
+                m = out.get(f"mid_{lag2}")
+                row[f"value_{lag2}_c"] = round(m - ask - fee, 2) if m is not None else None
+            out["takes"].append(row)
+    return out
+
+
+def _snipe_frame(key: str, row) -> None:
+    """Called for every socket frame (Polymarket `p:<slug>`, Kalshi
+    `k:<ticker>`). A no-op unless the market belongs to an over bet in play.
+    Never raises, never does I/O."""
+    try:
+        meta = SNIPE_SHADOW.get(key)
+        if meta is None or row is None:
+            return
+        s = _snipe_side(row, meta["syn"])
+        if s is None:
+            return
+        with _SNIPE_LOCK:
+            _SNIPE_STATS["frames"] += 1
+            h = _SNIPE_HIST.get(key)
+            if h is None:
+                h = _SNIPE_HIST[key] = _deque(maxlen=400)
+            h.append(s)
+            while h and h[0][0] < s[0] - _SNIPE_HIST_S:
+                h.popleft()
+            for ev in _SNIPE_EVENTS:                      # open events record every frame on their markets
+                if key in (ev["key"], ev.get("other")) and s[0] <= ev["t0"] + _SNIPE_HOLD_S:
+                    tp = ev["tape"].setdefault(key, [])
+                    if not tp or tp[-1][1:3] != s[1:3]:
+                        tp.append(s)
+            if _time.time() - _SNIPE_LAST.get(meta["pick"], 0.0) < _SNIPE_COOLDOWN_S:
+                return
+            trg = _snipe_trigger(h, s[0], meta["jump_c"], meta["win_s"])
+            if not trg:
+                return
+            _SNIPE_LAST[meta["pick"]] = _time.time()
+            other = meta.get("other")
+            tape = {key: [s]}
+            if other and _SNIPE_HIST.get(other):
+                tape[other] = [_SNIPE_HIST[other][-1]]   # the other venue's book as we last saw it
+            _SNIPE_EVENTS.append({"t0": s[0], "key": key, "other": other, "pick": meta["pick"],
+                                  "game": meta.get("game"), "line": meta.get("line"),
+                                  "trigger": trg, "tape": tape,
+                                  "pre": [x for x in h if x[0] >= s[0] - meta["win_s"]][-12:]})
+            _SNIPE_STATS["events"] += 1
+    except Exception:
+        _SNIPE_STATS["errors"] += 1
+
+
+def _hand_snipe_shadow_tick(sb, now) -> dict:
+    """Handbets tick: refresh which markets are over bets in play (both
+    venues of each), then grade and stamp the events whose 125s are up."""
+    global SNIPE_SHADOW, SNIPE_POLY_SLUGS, SNIPE_K_TICKERS
+    st: dict = {"watch": 0}
+    if not _machine_flag("hand_snipe_shadow", True):
+        SNIPE_SHADOW, SNIPE_POLY_SLUGS, SNIPE_K_TICKERS = {}, set(), set()
+        st["gate"] = "off"
+        return st
+    try:
+        jump = float(_machine_flag_val("hand_snipe_jump_c", _SNIPE_JUMP_C))
+        win = float(_machine_flag_val("hand_snipe_win_s", _SNIPE_WIN_S))
+    except (TypeError, ValueError):
+        jump, win = _SNIPE_JUMP_C, _SNIPE_WIN_S
+    rows = (sb.table("bot_picks").select("id,event_name,event_start,entry_line,signal_blob")
+            .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+            .eq("market_type", "total").eq("side", "over")
+            .lte("event_start", now.isoformat())
+            .gte("event_start", (now - timedelta(hours=_SNIPE_LIVE_H)).isoformat())
+            .limit(100).execute().data or [])
+    shadow: dict = {}
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if _kalshi_pick(b):
+            slug, syn = b.get("pmm_twin_slug"), bool(b.get("pmm_twin_synthetic"))
+            tk, by = b.get("kalshi_ticker"), bool(b.get("kalshi_buy_yes", True))
+        else:
+            slug, syn = b.get("pmm_slug"), bool(b.get("pmm_synthetic"))
+            tk, by = b.get("kalshi_twin_ticker"), bool(b.get("kalshi_twin_buy_yes", True))
+        pk = "p:" + slug if slug else None
+        kk = "k:" + tk if tk else None
+        base = {"pick": r["id"], "game": r.get("event_name"), "line": r.get("entry_line"),
+                "jump_c": jump, "win_s": win}
+        if pk:
+            shadow[pk] = {**base, "syn": syn, "other": kk}
+        if kk:
+            shadow[kk] = {**base, "syn": not by, "other": pk}
+    SNIPE_SHADOW = shadow
+    SNIPE_POLY_SLUGS = {k[2:] for k in shadow if k.startswith("p:")}
+    SNIPE_K_TICKERS = {k[2:] for k in shadow if k.startswith("k:")}
+    st["watch"] = len(shadow)
+    with _SNIPE_LOCK:
+        for k in list(_SNIPE_HIST):
+            if k not in shadow:
+                _SNIPE_HIST.pop(k, None)
+        due = [e for e in _SNIPE_EVENTS if _time.time() >= e["t0"] + _SNIPE_HOLD_S]
+        for e in due:
+            _SNIPE_EVENTS.remove(e)
+        st["open"] = len(_SNIPE_EVENTS)
+    for e in due:
+        try:
+            g = _snipe_grade(e)
+            _probe_log({"kind": "hand_snipe_shadow", "hand_snipe_shadow": True, "pick_id": e["pick"],
+                        "game": e.get("game"), "line": e.get("line"), "key": e["key"], "other": e.get("other"),
+                        "t0": datetime.fromtimestamp(e["t0"], timezone.utc).isoformat(),
+                        "trigger": e["trigger"], "pre": e.get("pre"), "grade": g,
+                        "frames": {k: len(v) for k, v in (e.get("tape") or {}).items()},
+                        "at": now.isoformat()})
+            _SNIPE_STATS["graded"] += 1
+        except Exception as ex:
+            _SNIPE_STATS["errors"] += 1
+            app.logger.warning("snipe shadow grade: %s", str(ex)[:120])
+    st.update({k: v for k, v in _SNIPE_STATS.items()})
+    return st
 
 
 def _ensure_live_worker() -> None:
