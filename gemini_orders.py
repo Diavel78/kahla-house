@@ -140,13 +140,9 @@ def probe(place: bool = False, symbol: Optional[str] = None, contracts: int = 1,
         out["verdict"] = "placed_left_resting" if out["verify"].get("seen") else "placed_unverified"
         return out
     t1 = time.monotonic()
-    try:
-        out["cancel"] = {"raw": _g.cancel_order(oid), "ms": int((time.monotonic() - t1) * 1000)}
-    except Exception as e:
-        out["cancel"] = {"error": f"{type(e).__name__}: {e}"[:400], "ms": int((time.monotonic() - t1) * 1000)}
-    gone = find_active(oid, tgt["symbol"], tries=4)
-    out["gone"] = not gone.get("seen") and not gone.get("error")
-    out["gone_read"] = gone
+    gone, cdet = cancel_verified(oid, tgt["symbol"])
+    out["cancel"] = {**cdet, "ms": int((time.monotonic() - t1) * 1000)}
+    out["gone"] = gone is True
     if out["verify"].get("seen") and out["gone"]:
         out["verdict"] = "ok"
     elif out["gone"]:
@@ -154,3 +150,127 @@ def probe(place: bool = False, symbol: Optional[str] = None, contracts: int = 1,
     else:
         out["verdict"] = "cancel_unverified"
     return out
+
+
+# ───────────────────────── the v0 lane's write + read helpers ─────────────────────────
+# Field names on Gemini's order / position rows were not all measured in September;
+# every reader below tries the likely spellings and the probe stamp's `sample` rows
+# are the ground truth to tighten them against.
+
+def _f(x) -> Optional[float]:
+    try:
+        return float(x) if x not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_order(o: dict) -> dict:
+    """One active-orders row → {id, symbol, outcome, side, price_c, qty, filled, leaves, status}."""
+    qty = None
+    for k in ("quantity", "originalQuantity", "orderQuantity", "size"):
+        qty = _f(o.get(k)) if qty is None else qty
+    filled = None
+    for k in ("filledQuantity", "executedQuantity", "cumQuantity", "filled"):
+        filled = _f(o.get(k)) if filled is None else filled
+    leaves = None
+    for k in ("remainingQuantity", "leavesQuantity", "remaining"):
+        leaves = _f(o.get(k)) if leaves is None else leaves
+    if leaves is None and qty is not None:
+        leaves = max(0.0, qty - (filled or 0.0))
+    px = _f(o.get("price") if o.get("price") is not None else o.get("limitPrice"))
+    return {"id": _oid(o), "symbol": o.get("symbol") or o.get("instrumentSymbol"),
+            "outcome": str(o.get("outcome") or o.get("eventOutcome") or "").lower(),
+            "side": str(o.get("side") or "").lower(),
+            "price_c": round(px * 100.0, 2) if px is not None else None,
+            "qty": qty, "filled": filled or 0.0, "leaves": leaves,
+            "status": str(o.get("status") or o.get("orderStatus") or "").lower()}
+
+
+def orders_by_id() -> Optional[dict]:
+    """Every active order, parsed, by id. None = the read failed (never 'no orders')."""
+    try:
+        rows = []
+        off = 0
+        while True:
+            page = _g.active_orders(limit=100, offset=off) or []
+            rows += page
+            if len(page) < 100 or off > 2000:
+                break
+            off += 100
+    except Exception:
+        return None
+    return {p["id"]: p for p in (parse_order(r) for r in rows) if p.get("id")}
+
+
+def positions_map() -> Optional[dict]:
+    """{(symbol, outcome yes|no): contracts held}. None = the read failed.
+    A NO holding may come back as a NEGATIVE quantity (Sep 13 2026 socket read)."""
+    try:
+        rows = []
+        off = 0
+        while True:
+            page = _g.positions(limit=100, offset=off) or []
+            rows += page
+            if len(page) < 100 or off > 2000:
+                break
+            off += 100
+    except Exception:
+        return None
+    out: dict = {}
+    for r in rows:
+        sym = r.get("symbol") or r.get("instrumentSymbol")
+        q = None
+        for k in ("quantity", "totalQuantity", "netQuantity", "size", "position"):
+            q = _f(r.get(k)) if q is None else q
+        if not sym or q is None or q == 0:
+            continue
+        oc = str(r.get("outcome") or r.get("eventOutcome") or "").lower()
+        if not oc:
+            oc = "no" if q < 0 else "yes"
+        out[(sym, oc)] = out.get((sym, oc), 0.0) + abs(q)
+    return out
+
+
+def place_rest(symbol: str, buy_yes: bool, price_c: float, qty: int, cid: Optional[str] = None) -> tuple:
+    """ONE post-only GTC BUY on our side (YES, or NO priced in NO's own terms),
+    then the active list must show it. → (order_id or None, detail)."""
+    det: dict = {"symbol": symbol, "outcome": "yes" if buy_yes else "no", "price_c": price_c, "qty": qty}
+    t0 = time.monotonic()
+    try:
+        res = _g.place_order(symbol, "buy", "yes" if buy_yes else "no", int(qty),
+                             round(float(price_c) / 100.0, 2), post_only=True, client_order_id=cid)
+    except Exception as e:
+        det["error"] = f"{type(e).__name__}: {e}"[:300]
+        return None, det
+    det["ms"] = int((time.monotonic() - t0) * 1000)
+    det["raw"] = res
+    oid = _oid(res if isinstance(res, dict) else {})
+    if not oid:
+        det["error"] = "create returned no order id"
+        return None, det
+    v = find_active(oid, symbol, tries=4, gap_s=0.75)
+    det["verified"] = bool(v.get("seen"))
+    det["verify"] = {k: v.get(k) for k in ("tries", "error", "n_rows")}
+    return oid, det
+
+
+def cancel_verified(order_id: str, symbol: Optional[str] = None) -> tuple:
+    """Cancel, then the active list must NOT show it. → (gone True/False/None, detail)
+    None = unreadable (never treat as gone)."""
+    det: dict = {"order_id": order_id}
+    try:
+        det["raw"] = _g.cancel_order(order_id)
+    except Exception as e:
+        det["error"] = f"{type(e).__name__}: {e}"[:300]
+    last_err = None
+    for _ in range(4):
+        time.sleep(0.75)
+        try:
+            rows = _g.active_orders(symbol=symbol, limit=100) or []
+            last_err = None
+            if not any(_oid(r) == str(order_id) for r in rows):
+                return True, det
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"[:200]
+    det["read_error"] = last_err
+    return (None if last_err else False), det
