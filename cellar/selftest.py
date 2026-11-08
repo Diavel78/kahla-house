@@ -2903,6 +2903,18 @@ def test_hand_auto_chase_cap() -> None:
         on = _app._hand_start_chase_on
         check("no auto chase on MLB / NHL, chase on NFL / NCAAF / NBA",
               on("MLB") is False and on("nhl") is False and on("NFL") and on("NCAAF") and on("NBA"))
+        cs = _app._hand_chase_s
+        check("NHL OVERS chase anyway, on a 15-minute clock (Rob, Nov 8 2026)",
+              on("NHL", "total", "over") is True and cs("NHL", "total", "over") == 900.0)
+        check("NHL unders, moneylines and puck lines still cancel",
+              on("NHL", "total", "under") is False and on("NHL", "moneyline", "home") is False
+              and on("NHL", "spread", "away") is False and on("MLB", "total", "over") is False)
+        check("every other chase keeps the hour", cs("NFL", "total", "over") == _app._HAND_START_CHASE_S
+              and cs("NHL", "total", "under") == _app._HAND_START_CHASE_S and cs() == _app._HAND_START_CHASE_S)
+        nb = _app._hand_chase_blob({"price_c": 48.0}, __import__("datetime").datetime(2026, 11, 8, 17, 0, tzinfo=__import__("datetime").timezone.utc),
+                                   48.0, 48.0, 10, "x", chase_s=900.0)
+        check("the chase blob takes the bet's own clock",
+              nb["live_snipe"]["until"].startswith("2026-11-08T17:15:00"), nb["live_snipe"]["until"])
         _app._machine_flag_val = lambda name, default=None: ["NBA"] if name == "hand_start_chase_off_sports" else default
         check("the flag list overrides the code default", on("NBA") is False and on("NHL") is True)
         _app._machine_flag = lambda name, default=None: False if name == "hand_start_chase" else default
@@ -2911,7 +2923,7 @@ def test_hand_auto_chase_cap() -> None:
         _app._machine_flag, _app._machine_flag_val = _mf, _mfv
     for fn in (_app._hand_start_finish_poly, _app._hand_start_finish_kalshi, _app._hand_kalshi_gone_chase):
         src_ = _ii.getsource(fn)
-        check(f"{fn.__name__} gates the chase per sport", '_hand_start_chase_on(r.get("sport"))' in src_
+        check(f"{fn.__name__} gates the chase per bet", '_hand_chase_on_r(r)' in src_
               and '_machine_flag("hand_start_chase", True):\n        try' not in src_)
     code, txt = _app._hand_start_cancel_text({"bet": {"contracts": 5}, "result": {"ok": True, "deleted": True}, "chase_off": "sport"})
     check("the game-start alert says the sport has no auto chase", code == "start_not_filled" and "no auto chase on this sport" in txt, txt)
@@ -4088,10 +4100,10 @@ def test_hand_red_alert() -> None:
     check("CHALK is not red where the start chases it live (Ravens +10.5, Nov 3 2026)",
           R(ck, resting, chases=True) is None and R(ck, resting, chases=False)[0] == "chalk")
     check("the alert tick passes the sport's start-chase answer",
-          "chases=_hand_start_chase_on(r.get(\"sport\"))" in _insp.getsource(_app._hand_red_alert_tick))
+          "chases=_hand_chase_on_r(r)" in _insp.getsource(_app._hand_red_alert_tick))
     _bsh = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "bet_sheets.html")).read()
     check("the page reads PAST LEASH amber where the start chases",
-          "hold.touch_c != null && b.start_chase" in _bsh and '"start_chase": _hand_start_chase_on(' in _insp.getsource(_app))
+          "hold.touch_c != null && b.start_chase" in _bsh and '"start_chase": _hand_chase_on_r(r)' in _insp.getsource(_app))
     check("MLB/NHL still cancel at the start (PAST LEASH stays red there)",
           not _app._hand_start_chase_on("NHL") and not _app._hand_start_chase_on("MLB") and _app._hand_start_chase_on("NCAAF"))
     r = R({"recon": {"red": [{"code": "dead_order", "msg": "the pick's order X is not on the book"}]}}, resting)

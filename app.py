@@ -18687,7 +18687,7 @@ def _hand_red_alert_tick(sb, now) -> dict:
             started = False
         rec = _hand_red_read_rec(sb, r, blob, s, started, read_cache) if not started else None
         red = _hand_red_state(blob, s, started=started, rec=rec,
-                              chases=_hand_start_chase_on(r.get("sport")))
+                              chases=_hand_chase_on_r(r))
         if not red and not started:
             if model_sides is None:
                 model_sides = _hand_model_sides(sb, now)
@@ -19858,10 +19858,31 @@ def _hand_start_complete_poly(sb, client, r: dict, blob: dict, slug: str, oid: s
 # his); football and basketball keep the auto chase. `machine_flags
 # hand_start_chase_off_sports` (a list) overrides the code default.
 _HAND_START_CHASE_OFF_SPORTS = ("MLB", "NHL")
+# …EXCEPT THESE, ON THEIR OWN CLOCK (Rob, Nov 8 2026: "You can chase Overs on
+# NHL for 15 minutes after game start. No unders"). sport → {"market_type:side":
+# seconds}. `machine_flags hand_start_chase_only` (same shape) overrides it.
+_HAND_START_CHASE_ONLY = {"NHL": {"total:over": 900.0}}
 
 
-def _hand_start_chase_on(sport) -> bool:
-    """Does the drop hand this sport's unfilled order to the live chase?"""
+def _hand_start_chase_exc(sport, market_type, side):
+    """Seconds of chase for a bet on an off sport that is chased anyway
+    (`_HAND_START_CHASE_ONLY`), else None."""
+    only = _machine_flag_val("hand_start_chase_only", _HAND_START_CHASE_ONLY)
+    if not isinstance(only, dict):
+        only = _HAND_START_CHASE_ONLY
+    per = only.get(str(sport or "").upper())
+    if not isinstance(per, dict):
+        return None
+    v = per.get(f"{str(market_type or '').lower()}:{str(side or '').lower()}")
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _hand_start_chase_on(sport, market_type=None, side=None) -> bool:
+    """Does the drop hand this bet's unfilled order to the live chase?"""
     if not _machine_flag("hand_start_chase", True):
         return False
     off = _machine_flag_val("hand_start_chase_off_sports", list(_HAND_START_CHASE_OFF_SPORTS))
@@ -19869,7 +19890,17 @@ def _hand_start_chase_on(sport) -> bool:
         off_set = {str(x).upper() for x in (off or [])}
     except TypeError:
         off_set = set(_HAND_START_CHASE_OFF_SPORTS)
-    return str(sport or "").upper() not in off_set
+    if str(sport or "").upper() not in off_set:
+        return True
+    return _hand_start_chase_exc(sport, market_type, side) is not None
+
+
+def _hand_chase_on_r(r: dict) -> bool:
+    return _hand_start_chase_on(r.get("sport"), r.get("market_type"), r.get("side"))
+
+
+def _hand_chase_s_r(r: dict) -> float:
+    return _hand_chase_s(r.get("sport"), r.get("market_type"), r.get("side"))
 
 
 def _hand_start_chase_retry(stamp: dict, r: dict, st: dict, now) -> None:
@@ -19894,7 +19925,7 @@ def _hand_start_finish_poly(sb, client, r: dict, stamp: dict, take, cum0: float,
     take (`tw` carries the window's totals when there was one). Stamps.
     SINCE OCT 24 2026 THE CANCEL IS THE FALLBACK: an unfilled order with the
     chase flag on goes to the live chase instead (`_hand_start_chase_poly`)."""
-    if _hand_start_chase_on(r.get("sport")):
+    if _hand_chase_on_r(r):
         try:
             handled = _hand_start_chase_poly(sb, client, r, stamp, now, st, tw=tw)
             if handled:
@@ -23245,7 +23276,7 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
         # is this the old retire.
         _twd = blob.get("start_take_window_done") if isinstance(blob.get("start_take_window_done"), dict) else {}
         if ((_twd.get("closed") == "order_gone" or isinstance(blob.get("kalshi_cancel_sent"), dict))
-                and now_ts - start_ts < _hand_chase_s()
+                and now_ts - start_ts < _hand_chase_s_r(r)
                 and _hand_kalshi_gone_chase(sb, client, r, blob, now, st, ticker, koid,
                                             blob.get("pmm_twin_slug"), _twd)):
             return
@@ -23479,9 +23510,9 @@ def _hand_start_finish_kalshi(sb, client, r: dict, stamp: dict, take, cum0: floa
     SINCE OCT 24 2026 THE CANCEL IS THE FALLBACK: a still-resting Kalshi
     order with the chase flag on moves to the Polymarket twin and the live
     chase (`_hand_start_chase_kalshi`)."""
-    if not cancelled and not _hand_start_chase_on(r.get("sport")) and _machine_flag("hand_start_chase", True):
+    if not cancelled and not _hand_chase_on_r(r) and _machine_flag("hand_start_chase", True):
         stamp["chase_off"] = "sport"                     # MLB / NHL: the plain cancel, the Live tab is Rob's
-    if (not cancelled and _hand_start_chase_on(r.get("sport"))
+    if (not cancelled and _hand_chase_on_r(r)
             and (stamp.get("window") or {}).get("closed") != "filled"):
         try:
             handled, cancelled = _hand_start_chase_kalshi(sb, client, r, stamp, now, st)
@@ -26474,7 +26505,7 @@ def api_bet_sheets_mine():
             "auto": bool(blob.get("auto_price")),      # the page's AUTO state (amber, never "need you")
             "vs_model": bool(blob.get("vs_model")),    # bet against the model on purpose — never MODEL FLIPPED
             "live_snipe": bool(blob.get("live_snipe")),
-            "start_chase": _hand_start_chase_on(r.get("sport")),   # PAST LEASH reads amber where the start chases
+            "start_chase": _hand_chase_on_r(r),   # PAST LEASH reads amber where the start chases
             "getlive_from": blob.get("getlive_from"),
             # NO "PULLED · back ~" ON A FULL LOT (Oct 24 2026, BC@GT O 49.5: the pull's cancel raced
             # the fill, the hold stayed on the blob, the card promised a rejoin on a bet held 10 of 10)
@@ -28371,7 +28402,17 @@ _LIVE_LAST: dict = {}              # slug -> monotonic of the last venue write
 _LIVE_STATS = {"frames": 0, "moves": 0, "pulls": 0, "rejoins": 0, "stays": 0, "skips": 0, "errors": 0}
 
 
-def _hand_chase_s() -> float:
+def _hand_chase_s(sport=None, market_type=None, side=None) -> float:
+    """The auto chase's clock. A bet on an off sport chased by exception
+    (NHL overs) runs its own, shorter clock."""
+    exc = _hand_start_chase_exc(sport, market_type, side) if sport else None
+    if exc is not None:
+        off = _machine_flag_val("hand_start_chase_off_sports", list(_HAND_START_CHASE_OFF_SPORTS))
+        try:
+            if str(sport).upper() in {str(x).upper() for x in (off or [])}:
+                return exc
+        except TypeError:
+            pass
     try:
         v = float(_machine_flag_val("hand_start_chase_s", _HAND_START_CHASE_S))
         return v if v > 0 else _HAND_START_CHASE_S
@@ -28414,7 +28455,8 @@ def _hand_chase_expired(blob: dict, now_ts: float) -> bool:
     return u is not None and now_ts >= u
 
 
-def _hand_chase_blob(blob: dict, now, price_c, from_c, qty_total, closed, tw=None, amended=True, cap_c=None) -> dict:
+def _hand_chase_blob(blob: dict, now, price_c, from_c, qty_total, closed, tw=None, amended=True, cap_c=None,
+                     chase_s=None) -> dict:
     """Pure. The pick's blob after the start rule hands an unfilled bet to the
     live chase: holds and the take window gone, `live_snipe` with the clock,
     the price/anchor at the chase's seat, the take lot (if the window took
@@ -28422,7 +28464,7 @@ def _hand_chase_blob(blob: dict, now, price_c, from_c, qty_total, closed, tw=Non
     now_iso = now.isoformat()
     nb = {k: v for k, v in blob.items() if k not in ("chase_hold", "thin_hold", "rejoin_hold", "line_hold")}
     nb = _hand_blob_close_window(nb, now_iso, "live_chase")
-    until = (now + timedelta(seconds=_hand_chase_s())).isoformat()
+    until = (now + timedelta(seconds=(chase_s if chase_s else _hand_chase_s()))).isoformat()
     nb.update({"live_snipe": {"at": now_iso, "from_c": from_c, "price_c": price_c, "auto": True,
                               "until": until, "closed": closed},
                "price_c": price_c, "anchor_c": price_c, "contracts": qty_total})
@@ -28525,7 +28567,7 @@ def _hand_start_chase_poly(sb, client, r: dict, stamp: dict, now, st: dict, tw=N
             return False                                 # filled or killed under us — the cancel path reads positions
     price_c = float(target) if verdict in ("amended", "stay") else float(cur_c)
     nb = _hand_chase_blob(blob, now, price_c, cur_c, qty_total, (stamp.get("window") or {}).get("closed"),
-                          tw=tw, amended=(verdict == "amended"), cap_c=cap)
+                          tw=tw, amended=(verdict == "amended"), cap_c=cap, chase_s=_hand_chase_s_r(r))
     if verdict == "unverified":
         nb["live_snipe"]["amend"] = "unverified"
     upd = {"signal_blob": nb}
@@ -28536,7 +28578,7 @@ def _hand_start_chase_poly(sb, client, r: dict, stamp: dict, now, st: dict, tw=N
     stamp.update({"kind": "hand_start_chase", "hand_start_chase": True, "hand_start_cancel": False,
                   "chase": {"from_c": cur_c, "price_c": price_c, "why": why, "amend": verdict, "leaves": leaves,
                             "qty_total": qty_total, "cap_c": cap, "until": nb["live_snipe"]["until"],
-                            "minutes": int(round(_hand_chase_s() / 60.0))},
+                            "minutes": int(round(_hand_chase_s_r(r) / 60.0))},
                   "result": {"ok": True, "chasing": True, "price_c": price_c, "leaves": leaves}, "http": 200})
     st["chased"] = st.get("chased", 0) + 1
     _hand_start_cancel_alert(stamp)
@@ -28555,7 +28597,7 @@ def _hand_kalshi_gone_chase(sb, client, r: dict, blob: dict, now, st: dict, tick
     for the unfilled size — never the Polymarket twin: Rob, Oct 24 2026,
     "if it didn't fill on Kalshi, it stays on Kalshi"). True when the chase
     took it; False leaves the bet for the next tick / the retire."""
-    if not _hand_start_chase_on(r.get("sport")):
+    if not _hand_chase_on_r(r):
         return False
     stamp = {"kind": "hand_start_cancel", "bet": {**_hand_start_bet(r, blob), "venue": "KALSHI", "ticker": ticker},
              "hand_start_cancel": True, "venue": "KALSHI", "pick_id": r["id"], "slug": twin, "ticker": ticker,
@@ -28724,7 +28766,7 @@ def _hand_start_chase_kalshi(sb, client, r: dict, stamp: dict, now, st: dict) ->
     for k in ("kalshi_cancel_sent", "kalshi_move_cancel_sent", "chase_err", "start_take_window"):
         nb.pop(k, None)
     nb = _hand_chase_blob(nb, now, float(target), k_c, qty_total, (stamp.get("window") or {}).get("closed"),
-                          amended=(amend_word == "amended"), cap_c=cap)
+                          amended=(amend_word == "amended"), cap_c=cap, chase_s=_hand_chase_s_r(r))
     nb["live_snipe"]["venue"] = "KALSHI"
     if amend_word not in ("amended", "created"):
         nb["live_snipe"]["amend"] = amend_word
@@ -28741,7 +28783,7 @@ def _hand_start_chase_kalshi(sb, client, r: dict, stamp: dict, now, st: dict) ->
                   "order_id": new_id,
                   "chase": {"from_c": k_c, "price_c": float(target), "why": why, "amend": amend_word,
                             "leaves": unfilled, "qty_total": qty_total, "cap_c": cap, "until": nb["live_snipe"]["until"],
-                            "minutes": int(round(_hand_chase_s() / 60.0)), "venue": "KALSHI", "held": round(held, 2)},
+                            "minutes": int(round(_hand_chase_s_r(r) / 60.0)), "venue": "KALSHI", "held": round(held, 2)},
                   "result": {"ok": True, "chasing": True, "price_c": float(target), "leaves": unfilled}, "http": 200})
     st["chased"] = st.get("chased", 0) + 1
     _hand_start_cancel_alert(stamp)
@@ -28773,7 +28815,7 @@ def _hand_live_expire(sb, client, r: dict, blob: dict, now, st: dict) -> None:
              "slug": slug, "order_id": blob.get("kalshi_order_id") if kalshi else blob.get("order_id"),
              "bet": _hand_start_bet(r, blob), "at": now.isoformat(),
              "chase": {"since": ls.get("at"), "until": ls.get("until"), "from_c": ls.get("from_c"),
-                       "minutes": int(round(_hand_chase_s() / 60.0)), "moves": lc.get("moves"),
+                       "minutes": int(round(_hand_chase_s_r(r) / 60.0)), "moves": lc.get("moves"),
                        "pulls": lc.get("pulls"), "rejoins": lc.get("rejoins"), "last_c": lc.get("last_c")},
              "result": out, "http": code}
     try:
