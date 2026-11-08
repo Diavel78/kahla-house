@@ -25761,6 +25761,42 @@ def _kalshi_probe_tick(sb) -> dict | None:
     return {"verdict": out.get("verdict"), "schema": (out.get("create") or {}).get("schema")}
 
 
+def _gemini_probe_tick(sb) -> dict | None:
+    """THE GEMINI PROOF, FIRED FROM A FLAG (Nov 8 2026, step 2 of Gemini
+    replacing Kalshi; Rob funded $200). Same contract as the Kalshi proof: set
+    `machine_flags gemini_probe` to `{"place": true}` (optionally `symbol`,
+    `contracts`, `off_c`, `cancel`); the next handbets tick runs
+    `gemini_orders.probe` ONCE — creds, balance, terms, active orders,
+    positions, one post-only 1-lot BUY 10¢ under the bid on a liquid pre-game
+    NFL contract, verify on the active list, cancel, verify gone — stamps
+    `exec_probe_runs kind=gemini_probe`, and clears the flag BEFORE placing.
+    `place:false` = reads only. Read it with /api/bet-sheets/picks?stamps=gemini_probe."""
+    cfg = _machine_flag_val("gemini_probe", None)
+    if not cfg:
+        return None
+    if not isinstance(cfg, dict):
+        cfg = {"place": bool(cfg)}
+    try:
+        sb.table("machine_flags").upsert(
+            {"key": "gemini_probe", "value": False,
+             "updated_at": datetime.now(timezone.utc).isoformat()}, on_conflict="key").execute()
+        _MFLAGS_CACHE["map"]["gemini_probe"] = False
+    except Exception as e:
+        return {"gate": f"flag clear failed, not running: {e}"[:120]}
+    import gemini_orders as _go
+    try:
+        out = _go.probe(place=bool(cfg.get("place")), symbol=cfg.get("symbol") or None,
+                        contracts=int(cfg.get("contracts") or 1), off_c=int(cfg.get("off_c") or 10),
+                        cancel=cfg.get("cancel", True) is not False, log_fn=app.logger.info)
+    except Exception as e:
+        out = {"verdict": "crashed", "error": f"{type(e).__name__}: {e}"[:300]}
+    out["kind"] = "gemini_probe"
+    out["cfg"] = cfg
+    _probe_log(json.loads(json.dumps(out, default=str)))
+    app.logger.info("gemini_probe verdict=%s", out.get("verdict"))
+    return {"verdict": out.get("verdict")}
+
+
 def _hand_queue_drain(sb, now, worker: str, stats: dict, client=None, max_n: int = 150,
                       max_passes: int = 4):
     """Claim + run every pending hand order, oldest first, in passes of
@@ -25958,6 +25994,7 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
         return stats
     try:
         stats["kalshi_probe"] = _kalshi_probe_tick(sb)      # one-shot, flag-driven, box IP
+        stats["gemini_probe"] = _gemini_probe_tick(sb)      # one-shot, flag-driven, box IP
     except Exception as e:
         stats["kalshi_probe"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     if worker == "box":
