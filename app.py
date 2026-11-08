@@ -51785,6 +51785,44 @@ def api_parlay_probe():
     return jsonify(out)
 
 
+@app.route("/api/gemini/acct")
+def api_gemini_acct():
+    """Shared-secret, READ-ONLY (Nov 8 2026): raw samples of the Gemini
+    account reads the settlement + sold-detection wiring parses — settled
+    positions, order history, positions, and /v1/mytrades for one symbol
+    (`symbol=`, else the newest settled one). Never writes. `n=` rows (≤20)."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    import gemini_pm as _gpm
+    out: dict = {"ok": True, "creds": _gpm.has_creds()}
+    if not out["creds"]:
+        return jsonify(out)
+    try:
+        n = max(1, min(int(request.args.get("n") or 5), 20))
+    except ValueError:
+        n = 5
+
+    def grab(name, fn):
+        try:
+            out[name] = fn()
+        except Exception as e:
+            out[name] = {"error": f"{type(e).__name__}: {e}"[:300]}
+    grab("positions_settled", lambda: _gpm.positions_settled(limit=n))
+    grab("order_history", lambda: _gpm.order_history(limit=n))
+    grab("positions", lambda: _gpm.positions(limit=n))
+    sym = request.args.get("symbol")
+    if not sym:
+        ps = out.get("positions_settled")
+        if isinstance(ps, list) and ps:
+            sym = ps[0].get("symbol") or ps[0].get("instrumentSymbol")
+    if sym:
+        out["mytrades_symbol"] = sym
+        grab("mytrades", lambda: _gpm._private("POST", "/v1/mytrades", {"symbol": sym, "limit_trades": n}))
+    return jsonify(json.loads(json.dumps(out, default=str)))
+
+
 @app.route("/api/gemini/coverage")
 def api_gemini_coverage():
     """Shared-secret, read-only (Nov 8 2026, Rob: "In September, it was NFL
