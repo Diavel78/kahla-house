@@ -1319,7 +1319,7 @@
         if (!q) return q;
         const one = x => x ? { ...x, bid: x.ask != null ? 100 - Number(x.ask) : null, ask: x.bid != null ? 100 - Number(x.bid) : null,
                                line: (mt === 'spread' && x.line != null) ? -Number(x.line) : x.line, chalk: false } : x;
-        return { poly: one(q.poly), kalshi: one(q.kalshi), age_s: q.age_s };
+        return { poly: one(q.poly), kalshi: one(q.kalshi), gemini: one(q.gemini), age_s: q.age_s };
     }
     function pickBtn(gi, g, mt, side, line, label, verdict, price, vq, inv) {
         if (line === null || line === undefined || !side) return '';
@@ -1367,7 +1367,8 @@
             // a bid a cent or more under fair at the same line reads green
             return (fair != null && !rung(q.line) && Number(q.bid) <= fair - 1) ? '<span class="vq-ok">' + t + '</span>' : t;
         };
-        const parts = [one('Poly', vq.poly), one('Kalshi', vq.kalshi)].filter(Boolean);
+        // GEMINI IS THE SECOND VENUE (Nov 8 2026): its quote replaces Kalshi's on the card
+        const parts = [one('Poly', vq.poly), vq.gemini ? one('Gemini', vq.gemini) : one('Kalshi', vq.kalshi)].filter(Boolean);
         if (fair != null) parts.push('<span class="vq-fair">fair ' + c(fair) + '¢</span>');
         if (!parts.length) return '';
         const age = (vq.age_s != null && vq.age_s > 45 * 60) ? ' · ' + Math.round(vq.age_s / 60) + 'm old' : '';
@@ -2062,7 +2063,7 @@
         if (up) {
             const vp = ((g.venue || {}).picks || {})[gradeKey];
             const fc = fairC(p);
-            const vq = (vp || fc != null) ? { poly: vp && vp.poly, kalshi: vp && vp.kalshi, age_s: vp ? g.venue.age_s : null, fair: fc } : null;
+            const vq = (vp || fc != null) ? { poly: vp && vp.poly, kalshi: vp && vp.kalshi, gemini: vp && vp.gemini, age_s: vp ? g.venue.age_s : null, fair: fc } : null;
             // THE 🔥 SIDE IS THE BUTTON (Nov 1 2026): the server put the pick on the
             // steam side; a market with no 🔥 (`fire: null`) has no button
             if (p.fire === null) return '';
@@ -2082,7 +2083,7 @@
             else { oline = -Number(line); label = nameOf(g, side) + ' ' + sgn(oline, 1); }
         }
         const vp = ((g.venue || {}).picks || {})[gradeKey];
-        let vq = vp ? mirrorQ({ poly: vp.poly, kalshi: vp.kalshi, age_s: g.venue.age_s }, mt) : null;
+        let vq = vp ? mirrorQ({ poly: vp.poly, kalshi: vp.kalshi, gemini: vp.gemini, age_s: g.venue.age_s }, mt) : null;
         const fc = fairC(p);
         if (fc != null) { vq = vq || {}; vq.fair = 100 - fc; }
         // the mirror is the other side's price only on the sheet's own rung; off it,

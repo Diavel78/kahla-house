@@ -31927,6 +31927,25 @@ def _gem_touch_rows(sport: str, r: dict, items: list, picks: dict, cache: dict, 
     if not g:
         return []
     _GEM_TOUCH["matched"] += 1
+    # THE CARD'S SECOND VENUE IS GEMINI (Nov 8 2026, Rob: "everything still says Kalshi
+    # on the sheet"): our-side bid/ask at the pick's own line by the slip's rung rule,
+    # stamped on the pick so the card draws "Gemini 48¢" where it drew Kalshi. The
+    # `kalshi` read stays on the pick and on the line tape (the 🔥 still reads it).
+    try:
+        import gemini_venue as _gv
+        for k, p in (picks or {}).items():
+            if not isinstance(p, dict) or not p.get("side"):
+                continue
+            rr = _gv.rung_for({"market_type": p.get("mt"), "side": p.get("side"), "line": p.get("line")},
+                              g, away, home)
+            if rr.get("ok"):
+                q = _gv.our_side_quote(rr.get("yes_bid"), rr.get("yes_ask"), bool(rr["buy_yes"]))
+                p["gemini"] = {"bid": q.get("bid"), "ask": q.get("ask"), "line": rr.get("line"),
+                               "symbol": rr.get("symbol")}
+            else:
+                p["gemini"] = {"bid": None, "ask": None, "why": str(rr.get("why") or "")[:60]}
+    except Exception as e:
+        _GEM_TOUCH["last_error"] = f"card quote: {e}"[:120]
     out = []
     for k, p in (picks or {}).items():
         if k not in ("ml", "spread", "total") or not isinstance(p, dict):

@@ -604,7 +604,7 @@
             // a bid a cent or more under fair at the same line reads green
             return (fair != null && !rung(q.line) && Number(q.bid) <= fair - 1) ? '<span class="vq-ok">' + t + '</span>' : t;
         };
-        const parts = [one('Poly', vq.poly), one('Kalshi', vq.kalshi)].filter(Boolean);
+        const parts = [one('Poly', vq.poly), vq.gemini ? one('Gemini', vq.gemini) : one('Kalshi', vq.kalshi)].filter(Boolean);   // Gemini is the second venue (Nov 8 2026)
         if (fair != null) parts.push('<span class="vq-fair">fair ' + c(fair) + '¢</span>');
         if (!parts.length) return '';
         const age = (vq.age_s != null && vq.age_s > 45 * 60) ? ' · ' + Math.round(vq.age_s / 60) + 'm old' : '';
@@ -624,7 +624,7 @@
         const vp = ((g.venue || {}).picks || {})[gradeKey];
         if (p.fire === null) return '';          // THE 🔥 SIDE IS THE BUTTON: no 🔥, no pick box
         const fc = fairC(p);
-        const vq = (vp || fc != null) ? { poly: vp && vp.poly, kalshi: vp && vp.kalshi, age_s: vp ? g.venue.age_s : null, fair: fc } : null;
+        const vq = (vp || fc != null) ? { poly: vp && vp.poly, kalshi: vp && vp.kalshi, gemini: vp && vp.gemini, age_s: vp ? g.venue.age_s : null, fair: fc } : null;
         return pickBox(p, label, price, '', vq, gradeKey === 'puck' ? 'spread' : gradeKey, line);
     }
     // where the line came from: PIN = Pinnacle; anything else is the fallback and says so
