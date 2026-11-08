@@ -17427,6 +17427,8 @@ def api_bet_sheets_place():
             # never changes the venue pick.
             res["pin"] = _bet_sheet_pin_quote(sb, it or {}, datetime.now(timezone.utc), pin_slates)
             want = str((it or {}).get("venue") or "auto").lower()
+            if want == "gemini" and _second_venue() == "gemini" and _hand_kalshi_on():
+                want = "kalshi"            # Gemini IS the second venue: quote it in Kalshi's slot
             if _hand_kalshi_on() and want not in ("poly", "gemini"):
                 # BOTH VENUES QUOTED (Oct 18 2026): the slip shows each seat
                 # all-in and which one the box would rest on.
@@ -17997,6 +17999,8 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                     out_ap["ms"] = ms
                 return out_ap
             want = str(item.get("venue") or "auto").lower()
+            if want == "gemini" and _second_venue() == "gemini" and _hand_kalshi_on():
+                want = "kalshi"            # Gemini IS the second venue: the toggle forces it, full lane rules
             if want == "gemini":
                 # GEMINI v0 (Nov 8 2026, Rob: "See if we can get some Gemini shit bet today"):
                 # the Polymarket seat first (Rob's opening seat = Poly − 5¢ on an empty
@@ -18302,6 +18306,13 @@ def _hand_status_publish(sb, client) -> dict:
     global HAND_HELD_SLUGS, KALSHI_WATCH_TICKERS
     HAND_HELD_SLUGS = held_slugs
     KALSHI_WATCH_TICKERS = k_watch | _hand_pre_tickers() | set(SNIPE_K_TICKERS)   # cellar/kalshifeed.py subscribes this set (+ the slip's pre-subscribed tickers)
+    try:
+        import kalshi_venue as _kvg
+        _kvg.GEM_LIVE = {t for t in k_watch if _is_gem(t)}       # Gemini lane bets keep Gemini reads on
+        if _kvg.GEM_LIVE or _second_venue() == "gemini":
+            _gem_ensure_thread()
+    except Exception:
+        pass
     _HAND_STATUS_LAST.update({"at": _time.time(), "rows": out, "venue_ok": venue_ok})   # the red alert reads this tick's strip
     out = {**out, **{k: v for k, v in _GEM_STATUS_ROWS.items() if k not in out}}       # Gemini v0 rows ride the same blob
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -22229,7 +22240,30 @@ _KALSHI_BOOK_READS_TICK = 12
 
 
 def _hand_kalshi_on() -> bool:
+    _second_venue_sync()
     return _machine_flag("hand_kalshi_enabled", HAND_KALSHI_ENABLED)
+
+
+def _second_venue() -> str:
+    """THE SECOND VENUE (Nov 8 2026, Rob: "IT REPLACES KALSHI… keep all the same
+    rules, change boxes"): `machine_flags hand_second_venue` = "gemini" puts
+    Gemini in Kalshi's slot — every new lane bet that would have gone to Kalshi
+    (venue compare, switch, getlive) resolves on Gemini; bets already on Kalshi
+    keep running on Kalshi (every venue call routes by the contract's name)."""
+    v = str(_machine_flag_val("hand_second_venue", "kalshi") or "kalshi").lower()
+    return "gemini" if v == "gemini" else "kalshi"
+
+
+def _second_venue_sync() -> None:
+    try:
+        import kalshi_venue as _kv
+        _kv.SECOND = _second_venue()
+    except Exception:
+        pass
+
+
+def _is_gem(ticker) -> bool:
+    return str(ticker or "").upper().startswith("GEMI-")
 
 
 def _hand_venue_min_gain_c() -> float:
@@ -22333,7 +22367,8 @@ def _bet_sheet_resolve_kalshi(item: dict) -> dict:
     import kalshi_venue as _kv
     sport = str(item.get("sport") or "").upper()
     try:
-        rs = _kv.resolve(sport, item.get("away"), item.get("home"), item.get("event_start"), item)
+        _second_venue_sync()
+        rs = _kv.lane_resolve(sport, item.get("away"), item.get("home"), item.get("event_start"), item)
     except Exception as e:
         return {"ok": False, "reason": f"Kalshi lookup failed: {e}"[:120]}
     if not rs.get("ok"):
@@ -25057,7 +25092,7 @@ def _hand_twin_backfill(sb, now) -> dict:
             continue
         done += 1
         try:
-            rs = _kv.resolve(item["sport"], item["away"], item["home"], item["event_start"], item)
+            rs = _kv.lane_resolve(item["sport"], item["away"], item["home"], item["event_start"], item)
         except Exception as e:
             rs = {"ok": False, "why": f"{type(e).__name__}: {e}"[:120]}
         nb = dict(blob)
@@ -26134,7 +26169,7 @@ def _hand_pre_row(client, row: dict, st: dict) -> None:
         st["_since_push"] = st.get("_since_push", 0) + 1
     if _hand_kalshi_on() and str(item.get("venue") or "auto").lower() != "poly":
         import kalshi_venue as _kv
-        rs = _kv.resolve(str(item.get("sport") or "").upper(), item.get("away"), item.get("home"),
+        rs = _kv.lane_resolve(str(item.get("sport") or "").upper(), item.get("away"), item.get("home"),
                          item.get("event_start"), item)
         tk = rs.get("ticker") if rs.get("ok") else None
         if tk and tk not in KALSHI_PRE_TICKERS:
@@ -26160,7 +26195,7 @@ def _hand_warm_row(client, row: dict) -> None:
                want_props=False, max_age_s=120)
     if _hand_kalshi_on() and str(item.get("venue") or "auto").lower() != "poly":
         import kalshi_venue as _kv
-        _kv.resolve(sport, item.get("away"), item.get("home"), item.get("event_start"), item)
+        _kv.lane_resolve(sport, item.get("away"), item.get("home"), item.get("event_start"), item)
 
 
 def _hand_warm_start(client, rows: list):
@@ -29840,6 +29875,8 @@ def _gem_ws_run() -> None:
                     _row = (_time.time(), _cc(d.get("b")), _qq(d.get("B")), _cc(d.get("a")), _qq(d.get("A")))
                     if sym in GEM_PICK_SYMS:
                         _gem_tape_note(sym, _row)          # the Gemini v0 game-start rule reads this
+                    if sym in KALSHI_WATCH_TICKERS:
+                        _gem_kalshi_tape(sym, _row)        # Gemini in Kalshi's slot: the lane's tape
                     _snipe_frame("g:" + sym, _row)
             finally:
                 try: ws.close()
@@ -29849,6 +29886,24 @@ def _gem_ws_run() -> None:
             _time.sleep(3)
 
 
+def _gem_kalshi_tape(sym: str, row: tuple) -> None:
+    """A Gemini socket frame on a lane contract → a KALSHI_TAPE row in the
+    tape shape the start rule / move rule read (top of book only)."""
+    try:
+        ts, b, bq, a, aq = row
+        r = (round(float(ts), 2), b, round(bq or 0.0, 1), a, round(aq or 0.0, 1),
+             round(bq or 0.0, 1), round(aq or 0.0, 1),
+             [(b, round(bq or 0.0, 1))] if b is not None else [],
+             [(a, round(aq or 0.0, 1))] if a is not None else [])
+        dq = KALSHI_TAPE.get(sym)
+        if dq is None:
+            dq = KALSHI_TAPE[sym] = _deque(maxlen=_KALSHI_TAPE_MAX)
+        dq.append(r)
+        _tape_base_note("k:" + sym, r[0], (r[2] or 0.0) + (r[4] or 0.0))
+    except Exception:
+        pass
+
+
 def _gem_ws_want() -> set:
     """The Gemini socket's set: the shadow's twins (while the shadow is on) +
     every Gemini v0 bet's contract (always — the game-start rule needs it)."""
@@ -29856,6 +29911,7 @@ def _gem_ws_want() -> set:
     if _machine_flag("hand_snipe_shadow", True) and _machine_flag("hand_snipe_gemini", True):
         want |= {k[2:] for k in SNIPE_GEM_META}
     want |= set(GEM_PICK_SYMS)
+    want |= {t for t in set(KALSHI_WATCH_TICKERS) if _is_gem(t)}     # Gemini in Kalshi's slot
     return want
 
 

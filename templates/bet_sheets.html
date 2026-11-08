@@ -764,8 +764,11 @@
     function gemOn() { try { return localStorage.getItem('kh_slip_gem_v1') === '1'; } catch (e) { return false; } }
     function setGem(v) { try { localStorage.setItem('kh_slip_gem_v1', v ? '1' : '0'); } catch (e) {} renderSlip(); }
     function venueSel() { return gemOn() ? 'gemini' : 'auto'; }
-    function venueName(b) { return (b && b.venue === 'KALSHI') ? 'Kalshi' : (b && b.venue === 'GEMINI') ? 'Gemini' : 'Poly'; }
-    function venueTag(b) { return (b && b.venue === 'KALSHI') ? '<span class="tag kal">KALSHI</span>' : (b && b.venue === 'GEMINI') ? '<span class="tag gem">GEMINI</span>' : '<span class="tag gry">POLY</span>'; }
+    // GEMINI IN KALSHI'S SLOT (Nov 8 2026): the lane calls it KALSHI, the contract says GEMI-
+    function isGemT(t) { return /^GEMI-/i.test(String(t || '')); }
+    function venueName(b) { return (b && (b.venue === 'GEMINI' || (b.venue === 'KALSHI' && isGemT(b.kalshi_ticker)))) ? 'Gemini' : (b && b.venue === 'KALSHI') ? 'Kalshi' : 'Poly'; }
+    function venueTag(b) { return (b && (b.venue === 'GEMINI' || (b.venue === 'KALSHI' && isGemT(b.kalshi_ticker)))) ? '<span class="tag gem">GEMINI</span>' : (b && b.venue === 'KALSHI') ? '<span class="tag kal">KALSHI</span>' : '<span class="tag gry">POLY</span>'; }
+    function qKName(q) { return (q && ((q.kalshi && isGemT(q.kalshi.ticker)) || isGemT(q.ticker))) ? 'Gemini' : 'Kalshi'; }
     function toggleSlip(force) {
         _slipOpen = (force === undefined) ? !_slipOpen : !!force;
         if (force === undefined) _slipUserHid = !_slipOpen;   // a tap on the header is the user's choice
@@ -866,10 +869,10 @@
             } else if (i.q) {
                 if (i.q.ok) {
                     const vp = i.q.venue_pick || {}, ai = vp.all_in || {};
-                    const vtxt = i.q.venue ? ('<b>' + (i.q.venue === 'KALSHI' ? 'KALSHI' : i.q.venue === 'GEMINI' ? 'GEMINI' : 'Polymarket') + '</b>'
-                        + (vp.why === 'line_differs_fair' && vp.edge && vp.lines ? ' · Poly ' + rungTxt(i, vp.lines.POLYMARKET) + ' ' + Number(ai.POLYMARKET).toFixed(1) + '¢ (' + fairGapTxt(vp.edge.POLYMARKET, vp.fair.POLYMARKET) + ') vs Kalshi ' + rungTxt(i, vp.lines.KALSHI) + ' ' + Number(ai.KALSHI).toFixed(1) + '¢ (' + fairGapTxt(vp.edge.KALSHI, vp.fair.KALSHI) + ')'
-                           : /^line_differs/.test(vp.why || '') && i.q.kalshi && i.q.kalshi.ok && i.q.poly === undefined ? ' · Kalshi ' + rungTxt(i, i.q.kalshi.rung_line) + ' ' + i.q.kalshi.price_c + '¢ (no Pinnacle fair to compare lines)'
-                           : ai.POLYMARKET != null && ai.KALSHI != null ? ' · all-in Poly ' + Number(ai.POLYMARKET).toFixed(2) + '¢ vs Kalshi ' + Number(ai.KALSHI).toFixed(2) + '¢'
+                    const vtxt = i.q.venue ? ('<b>' + (i.q.venue === 'KALSHI' ? qKName(i.q).toUpperCase() : i.q.venue === 'GEMINI' ? 'GEMINI' : 'Polymarket') + '</b>'
+                        + (vp.why === 'line_differs_fair' && vp.edge && vp.lines ? ' · Poly ' + rungTxt(i, vp.lines.POLYMARKET) + ' ' + Number(ai.POLYMARKET).toFixed(1) + '¢ (' + fairGapTxt(vp.edge.POLYMARKET, vp.fair.POLYMARKET) + ') vs ' + qKName(i.q) + ' ' + rungTxt(i, vp.lines.KALSHI) + ' ' + Number(ai.KALSHI).toFixed(1) + '¢ (' + fairGapTxt(vp.edge.KALSHI, vp.fair.KALSHI) + ')'
+                           : /^line_differs/.test(vp.why || '') && i.q.kalshi && i.q.kalshi.ok && i.q.poly === undefined ? ' · ' + qKName(i.q) + ' ' + rungTxt(i, i.q.kalshi.rung_line) + ' ' + i.q.kalshi.price_c + '¢ (no Pinnacle fair to compare lines)'
+                           : ai.POLYMARKET != null && ai.KALSHI != null ? ' · all-in Poly ' + Number(ai.POLYMARKET).toFixed(2) + '¢ vs ' + qKName(i.q) + ' ' + Number(ai.KALSHI).toFixed(2) + '¢'
                            : (i.q.kalshi && i.q.kalshi.ok === false && i.q.kalshi.reason ? ' · ' + esc(i.q.kalshi.reason) : (i.q.poly && i.q.poly.reason ? ' · Poly: ' + esc(i.q.poly.reason) : ''))) + ' · ') : '';
                     q = '<div class="q ok">' + vtxt + (i.q.rung_why === 'favorable' ? 'rung ' + rungTxt(i, i.q.rung_line) + ' (better than sheet) · ' : '')
                       + (i.q.thin ? 'sitting ' + i.q.price_c + '¢ · touch ' + i.q.touch_c + '¢ is thin (' + Math.round(i.q.thin.stack_q || i.q.thin.touch_q || 0) + ' over ' + Math.round(i.q.thin.below_q || 0) + ')' : 'touch ' + i.q.price_c + '¢') + (i.q.ask_c != null ? ' / ask ' + i.q.ask_c + '¢' : '') + ' · ' + n + ' for $' + (n * i.q.price_c / 100).toFixed(2) + pinQuoteTxt(i) + gemQuoteTxt(i) + '</div>';

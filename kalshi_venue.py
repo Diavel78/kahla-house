@@ -2015,3 +2015,233 @@ def ws_auth_headers() -> list | None:
     sig = _sign(pem, ts + "GET" + "/trade-api/ws/v2")
     return [f"KALSHI-ACCESS-KEY: {kid}", f"KALSHI-ACCESS-SIGNATURE: {sig}",
             f"KALSHI-ACCESS-TIMESTAMP: {ts}"]
+
+
+# ═════════════════ GEMINI IN KALSHI'S SLOT (Nov 8 2026) ═════════════════
+# Rob: "IT REPLACES KALSHI… SAME CHASE… keep all the same rules, change boxes."
+# The hand lane's Kalshi code (chase, leash, thin touch, line move, venue switch,
+# start take / chase, live chase, gone sweep) runs UNCHANGED on Gemini: every
+# venue call below routes by the CONTRACT'S OWN NAME — `GEMI-…` goes to Gemini,
+# a `KX…` ticker to Kalshi exactly as before — so a Kalshi bet already resting or
+# held keeps every Kalshi read, and nothing is ever read through the wrong venue.
+# `SECOND` (set by the app off `machine_flags hand_second_venue`) only decides
+# where NEW lane bets resolve (`lane_resolve`). Gemini shapes are translated into
+# Kalshi's: books bids-only per side, orders YES-canonical `yes_c`, positions
+# net (+YES / −NO), fees = taker 7¢·p(1−p), maker 0 during Gemini's promo.
+# Gemini has no amend: an amend is cancel → verify → create (the venue's own
+# documented replace order), the new id handed back like Kalshi's re-id.
+SECOND = "kalshi"
+_GEM_TIF = {"good_till_canceled": "good-til-cancel", "immediate_or_cancel": "immediate-or-cancel",
+            "fill_or_kill": "fill-or-kill"}
+
+
+def is_gem(ticker) -> bool:
+    return str(ticker or "").upper().startswith("GEMI-")
+
+
+def gem_fee() -> dict:
+    import gemini_venue as _gv
+    return {"fee_type": "gemini", "mult": 1.0,
+            "maker_ratio": (_gv.maker_c() / _gv.GEMINI_TAKER_C) if _gv.GEMINI_TAKER_C else 0.0}
+
+
+def lane_resolve(sport: str, away: str, home: str, start_iso, item: dict) -> dict:
+    """The hand lane's second-venue resolve: Gemini when SECOND says so (in
+    Kalshi's resolve shape), else Kalshi's own `resolve`. The sheet touch /
+    line tape keep calling `resolve` — the 🔥 reads real Kalshi."""
+    if SECOND != "gemini":
+        return resolve(sport, away, home, start_iso, item)
+    import gemini_venue as _gv
+    r = _gv.resolve(sport, away, home, start_iso, item)
+    if not r.get("ok"):
+        return {"ok": False, "why": f"Gemini: {r.get('why')}", "tried": []}
+    return {"ok": True, "ticker": r["symbol"], "buy_yes": bool(r["buy_yes"]), "line": r.get("line"),
+            "why": r.get("why"), "quote": r.get("quote"),
+            "book": {"yes_bid": r.get("yes_bid"), "yes_ask": r.get("yes_ask")},
+            "fee": gem_fee(), "series": "GEMINI", "event_ticker": r.get("event"),
+            "ladder": r.get("ladder"), "tried": []}
+
+
+def _gem_orderbook(ticker: str) -> dict:
+    import gemini_venue as _gv
+    ob = _gv.orderbook(ticker)
+    if not ob.get("ok"):
+        return {"ok": False, "yes": [], "no": [], "error": ob.get("error")}
+    yes = sorted(ob.get("bids") or [], key=lambda x: -x[0])
+    no = sorted(((round(100.0 - c, 2), q) for c, q in (ob.get("asks") or [])), key=lambda x: -x[0])
+    return {"ok": True, "yes": yes, "no": no, "error": None}
+
+
+def _gem_order_kshape(p: dict) -> dict:
+    """gemini_orders.parse_order → Kalshi's parse_order shape (YES-canonical)."""
+    px = p.get("price_c")
+    yes_c = None if px is None else (px if p.get("outcome") != "no" else round(100.0 - px, 2))
+    return {"order_id": p.get("id"), "ticker": p.get("symbol"), "status": "resting",
+            "yes_c": yes_c, "remaining": float(p.get("leaves") or 0.0), "filled": float(p.get("filled") or 0.0),
+            "initial": p.get("qty"), "side": "bid" if p.get("outcome") != "no" else "ask", "action": "buy",
+            "client_order_id": None}
+
+
+def _gem_resting() -> dict:
+    import gemini_orders as _go
+    by = _go.orders_by_id()
+    if by is None:
+        return {"ok": False, "by_id": {}, "error": "Gemini orders unreadable"}
+    return {"ok": True, "by_id": {oid: _gem_order_kshape(p) for oid, p in by.items()
+                                  if (p.get("leaves") or 0) > 0}, "error": None}
+
+
+def _gem_positions() -> dict | None:
+    import gemini_orders as _go
+    pm = _go.positions_map()
+    if pm is None:
+        return None
+    out: dict = {}
+    for (sym, oc), q in pm.items():
+        out[sym] = out.get(sym, 0.0) + (q if oc == "yes" else -q)
+    return out
+
+
+def _gem_create(ticker: str, buy_yes: bool, price_c, count: int, tif: str, post_only: bool,
+                client_order_id: str | None) -> dict:
+    import gemini_pm as _g
+    import gemini_orders as _go
+    our = max(1, min(99, int(round(float(price_c)))))
+    try:
+        raw = _g.place_order(ticker, "buy", "yes" if buy_yes else "no", int(count), our / 100.0,
+                             post_only=bool(post_only), tif=_GEM_TIF.get(tif, "good-til-cancel"),
+                             client_order_id=client_order_id)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:300], "status": 400, "venue": "GEMINI"}
+    p = _go.parse_order(raw if isinstance(raw, dict) else {})
+    fc = float(p.get("filled") or 0.0)
+    rc = p.get("leaves")
+    if rc is None:
+        rc = max(0.0, float(count) - fc) if tif == "good_till_canceled" else 0.0
+    res = {"ok": True, "status": 201, "data": raw, "order": raw, "order_id": p.get("id"),
+           "fill_count": fc, "remaining_count": float(rc), "venue": "GEMINI", "schema": "gemini"}
+    res["order_status"] = ("resting" if rc > 0 and fc == 0 else "partial" if rc > 0 and fc > 0
+                           else "filled" if fc > 0 else "none")
+    return res
+
+
+def _gem_cancel(order_id: str) -> dict:
+    import gemini_pm as _g
+    try:
+        return {"ok": True, "status": 200, "data": _g.cancel_order(order_id), "venue": "GEMINI"}
+    except Exception as e:
+        return {"ok": False, "status": 400, "error": f"{type(e).__name__}: {e}"[:300], "venue": "GEMINI"}
+
+
+def _gem_amend(order_id: str, ticker: str, buy_yes: bool, price_c, total_count: int) -> dict:
+    """No amend on Gemini: read the order (its fills), cancel it, verify it is
+    gone, create the unfilled remainder at the new price. The new order id
+    comes back where Kalshi's re-id does."""
+    import gemini_orders as _go
+    by = _go.orders_by_id()
+    if by is None:
+        return {"ok": False, "status": 503, "error": "Gemini orders unreadable"}
+    cur = by.get(str(order_id))
+    if cur is None:
+        return {"ok": False, "status": 404, "error": "order not resting on Gemini"}
+    filled = float(cur.get("filled") or 0.0)
+    gone, det = _go.cancel_verified(str(order_id), ticker)
+    if gone is not True:
+        return {"ok": False, "status": 409, "error": f"Gemini cancel unconfirmed ({det.get('error') or det.get('read_error') or 'still listed'})"}
+    want = int(round(float(total_count) - filled))
+    if want < 1:
+        return {"ok": True, "status": 200, "data": {"order": {"order_id": None}}, "note": "nothing unfilled"}
+    cr = _gem_create(ticker, buy_yes, price_c, want, "good_till_canceled", True, None)
+    if not cr.get("ok"):
+        return {"ok": False, "status": cr.get("status"), "error": f"replace create failed: {cr.get('error')}",
+                "cancelled": True}
+    return {"ok": True, "status": 200, "data": {"order": {"order_id": cr.get("order_id")}}, "replaced": True}
+
+
+def _gem_order_resting(order_id: str, ticker: str | None) -> dict:
+    import gemini_pm as _g
+    try:
+        rows = _g.active_orders(symbol=ticker, limit=100) or []
+    except Exception as e:
+        return {"ok": False, "resting": None, "error": f"{type(e).__name__}: {e}"[:200]}
+    import gemini_orders as _go
+    for r in rows:
+        if _go._oid(r) == str(order_id):
+            p = _go.parse_order(r)
+            px = p.get("price_c")
+            yes_c = None if px is None else (px if p.get("outcome") != "no" else round(100.0 - px, 2))
+            return {"ok": True, "resting": True, "order": {"order_id": p.get("id"), "ticker": p.get("symbol"),
+                                                            "status": "resting", "yes_price_dollars": None if yes_c is None else yes_c / 100.0,
+                                                            "remaining_count": p.get("leaves"), "fill_count": p.get("filled")}}
+    return {"ok": True, "resting": False}
+
+
+# ── route the lane's venue calls by contract name ──
+_K_orderbook, _K_create_order, _K_cancel_order = orderbook, create_order, cancel_order
+_K_amend_order, _K_order_resting, _K_resting_orders, _K_positions = amend_order, order_resting, resting_orders, positions
+_K_ensure_shard_funded = ensure_shard_funded
+
+
+def orderbook(ticker: str, depth: int = 12) -> dict:          # noqa: F811
+    return _gem_orderbook(ticker) if is_gem(ticker) else _K_orderbook(ticker, depth)
+
+
+def create_order(ticker: str, buy_yes: bool, price_c, count: int, tif: str = "good_till_canceled",   # noqa: F811
+                 post_only: bool = True, client_order_id: str | None = None,
+                 expiration_time=None, action: str = "buy") -> dict:
+    if is_gem(ticker):
+        return _gem_create(ticker, buy_yes, price_c, count, tif, post_only, client_order_id)
+    return _K_create_order(ticker, buy_yes, price_c, count, tif, post_only, client_order_id, expiration_time, action)
+
+
+def cancel_order(order_id: str, ticker: str | None = None) -> dict:      # noqa: F811
+    if is_gem(ticker) or (ticker is None and str(order_id).isdigit()):
+        return _gem_cancel(order_id)
+    return _K_cancel_order(order_id, ticker)
+
+
+def amend_order(order_id: str, ticker: str, buy_yes: bool, price_c, total_count: int) -> dict:   # noqa: F811
+    if is_gem(ticker):
+        return _gem_amend(order_id, ticker, buy_yes, price_c, total_count)
+    return _K_amend_order(order_id, ticker, buy_yes, price_c, total_count)
+
+
+def order_resting(order_id: str, ticker: str | None = None) -> dict:     # noqa: F811
+    if is_gem(ticker):
+        return _gem_order_resting(order_id, ticker)
+    return _K_order_resting(order_id, ticker)
+
+
+def _need_gem() -> bool:
+    return SECOND == "gemini" or bool(GEM_LIVE)
+
+
+GEM_LIVE: set = set()          # the app sets this: Gemini tickers on pending lane picks
+
+
+def resting_orders() -> dict:          # noqa: F811
+    """Kalshi's resting orders, plus Gemini's while Gemini is the second venue or
+    any lane bet still lives there. Either read failing = unreadable (never 'none')."""
+    k = _K_resting_orders()
+    if not _need_gem():
+        return k
+    gm = _gem_resting()
+    if not k.get("ok") or not gm.get("ok"):
+        return {"ok": False, "by_id": {}, "error": (k.get("error") or gm.get("error"))}
+    return {"ok": True, "by_id": {**k.get("by_id", {}), **gm.get("by_id", {})}, "error": None}
+
+
+def positions() -> dict | None:        # noqa: F811
+    k = _K_positions()
+    if not _need_gem():
+        return k
+    gp = _gem_positions()
+    if k is None or gp is None:
+        return None
+    return {**k, **gp}
+
+
+def ensure_shard_funded(ticker: str, need_c: float, wait_s: float = 8.0, round_c: float = 500.0) -> dict:   # noqa: F811
+    if is_gem(ticker):
+        return {"ok": True, "ticker": ticker, "skipped": "gemini has no shards"}
+    return _K_ensure_shard_funded(ticker, need_c, wait_s, round_c)

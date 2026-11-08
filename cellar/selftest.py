@@ -6407,6 +6407,88 @@ def test_gemini_v0_lane() -> None:
           and "Gemini bets: cancel only for now" in src)
 
 
+def test_gemini_in_kalshi_slot() -> None:
+    """GEMINI IN KALSHI'S SLOT (Nov 8 2026, Rob: "keep all the same rules,
+    change boxes"): every lane venue call routes by the contract's own name —
+    GEMI-… to Gemini, KX… to Kalshi untouched; the merged reads are unreadable
+    when either side is; Gemini's amend = cancel → verify → re-create the
+    unfilled remainder; maker fee 0; the touch walk still reads real Kalshi."""
+    import kalshi_venue as _kv
+    import gemini_orders as _go
+    import gemini_pm as _gp
+    import app as _app
+    print("\n[Gemini in Kalshi's slot]")
+    sv = {k: getattr(_kv, k) for k in ("_K_orderbook", "_K_create_order", "_K_cancel_order", "_K_amend_order",
+                                       "_K_resting_orders", "_K_positions", "SECOND", "GEM_LIVE")}
+    svg = {k: getattr(_go, k) for k in ("orders_by_id", "positions_map", "cancel_verified")}
+    svp = {k: getattr(_gp, k) for k in ("place_order", "cancel_order")}
+    calls: list = []
+    try:
+        _kv._K_orderbook = lambda t, d=12: calls.append(("K_book", t)) or {"ok": True, "yes": [], "no": []}
+        _kv._K_create_order = lambda *a, **k: calls.append(("K_create", a[0])) or {"ok": True}
+        _kv._K_cancel_order = lambda oid, t=None: calls.append(("K_cancel", oid)) or {"ok": True}
+        _kv._K_resting_orders = lambda: {"ok": True, "by_id": {"k-1": {"order_id": "k-1", "ticker": "KXNFL-A"}}, "error": None}
+        _kv._K_positions = lambda: {"KXNFL-A": 5.0}
+        _gp.place_order = lambda sym, side, oc, q, px, post_only=True, tif="good-til-cancel", client_order_id=None: (
+            calls.append(("G_place", sym, oc, q, round(px, 2), post_only, tif)) or {"orderId": 555, "quantity": q})
+        _gp.cancel_order = lambda oid: calls.append(("G_cancel", int(oid))) or {"result": "ok"}
+        _go.orders_by_id = lambda: {"444": {"id": "444", "symbol": "GEMI-X-T-O44", "outcome": "no", "price_c": 47.0,
+                                            "qty": 10.0, "filled": 3.0, "leaves": 7.0}}
+        _go.positions_map = lambda: {("GEMI-X-T-O44", "no"): 3.0}
+        _go.cancel_verified = lambda oid, sym=None: (calls.append(("G_cancel_v", oid)) or True, {})
+        _kv.orderbook("KXNFL-A")
+        _kv.cancel_order("k-1", "KXNFL-A")
+        check("a Kalshi ticker still routes to Kalshi (book, cancel)",
+              ("K_book", "KXNFL-A") in calls and ("K_cancel", "k-1") in calls)
+        _kv.SECOND = "gemini"
+        ro = _kv.resting_orders()
+        g = ro["by_id"].get("444") or {}
+        check("merged resting orders: Kalshi's + Gemini's in Kalshi's shape (a NO at 47 = yes_c 53)",
+              ro["ok"] and "k-1" in ro["by_id"] and g.get("yes_c") == 53.0 and g.get("remaining") == 7.0
+              and g.get("filled") == 3.0 and g.get("ticker") == "GEMI-X-T-O44")
+        pos = _kv.positions()
+        check("merged positions: a Gemini NO lot reads −3 (Kalshi's net sign)",
+              pos.get("KXNFL-A") == 5.0 and pos.get("GEMI-X-T-O44") == -3.0
+              and _kv.held_for(pos, "GEMI-X-T-O44", False) == 3.0)
+        _go.orders_by_id = lambda: None
+        _go.positions_map = lambda: None
+        check("…and Gemini unreadable makes the whole read unreadable (never 'nothing there')",
+              _kv.resting_orders()["ok"] is False and _kv.positions() is None)
+        _go.orders_by_id = lambda: {"444": {"id": "444", "symbol": "GEMI-X-T-O44", "outcome": "no", "price_c": 47.0,
+                                            "qty": 10.0, "filled": 3.0, "leaves": 7.0}}
+        _go.positions_map = lambda: {("GEMI-X-T-O44", "no"): 3.0}
+        calls.clear()
+        am = _kv.amend_order("444", "GEMI-X-T-O44", False, 49, 10)
+        check("Gemini amend = verified cancel, then create the 7 unfilled at the new price, new id back",
+              am.get("ok") and calls[0] == ("G_cancel_v", "444")
+              and calls[1] == ("G_place", "GEMI-X-T-O44", "no", 7, 0.49, True, "good-til-cancel")
+              and (am.get("data") or {}).get("order", {}).get("order_id") == "555")
+        cr = _kv.create_order("GEMI-X-T-O44", True, 52, 10)
+        check("a create on a GEMI contract goes to Gemini (post-only GTC, YES at 52¢), never Kalshi",
+              cr.get("ok") and cr.get("order_id") == "555" and not any(c[0] == "K_create" for c in calls))
+        check("no shards on Gemini; Kalshi's shard check is skipped",
+              _kv.ensure_shard_funded("GEMI-X-T-O44", 500).get("skipped"))
+        check("maker fee 0 during Gemini's promo; taker 7¢·p(1−p) (the Kalshi fee math, Gemini's terms)",
+              _kv.fee_per_contract_c("KALSHI", "rest", 50, _kv.gem_fee()) == 0.0
+              and abs(_kv.fee_per_contract_c("KALSHI", "take", 50, _kv.gem_fee()) - 1.75) < 1e-9)
+    finally:
+        for k, v in sv.items():
+            setattr(_kv, k, v)
+        for k, v in svg.items():
+            setattr(_go, k, v)
+        for k, v in svp.items():
+            setattr(_gp, k, v)
+    src = open(_app.__file__).read()
+    touch = src[src.index("def _sheet_touch_kalshi("):src.index("def _sheet_touch_kalshi(") + 1500]
+    check("the touch walk (the 🔥's tape) still reads REAL Kalshi — only the lane uses lane_resolve",
+          "_kv.resolve(" in touch and "lane_resolve" not in touch
+          and src.count("_kv.lane_resolve(") == 4)
+    import cellar.kalshifeed as _kf
+    ksrc = open(_kf.__file__).read()
+    check("the Kalshi socket never subscribes a GEMI- contract",
+          'not str(x).upper().startswith("GEMI-")' in ksrc)
+
+
 def test_gemini_tape() -> None:
     """THE GEMINI TAPE (Nov 8 2026, Rob: "why in the hell are we using
     Kalshi?"): the touch walk records Gemini's book beside each sheet game,
@@ -8231,7 +8313,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_gemini_tape, test_gemini_venue_read, test_gemini_probe, test_gemini_v0_lane, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_gemini_tape, test_gemini_venue_read, test_gemini_probe, test_gemini_v0_lane, test_gemini_in_kalshi_slot, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

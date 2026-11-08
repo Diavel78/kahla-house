@@ -143,7 +143,9 @@ class KalshiFeed:
     def _want() -> set:
         try:
             import app as _app
-            return set(x for x in (_app.KALSHI_WATCH_TICKERS or set()) if x)
+            # a Gemini contract in Kalshi's slot (`GEMI-…`, Nov 8 2026) is never sent to Kalshi —
+            # Gemini's own socket (app._gem_ws_run) watches it
+            return set(x for x in (_app.KALSHI_WATCH_TICKERS or set()) if x and not str(x).upper().startswith("GEMI-"))
         except Exception:
             return set()
 
