@@ -237,7 +237,7 @@ def positions_map() -> Optional[dict]:
         sym = r.get("symbol") or r.get("instrumentSymbol")
         q = None
         # `totalQuantity` + `outcome` = what the Sep 2026 hedge daemon read off live positions
-        for k in ("totalQuantity", "quantity", "netQuantity", "size", "position"):
+        for k in ("positionQuantity", "totalQuantity", "position", "quantity", "netQuantity", "size"):
             q = _f(r.get(k)) if q is None else q
         if sym and q is not None:
             parsed += 1
@@ -318,32 +318,28 @@ def _ts_iso(r: dict) -> Optional[str]:
 def parse_settled(r: dict) -> Optional[dict]:
     """One settled-position row → Kalshi's parsed settlement shape {ticker,
     result yes|no, yes_q, no_q, yes_cost, no_cost, revenue_usd, fee_usd,
-    settled_time}; None when the result can't be read."""
-    sym = r.get("symbol") or r.get("instrumentSymbol")
+    settled_time}; None when the result can't be read. MEASURED Nov 8 2026
+    (the probe's settled_sample): `instrumentSymbol`, `outcome` (our side),
+    `positionQuantity`, `costBasis` (dollars), `payout` (dollars),
+    `resolutionSide` (the side the market resolved to), `settledAt`."""
+    sym = r.get("instrumentSymbol") or r.get("symbol")
     oc = str(r.get("outcome") or "").lower()
     q = None
-    for k in ("totalQuantity", "quantity", "settledQuantity", "size"):
+    for k in ("positionQuantity", "position", "totalQuantity", "quantity"):
         q = _f(r.get(k)) if q is None else q
-    if not sym or oc not in ("yes", "no") or q is None:
+    res = str(r.get("resolutionSide") or (r.get("contractMetadata") or {}).get("resolutionSide") or "").lower()
+    if not sym or oc not in ("yes", "no") or q is None or res not in ("yes", "no"):
         return None
     q = abs(q)
-    avg = _f(r.get("avgPrice"))
-    sp = None
-    for k in ("settlementPrice", "settlePrice", "finalPrice", "payoutPrice", "resolutionPrice"):
-        sp = _f(r.get(k)) if sp is None else sp
-    res = str(r.get("result") or r.get("resolution") or r.get("winningOutcome") or "").lower()
-    if res in ("yes", "no"):
-        won = (res == oc)
-    elif sp is not None and (sp >= 0.99 or sp <= 0.01):
-        won = sp >= 0.99            # the settle price in OUR outcome's terms (to verify on the probe)
-    else:
-        return None
-    market = oc if won else ("no" if oc == "yes" else "yes")
-    cost = round(q * avg, 2) if avg is not None else None
-    return {"ticker": sym, "event_ticker": None, "result": market,
+    cost = _f(r.get("costBasis"))
+    pay = _f(r.get("payout"))
+    won = res == oc
+    if pay is None:
+        pay = round(q, 2) if won else 0.0
+    return {"ticker": sym, "event_ticker": (r.get("contractMetadata") or {}).get("eventTicker"), "result": res,
             "yes_q": q if oc == "yes" else 0.0, "no_q": q if oc == "no" else 0.0,
             "yes_cost": cost if oc == "yes" else 0.0, "no_cost": cost if oc == "no" else 0.0,
-            "revenue_usd": round(q, 2) if won else 0.0, "fee_usd": 0.0, "settled_time": _ts_iso(r)}
+            "revenue_usd": round(pay, 2), "fee_usd": 0.0, "settled_time": _ts_iso(r)}
 
 
 def settlements_map(limit: int = 200) -> Optional[dict]:
@@ -361,23 +357,33 @@ def settlements_map(limit: int = 200) -> Optional[dict]:
 
 
 def fills_kshape(symbol: str, limit: int = 100) -> Optional[list]:
-    """/v1/mytrades for one contract → Kalshi fill rows {ticker, outcome_side
+    """Our SALES on one contract, in Kalshi's fill shape {ticker, outcome_side
     (the exposure the fill ADDED), count, yes/no_price_dollars, fee_cost,
-    created_time}. None when the read fails."""
+    created_time}. Off ORDER HISTORY (MEASURED Nov 8 2026: `side` buy|sell,
+    `outcome`, `filledQuantity`, `avgExecutionPrice` in the outcome's own
+    terms, `updatedAt`) — /v1/mytrades carries no outcome, so a NO sale can't
+    be told from a buy there. None when the read fails."""
     try:
-        rows = _g._private("POST", "/v1/mytrades", {"symbol": symbol, "limit_trades": int(limit)}) or []
+        rows = _g.order_history(limit=int(limit), symbol=symbol) or []
     except Exception:
-        return None
+        try:                                   # the filter may not be accepted: read the account's history, filter here
+            rows = _g.order_history(limit=200) or []
+        except Exception:
+            return None
     out = []
-    for t in rows if isinstance(rows, list) else []:
-        q, px = _f(t.get("amount") if t.get("amount") is not None else t.get("quantity")), _f(t.get("price"))
-        if not q or px is None:
+    for o in rows if isinstance(rows, list) else []:
+        if (o.get("symbol") or o.get("instrumentSymbol")) != symbol:
             continue
-        side = str(t.get("type") or t.get("side") or "").lower()
-        oc = str(t.get("outcome") or "yes").lower()
+        q, px = _f(o.get("filledQuantity")), _f(o.get("avgExecutionPrice"))
+        if not q or q <= 0 or px is None:
+            continue
+        side = str(o.get("side") or "").lower()
+        oc = str(o.get("outcome") or "").lower()
+        if oc not in ("yes", "no") or side not in ("buy", "sell"):
+            continue
         added = oc if side == "buy" else ("no" if oc == "yes" else "yes")
         price_yes = px if oc == "yes" else round(1.0 - px, 4)
         out.append({"ticker": symbol, "outcome_side": added, "count": q,
                     "yes_price_dollars": price_yes, "no_price_dollars": round(1.0 - price_yes, 4),
-                    "fee_cost": _f(t.get("fee_amount")) or 0.0, "created_time": _ts_iso(t)})
+                    "fee_cost": 0.0, "created_time": o.get("updatedAt") or o.get("createdAt")})
     return out

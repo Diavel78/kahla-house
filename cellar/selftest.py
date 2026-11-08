@@ -6498,26 +6498,35 @@ def test_gemini_settle_sold() -> None:
     import kalshi_venue as _kv
     import app as _app
     print("\n[Gemini settlement + sold]")
-    ps = _go.parse_settled({"symbol": "GEMI-X-T-O44", "outcome": "no", "totalQuantity": "10",
-                            "avgPrice": "0.48", "settlementPrice": "1.00"})
+    # the REAL row shapes (the Nov 8 2026 probe)
+    ps = _go.parse_settled({"instrumentSymbol": "GEMI-X-T-O44", "outcome": "no", "positionQuantity": "10",
+                            "position": 10, "costBasis": "4.80", "payout": "10.00", "resolutionSide": "no",
+                            "settledAt": "2026-11-09T03:00:00Z"})
     v = _kv.settle_verdict(ps, False)
-    check("a settled NO lot at 1.00 = the market resolved NO, our NO won 10 for $4.80 → +$5.20",
+    check("a settled NO lot the market resolved NO: won 10 for $4.80 → +$5.20 (instrumentSymbol/positionQuantity/costBasis/payout/resolutionSide)",
           ps and ps["result"] == "no" and v and v["status"] == "won" and v["pnl_usd"] == 5.2)
-    ps2 = _go.parse_settled({"symbol": "GEMI-X-S-CHI6", "outcome": "yes", "totalQuantity": "10",
-                             "avgPrice": "0.48", "settlementPrice": "0"})
-    check("…a YES lot at 0 lost −$4.80; an unreadable row is None, never a grade",
-          _kv.settle_verdict(ps2, True)["pnl_usd"] == -4.8 and _go.parse_settled({"symbol": "x"}) is None)
-    sv = _gp._private
+    alabama = {"instrumentSymbol": "GEMI-NCAAF-2609191930-FSU-ALA-M-ALA", "outcome": "yes", "positionQuantity": "44.44",
+               "costBasis": "19.998", "payout": "44.44", "netProfit": "24.44", "resolutionSide": "yes"}
+    va = _kv.settle_verdict(_go.parse_settled(alabama), True)
+    check("…the probe's own Alabama row grades won +$24.44, the venue's netProfit",
+          va and va["status"] == "won" and va["pnl_usd"] == 24.44)
+    ps2 = _go.parse_settled({"instrumentSymbol": "GEMI-X-S-CHI6", "outcome": "yes", "positionQuantity": "10",
+                             "costBasis": "4.80", "payout": "0", "resolutionSide": "no"})
+    check("…a YES lot the market resolved NO lost −$4.80; an unreadable row is None, never a grade",
+          _kv.settle_verdict(ps2, True)["pnl_usd"] == -4.8 and _go.parse_settled({"instrumentSymbol": "x"}) is None)
+    sv = _gp.order_history
     try:
-        _gp._private = lambda m, path, params=None, **k: [
-            {"price": "0.61", "amount": "10", "type": "Sell", "outcome": "no", "timestampms": 1794166000000,
-             "fee_amount": "0.0"}]
+        _gp.order_history = lambda limit=100, **p: [
+            {"symbol": "GEMI-X-T-O44", "side": "sell", "outcome": "no", "filledQuantity": "10",
+             "avgExecutionPrice": "0.61", "status": "filled", "updatedAt": "2026-11-08T20:00:00Z"},
+            {"symbol": "GEMI-X-T-O44", "side": "buy", "outcome": "no", "filledQuantity": "10",
+             "avgExecutionPrice": "0.48", "status": "filled", "updatedAt": "2026-11-08T19:00:00Z"}]
         f = _go.fills_kshape("GEMI-X-T-O44")
         plan = _app._hand_kalshi_sold_plan(f, "GEMI-X-T-O44", False, None, 48.0, 10)
-        check("a Gemini app SALE of our NO lot reads as a sale covering it (10 at 61¢ → +$1.30)",
+        check("a Gemini app SALE of our NO lot (order history: sell / no / 10 @ 0.61) closes it +$1.30; the buy is not a sale",
               plan and plan["qty"] == 10 and plan["pnl_usd"] == 1.3)
     finally:
-        _gp._private = sv
+        _gp.order_history = sv
     sv2 = (_kv._K_settlements, _kv.GEM_SETTLE, _kv.SECOND, _go.settlements_map)
     try:
         _kv._K_settlements = lambda *a, **k: {"KX-A": {"ticker": "KX-A"}}
