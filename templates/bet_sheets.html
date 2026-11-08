@@ -2397,7 +2397,7 @@
     }
     function myBetGame(b) {
         return _games.find(g => (b.market_id && g.market_id === b.market_id)
-            || (g.event_name === b.event_name && String(g.event_start) === String(b.event_start))) || null;
+            || (g.event_name === b.event_name && Date.parse(g.event_start) === Date.parse(b.event_start))) || null;
     }
     function myPicksText(bets, title) {
         const out = [], rec = { win: 0, loss: 0, push: 0 };
@@ -2406,7 +2406,9 @@
         out.push((title || 'My picks') + ' · ' + day);
         const games = [], byKey = {};
         bets.forEach(b => {
-            const k = (b.sport || '') + '|' + (b.event_name || '') + '|' + (b.event_start || '');
+            // the start as a TIME, never its text: the box's cancels write '+00:00', the picks 'Z'
+            // (Nov 8 2026, the Bengals over printed as a second Falcons game at the bottom)
+            const k = (b.sport || '') + '|' + (b.event_name || '') + '|' + (Date.parse(b.event_start) || b.event_start || '');
             if (!byKey[k]) { byKey[k] = []; games.push(k); }
             byKey[k].push(b);
         });
@@ -2464,7 +2466,7 @@
             .filter(b => b.event_start && azDay(b.event_start) === today)
             .filter(b => myBetLive(b) && ok1(b))
             .sort((x, y) => String(x.sport || '').localeCompare(String(y.sport || ''))
-                         || String(x.event_start).localeCompare(String(y.event_start))
+                         || ((Date.parse(x.event_start) || 0) - (Date.parse(y.event_start) || 0))
                          || String(x.event_name || '').localeCompare(String(y.event_name || ''))) };
     }
     async function copyText(txt) {

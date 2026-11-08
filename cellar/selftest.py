@@ -3955,6 +3955,10 @@ def test_bet_sheet_live_section() -> None:
           "onclick=\"copySettled()\"" in html and "todaysBets(true)" in _cp
           and "String(b.sport || '').toUpperCase() === sp" in _cp
           and "['won', 'lost', 'push', 'sold'].indexOf(b.status) >= 0" in _cp and "Record: " in _cp)
+    check("the copies group and sort a game by its start TIME, not its text (a '+00:00' cancel and a 'Z' pick are one game)",
+          "(Date.parse(b.event_start) || b.event_start || '')" in _cp
+          and "((Date.parse(x.event_start) || 0) - (Date.parse(y.event_start) || 0))" in _cp
+          and "Date.parse(g.event_start) === Date.parse(b.event_start)" in html)
     check("…and a bet on a FINAL game counts settled before the venue pays it (graded off the score)",
           "gradeOffFinal(b, finalFor(b))" in _cp and "g.grade.final" in _cp)
     check("the Live box and the Live games tab sort by time left in the game, nearest the end first",
