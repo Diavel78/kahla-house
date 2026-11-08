@@ -217,17 +217,23 @@ def positions_map() -> Optional[dict]:
     except Exception:
         return None
     out: dict = {}
+    parsed = 0
     for r in rows:
         sym = r.get("symbol") or r.get("instrumentSymbol")
         q = None
-        for k in ("quantity", "totalQuantity", "netQuantity", "size", "position"):
+        # `totalQuantity` + `outcome` = what the Sep 2026 hedge daemon read off live positions
+        for k in ("totalQuantity", "quantity", "netQuantity", "size", "position"):
             q = _f(r.get(k)) if q is None else q
+        if sym and q is not None:
+            parsed += 1
         if not sym or q is None or q == 0:
             continue
         oc = str(r.get("outcome") or r.get("eventOutcome") or "").lower()
         if not oc:
             oc = "no" if q < 0 else "yes"
         out[(sym, oc)] = out.get((sym, oc), 0.0) + abs(q)
+    if rows and not parsed:
+        return None        # rows we cannot read are UNREADABLE — never "nothing held" (a filled lot would read cancelled)
     return out
 
 
