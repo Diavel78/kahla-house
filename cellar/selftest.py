@@ -6776,6 +6776,9 @@ def test_gemini_ws_book() -> None:
         src = inspect.getsource(_app._kalshi_hand_book)
         check("the lane's book read asks the Gemini socket before REST",
               src.index("_gem_ws_book(ticker)") < src.index("_kv.orderbook(ticker)") and "_gem_depth_seed" in src)
+        rl = inspect.getsource(_app._gem_relink)
+        check("the socket thread never walks Gemini's catalog (relink reads the warm cache)",
+              "events_all(" not in rl and "sports_events(" not in rl and "warm(" in rl)
         check("the socket subscribes @depth beside @bookTicker",
               '("@bookTicker", "@depth")' in inspect.getsource(_app._gem_ws_run))
     finally:

@@ -30074,14 +30074,25 @@ def _gem_link_for_slug(slug: str, index: dict):
 def _gem_relink() -> None:
     """Map every over bet in play to its Gemini twin (index refreshed ≤10 min)."""
     global SNIPE_GEM_META, SNIPE_GEM_LINK
-    import gemini_pm as _gpm
-    if _time.time() - _GEM_STATE["index_at"] > 600:
-        try:
-            _GEM_STATE["index"] = _gem_total_index(_gpm.events_all("sports", "active"))
-            _GEM_STATE["err"] = None
-        except Exception as ex:
-            _GEM_STATE["err"] = str(ex)[:160]
-        _GEM_STATE["index_at"] = _time.time()
+    # NEVER A CATALOG WALK ON THE SOCKET THREAD (Nov 8 2026): this used to call
+    # `events_all` here every 10 min — ~20s with the Gemini book socket frozen
+    # (the bet path's books went stale) for a shadow that is switched off. Only
+    # link when the shadow watches something, off the catalog `gemini_venue`
+    # keeps warm in memory (rebuilt only when that list is replaced).
+    if not SNIPE_SHADOW:
+        SNIPE_GEM_LINK, SNIPE_GEM_META = {}, {}
+        return
+    try:
+        import gemini_venue as _gvl
+        _gvl.warm(600.0)
+        with _gvl._EV_LOCK:
+            evs = _gvl._EV_CACHE.get("evs")
+        if evs is not None and _GEM_STATE.get("index_src") is not evs:
+            _GEM_STATE["index"] = _gem_total_index(evs)
+            _GEM_STATE["index_src"] = evs
+            _GEM_STATE["index_at"] = _time.time()
+    except Exception as ex:
+        _GEM_STATE["err"] = "relink: " + str(ex)[:150]
     link, meta = {}, {}
     for k, m in list(SNIPE_SHADOW.items()):
         if not k.startswith("p:"):
@@ -32387,7 +32398,7 @@ def _gem_touch_rows(sport: str, r: dict, items: list, picks: dict, cache: dict, 
     if _time.time() - _GEM_TOUCH["at"] > 60.0:
         _GEM_TOUCH["at"] = _time.time()
         import gemini_venue as _gv
-        evs, err = _gv.sports_events()
+        evs, err = _gv.sports_events(ttl_s=60.0, stale_ok_s=1800.0)   # warm cache; the walk runs in the background
         if evs:
             _GEM_TOUCH["idx"] = _gem_game_index(evs)
             _GEM_TOUCH["events"] = len(evs)
