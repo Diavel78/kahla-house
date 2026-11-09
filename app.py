@@ -32414,6 +32414,14 @@ def _gem_touch_rows(sport: str, r: dict, items: list, picks: dict, cache: dict, 
     g, away, home = _gem_find_game(_GEM_TOUCH["idx"], it0.get("away"), it0.get("home"),
                                    it0.get("event_start") or r.get("event_start"))
     if not g:
+        # NOT POSTED ≠ NO BID (Nov 9 2026, Rob: "Sometimes the - means no bids… some
+        # times it means the game isn't listed yet… N/A for Gemini if the game hasn't
+        # been posted yet (or the line)"). Only with a loaded catalog: an empty index
+        # says nothing about the game.
+        if _GEM_TOUCH.get("idx"):
+            for p in (picks or {}).values():
+                if isinstance(p, dict) and p.get("side"):
+                    p["gemini"] = {"bid": None, "ask": None, "na": True, "why": "game not on Gemini"}
         return []
     _GEM_TOUCH["matched"] += 1
     # THE CARD'S SECOND VENUE IS GEMINI (Nov 8 2026, Rob: "everything still says Kalshi
@@ -32432,7 +32440,9 @@ def _gem_touch_rows(sport: str, r: dict, items: list, picks: dict, cache: dict, 
                 p["gemini"] = {"bid": q.get("bid"), "ask": q.get("ask"), "line": rr.get("line"),
                                "symbol": rr.get("symbol")}
             else:
-                p["gemini"] = {"bid": None, "ask": None, "why": str(rr.get("why") or "")[:60]}
+                why = str(rr.get("why") or "")
+                p["gemini"] = {"bid": None, "ask": None, "why": why[:60],
+                               "na": why.startswith("no Gemini") or why.startswith("market type")}
     except Exception as e:
         _GEM_TOUCH["last_error"] = f"card quote: {e}"[:120]
     out = []

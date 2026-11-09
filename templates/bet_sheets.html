@@ -1360,6 +1360,7 @@
         const fair = vq.fair != null ? Number(vq.fair) : null;
         const one = (name, q) => {
             if (!q) return '';
+            if (q.na) return '<span class="vq-no" title="' + esc(q.why || 'not posted') + '">' + name + ' N/A</span>';   // not posted (game or line) — Nov 9 2026
             if (q.bid == null) return '<span class="vq-no">' + name + ' —</span>';
             const t = name + ' ' + c(q.bid) + '¢' + rung(q.line) + (q.chalk ? ' chalk' : '');
             // a bid a cent or more under fair at the same line reads green
@@ -2662,7 +2663,7 @@
     document.addEventListener('keydown', e => { if (e.key === 'Escape' && _fullGi !== null) closeFull(); });
     function fullMirror(q, mt) {
         if (!q) return null;
-        return { bid: q.ask != null ? 100 - Number(q.ask) : null,
+        return { bid: q.ask != null ? 100 - Number(q.ask) : null, na: q.na,
                  line: (mt === 'spread' && q.line != null) ? -Number(q.line) : q.line };
     }
     function fullRows(g, key) {
@@ -2697,6 +2698,7 @@
         const c = x => Math.round(Number(x) * 10) / 10;
         const one = (name, q) => {
             if (!q) return '';
+            if (q.na) return '<span class="no">' + name + ' N/A</span>';
             if (q.bid == null) return '<span class="no">' + name + ' —</span>';
             const off = q.line != null && mt !== 'ml' && Math.abs(Number(q.line) - Number(r.line)) >= 0.01;
             const t = name + ' ' + c(q.bid) + '¢' + (off ? ' @ ' + (mt === 'total' ? Number(q.line) : sgn(q.line, 1)) : '');
