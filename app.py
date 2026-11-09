@@ -22459,6 +22459,14 @@ def _bet_sheet_resolve_kalshi(item: dict, poly_seat_c=None) -> dict:
     if seat is None:
         seat = s_bid
     seat = round(_grid_dn(float(seat), _KALSHI_TICK_C), 2)
+    _cap = _hand_chalk_cap_c(str(item.get("market_type") or ""))
+    if seat >= _cap - 1e-9:
+        # CHALK IS PER BOOK (Nov 9 2026, Rob: "one book's chalk, so we won't bet it on
+        # the book that's not chalk — that makes no sense"): each venue is judged on
+        # the price IT would rest at; this one is chalk, the other may not be.
+        _nm = "Gemini" if str(ticker).startswith("GEMI-") else "Kalshi"
+        return {"ok": False, "reason": f"{_nm} {seat:g}¢ at {rs.get('line')} is chalk — not betting it there",
+                "ticker": ticker, "rung_line": rs.get("line"), "seat_c": seat}
     return {"ok": True, "venue": "KALSHI", "ticker": ticker, "buy_yes": buy_yes,
             "rung_line": rs.get("line"), "rung_why": rs.get("why"),
             "price_c": seat, "touch_c": s_bid, "ask_c": s_ask,
@@ -22551,6 +22559,9 @@ def _bet_sheet_resolve_gemini(item: dict, poly_seat_c=None) -> dict:
         if seat is None:
             seat = s_bid
         seat = round(_grid_dn(float(seat), _gv.TICK_C), 2)
+        if seat >= _hand_chalk_cap_c(str(item.get("market_type") or "")) - 1e-9:
+            return {"ok": False, "reason": f"Gemini {seat:g}¢ at {rs.get('line')} is chalk — not betting it there",
+                    "symbol": sym, "rung_line": rs.get("line"), "seat_c": seat}
     return {"ok": True, "venue": "GEMINI", "symbol": sym, "buy_yes": buy_yes,
             "rung_line": rs.get("line"), "rung_why": rs.get("why"),
             "price_c": seat, "touch_c": s_bid, "ask_c": s_ask, "opened": opened,
