@@ -81,6 +81,8 @@ _EV_LOCK = threading.Lock()
 
 
 def _fetch_events() -> tuple[list, Optional[str]]:
+    """THE FULL CATALOG WALK — discovery (new games, changed mappings). Since
+    the targeted refresh below it runs at most every `FULL_EVERY_S` on the box."""
     try:
         evs = _g.events_all("sports", "active")
     except Exception as e:
@@ -88,19 +90,137 @@ def _fetch_events() -> tuple[list, Optional[str]]:
             _EV_CACHE["err"] = f"{type(e).__name__}: {e}"[:200]
             stale = _EV_CACHE["evs"]
         return (stale or []), _EV_CACHE["err"]
+    now = time.time()
     with _EV_LOCK:
-        _EV_CACHE.update(at=time.time(), evs=evs, err=None, fetch_s=round(time.time() - _EV_CACHE.get("t0", time.time()), 2))
+        _EV_CACHE.update(at=now, full_at=now, evs=evs, err=None,
+                         fetch_s=round(now - _EV_CACHE.get("t0", now), 2))
+        _EV_STATS["full"] += 1
+        _EV_STATS["full_s"] = _EV_CACHE["fetch_s"]
     return evs, None
 
 
+# ── THE TARGETED REFRESH (Nov 8 2026, Rob: "look up the fucking game you actually
+# want to look up") ──────────────────────────────────────────────────────────
+# Measured before building (/api/gemini/coverage?shape=1): GET
+# /v1/prediction-markets/events/{ticker} answers in ~0.5s with the same contracts
+# and the same bid/ask as the catalog's copy of that event (BOS@MIL spread, 33 of
+# 33, pre-game); an unknown ticker answers 404; the catalog walk is ~4s from the
+# site and 14-26s on the box. So between full walks the box re-reads ONLY the
+# event tickers somebody is using (a resolve, a lane bet, the touch walk's near
+# games — `mark_hot`), one event at a time, and swaps each into the cached list.
+# A failed read (404 / 500 / 503 / timeout) keeps the cached copy; the next full
+# walk is what drops a game Gemini removed.
+FULL_EVERY_S = 300.0       # discovery: the whole catalog at most this often (the touch tape's near tier is 3 min)
+HOT_TTL_S = 1800.0         # an event ticker stays hot this long after its last use
+HOT_MAX = 40               # event reads per targeted pass
+_HOT: dict = {}            # event ticker → last use (epoch)
+_EV_STATS = {"full": 0, "targeted": 0, "event_ok": 0, "event_err": 0, "last_err": None, "last_pass": None}
+
+
+def event_ticker_of(symbol) -> Optional[str]:
+    """Pure. Contract → its event: GEMI-NBA-2611090100-BOS-MIL-S-BOS12 →
+    NBA-2611090100-BOS-MIL-S."""
+    s_ = str(symbol or "")
+    if s_.upper().startswith("GEMI-"):
+        s_ = s_[5:]
+    parts = s_.split("-")
+    return "-".join(parts[:-1]) if len(parts) >= 6 else None
+
+
+def mark_hot(tickers) -> None:
+    now = time.time()
+    with _EV_LOCK:
+        for t in tickers or ():
+            if t:
+                _HOT[str(t)] = now
+
+
+def hot_tickers(now: Optional[float] = None) -> list:
+    """Pure-ish. The hot event tickers, most recently used first, dead ones dropped."""
+    now = time.time() if now is None else now
+    with _EV_LOCK:
+        for t in [t for t, at in _HOT.items() if now - at > HOT_TTL_S]:
+            _HOT.pop(t, None)
+        return [t for t, _ in sorted(_HOT.items(), key=lambda kv: -kv[1])][:HOT_MAX]
+
+
+def merge_events(evs: list, fresh: dict) -> list:
+    """Pure. A NEW list with each event whose ticker is in `fresh` replaced by
+    the fresh copy (the old list is never mutated — the index memo keys on it).
+    A fresh event the list doesn't hold is appended (listed since the walk)."""
+    out, seen = [], set()
+    for e in evs or []:
+        t = (e or {}).get("ticker")
+        if t in fresh:
+            out.append(fresh[t])
+            seen.add(t)
+        else:
+            out.append(e)
+    out.extend(v for t, v in fresh.items() if t not in seen)
+    return out
+
+
+def _valid_event(ev, ticker) -> bool:
+    """Pure. A single-event answer we trust enough to swap in: the right ticker,
+    a contracts list, every contract carrying its symbol."""
+    if not isinstance(ev, dict) or ev.get("ticker") != ticker:
+        return False
+    cs = ev.get("contracts")
+    return isinstance(cs, list) and all(isinstance(c, dict) and c.get("instrumentSymbol") for c in cs)
+
+
+def _refresh_hot() -> int:
+    """Re-read each hot event ticker on its own and swap it into the cache.
+    Returns how many were refreshed. Never clears a cached event."""
+    tickers = hot_tickers()
+    t0 = time.time()
+    fresh: dict = {}
+    for t in tickers:
+        try:
+            ev = _g.event(t)
+            if isinstance(ev, dict) and isinstance(ev.get("data"), dict) and "ticker" not in ev:
+                ev = ev["data"]
+            if _valid_event(ev, t):
+                fresh[t] = ev
+                _EV_STATS["event_ok"] += 1
+            else:
+                _EV_STATS["event_err"] += 1
+                _EV_STATS["last_err"] = f"{t}: unexpected shape"
+        except Exception as e:                     # 404 / 500 / 503 / timeout → keep the cached copy
+            _EV_STATS["event_err"] += 1
+            _EV_STATS["last_err"] = f"{t}: {type(e).__name__}: {e}"[:200]
+    with _EV_LOCK:
+        if fresh and _EV_CACHE["evs"] is not None:
+            _EV_CACHE["evs"] = merge_events(_EV_CACHE["evs"], fresh)
+        _EV_CACHE["at"] = time.time()
+        _EV_STATS["targeted"] += 1
+        _EV_STATS["last_pass"] = {"events": len(tickers), "ok": len(fresh), "ms": int((time.time() - t0) * 1000)}
+    return len(fresh)
+
+
 def _bg_refresh() -> None:
+    """The background refresher: the full walk when discovery is due (or there
+    is nothing cached), else only the hot events."""
     try:
         with _EV_LOCK:
             _EV_CACHE["t0"] = time.time()
-        _fetch_events()
+            full_due = (_EV_CACHE["evs"] is None
+                        or time.time() - float(_EV_CACHE.get("full_at") or 0.0) >= FULL_EVERY_S)
+        if full_due:
+            _fetch_events()
+        else:
+            _refresh_hot()
     finally:
         with _EV_LOCK:
             _EV_CACHE["bg"] = False
+
+
+def refresh_stats() -> dict:
+    with _EV_LOCK:
+        return {**_EV_STATS, "hot": len(_HOT),
+                "age_s": None if _EV_CACHE["evs"] is None else round(time.time() - _EV_CACHE["at"], 1),
+                "full_age_s": (round(time.time() - float(_EV_CACHE["full_at"]), 1)
+                               if _EV_CACHE.get("full_at") else None)}
 
 
 def sports_events(ttl_s: float = 30.0, stale_ok_s: float = 0.0) -> tuple[list, Optional[str]]:
@@ -153,10 +273,9 @@ _IDX_MEMO: dict = {"key": None, "idx": None}
 def game_index_cached(evs) -> dict:
     """game_index(evs) built once per events list (the list is replaced, never
     mutated, on each refresh)."""
-    k = id(evs)
-    if _IDX_MEMO["key"] != k or _IDX_MEMO["idx"] is None:
+    if _IDX_MEMO.get("ref") is not evs or _IDX_MEMO["idx"] is None:
         _IDX_MEMO["idx"] = game_index(evs)
-        _IDX_MEMO["key"] = k
+        _IDX_MEMO["ref"] = evs
     return _IDX_MEMO["idx"]
 
 
@@ -376,6 +495,7 @@ def resolve(sport: str, away: str, home: str, start_iso, item: dict) -> dict:
         if g is None:
             warm(60.0)
             return {"ok": False, "why": "Gemini does not list this game (as of the last catalog read)"}
+    mark_hot((g.get("events") or {}).values())
     r = rung_for(item, g, aw, hm)
     if not r.get("ok"):
         return r

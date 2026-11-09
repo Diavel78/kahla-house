@@ -18322,6 +18322,7 @@ def _hand_status_publish(sb, client) -> dict:
         if _kvg.GEM_LIVE or _second_venue() == "gemini":
             _gem_ensure_thread()
             import gemini_venue as _gvw
+            _gvw.mark_hot(_gvw.event_ticker_of(t) for t in _kvg.GEM_LIVE)   # the bets' own games re-read one by one
             _gvw.warm(60.0)                                # the catalog refreshes here, never on a bet
     except Exception:
         pass
@@ -30552,6 +30553,11 @@ def _hand_snipe_shadow_tick(sb, now) -> dict:
     st["gemini"] = {k: _GEM_STATE.get(k) for k in ("frames", "subs", "connects", "err", "probe_ok", "epoch",
                                                    "depth_sample", "depth_odd_sample", "mismatch_sample")}
     st["gemini"]["book_src"] = dict(_GEM_WS_SRC)
+    try:
+        import gemini_venue as _gvs
+        st["gemini"]["catalog"] = _gvs.refresh_stats()
+    except Exception:
+        pass
     st["gemini"]["depth_books"] = sum(1 for v in GEM_DEPTH.values() if v.get("seeded"))
     st["gemini"]["linked"] = len(SNIPE_GEM_META)
     with _SNIPE_LOCK:
