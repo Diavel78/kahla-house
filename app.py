@@ -17187,7 +17187,7 @@ def _hand_pre_push() -> str | None:
         return f"err: {e}"[:80]
 
 
-def _bet_sheet_slug(client, item: dict) -> dict:
+def _bet_sheet_slug(client, item: dict, chalk: bool = True) -> dict:
     """One slip item → its Polymarket RUNG (slug + side), no book read: the
     venue event (cached 120s across items, one day-list per sport), the
     half-point rung walk under the chalk cap, the slug-agrees-with-the-bet
@@ -17233,7 +17233,7 @@ def _bet_sheet_slug(client, item: dict) -> dict:
         return {"ok": False, "reason": f"Polymarket lists no {_nm[mt]} for this game"
                 + (f" — only the {', '.join(_nm[k] for k in _have)}" if _have else "")}
     chalk_c = _hand_chalk_cap_c(mt)
-    entry, why = _bet_sheet_rung(pmm.get(mt), mt, side, item.get("line"), cap_c=chalk_c)
+    entry, why = _bet_sheet_rung(pmm.get(mt), mt, side, item.get("line"), cap_c=(chalk_c if chalk else None))
     if entry is None:
         return {"ok": False, "reason": why}
     slug = entry["slug"]
@@ -17252,14 +17252,14 @@ def _bet_sheet_slug(client, item: dict) -> dict:
             "why": why, "chalk_c": chalk_c}
 
 
-def _bet_sheet_resolve(client, item: dict) -> dict:
+def _bet_sheet_resolve(client, item: dict, chalk: bool = True) -> dict:
     """One slip item → the Polymarket slug + the touch on our side. The
     rung from `_bet_sheet_slug` (event lookup cached 120s across items),
     then ONE book — the depth socket's when the slug is subscribed
     (`_hand_poly_book`), else REST — and the seat on it."""
     mt = str(item.get("market_type") or "")
     es = item.get("event_start")
-    sl = _bet_sheet_slug(client, item)
+    sl = _bet_sheet_slug(client, item, chalk=chalk)   # _bet_sheet_slug(client, item) + the chalk switch
     if not sl.get("ok"):
         return {k: v for k, v in sl.items() if k in ("ok", "reason", "slug", "rung_line")}
     slug, synthetic, entry, pmm = sl["slug"], sl["synthetic"], sl["entry"], sl["pmm"]
@@ -17277,13 +17277,14 @@ def _bet_sheet_resolve(client, item: dict) -> dict:
     seat, sdet = _hand_seat_price(book, synthetic, es, datetime.now(timezone.utc), mp, oh)
     if seat is None:
         seat = s_bid
-    if float(seat) >= chalk_c - 1e-9:
+    if chalk and float(seat) >= chalk_c - 1e-9:
         # THE CHALK RULE at the fresh book: the ladder walk read the event's
         # embedded quotes; the seat is priced off the live book, and a seat at
         # or past the cap stays on the slip with the reason
         _am = _SHEET_CHALK_ML if mt == "ml" else _SHEET_CHALK_OU
         return {"ok": False, "reason": f"{float(seat):g}¢ at {entry.get('line')} is {_am} or shorter — chalk, not betting it",
-                "slug": slug, "rung_line": entry.get("line"), "chalk_cap_c": chalk_c}
+                "slug": slug, "rung_line": entry.get("line"), "chalk_cap_c": chalk_c,
+                "seat_c": float(seat)}        # Polymarket's seat there all the same: Gemini opens 5¢ under it
     return {"ok": True, "slug": slug, "synthetic": synthetic,
             "rung_line": entry.get("line"), "rung_why": why,
             "chalk_skipped": entry.get("chalk_skipped"), "chalk_cap_c": chalk_c,
@@ -17445,7 +17446,8 @@ def api_bet_sheets_place():
                 # BOTH VENUES QUOTED (Oct 18 2026): the slip shows each seat
                 # all-in and which one the box would rest on.
                 try:
-                    k = _bet_sheet_resolve_kalshi(it or {}, poly_seat_c=(res.get("price_c") if res.get("ok") else None))
+                    _r0 = dict(res)
+                    k = _bet_sheet_resolve_kalshi(it or {}, poly_seat_c=(lambda ln, _r=_r0, _it=(it or {}): _poly_seat_at(client, _it, _r, ln)))
                 except Exception as e:
                     k = {"ok": False, "reason": f"Kalshi: {type(e).__name__}: {e}"[:120]}
                 k.pop("_book", None)
@@ -17467,8 +17469,8 @@ def api_bet_sheets_place():
             # shown beside the others, never picked yet.
             if _machine_flag("hand_gemini_quote", True):
                 try:
-                    _ps = (res.get("poly") or {}).get("price_c") if res.get("venue") == "KALSHI" else res.get("price_c")
-                    gq = _bet_sheet_resolve_gemini(it or {}, poly_seat_c=_ps)
+                    _r1 = dict(res.get("poly") or {}) if res.get("venue") == "KALSHI" else dict(res)
+                    gq = _bet_sheet_resolve_gemini(it or {}, poly_seat_c=(lambda ln, _r=_r1, _it=(it or {}): _poly_seat_at(client, _it, _r, ln)))
                 except Exception as e:
                     gq = {"ok": False, "reason": f"Gemini: {type(e).__name__}: {e}"[:120]}
                 gq.pop("_book", None)
@@ -18020,7 +18022,7 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                 # Gemini book), then the Gemini contract + seat, one verified post-only order.
                 rs = _bet_sheet_resolve(client, item)
                 _lap("resolve")
-                g_rs = _bet_sheet_resolve_gemini(item, poly_seat_c=(rs.get("price_c") if rs.get("ok") else None))
+                g_rs = _bet_sheet_resolve_gemini(item, poly_seat_c=(lambda ln, _r=rs: _poly_seat_at(client, item, _r, ln)))
                 _lap("gemini")
                 g_out = _hand_order_execute_gemini(sb, row, pl, item, g_rs, rs, worker)
                 _lap("place_log")
@@ -18039,7 +18041,7 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                 # and Kalshi must beat it by `hand_venue_min_gain_c`.
                 try:
                     k_rs = _bet_sheet_resolve_kalshi(
-                        item, poly_seat_c=(rs.get("price_c") if isinstance(rs, dict) and rs.get("ok") else None))
+                        item, poly_seat_c=(lambda ln, _r=rs: _poly_seat_at(client, item, _r, ln)))
                 except Exception as e:
                     k_rs = {"ok": False, "reason": f"Kalshi: {type(e).__name__}: {e}"[:120]}
                 _lap("kalshi")
@@ -22441,13 +22443,9 @@ def _bet_sheet_resolve_kalshi(item: dict, poly_seat_c=None) -> dict:
     syn = not buy_yes
     s_bid, s_ask = _manual_side_book(book, syn)
     if s_bid is None and str(ticker).startswith("GEMI-"):
-        import gemini_venue as _gv
-        seat = _gv.opening_seat_c(None, poly_seat_c, _GEM_OPEN_UNDER_C)
+        seat, why = _gem_open_seat(item, poly_seat_c, rs.get("line"), s_ask)
         if seat is None:
-            return {"ok": False, "reason": "no bids on Gemini and no Polymarket seat to open under",
-                    "ticker": ticker, "rung_line": rs.get("line")}
-        if s_ask is not None and seat >= s_ask:
-            seat = float(max(1, math.floor(s_ask - 1)))
+            return {"ok": False, "reason": why, "ticker": ticker, "rung_line": rs.get("line")}
         return {"ok": True, "venue": "KALSHI", "ticker": ticker, "buy_yes": buy_yes,
                 "rung_line": rs.get("line"), "rung_why": rs.get("why"),
                 "price_c": seat, "touch_c": None, "ask_c": s_ask, "opened": "poly_minus",
@@ -22469,6 +22467,52 @@ def _bet_sheet_resolve_kalshi(item: dict, poly_seat_c=None) -> dict:
 
 
 _GEM_OPEN_UNDER_C = 5.0      # Rob, Nov 8 2026: no market on Gemini → open 5¢ under Polymarket's seat
+
+
+def _poly_seat_at(client, item: dict, poly_rs, line):
+    """Polymarket's seat on the bet's side AT EXACTLY `line` (Gemini's rung) —
+    CHALK OR NOT — the reference for Rob's Gemini opening seat. Nov 9 2026,
+    Mississippi State +3.5: Polymarket's +3.5 sat at 55¢ (one half-cent past
+    −120), the slip refused it as chalk, threw the price away, and Gemini's empty
+    book said "no Polymarket seat to open under" — when 55 − 5 = 50¢ was the bet
+    (Rob: "that would put us at 50, which isn't fucking chalk"). And never a
+    seat from ANOTHER line: Jacksonville State −6.5 opened at 7¢ off an empty
+    −4.5's 12¢. None when Polymarket has no bid at that exact line."""
+    rs = poly_rs if isinstance(poly_rs, dict) else {}
+    if _hand_same_line(rs.get("rung_line"), line):
+        if rs.get("ok") and rs.get("price_c") is not None:
+            return float(rs["price_c"])
+        if rs.get("seat_c") is not None:
+            return float(rs["seat_c"])
+    if client is None:
+        return None
+    try:
+        r2 = _bet_sheet_resolve(client, {**(item or {}), "line": line}, chalk=False)
+    except Exception:
+        return None
+    if r2.get("ok") and _hand_same_line(r2.get("rung_line"), line) and r2.get("price_c") is not None:
+        return float(r2["price_c"])
+    return None
+
+
+def _gem_open_seat(item: dict, poly_seat_c, line, s_ask):
+    """Rob's opening seat on an EMPTY Gemini book: Polymarket's seat at the same
+    line (a number, or a callable(line) → number) − 5¢, a tick under any ask,
+    never past the chalk cap. (seat, None) or (None, reason)."""
+    import gemini_venue as _gv
+    ref = poly_seat_c(line) if callable(poly_seat_c) else poly_seat_c
+    seat = _gv.opening_seat_c(None, ref, _GEM_OPEN_UNDER_C)
+    if seat is None:
+        _ln = ""
+        if line is not None:
+            _ln = f" at {float(line):+g}" if str(item.get("market_type")) == "spread" else f" at {float(line):g}"
+        return None, f"no bids on Gemini and no Polymarket price{_ln} to open under"
+    if s_ask is not None and seat >= s_ask:
+        seat = float(max(1, math.floor(s_ask - 1)))
+    cap = _hand_chalk_cap_c(str(item.get("market_type") or ""))
+    if seat >= cap - 1e-9:
+        return None, f"Gemini would open at {seat:g}¢ (Polymarket {float(ref):g}¢ − 5) — chalk, not betting it"
+    return seat, None
 
 
 def _bet_sheet_resolve_gemini(item: dict, poly_seat_c=None) -> dict:
@@ -22497,12 +22541,9 @@ def _bet_sheet_resolve_gemini(item: dict, poly_seat_c=None) -> dict:
     s_bid, s_ask = _manual_side_book(book, syn)
     opened = None
     if s_bid is None:
-        seat = _gv.opening_seat_c(None, poly_seat_c, _GEM_OPEN_UNDER_C)
+        seat, why = _gem_open_seat(item, poly_seat_c, rs.get("line"), s_ask)
         if seat is None:
-            return {"ok": False, "reason": "no bids on Gemini and no Polymarket seat to open under",
-                    "symbol": sym, "rung_line": rs.get("line")}
-        if s_ask is not None and seat >= s_ask:
-            seat = float(max(1, math.floor(s_ask - 1)))
+            return {"ok": False, "reason": why, "symbol": sym, "rung_line": rs.get("line")}
         opened, sdet = "poly_minus", {}
     else:
         mp, oh = _hand_thin_cfg()
