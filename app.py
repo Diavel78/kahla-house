@@ -18321,6 +18321,8 @@ def _hand_status_publish(sb, client) -> dict:
         _kvg.GEM_LIVE = {t for t in k_watch if _is_gem(t)}       # Gemini lane bets keep Gemini reads on
         if _kvg.GEM_LIVE or _second_venue() == "gemini":
             _gem_ensure_thread()
+            import gemini_venue as _gvw
+            _gvw.warm(60.0)                                # the catalog refreshes here, never on a bet
     except Exception:
         pass
     _HAND_STATUS_LAST.update({"at": _time.time(), "rows": out, "venue_ok": venue_ok})   # the red alert reads this tick's strip

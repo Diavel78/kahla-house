@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 import re
 import threading
+import os
 import time
 import unicodedata
 from datetime import datetime, timezone
@@ -124,6 +125,21 @@ def sports_events(ttl_s: float = 30.0, stale_ok_s: float = 0.0) -> tuple[list, O
             return _EV_CACHE["evs"], None
         _EV_CACHE["t0"] = time.time()
     return _fetch_events()
+
+
+def warm(max_age_s: float = 60.0) -> bool:
+    """Keep the catalog fresh OFF the bet path: start a background walk when the
+    cache is empty or older than `max_age_s` (never blocks). The handbets tick
+    calls it every tick; the bet path only ever reads memory. True = a walk
+    was started."""
+    with _EV_LOCK:
+        have = _EV_CACHE["evs"] is not None
+        age = time.time() - _EV_CACHE["at"]
+        if (have and age < max_age_s) or _EV_CACHE.get("bg"):
+            return False
+        _EV_CACHE["bg"] = True
+    threading.Thread(target=_bg_refresh, name="gemini-events", daemon=True).start()
+    return True
 
 
 def events_age_s() -> Optional[float]:
@@ -338,15 +354,28 @@ def resolve(sport: str, away: str, home: str, start_iso, item: dict) -> dict:
     """One slip item → its Gemini contract + our-side quote off the cached events
     list. {ok, symbol, buy_yes, line, why, quote{bid, ask}, ladder, event} or
     {ok: False, why}."""
-    evs, err = sports_events(ttl_s=60.0, stale_ok_s=1800.0)
-    if not evs:
-        return {"ok": False, "why": f"Gemini events unreadable: {err}" if err else "Gemini lists no sports events"}
-    g, aw, hm = find_game(game_index_cached(evs), away, home, start_iso)
-    if g is None and (events_age_s() or 0) > 60.0:
-        evs, err = sports_events(ttl_s=0.0)          # a game listed since the last walk: one fresh read
+    # THE BET PATH NEVER WALKS THE CATALOG (Nov 8 2026, Rob: "look up the fucking
+    # game you actually want to look up… this is the third time"). It reads the
+    # game out of memory; `warm()` (the handbets tick) keeps memory fresh in the
+    # background. Empty or a miss → kick a background walk and answer now.
+    # Off the box (a Vercel request: the slip Quote, a probe) nothing keeps the
+    # catalog warm and a background thread dies with the request, so there a
+    # cold cache is read once in-line. Bets execute on the box.
+    if os.environ.get("CELLAR_SIDE", "").strip() != "cellar":
+        evs, err = sports_events(ttl_s=60.0, stale_ok_s=1800.0)
         g, aw, hm = find_game(game_index_cached(evs), away, home, start_iso) if evs else (None, None, None)
-    if g is None:
-        return {"ok": False, "why": "Gemini does not list this game"}
+        if g is None:
+            return {"ok": False, "why": f"Gemini events unreadable: {err}" if (err and not evs) else "Gemini does not list this game"}
+    else:
+        with _EV_LOCK:
+            evs, err = _EV_CACHE["evs"], _EV_CACHE.get("err")
+        if not evs:
+            warm(0.0)
+            return {"ok": False, "why": f"Gemini catalog loading{(': ' + err) if err else ''}"}
+        g, aw, hm = find_game(game_index_cached(evs), away, home, start_iso)
+        if g is None:
+            warm(60.0)
+            return {"ok": False, "why": "Gemini does not list this game (as of the last catalog read)"}
     r = rung_for(item, g, aw, hm)
     if not r.get("ok"):
         return r
