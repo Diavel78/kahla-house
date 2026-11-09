@@ -52374,8 +52374,9 @@ def api_gemini_coverage():
             except Exception as e:
                 out["missing_event"] = {"error": f"{type(e).__name__}: {e}"[:200]}
         out["filters"] = {}
-        for k, v in (("sport", "american_football"), ("sport", "basketball"), ("sport", "ice_hockey"),
-                     ("sport", "football"), ("sport", "nfl"), ("league", "NFL"), ("series", "NFL")):
+        _fl = [("sport", x.strip()) for x in (request.args.get("sports") or "").split(",") if x.strip()] or \
+            [("sport", "american_football"), ("sport", "basketball"), ("sport", "hockey")]
+        for k, v in _fl:
             t0 = _tm.time()
             try:
                 page = _gpm.events("sports", "active", 500, 0, **{k: v})
