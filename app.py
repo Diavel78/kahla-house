@@ -52321,6 +52321,73 @@ def api_gemini_coverage():
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
     import gemini_pm as _gpm
+    if request.args.get("shape"):
+        # ?shape=1[&event=<ticker>] — VERIFY BEFORE BUILDING (Nov 8 2026): times the full
+        # catalog walk, then the single-event read (GET …/events/{ticker}) beside the
+        # catalog's own copy of that event (keys, contracts, prices side by side), then
+        # the list filters (sport=…) — does each one narrow the list, and how fast.
+        import time as _tm
+        out: dict = {"ok": True}
+        t0 = _tm.time()
+        try:
+            evs = _gpm.events_all("sports", "active")
+            out["catalog"] = {"events": len(evs), "ms": int((_tm.time() - t0) * 1000),
+                              "keys": sorted((evs[0] or {}).keys()) if evs else None}
+        except Exception as e:
+            evs = []
+            out["catalog"] = {"error": f"{type(e).__name__}: {e}"[:300], "ms": int((_tm.time() - t0) * 1000)}
+        tick = request.args.get("event")
+        if not tick:
+            for e in evs:
+                t = str(e.get("ticker") or "")
+                if t.endswith("-S") and len(e.get("contracts") or []) >= 3:
+                    tick = t
+                    break
+        if tick:
+            cat = next((e for e in evs if e.get("ticker") == tick), None)
+            t0 = _tm.time()
+            try:
+                one = _gpm.event(tick)
+                ms = int((_tm.time() - t0) * 1000)
+                body = one.get("data") if isinstance(one, dict) and isinstance(one.get("data"), dict) else one
+                def _cs(ev):
+                    return {str(c.get("instrumentSymbol")): (c.get("prices") or {})
+                            for c in ((ev or {}).get("contracts") or [])}
+                a_, b_ = _cs(body), _cs(cat)
+                out["event"] = {"ticker": tick, "ms": ms,
+                                "top_keys": sorted(one.keys()) if isinstance(one, dict) else type(one).__name__,
+                                "keys": sorted(body.keys()) if isinstance(body, dict) else None,
+                                "contracts": len(a_), "catalog_contracts": len(b_),
+                                "same_symbols": sorted(a_) == sorted(b_),
+                                "nested": {k: (len(v) if isinstance(v, list) else type(v).__name__)
+                                           for k, v in (body or {}).items() if isinstance(v, (list, dict)) and k != "contracts"},
+                                "prices": {k: {"event": a_.get(k), "catalog": b_.get(k)} for k in list(a_)[:4]},
+                                "contract_keys": sorted(((body or {}).get("contracts") or [{}])[0].keys()),
+                                "raw": str(one)[:1500]}
+            except Exception as e:
+                out["event"] = {"ticker": tick, "error": f"{type(e).__name__}: {e}"[:300],
+                                "ms": int((_tm.time() - t0) * 1000)}
+            t0 = _tm.time()
+            try:
+                _gpm.event(tick + "-NOPE")
+                out["missing_event"] = {"status": "no error", "ms": int((_tm.time() - t0) * 1000)}
+            except Exception as e:
+                out["missing_event"] = {"error": f"{type(e).__name__}: {e}"[:200]}
+        out["filters"] = {}
+        for k, v in (("sport", "american_football"), ("sport", "basketball"), ("sport", "ice_hockey"),
+                     ("sport", "football"), ("sport", "nfl"), ("league", "NFL"), ("series", "NFL")):
+            t0 = _tm.time()
+            try:
+                page = _gpm.events("sports", "active", 500, 0, **{k: v})
+                pre = {}
+                for e in page:
+                    p_ = str(e.get("ticker") or "").split("-")[0]
+                    pre[p_] = pre.get(p_, 0) + 1
+                out["filters"][f"{k}={v}"] = {"events": len(page), "ms": int((_tm.time() - t0) * 1000),
+                                              "prefixes": pre, "sample": [e.get("ticker") for e in page[:3]]}
+            except Exception as e:
+                out["filters"][f"{k}={v}"] = {"error": f"{type(e).__name__}: {e}"[:200]}
+        return jsonify(out)
     if request.args.get("side"):
         # ?sport=&away=&home=&start=&mt=&side=&line=[&poly=50] — one bet resolved the way
         # the slip Quote will (gemini_venue + the seat rule), live
