@@ -16869,6 +16869,12 @@ def _bet_sheet_rung(entries, mt: str, side: str, want, cap_c=None):
         + [(ln, e, "unfavorable") for ln, e in unf]
     skipped = []
     for ln, e, why in order:
+        if skipped and why != "unfavorable":
+            # A RUNG PAST A CHALK RUNG IS CHALKIER (Nov 9 2026, Auburn @ Mississippi
+            # State: MSU +3.5 read chalk, the walk climbed +4.5 … +26.5 — all chalk —
+            # and took +27.5 at 81.5¢ because ITS book was empty, no bid to read).
+            # Once a rung is chalk, only LESS favorable rungs are left.
+            continue
         bid = _entry_bid_c(e)
         if cap_c is not None and bid is not None and bid >= float(cap_c) - 1e-9:
             skipped.append({"line": ln, "bid_c": bid})

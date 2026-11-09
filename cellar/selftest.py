@@ -2584,6 +2584,15 @@ def test_bet_sheet_rung() -> None:
     check("favorite −12: −11.5 at 57¢ is chalk → −12.5 at 50¢", e["slug"] == "h125" and why == "unfavorable")
     e, why = _app._bet_sheet_rung([{"side": "home", "line": -12.5, "slug": "h125", "quote": q(50.0)}], "spread", "home", -12.0, cap_c=cap)
     check("no favorable rung at all → still refused (the chalk step needs a chalky favorable rung)", e is None)
+    # Nov 9 2026, Auburn @ Mississippi State: +3.5 chalk, +4.5 chalk, +27.5 an empty
+    # book (no bid) — the walk took +27.5. Past a chalk rung, only worse rungs.
+    sp3 = [{"side": "home", "line": 3.5, "slug": "m35", "quote": q(56.0)},
+           {"side": "home", "line": 4.5, "slug": "m45", "quote": q(59.0)},
+           {"side": "home", "line": 27.5, "slug": "m275"},
+           {"side": "home", "line": 2.5, "slug": "m25", "quote": q(52.0)}]
+    e, why = _app._bet_sheet_rung(sp3, "spread", "home", 3.5, cap_c=cap)
+    check("MSU +3.5 chalk → +2.5, never the empty +27.5 past the chalk", e and e["slug"] == "m25" and why == "unfavorable",
+          (e or {}).get("slug"))
     B = _app._bettable_half
     check("bettable half: O 50 → 49.5, U 50 → 50.5, −12 → −11.5, +12 → +12.5, a half stays",
           B(50, "total", "over") == 49.5 and B(50, "total", "under") == 50.5 and B(-12, "spread", "home") == -11.5
