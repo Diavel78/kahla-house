@@ -6724,6 +6724,15 @@ def test_gemini_open_seat() -> None:
     check("Gemini's own opening seat past the chalk cap → refused", seat is None and "chalk" in why, why)
     seat, why = _app._gem_open_seat(it, 55.0, 3.5, 48.0)
     check("never on or across Gemini's ask", seat == 47.0, seat)
+    # Missouri @ Georgia −14.5 (Nov 9 2026): a 10¢ Gemini seat vs Polymarket 50¢
+    seat, raised = _app._gem_junk_floor(it, 50.0, -14.5, 10.0, None)
+    check("a junk Gemini bid far under Polymarket → seated at Poly − 5¢", seat == 45.0 and raised, (seat, raised))
+    seat, raised = _app._gem_junk_floor(it, 50.0, -14.5, 47.0, None)
+    check("a real Gemini bid inside 5¢ of Polymarket is left alone", seat == 47.0 and not raised, (seat, raised))
+    seat, raised = _app._gem_junk_floor(it, None, -14.5, 10.0, None)
+    check("no Polymarket price at the line → the Gemini seat stands", seat == 10.0 and not raised)
+    seat, raised = _app._gem_junk_floor(it, 50.0, -14.5, 10.0, 30.0)
+    check("the raised seat stays a tick under Gemini's ask", seat == 29.0 and raised, (seat, raised))
 
 
 def test_venue_contract() -> None:

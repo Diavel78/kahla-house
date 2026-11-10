@@ -22459,6 +22459,9 @@ def _bet_sheet_resolve_kalshi(item: dict, poly_seat_c=None) -> dict:
     if seat is None:
         seat = s_bid
     seat = round(_grid_dn(float(seat), _KALSHI_TICK_C), 2)
+    _junk = False
+    if str(ticker).startswith("GEMI-"):
+        seat, _junk = _gem_junk_floor(item, poly_seat_c, rs.get("line"), seat, s_ask)
     _cap = _hand_chalk_cap_c(str(item.get("market_type") or ""))
     if seat >= _cap - 1e-9:
         # CHALK IS PER BOOK (Nov 9 2026, Rob: "one book's chalk, so we won't bet it on
@@ -22469,7 +22472,7 @@ def _bet_sheet_resolve_kalshi(item: dict, poly_seat_c=None) -> dict:
                 "ticker": ticker, "rung_line": rs.get("line"), "seat_c": seat}
     return {"ok": True, "venue": "KALSHI", "ticker": ticker, "buy_yes": buy_yes,
             "rung_line": rs.get("line"), "rung_why": rs.get("why"),
-            "price_c": seat, "touch_c": s_bid, "ask_c": s_ask,
+            "price_c": seat, "touch_c": s_bid, "ask_c": s_ask, "opened": ("poly_minus_junk" if _junk else None),
             "thin": (sdet if sdet.get("thin") else None), "fee": rs.get("fee"),
             "series": rs.get("series"), "event_ticker": rs.get("event_ticker"), "_book": book, "t": _t}
 
@@ -22501,6 +22504,27 @@ def _poly_seat_at(client, item: dict, poly_rs, line):
     if r2.get("ok") and _hand_same_line(r2.get("rung_line"), line) and r2.get("price_c") is not None:
         return float(r2["price_c"])
     return None
+
+
+def _gem_junk_floor(item: dict, poly_seat_c, line, seat, s_ask):
+    """A Gemini seat sitting MORE than the opening gap under Polymarket's seat at
+    the same line is a junk bid, not a market (Nov 9 2026, Missouri @ Georgia
+    −14.5: a 9¢ bid on Gemini, Polymarket's seat 50¢, the placement compare called
+    10¢ "cheaper" and rested the bet where it can never fill). Seat it where the
+    empty-book rule would: Polymarket − 5¢, a tick under any ask. Returns
+    (seat, raised: bool)."""
+    try:
+        ref = poly_seat_c(line) if callable(poly_seat_c) else poly_seat_c
+    except Exception:
+        ref = None
+    if ref is None or seat is None:
+        return seat, False
+    floor_c = float(math.floor(float(ref) - _GEM_OPEN_UNDER_C + 1e-9))
+    if float(seat) >= floor_c - 1e-9:
+        return seat, False
+    if s_ask is not None and floor_c >= float(s_ask):
+        floor_c = float(math.floor(float(s_ask) - 1))
+    return (floor_c, True) if floor_c > float(seat) else (seat, False)
 
 
 def _gem_open_seat(item: dict, poly_seat_c, line, s_ask):
@@ -22559,6 +22583,9 @@ def _bet_sheet_resolve_gemini(item: dict, poly_seat_c=None) -> dict:
         if seat is None:
             seat = s_bid
         seat = round(_grid_dn(float(seat), _gv.TICK_C), 2)
+        seat, _jk = _gem_junk_floor(item, poly_seat_c, rs.get("line"), seat, s_ask)
+        if _jk:
+            opened = "poly_minus_junk"
         if seat >= _hand_chalk_cap_c(str(item.get("market_type") or "")) - 1e-9:
             return {"ok": False, "reason": f"Gemini {seat:g}¢ at {rs.get('line')} is chalk — not betting it there",
                     "symbol": sym, "rung_line": rs.get("line"), "seat_c": seat}
