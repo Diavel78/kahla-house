@@ -23406,6 +23406,11 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
     thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
     thin_join = None
     guard_on = thin_pct > 0 and (ev.astimezone(timezone.utc) - now).total_seconds() > thin_off_h * 3600.0
+    if _is_gem(ticker):
+        # ALONE ON GEMINI IS FINE (Nov 9 2026, Rob: "I don't give a shit if I'm out
+        # there by myself"): a one-maker book makes every bid a "thin touch"; the
+        # thin-touch drop and hold are Polymarket rules
+        guard_on = False
     lad = _hand_ladder_from_book(book, syn)
     leaves_q = float(o.get("remaining") or 0.0)
     if verdict == "stay" and note == "at_touch" and guard_on and lad is not None:
@@ -26033,6 +26038,23 @@ def _hand_kalshi_move_complete(sb, r: dict, blob: dict, now, st: dict, ticker: s
     return True
 
 
+def _gem_move_ref(rows, our_c: float, now_ts: float) -> float:
+    """Pure. Which Polymarket rung a Gemini bid stands on for the move rule. Our
+    Gemini bid (whole cents) against Polymarket's half-cent touch: when the twin's
+    top bid over the baseline window sits AT or within a cent ABOVE ours, that rung
+    is ours — its collapse leaves us over the market. A Polymarket touch more than a
+    cent above us moving down still leaves us under it: our own price (below_rung)."""
+    try:
+        bids = [float(r[1]) for r in (rows or [])
+                if r and r[1] is not None and now_ts - _HAND_MOVE_BASE_S <= float(r[0]) < now_ts - _HAND_MOVE_RECENT_S]
+    except (TypeError, ValueError, IndexError):
+        bids = []
+    if not bids:
+        return float(our_c)
+    hi = max(bids)
+    return hi if float(our_c) - 0.01 <= hi <= float(our_c) + 1.0 + 1e-9 else float(our_c)
+
+
 def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg: dict, kctx: dict) -> None:
     """THE LINE-MOVE RULE ON A KALSHI BET — the same rule as the Polymarket
     one (`_hand_move_plan`: collapse + relocation = cancel, sit out, rejoin
@@ -26052,6 +26074,19 @@ def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg
     lead_s = (ev.astimezone(timezone.utc) - now).total_seconds()
     syn = not by
     side_rows = _hand_side_rows(KALSHI_TAPE.get(ticker), syn)
+    # A GEMINI BET'S LINE MOVES ARE READ OFF POLYMARKET (Nov 9 2026, Rob: "sellers
+    # leaving on Gemini because it's such a small book is just noise… if Polymarket
+    # was still at 50, this guy drops off, I'm fine at 50… I don't give a shit if
+    # I'm out there by myself"). A Gemini book is often ONE maker; his one-cent
+    # requotes cancelled 16 Gemini bets in a day (Spurs @ Suns O 225.5 four times)
+    # against one Polymarket bet. The same-line twin's socket tape is the market;
+    # no twin = no move rule (alone at a fair price is fine). No vanish drop either.
+    gem_poly = None
+    if _is_gem(ticker) and _machine_flag("hand_gem_move_poly", True):
+        twin = blob.get("pmm_twin_slug")
+        gem_poly = {"twin": twin, "syn": bool(blob.get("pmm_twin_synthetic"))}
+        if twin:
+            side_rows = _hand_side_rows(TOUCH_TAPE.get(twin), gem_poly["syn"])
     hold = blob.get("line_hold") if isinstance(blob.get("line_hold"), dict) else None
     last_at = _HAND_MOVE_LAST.get(r["id"], 0.0)
     pct, calm_s, max_wait, lead_min, leash = (cfg["pct"], cfg["calm_s"], cfg["max_wait"],
@@ -26074,6 +26109,14 @@ def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg
         if book is None:
             return
         touch, _a = _manual_side_book(book, syn)
+        if touch is None and gem_poly is not None:
+            # a one-maker Gemini book can be EMPTY once we're off it: sit back down
+            # at the rung Polymarket moved to, else Polymarket's bid now
+            touch = hold.get("rejoin_c")
+            if touch is None and side_rows:
+                touch = side_rows[-1][1]
+            if touch is not None and _a is not None and float(touch) >= float(_a):
+                touch = float(_a) - 1.0
         if touch is None:
             return
         dest = hold.get("rejoin_c")
@@ -26150,9 +26193,18 @@ def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg
     if price_c is None:
         return
     leaves = float(o.get("remaining") or 0.0)
-    verdict, det = _hand_move_plan(side_rows, price_c, leaves, now_ts, pct,
+    plan_price, plan_qty, plan_drop = price_c, leaves, cfg["drop"]
+    if gem_poly is not None:
+        if not gem_poly["twin"]:
+            st["gem_no_twin"] = st.get("gem_no_twin", 0) + 1
+            return
+        plan_price, plan_qty, plan_drop = _gem_move_ref(side_rows, price_c, now_ts), 0.0, False
+        st["gem_poly"] = st.get("gem_poly", 0) + 1
+    verdict, det = _hand_move_plan(side_rows, plan_price, plan_qty, now_ts, pct,
                                    relocate_pct=cfg["relocate_pct"], need_ask=cfg["need_ask"],
-                                   drop=cfg["drop"], drop_min_pct=cfg["drop_min_pct"])
+                                   drop=plan_drop, drop_min_pct=cfg["drop_min_pct"])
+    if gem_poly is not None:
+        det = {**det, "read": "polymarket", "twin": gem_poly["twin"], "our_c": price_c}
     if verdict == "drop":
         if _time.monotonic() - last_at < 30.0:
             return

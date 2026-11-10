@@ -6743,6 +6743,20 @@ def test_gemini_open_seat() -> None:
           _insp_src(_app._hand_switch_to_poly).count("tie_gemini=False") == 2
           and "tie_gemini=False" in _insp_src(_app._hand_switch_to_kalshi)
           and _app._hand_switch_min_gain_c() == 1.0)
+    # A Gemini bet's line moves read off Polymarket (Nov 9 2026)
+    t0 = 1000.0
+    rows = [(t0 + i, 50.0, 3000.0, 51.0, 3000.0) for i in range(5, 75, 5)]
+    check("Gemini move ref: Polymarket touch at our 50 → that rung is ours", _app._gem_move_ref(rows, 50.0, t0 + 100) == 50.0)
+    rows2 = [(t0 + i, 50.5, 3000.0, 51.0, 3000.0) for i in range(5, 75, 5)]
+    check("…Polymarket half a cent above us → its rung is ours (its collapse strands us)",
+          _app._gem_move_ref(rows2, 50.0, t0 + 100) == 50.5)
+    rows3 = [(t0 + i, 52.0, 3000.0, 53.0, 3000.0) for i in range(5, 75, 5)]
+    check("…Polymarket 2¢ above us → our own price (a drop there still leaves us under it)",
+          _app._gem_move_ref(rows3, 50.0, t0 + 100) == 50.0)
+    src = _insp_src(_app._hand_move_kalshi)
+    check("the Gemini move rule reads the Polymarket twin's tape, no vanish drop, no twin = no rule",
+          "TOUCH_TAPE.get(twin)" in src and "gem_no_twin" in src and "plan_drop = _gem_move_ref(" in src.replace(
+              "plan_price, plan_qty, plan_drop = _gem_move_ref(", "plan_drop = _gem_move_ref("))
     L = _app._bs_label_at_line
     check("bet label follows the resting line (Under 214.5 → 215.5; spread signs kept)",
           L("Under 214.5", "total", 215.5) == "Under 215.5" and L("Washington State -9.5", "spread", -10.5) == "Washington State -10.5"
