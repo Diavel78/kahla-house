@@ -6724,6 +6724,11 @@ def test_gemini_open_seat() -> None:
     check("Gemini's own opening seat past the chalk cap → refused", seat is None and "chalk" in why, why)
     seat, why = _app._gem_open_seat(it, 55.0, 3.5, 48.0)
     check("never on or across Gemini's ask", seat == 47.0, seat)
+    L = _app._bs_label_at_line
+    check("bet label follows the resting line (Under 214.5 → 215.5; spread signs kept)",
+          L("Under 214.5", "total", 215.5) == "Under 215.5" and L("Washington State -9.5", "spread", -10.5) == "Washington State -10.5"
+          and L("Akron +14.5", "spread", 14.5) == "Akron +14.5" and L("SMU ML", "ml", None) == "SMU ML",
+          (L("Under 214.5", "total", 215.5), L("Washington State -9.5", "spread", -10.5)))
     # Missouri @ Georgia −14.5 (Nov 9 2026): a 10¢ Gemini seat vs Polymarket 50¢
     seat, raised = _app._gem_junk_floor(it, 50.0, -14.5, 10.0, None)
     check("a junk Gemini bid far under Polymarket → seated at Poly − 5¢", seat == 45.0 and raised, (seat, raised))

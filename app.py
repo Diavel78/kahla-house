@@ -27146,7 +27146,7 @@ def api_bet_sheets_mine():
             "market_id": r.get("market_id"),
             "event_start": r.get("event_start"), "started": started,
             "market_type": r.get("market_type"), "side": r.get("side"),
-            "line": r.get("entry_line"), "label": blob.get("label"),
+            "line": r.get("entry_line"), "label": _bs_label_at_line(blob.get("label"), r.get("market_type"), r.get("entry_line")),
             "entry_price": r.get("entry_price"), "price_c": price_c,
             "contracts": contracts, "slug": slug, "synthetic": syn,
             "order_id": blob.get("gemini_order_id") if gemini else (oid if not kalshi else blob.get("kalshi_order_id")),
@@ -27527,6 +27527,35 @@ def _bs_flip_line(mt, line):
         return -float(line) if mt == "spread" else float(line)
     except (TypeError, ValueError):
         return None
+
+
+def _bs_label_at_line(label, mt, line):
+    """Pure. The slip's label names the SHEET's line; the bet may rest at another
+    rung (Nov 9 2026, CLE @ CHA: the slip said Under 214.5, Gemini took Under
+    215.5, the bet list read 214.5). The label's number follows the bet's line."""
+    if not label or line is None or mt not in ("spread", "total"):
+        return label
+    try:
+        ln = float(line)
+    except (TypeError, ValueError):
+        return label
+    m = list(re.finditer(r"[+−-]?\d+(?:\.\d+)?", str(label)))
+    if not m:
+        return label
+    last = m[-1]
+    try:
+        cur = float(last.group(0).replace("−", "-"))
+    except ValueError:
+        return label
+    if mt == "total":
+        if abs(abs(cur) - ln) < 0.01:
+            return label
+        new = f"{ln:g}"
+    else:
+        if abs(cur - ln) < 0.01:
+            return label
+        new = f"{ln:+g}"
+    return str(label)[:last.start()] + new + str(label)[last.end():]
 
 
 def _bs_flip_label(event_name, mt, side, line) -> str:
