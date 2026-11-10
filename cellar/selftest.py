@@ -6709,6 +6709,38 @@ def _insp_src(f) -> str:
     return _i.getsource(f)
 
 
+def test_pin_line_gap() -> None:
+    """THE LINE CHECK (Nov 9 2026): a slip line 1.5+ off Pinnacle's main line is
+    refused at placement (Rob's stale HOU -8.5 with Pinnacle back at -4)."""
+    import inspect
+    import app as _app
+    it = {"sport": "NBA", "market_type": "spread", "side": "home", "line": -8.5,
+          "away": "Denver Nuggets", "home": "Houston Rockets"}
+    v = _app._pin_gap_verdict(it, -4.0, 1.5)
+    check("HOU -8.5 vs Pinnacle -4 → refused", bool(v) and v["gap"] == 4.5, v)
+    check("…and the reason names the new line", v and "Houston Rockets -4" in v["reason"], v)
+    check("HOU -4.5 vs Pinnacle -4 → placed", _app._pin_gap_verdict({**it, "line": -4.5}, -4.0, 1.5) is None)
+    aw = {**it, "side": "away", "line": 8.5}
+    check("away DEN +8.5 vs Pinnacle home -4 → refused (DEN +4 now)",
+          (_app._pin_gap_verdict(aw, -4.0, 1.5) or {}).get("pin_line") == 4.0)
+    check("away DEN +4.5 vs home -4 → placed", _app._pin_gap_verdict({**aw, "line": 4.5}, -4.0, 1.5) is None)
+    check("exactly 1.5 off → refused", _app._pin_gap_verdict({**it, "line": -5.5}, -4.0, 1.5) is not None)
+    check("1.0 off → placed", _app._pin_gap_verdict({**it, "line": -5.0}, -4.0, 1.5) is None)
+    tot = {"sport": "NFL", "market_type": "total", "side": "under", "line": 44.5}
+    check("total 44.5 vs Pinnacle 47 → refused", _app._pin_gap_verdict(tot, 47.0, 1.5) is not None)
+    check("total 44.5 vs Pinnacle 45 → placed", _app._pin_gap_verdict(tot, 45.0, 1.5) is None)
+    check("no Pinnacle line never blocks", _app._pin_gap_verdict(it, None, 1.5) is None)
+    check("check off (0) never blocks", _app._pin_gap_verdict(it, -4.0, 0) is None)
+    check("hockey puck line is never checked",
+          _app._pin_gap_verdict({**it, "sport": "NHL", "line": -1.5}, 1.5, 1.5) is None)
+    check("moneyline is never checked", _app._pin_gap_verdict({**it, "market_type": "ml"}, -4.0, 1.5) is None)
+    src = inspect.getsource(_app._hand_order_execute)
+    check("the executor runs the line check before any venue resolve",
+          "_hand_pin_gap_check(" in src and src.index("_hand_pin_gap_check(") < src.index("_bet_sheet_resolve(client, item)"))
+    check("the slip Quote runs the line check too",
+          "_hand_pin_gap_check(" in inspect.getsource(_app.api_bet_sheets_place))
+
+
 def test_gemini_open_seat() -> None:
     """Rob's Gemini opening seat reads Polymarket's price AT GEMINI'S LINE, chalk or
     not (Nov 9 2026, MSU +3.5: Polymarket 55¢ = chalk, Gemini empty → 50¢, not a
@@ -8752,7 +8784,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_gemini_tape, test_gemini_ws_book, test_venue_contract, test_gemini_open_seat, test_gemini_targeted_refresh, test_gemini_venue_read, test_gemini_probe, test_gemini_v0_lane, test_gemini_in_kalshi_slot, test_gemini_settle_sold, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_gemini_tape, test_gemini_ws_book, test_venue_contract, test_pin_line_gap, test_gemini_open_seat, test_gemini_targeted_refresh, test_gemini_venue_read, test_gemini_probe, test_gemini_v0_lane, test_gemini_in_kalshi_slot, test_gemini_settle_sold, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

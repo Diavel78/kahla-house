@@ -17130,6 +17130,83 @@ def _pin_fair_for_item(events, sport: str, item: dict, age_min=None) -> dict | N
             "age_min": (round(float(age_min), 1) if age_min is not None else None), "line": item.get("line")}
 
 
+# THE LINE CHECK (Nov 9 2026, Rob's HOU -8.5: the NBA sheet priced Denver @
+# Houston at 12:10 PM with Pinnacle -9 on a Jokic/Murray scare; by 12:40 they
+# were cleared and Pinnacle was back to -4, the next re-price was 3:45 PM,
+# and a 12:38 slip placed the stale -8.5 at 36¢). Before the box places a
+# spread or total, the slip's line is held against Pinnacle's main line off
+# the 60-second read; `_HAND_PIN_GAP_PTS` or more apart → refused, the item
+# stays on the slip with the reason. Either direction: a stale line is a
+# stale line. Football + basketball only — hockey's puck line and baseball's
+# run line sit at ±1.5 whatever the game, so a gap there means nothing.
+# No Pinnacle line (unpriced game, feed down) never blocks a bet.
+_HAND_PIN_GAP_PTS = 1.5
+_PIN_GAP_SPORTS = frozenset({"NFL", "NCAAF", "NBA", "NCAAB", "CBB"})
+
+
+def _hand_pin_gap_pts() -> float:
+    """machine_flags hand_pin_gap_pts overrides; 0 switches the check off."""
+    try:
+        return float(_machine_flag_val("hand_pin_gap_pts", _HAND_PIN_GAP_PTS))
+    except (TypeError, ValueError):
+        return _HAND_PIN_GAP_PTS
+
+
+def _pin_gap_verdict(item: dict, pin_line, gap_pts: float) -> dict | None:
+    """Pure. `pin_line` = Pinnacle's HOME spread (negative = home favored) or
+    its total. None when the slip line is within `gap_pts`, the check is
+    off, or anything is unreadable; else {gap, pin_line (the slip side's own
+    orientation), slip_line, reason}."""
+    if not item or pin_line is None or not gap_pts or gap_pts <= 0:
+        return None
+    sport = str(item.get("sport") or "").upper()
+    mt = str(item.get("market_type") or "")
+    if sport not in _PIN_GAP_SPORTS or mt not in ("spread", "total"):
+        return None
+    side = str(item.get("side") or "")
+    try:
+        ln, pl = float(item.get("line")), float(pin_line)
+    except (TypeError, ValueError):
+        return None
+    if mt == "spread":
+        if side not in ("home", "away"):
+            return None
+        mine = pl if side == "home" else -pl          # Pinnacle's line on the slip's side
+    else:
+        mine = pl
+    gap = abs(ln - mine)
+    if gap < float(gap_pts) - 1e-9:
+        return None
+    if mt == "spread":
+        who = item.get(side) or side
+        txt = f"Pinnacle has {who} {mine:+g} now, the slip says {ln:+g}"
+    else:
+        txt = f"Pinnacle's total is {mine:g} now, the slip says {ln:g}"
+    return {"gap": round(gap, 1), "pin_line": mine, "slip_line": ln,
+            "reason": f"Line moved — {txt}. Not placed; check the game and re-bet."}
+
+
+def _hand_pin_gap_check(sb, item: dict, now, slates: dict) -> dict | None:
+    """Pinnacle's main line off the 60-second read (`_pin_live_slate`) held
+    against a slip item. None = fine (or no Pinnacle line to check); a dict
+    = refuse. Never raises."""
+    try:
+        if str((item or {}).get("sport") or "").upper() not in _PIN_GAP_SPORTS:
+            return None
+        if str((item or {}).get("market_type") or "") not in ("spread", "total"):
+            return None
+        gp = _hand_pin_gap_pts()
+        if gp <= 0:
+            return None
+        events, _age = _pin_live_slate(sb, item.get("sport"), now, slates)
+        pin = _pin_line_from_events(events, item.get("away"), item.get("home"),
+                                    item.get("market_type"), book="pinnacle",
+                                    start=item.get("event_start"))
+        return _pin_gap_verdict(item, pin, gp)
+    except Exception:
+        return None
+
+
 def _bet_sheet_pin_quote(sb, item: dict, now, slates: dict) -> dict | None:
     """Pinnacle's quote for a slip item (= Bet105's, see _sheet_pin_block).
     One slate per sport per request: the cached slate when it is under
@@ -17406,6 +17483,7 @@ def api_bet_sheets_place():
     t_end = _time.monotonic() + 50.0          # under the Vercel function budget
     if preview:
         pin_slates: dict = {}
+        gap_slates: dict = {}
         for n, it in enumerate(items):
             key = (it or {}).get("key")
             if _time.monotonic() > t_end - 10.0:
@@ -17488,6 +17566,9 @@ def api_bet_sheets_place():
                     else:
                         res = {**res, "ok": False, "venue": "GEMINI",
                                "reason": gq.get("reason") or "no Gemini market"}
+            pg = _hand_pin_gap_check(sb, it or {}, datetime.now(timezone.utc), gap_slates)
+            if pg:
+                res = {**res, "ok": False, "reason": pg["reason"], "pin_gap": pg}
             results.append(res)
         return jsonify({"ok": True, "preview": True, "placed": 0,
                         "contracts": contracts, "results": results})
@@ -18013,6 +18094,10 @@ def _hand_order_execute(sb, client, row: dict, worker: str, deferred: list | Non
                 if isinstance(out_ap, dict) and "ms" not in out_ap:
                     out_ap["ms"] = ms
                 return out_ap
+            pg = _hand_pin_gap_check(sb, item, datetime.now(timezone.utc), {})
+            _lap("pin")
+            if pg:
+                return {"ok": False, "error": pg["reason"], "pin_gap": pg, "ms": ms}
             want = str(item.get("venue") or "auto").lower()
             if want == "gemini" and _second_venue() == "gemini" and _hand_kalshi_on():
                 want = "kalshi"            # Gemini IS the second venue: the toggle forces it, full lane rules
