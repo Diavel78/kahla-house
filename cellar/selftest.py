@@ -6704,6 +6704,11 @@ def test_gemini_settle_sold() -> None:
           "k_tickers = [t for t in tickers if not _is_gem(t)]" in src and '_machine_flag("gemini_sold", False)' in src)
 
 
+def _insp_src(f) -> str:
+    import inspect as _i
+    return _i.getsource(f)
+
+
 def test_gemini_open_seat() -> None:
     """Rob's Gemini opening seat reads Polymarket's price AT GEMINI'S LINE, chalk or
     not (Nov 9 2026, MSU +3.5: Polymarket 55¢ = chalk, Gemini empty → 50¢, not a
@@ -6724,6 +6729,20 @@ def test_gemini_open_seat() -> None:
     check("Gemini's own opening seat past the chalk cap → refused", seat is None and "chalk" in why, why)
     seat, why = _app._gem_open_seat(it, 55.0, 3.5, 48.0)
     check("never on or across Gemini's ask", seat == 47.0, seat)
+    import kalshi_venue as _kvs
+    gf = {"fee_type": "gemini", "maker_ratio": 0.0, "mult": 1.0}
+    v, _d = _kvs.compare_rest(51.0, 51.0, 10, gf, current="POLYMARKET")
+    check("placement: a tie goes to Gemini", v == "KALSHI", _d)
+    v, _d = _kvs.compare_rest(51.0, 51.0, 10, gf, current="POLYMARKET", min_gain_c=1.0, tie_gemini=False)
+    check("switch: a tie stays put (Akron +14.5 switched 12 times on ties)", v == "POLYMARKET", _d)
+    v, _d = _kvs.compare_rest(51.0, 50.0, 10, gf, current="POLYMARKET", min_gain_c=1.0, tie_gemini=False)
+    check("switch: a full cent cheaper moves it", v == "KALSHI", _d)
+    v, _d = _kvs.compare_rest(50.5, 51.0, 10, gf, current="KALSHI", min_gain_c=1.0, tie_gemini=False)
+    check("switch: half a cent is not worth a cancel + create", v == "KALSHI", _d)
+    check("all three switch compares use the 1¢ switch gain, never the tie rule",
+          _insp_src(_app._hand_switch_to_poly).count("tie_gemini=False") == 2
+          and "tie_gemini=False" in _insp_src(_app._hand_switch_to_kalshi)
+          and _app._hand_switch_min_gain_c() == 1.0)
     L = _app._bs_label_at_line
     check("bet label follows the resting line (Under 214.5 → 215.5; spread signs kept)",
           L("Under 214.5", "total", 215.5) == "Under 215.5" and L("Washington State -9.5", "spread", -10.5) == "Washington State -10.5"

@@ -152,7 +152,8 @@ def all_in_c(venue: str, role: str, price_c, qty: int, fee: dict | None = None, 
 
 
 def compare_rest(poly_touch_c, kalshi_touch_c, qty: int, kalshi_fee: dict | None,
-                 current: str | None = None, min_gain_c: float = 0.0, at=None):
+                 current: str | None = None, min_gain_c: float = 0.0, at=None,
+                 tie_gemini: bool = True):
     """Pure. WHERE A RESTING BET SITS. Each venue's seat = our-side touch
     (the price we would join) + its maker fee. Lower all-in wins; a tie, or
     a gain under `min_gain_c`, keeps the bet where it is (`current`) so the
@@ -168,7 +169,7 @@ def compare_rest(poly_touch_c, kalshi_touch_c, qty: int, kalshi_fee: dict | None
         return None, {"why": "no_quote"}
     best = min(opts, key=opts.get)
     det = {"all_in": opts, "best": best}
-    if (isinstance(kalshi_fee, dict) and kalshi_fee.get("fee_type") == "gemini"
+    if (tie_gemini and isinstance(kalshi_fee, dict) and kalshi_fee.get("fee_type") == "gemini"
             and len(opts) == 2 and abs(opts["POLYMARKET"] - opts["KALSHI"]) <= 1e-9):
         # A TIE GOES TO GEMINI (Nov 8 2026, Rob: "if they're both a tie and one's paying a
         # maker reward, well, then it should go to Gemini"): Gemini pays makers a rebate

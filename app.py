@@ -25407,6 +25407,19 @@ def _hand_switch_ok(blob: dict, r: dict, now, st: dict, filled) -> bool:
 
 
 _HAND_SWITCH_MIN_GAP_S = 900.0    # machine_flags hand_switch_min_gap_s overrides
+_HAND_SWITCH_MIN_GAIN_C = 1.0     # machine_flags hand_switch_min_gain_c overrides
+
+
+def _hand_switch_min_gain_c() -> float:
+    """A RESTING BET MOVES VENUES ONLY FOR A REAL CENT (Nov 9 2026, Rob: "1 cent
+    difference to send it back and forth is fair"). Akron +14.5 switched 12 times
+    in a day: a tie sent it to Gemini (Rob's placement rule), the next 1¢ wobble
+    sent it home, every move a cancel + create at the back of the queue. Placement
+    keeps tie → Gemini; a switch needs ≥ this many cents all-in, and a tie stays put."""
+    try:
+        return float(_machine_flag_val("hand_switch_min_gain_c", _HAND_SWITCH_MIN_GAIN_C))
+    except (TypeError, ValueError):
+        return _HAND_SWITCH_MIN_GAIN_C
 
 
 def _hand_switch_gap_s_ok(blob: dict, now, min_gap_s=None) -> bool:
@@ -25498,7 +25511,7 @@ def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict
         if p_touch is None:
             return False
         v0, _d0 = _kv.compare_rest(p_touch, k_seat_c, qty, blob.get("kalshi_fee"),
-                                   current="KALSHI", min_gain_c=_hand_venue_min_gain_c())
+                                   current="KALSHI", min_gain_c=_hand_switch_min_gain_c(), tie_gemini=False)
         if v0 != "POLYMARKET":
             return False
     pbook = _hand_poly_book(client, twin, tries=1)    # the depth socket's book (the twin rides the watch set), REST if dark
@@ -25529,7 +25542,7 @@ def _hand_switch_to_poly(sb, client, r: dict, blob: dict, now, st: dict, o: dict
                  "poly_top": (_hand_ladder_from_book(pbook, tsyn) or [])[:3]}
     else:
         v, det = _kv.compare_rest(p_seat, k_seat_c, qty, blob.get("kalshi_fee"),
-                                  current="KALSHI", min_gain_c=_hand_venue_min_gain_c())
+                                  current="KALSHI", min_gain_c=_hand_switch_min_gain_c(), tie_gemini=False)
         if v != "POLYMARKET":
             _HAND_SWITCH_SEEN.pop(r["id"], None)
             return False
@@ -25657,7 +25670,7 @@ def _hand_switch_to_kalshi(sb, client, r: dict, blob: dict, now, st: dict, o: di
     if ps is not None:
         p_seat = ps
     v, det = _kv.compare_rest(p_seat, k_seat, qty, blob.get("kalshi_fee"),
-                              current="POLYMARKET", min_gain_c=_hand_venue_min_gain_c())
+                              current="POLYMARKET", min_gain_c=_hand_switch_min_gain_c(), tie_gemini=False)
     if v != "KALSHI":
         _HAND_SWITCH_SEEN.pop(r["id"], None)
         return False
