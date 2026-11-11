@@ -17168,13 +17168,24 @@ def _pin_gap_verdict(item: dict, pin_line, gap_pts: float) -> dict | None:
         ln, pl = float(item.get("line")), float(pin_line)
     except (TypeError, ValueError):
         return None
+    # ONLY A WORSE LINE IS REFUSED (Nov 11 2026, Rob on Under 44.5 refused
+    # with Pinnacle at 43: "I'm betting under… this a good thing"). A slip
+    # line BETTER than Pinnacle's for its side is the bet getting cheaper —
+    # it places, and the venue's price (the chalk rule) decides the rest.
     if mt == "spread":
         if side not in ("home", "away"):
             return None
         mine = pl if side == "home" else -pl          # Pinnacle's line on the slip's side
+        worse = mine - ln                              # own-line lower = worse (−8.5 vs −4)
     else:
         mine = pl
-    gap = abs(ln - mine)
+        if side == "over":
+            worse = ln - mine                          # an over is worse at a higher total
+        elif side == "under":
+            worse = mine - ln                          # an under is worse at a lower total
+        else:
+            return None
+    gap = worse
     if gap < float(gap_pts) - 1e-9:
         return None
     if mt == "spread":
@@ -17183,7 +17194,7 @@ def _pin_gap_verdict(item: dict, pin_line, gap_pts: float) -> dict | None:
     else:
         txt = f"Pinnacle's total is {mine:g} now, the slip says {ln:g}"
     return {"gap": round(gap, 1), "pin_line": mine, "slip_line": ln,
-            "reason": f"Line moved — {txt}. Not placed; check the game and re-bet."}
+            "reason": f"Line moved against you — {txt}. Not placed; check the game and re-bet."}
 
 
 def _hand_pin_gap_check(sb, item: dict, now, slates: dict) -> dict | None:

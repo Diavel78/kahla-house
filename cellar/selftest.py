@@ -6720,15 +6720,19 @@ def test_pin_line_gap() -> None:
     check("HOU -8.5 vs Pinnacle -4 → refused", bool(v) and v["gap"] == 4.5, v)
     check("…and the reason names the new line", v and "Houston Rockets -4" in v["reason"], v)
     check("HOU -4.5 vs Pinnacle -4 → placed", _app._pin_gap_verdict({**it, "line": -4.5}, -4.0, 1.5) is None)
-    aw = {**it, "side": "away", "line": 8.5}
-    check("away DEN +8.5 vs Pinnacle home -4 → refused (DEN +4 now)",
+    aw = {**it, "side": "away", "line": 2.5}
+    check("away DEN +2.5 vs Pinnacle home -4 (DEN +4) → refused, worse line",
           (_app._pin_gap_verdict(aw, -4.0, 1.5) or {}).get("pin_line") == 4.0)
-    check("away DEN +4.5 vs home -4 → placed", _app._pin_gap_verdict({**aw, "line": 4.5}, -4.0, 1.5) is None)
-    check("exactly 1.5 off → refused", _app._pin_gap_verdict({**it, "line": -5.5}, -4.0, 1.5) is not None)
-    check("1.0 off → placed", _app._pin_gap_verdict({**it, "line": -5.0}, -4.0, 1.5) is None)
-    tot = {"sport": "NFL", "market_type": "total", "side": "under", "line": 44.5}
-    check("total 44.5 vs Pinnacle 47 → refused", _app._pin_gap_verdict(tot, 47.0, 1.5) is not None)
-    check("total 44.5 vs Pinnacle 45 → placed", _app._pin_gap_verdict(tot, 45.0, 1.5) is None)
+    check("away DEN +8.5 vs DEN +4 → placed (better line)", _app._pin_gap_verdict({**aw, "line": 8.5}, -4.0, 1.5) is None)
+    check("HOU -4 vs Pinnacle -8.5 → placed (better line)", _app._pin_gap_verdict({**it, "line": -4.0}, -8.5, 1.5) is None)
+    check("exactly 1.5 worse → refused", _app._pin_gap_verdict({**it, "line": -5.5}, -4.0, 1.5) is not None)
+    check("1.0 worse → placed", _app._pin_gap_verdict({**it, "line": -5.0}, -4.0, 1.5) is None)
+    tot = {"sport": "NCAAF", "market_type": "total", "side": "under", "line": 44.5}
+    check("Under 44.5 vs Pinnacle 43 → placed (Rob's Sac State under, better line)",
+          _app._pin_gap_verdict(tot, 43.0, 1.5) is None)
+    check("Under 44.5 vs Pinnacle 47 → refused", _app._pin_gap_verdict(tot, 47.0, 1.5) is not None)
+    check("Over 44.5 vs Pinnacle 43 → refused", _app._pin_gap_verdict({**tot, "side": "over"}, 43.0, 1.5) is not None)
+    check("Over 44.5 vs Pinnacle 47 → placed (better line)", _app._pin_gap_verdict({**tot, "side": "over"}, 47.0, 1.5) is None)
     check("no Pinnacle line never blocks", _app._pin_gap_verdict(it, None, 1.5) is None)
     check("check off (0) never blocks", _app._pin_gap_verdict(it, -4.0, 0) is None)
     check("hockey puck line is never checked",
