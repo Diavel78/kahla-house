@@ -402,7 +402,7 @@
             </div>
 
             <div class="sec hide" id="plSec">
-                <div class="sh" onclick="togglePl()" title="Show / hide"><h2>Live</h2><span class="sub" id="plMeta"></span><span class="chev">▼</span></div>
+                <div class="sh" onclick="togglePl()" title="Hide"><h2>Live</h2><span class="sub" id="plMeta"></span><span class="chev">▲</span></div>
                 <div class="sb-body" id="plBody"></div>
             </div>
 
@@ -715,18 +715,21 @@
         try { localStorage.setItem(BETS_COLLAPSE_KEY, c ? '1' : '0'); } catch (e) {}
     }
     _applyBetsCollapse();
-    const PL_COLLAPSE_KEY = 'kh_pl_collapsed_v1';
-    function _applyPlCollapse() {
-        let c = false; try { c = localStorage.getItem(PL_COLLAPSE_KEY) === '1'; } catch (e) {}
-        document.getElementById('plSec').classList.toggle('collapsed', c);
-    }
+    // THE LIVE TILE IS THE SWITCH (Rob, Nov 12 2026: "The way the settled
+    // works, click to show, click again to hide, should be how live works as
+    // well"): tap the Live tile → the Live section shows; tap again (or its
+    // header) → hidden. Open by default, the old collapse choice carries over.
+    let _plOpen = true;
+    try {
+        const v = localStorage.getItem('kh_bs_live_open');
+        _plOpen = v != null ? v === '1' : localStorage.getItem('kh_pl_collapsed_v1') !== '1';
+    } catch (e) {}
     function togglePl() {
-        const sec = document.getElementById('plSec');
-        const c = !sec.classList.contains('collapsed');
-        sec.classList.toggle('collapsed', c);
-        try { localStorage.setItem(PL_COLLAPSE_KEY, c ? '1' : '0'); } catch (e) {}
+        _plOpen = !_plOpen;
+        try { localStorage.setItem('kh_bs_live_open', _plOpen ? '1' : '0'); } catch (e) {}
+        if (_lastBetsPayload) { renderMoney(_lastBetsPayload); renderPnl(_lastBetsPayload); }
+        if (_plOpen) document.getElementById('plSec').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
-    _applyPlCollapse();
     let _slip = [];          // [{key, sport, away, home, event_start, market_type, side, line, label, game, q}]
     let _slipOpen = false;
     // THE SLIP STAYS WHERE YOU PUT IT (Rob, Oct 7 2026: "if I hide you, I'll
@@ -1760,10 +1763,10 @@
             if (pc != null) rest += Number(o.leaves || 0) * pc / 100;
         });
         const nset = w + l + p + s;
-        const tile = (k, v, cls, sub, tap) => '<div class="tile' + (tap ? ' tap' + (_setOpen ? ' on' : '') + '" onclick="toggleSettled()' : '') + '"><span class="k">' + k + '</span><span class="v ' + (cls || '') + '">' + v + '</span><span class="s">' + sub + '</span></div>';
+        const tile = (k, v, cls, sub, tap) => '<div class="tile' + (tap ? ' tap' + (tap.on ? ' on' : '') + '" onclick="' + tap.fn + '()' : '') + '"><span class="k">' + k + '</span><span class="v ' + (cls || '') + '">' + v + '</span><span class="s">' + sub + '</span></div>';
         document.getElementById('money').innerHTML =
-              tile('Settled today', nset ? money(sp) : '$0.00', nset ? _plCls(sp) : '', nset ? (w + '-' + l + (p ? '-' + p : '') + (s ? ' · ' + s + ' sold' : '')) : 'nothing yet', true)
-            + tile('Live', lv.rows.length ? money(lv.pl) : '—', lv.rows.length ? _plCls(lv.pl) : '', lv.rows.length ? lv.rows.length + ' bet' + (lv.rows.length === 1 ? '' : 's') + (lv.nq ? ' · ' + lv.nq + ' no quote' : '') : 'nothing live')
+              tile('Settled today', nset ? money(sp) : '$0.00', nset ? _plCls(sp) : '', nset ? (w + '-' + l + (p ? '-' + p : '') + (s ? ' · ' + s + ' sold' : '')) : 'nothing yet', { on: _setOpen, fn: 'toggleSettled' })
+            + tile('Live', lv.rows.length ? money(lv.pl) : '—', lv.rows.length ? _plCls(lv.pl) : '', lv.rows.length ? lv.rows.length + ' bet' + (lv.rows.length === 1 ? '' : 's') + (lv.nq ? ' · ' + lv.nq + ' no quote' : '') : 'nothing live', { on: _plOpen, fn: 'togglePl' })
             + tile('Resting', '$' + rest.toFixed(2), '', nr + ' order' + (nr === 1 ? '' : 's'));
     }
     // THE SETTLED LIST (Rob, Oct 30 2026: "keep me a list if I clicked the
@@ -1816,8 +1819,13 @@
     // decided) against cost. Settled and pre-game bets live on the sheet.
     function renderPnl(d) {
         const live = _plMark(_liveBets(d));
-        document.getElementById('plSec').classList.toggle('hide', !live.rows.length);
-        if (!live.rows.length) { document.getElementById('plBody').innerHTML = ''; return; }
+        document.getElementById('plSec').classList.toggle('hide', !_plOpen);
+        if (!_plOpen) return;
+        if (!live.rows.length) {
+            document.getElementById('plMeta').innerHTML = '';
+            document.getElementById('plBody').innerHTML = '<div class="c-n" style="padding:6px 2px">Nothing live right now.</div>';
+            return;
+        }
         document.getElementById('plMeta').innerHTML = '<span class="amt ' + _plCls(live.pl) + '" style="font-size:15px">' + money(live.pl) + '</span>';
         document.getElementById('plBody').innerHTML = live.rows.map(r => {
             const b = r.b, fin = b.prob_src === 'decided';
