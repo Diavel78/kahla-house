@@ -6491,6 +6491,50 @@ def api_cellar_flag():
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}), 500
 
 
+@app.route("/api/cellar/kick")
+def api_cellar_kick():
+    """THE SELF-KICK (Nov 13 2026, Rob: "Can't kick… it's every night"):
+    `?key=…[&procs=money,tape]` sets machine_flags box_kick to a fresh nonce;
+    each named daemon pulls main, runs the selftest in a throwaway worktree,
+    fast-forwards and restarts itself (cellar/selfkick.py). `?status=1` reads
+    the box_kick stamps back. Shared-secret; fire via the site-curl bridge."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    if request.args.get("status"):
+        try:
+            rows = (sb.table("exec_probe_runs").select("at,result").eq("params->>kind", "box_kick")
+                    .order("at", desc=True).limit(int(request.args.get("n") or 6)).execute().data) or []
+            boots = (sb.table("exec_probe_runs").select("at,result").eq("params->>kind", "cellar_boot")
+                     .order("at", desc=True).limit(4).execute().data) or []
+            flag = (sb.table("machine_flags").select("value,updated_at").eq("key", "box_kick")
+                    .limit(1).execute().data or [{}])[0]
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}), 500
+        return jsonify({"ok": True, "flag": flag, "kicks": rows,
+                        "boots": [{"at": b_.get("at"), "proc": (b_.get("result") or {}).get("proc"),
+                                   "sha": str((b_.get("result") or {}).get("sha") or "")[:12]} for b_ in boots],
+                        "site_sha": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:12]})
+    procs = [p_.strip() for p_ in (request.args.get("procs") or "money").split(",") if p_.strip()]
+    if not procs or any(p_ not in ("money", "tape", "all") for p_ in procs):
+        return jsonify({"ok": False, "error": "procs = money, tape or all"}), 400
+    val = {"nonce": uuid.uuid4().hex[:12], "procs": procs, "at": datetime.now(timezone.utc).isoformat(),
+           "site_sha": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:12]}
+    try:
+        sb.table("machine_flags").upsert({"key": "box_kick", "value": val,
+                                          "updated_at": datetime.now(timezone.utc).isoformat()},
+                                         on_conflict="key").execute()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}), 500
+    _probe_log({"kind": "flag_set", "flag": "box_kick", "new": val})
+    return jsonify({"ok": True, "kick": val,
+                    "note": "the daemon checks every 20s; selftest ~2-5 min; read ?status=1"})
+
+
 @app.route("/api/cellar/health")
 def api_cellar_health():
     """READ-ONLY: the box's lane vitals, the SHA it booted on, the machine
@@ -6515,7 +6559,7 @@ def api_cellar_health():
                         for x in r]
         out["site_sha"] = (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:12]
         flags = (sb.table("machine_flags").select("key,value,updated_at")
-                 .limit(60).execute().data) or []
+                 .limit(500).execute().data) or []
         out["flags"] = {f["key"]: ("<set>" if f["key"].endswith(("_key", "_secret")) and f.get("value") else f.get("value"))
                         for f in flags}
         try:
@@ -49992,8 +50036,10 @@ def _machine_flag(key: str, default: bool = True) -> bool:
     try:
         c = _MFLAGS_CACHE
         if _time.time() - c["at"] > 60.0:
+            # 50 → 500 (Nov 13 2026: the table held 46 rows — one more page of
+            # kill switches and the 51st would have read its code default, silently)
             rows = (get_supabase().table("machine_flags")
-                    .select("key,value").limit(50).execute().data) or []
+                    .select("key,value").limit(500).execute().data) or []
             c["map"] = {r["key"]: r.get("value") for r in rows}
             c["at"] = _time.time()
         v = c["map"].get(key)

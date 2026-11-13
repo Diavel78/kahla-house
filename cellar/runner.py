@@ -259,6 +259,7 @@ class Runner:
                     capture_output=True, text=True, timeout=10).stdout.strip()
             except Exception:
                 sha = ""
+        self._boot_sha = sha
         log.info("cellar code: %s", sha[:12] or "UNKNOWN (git unreadable)")
         try:
             import sys
@@ -441,6 +442,27 @@ class Runner:
 
         for s in (signal.SIGINT, signal.SIGTERM):
             signal.signal(s, lambda *_: self.stop.set())
+
+        # THE SELF-KICK (Nov 13 2026): the site flips machine_flags box_kick and
+        # this daemon pulls main, selftests it in a throwaway worktree, and
+        # restarts itself (launchd KeepAlive) — no session on the box needed.
+        if (os.environ.get("CELLAR_SELF_KICK") or "1").strip() != "0":
+            try:
+                from .selfkick import KickWatch
+
+                def _read_kick_flag():
+                    rows = (self.sb.table("machine_flags").select("value").eq("key", "box_kick")
+                            .limit(1).execute().data) or []
+                    return rows[0].get("value") if rows else None
+
+                def _stamp_kick(res):
+                    self.sb.table("exec_probe_runs").insert(
+                        {"params": {"kind": "box_kick"}, "result": res}).execute()
+
+                KickWatch(_read_kick_flag, _stamp_kick, self.stop.set, self.stop,
+                          getattr(self, "_boot_sha", "")).start()
+            except Exception as e:
+                log.error("self-kick watcher failed to start: %s", e)
 
         self._renewer = threading.Thread(target=self._renew_loop,
                                          name="cellar-renew", daemon=True)

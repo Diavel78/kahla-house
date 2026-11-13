@@ -1090,6 +1090,7 @@ daemon now stamps its git SHA at boot (`exec_probe_runs`, `kind=cellar_boot`)
 and the dashboard's lane card prints `code <sha>`, or `⚠ cellar on X, site on
 Y — pull + restart` when they differ. **Check that line before debugging why a
 change "didn't work".**
+**THE SELF-KICK (Nov 13 2026 — the box session kept going offline):** `/api/cellar/kick?procs=money[,tape]` (shared-secret, site-curl) sets `machine_flags box_kick {nonce, procs}`; each named daemon (`cellar/selfkick.py`, a 20s watcher) fetches main, runs the selftest in a THROWAWAY worktree with its own python, fast-forwards the live tree only on a pass, and stops cleanly so launchd restarts it. A failed selftest changes nothing and sends a 🔴. `?status=1` reads the `box_kick` stamps + boot SHAs. Git runs as the repo owner when the daemon is root. `CELLAR_SELF_KICK=0` turns the watcher off.
 
 ⚠ **`CELLAR_DRY_RUN` defaults to TRUE, and existing healthy `work=12` ticks are
 NOT evidence it is off** — `_drive_route` lanes (pm_snapshot/paperlog/vsin/
