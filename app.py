@@ -18363,6 +18363,16 @@ def _hand_status_publish(sb, client) -> dict:
     # parsed, never text: the box returns starts in Arizona offset (Oct 28 2026)
     rows = sorted(rows, key=lambda x: ((_aware_ts(x.get("event_start")) or _far) > _now,
                                        _aware_ts(x.get("event_start")) or _far))
+    try:
+        # Gemini reads are ON before the first shared orders read, not only after
+        # this tick's publish sets GEM_LIVE (a cold tick read Kalshi alone and every
+        # Gemini order looked gone)
+        import kalshi_venue as _kvp
+        _kvp.GEM_LIVE = set(_kvp.GEM_LIVE) | {
+            (x.get("signal_blob") or {}).get("kalshi_ticker") for x in rows
+            if isinstance(x.get("signal_blob"), dict) and _is_gem((x.get("signal_blob") or {}).get("kalshi_ticker"))}
+    except Exception:
+        pass
     for r in rows:
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if blob.get("kalshi_twin_ticker") and not _kalshi_pick(blob):
@@ -18514,6 +18524,10 @@ _HAND_STATUS_LAST: dict = {"at": 0.0, "rows": {}}
 _HAND_RED_SEEN: dict = {}
 _HAND_RED_RETRY_S = 300.0        # a failed Telegram send retries on this clock, never every 10s tick (Oct 21 2026: 50 stamps in 8 min)
 _HAND_RED_MIN_TICKS = 2
+# THE BURST GUARD (Nov 13 2026, ~90 OFF THE BOOK pings off one bad Gemini read):
+# more than this many OFF THE BOOK reds ready in one tick is one summary message,
+# never one each — a real wipe still says so, a read glitch can't flood the phone.
+_HAND_RED_BURST = 5
 _TG_RED_PREFIX = "\U0001f534"       # 🔴
 
 
@@ -18883,6 +18897,28 @@ def _hand_model_sides(sb, now) -> dict:
     return out
 
 
+def _hand_red_mark(sb, items: list, ok: bool, burst_n: int | None = None) -> None:
+    """Stamp each red that was (or failed to be) sent; a sent one is remembered
+    on the pick so it never pings twice, a failed one retries on its clock."""
+    at = datetime.now(timezone.utc).isoformat()
+    for r, blob, code, text, e in items:
+        stamp = {"kind": "hand_red_alert", "hand_red_alert": True, "pick_id": r["id"], "code": code,
+                 "text": text, "sent": ok, "creds": _tg_creds()[2], "burst": burst_n,
+                 "err": None if ok else _TG_LAST_ERR.get("err"), "at": at}
+        if not ok:
+            e["retry_at"] = _time.time() + _HAND_RED_RETRY_S
+        try:
+            _probe_log(stamp)
+        except Exception:
+            pass
+        if ok:
+            try:
+                sb.table("bot_picks").update({"signal_blob": {**blob, "red_alert": {
+                    "code": code, "at": at, "text": text}}}).eq("id", r["id"]).execute()
+            except Exception:
+                pass
+
+
 def _hand_red_alert_tick(sb, now) -> dict:
     """Handbets tick, after the reconcile: ping Telegram once per red."""
     if not _machine_flag("hand_red_alert", True):
@@ -18905,6 +18941,7 @@ def _hand_red_alert_tick(sb, now) -> dict:
     live_ids = set()
     read_cache: dict = {}
     model_sides = None
+    ready: list = []
     for r in picks:
         pid = str(r.get("id"))
         live_ids.add(pid)
@@ -18953,29 +18990,31 @@ def _hand_red_alert_tick(sb, now) -> dict:
             continue                            # this red already pinged
         if float(e.get("retry_at") or 0) > _time.time():
             continue                            # a failed send waits _HAND_RED_RETRY_S, not a tick
-        msg = _hand_red_msg(r, blob, text)
+        ready.append((r, blob, code, text, e))
+    burst = [x for x in ready if x[2] == "off_book"]
+    if len(burst) > _HAND_RED_BURST:
+        ready = [x for x in ready if x[2] != "off_book"]
+        names = [_hand_red_msg(x[0], x[1], "").split("\n")[0].replace(_TG_RED_PREFIX, "").strip()[:70]
+                 for x in burst[:6]]
+        msg = (f"🔴 {len(burst)} bets read OFF THE BOOK at once — usually a venue read "
+               f"glitch, check the app before acting\n" + "\n".join(names)
+               + (f"\n… +{len(burst) - 6} more" if len(burst) > 6 else ""))
         ok = False
         try:
             ok = bool(_send_fill_telegram(msg, urgent=True))
         except Exception:
             ok = False
-        stamp = {"kind": "hand_red_alert", "hand_red_alert": True, "pick_id": r["id"], "code": code,
-                 "text": text, "sent": ok, "creds": _tg_creds()[2],
-                 "err": None if ok else _TG_LAST_ERR.get("err"),
-                 "at": datetime.now(timezone.utc).isoformat()}
-        if not ok:
-            e["retry_at"] = _time.time() + _HAND_RED_RETRY_S
+        _hand_red_mark(sb, burst, ok, burst_n=len(burst))
+        sent += len(burst) if ok else 0
+    for x in ready:
+        r, blob = x[0], x[1]
+        ok = False
         try:
-            _probe_log(stamp)
+            ok = bool(_send_fill_telegram(_hand_red_msg(r, blob, x[3]), urgent=True))
         except Exception:
-            pass
-        if ok:
-            sent += 1
-            try:
-                sb.table("bot_picks").update({"signal_blob": {**blob, "red_alert": {
-                    "code": code, "at": stamp["at"], "text": text}}}).eq("id", r["id"]).execute()
-            except Exception:
-                pass
+            ok = False
+        _hand_red_mark(sb, [x], ok)
+        sent += 1 if ok else 0
     for pid in list(_HAND_RED_SEEN):
         if pid not in live_ids:
             _HAND_RED_SEEN.pop(pid, None)
@@ -23316,7 +23355,12 @@ def _hand_status_kalshi(sb, r: dict, blob: dict, k_orders, k_pos, poly_positions
         "venue": "KALSHI",
         "order": ({"resting": True, "leaves": o.get("remaining"), "cum": o.get("filled"), "price_c": price_c}
                   if resting else {"resting": False}),
-        "held": round(held or 0.0, 2), "held_unknown": held is None,
+        # AN UNREADABLE ORDERS READ IS "CAN'T TELL", NEVER "OFF THE BOOK" (Nov 13
+        # 2026, 4:49 PM: one bad Gemini read with positions fine read every Gemini
+        # bet as no order + nothing held — ~90 OFF THE BOOK pings in a burst)
+        "held": round(held or 0.0, 2),
+        "held_unknown": held is None or (k_orders is None and bool(blob.get("kalshi_order_id"))),
+        "order_unknown": k_orders is None,
         "cur_c": cur_c, "touch_c": touch_c,
         "outbid": bool(resting and touch_c is not None and price_c is not None
                        and price_c < float(touch_c) - 0.01),

@@ -1282,6 +1282,8 @@
             return { cls: 'rest', short: 'SWITCHING', detail: 'Polymarket cancel sent · the box is completing the move to ' + (isGemT(b.kalshi_twin_ticker) || !b.kalshi_twin_ticker ? 'Gemini' : 'Kalshi') };
         if (b.kalshi_cancel_sent)
             return { cls: 'rest', short: 'CANCELLING', detail: venueName(b) + ' cancel sent · the box is waiting for the book to agree' };
+        if (b.held_unknown)   // the venue read failed this tick — "can't tell", never OFF THE BOOK (Nov 13 2026)
+            return { cls: 'rest', short: 'CHECKING', detail: venueName(b) + ' did not answer this read · the box checks again in a few seconds' };
         return { cls: 'warn', short: 'OFF THE BOOK', detail: 'no order resting and nothing held' };
     }
     function fmtQ(x) { return String(Math.round(Number(x || 0) * 100) / 100); }

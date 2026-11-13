@@ -321,7 +321,7 @@ def active_orders(symbol: Optional[str] = None, limit: int = 100, offset: int = 
     if symbol:
         p["symbol"] = symbol
     d = _private("POST", f"{PM}/orders/active", p)
-    return _rows(d)
+    return _rows_strict(d)
 
 
 def order_history(limit: int = 100, **p) -> list[dict]:
@@ -331,7 +331,7 @@ def order_history(limit: int = 100, **p) -> list[dict]:
 
 def positions(limit: int = 100, offset: int = 0, **p) -> list[dict]:
     q = {"limit": limit, "offset": offset}; q.update(p)
-    return _rows(_private("POST", f"{PM}/positions", q))
+    return _rows_strict(_private("POST", f"{PM}/positions", q))
 
 
 def positions_settled(limit: int = 100, **p) -> list[dict]:
@@ -410,6 +410,22 @@ def _rows(d: Any) -> list[dict]:
             if isinstance(d.get(k), list):
                 return d[k]
     return []
+
+
+def _rows_strict(d: Any) -> list[dict]:
+    """The ACCOUNT reads (active orders, positions): an answer we can't read is
+    an error, never an empty account (Nov 13 2026 — a bad Gemini read read every
+    Gemini bet as off the book). An empty body or a known key holding null is
+    an empty list; an error dict or an unknown shape raises."""
+    if d is None or isinstance(d, list):
+        return d or []
+    if isinstance(d, dict):
+        for k in ("data", "orders", "positions", "results", "items"):
+            if isinstance(d.get(k), list):
+                return d[k]
+            if k in d and d[k] is None:
+                return []
+    raise GeminiError(f"unreadable account answer: {str(d)[:200]}")
 
 
 # --------------------------------------------------------------------------- helpers
