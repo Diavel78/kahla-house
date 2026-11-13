@@ -6909,9 +6909,13 @@ def test_self_kick() -> None:
     g(*env_git, "commit", "-qam", "v2", cwd=dev); g("push", "-q", "origin", "HEAD:main", cwd=dev)
     boot = g("rev-parse", "HEAD", cwd=live).stdout.strip()
     stamps = []
-    old_repo, old_st = _k.REPO, _k._selftest_in
+    old_repo, old_st, old_lock = _k.REPO, _k._selftest_in, _k.LOCK_PATH
     try:
         _k.REPO = live
+        # never the real lock: a kick runs THIS selftest while holding it
+        _k.LOCK_PATH = os.path.join(root, "kick.lock")
+        check("the test's kicks never take the real kick lock (the parent kick holds it)",
+              _k.LOCK_PATH != old_lock and not _k.LOCK_PATH.startswith(os.path.dirname(old_lock) + os.sep + "kahla-box"))
         _k._selftest_in = lambda tree: (os.path.exists(os.path.join(tree, "f.txt"))
                                         and open(os.path.join(tree, "f.txt")).read() == "v2\n" and False, "1 failed")
         r = _k.run_kick("n1", boot, stamps.append)
@@ -6927,7 +6931,7 @@ def test_self_kick() -> None:
         r = _k.run_kick("n3", head, stamps.append)
         check("already current → no restart", r["ok"] and not r["restart"] and r["why"] == "current")
     finally:
-        _k.REPO, _k._selftest_in = old_repo, old_st
+        _k.REPO, _k._selftest_in, _k.LOCK_PATH = old_repo, old_st, old_lock
         import shutil as _sh
         _sh.rmtree(root, ignore_errors=True)
     src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner.py")).read()

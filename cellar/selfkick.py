@@ -53,6 +53,11 @@ POLL_S = 20.0
 GIT_TIMEOUT_S = 120
 SELFTEST_TIMEOUT_S = 1500
 FLAG = "box_kick"
+# The kick holds this while it runs — INCLUDING the selftest subprocess, whose own
+# test_self_kick points LOCK_PATH elsewhere (Nov 12 2026: the first real kick
+# deadlocked for its whole 25-minute selftest timeout — the child test waited on
+# the lock its parent held).
+LOCK_PATH = os.path.join(tempfile.gettempdir(), "kahla-box-kick.lock")
 
 
 def proc_name() -> str:
@@ -143,7 +148,7 @@ def run_kick(nonce: str, boot_sha: str, stamp: Callable[[dict], None]) -> dict:
                  "boot_sha": boot_sha[:12], "at": datetime.now(timezone.utc).isoformat(),
                  "steps": []}
     t0 = time.time()
-    lock_f = open(os.path.join(tempfile.gettempdir(), "kahla-box-kick.lock"), "w")
+    lock_f = open(LOCK_PATH, "w")
     try:
         fcntl.flock(lock_f, fcntl.LOCK_EX)
         rc, msg = _git("fetch", "-q", "origin", "main")
