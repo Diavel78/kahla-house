@@ -110,15 +110,43 @@ def events(category: str = "sports", status: str = "active", limit: int = 500,
     return d.get("data") or d.get("events") or []
 
 
-def events_all(category: str = "sports", status: str = "active", **filters) -> list[dict]:
+def _events_walk(category: str, status: str, fetch=None, **filters) -> list[dict]:
+    fetch = fetch or events
     out: list[dict] = []
     off = 0
     while True:
-        page = events(category, status, 500, off, **filters)
+        page = fetch(category, status, 500, off, **filters)
         out.extend(page)
         if len(page) < 500 or off > 20000:
             return out
         off += 500
+
+
+# THE UNFILTERED SPORTS LIST IS NOT THE CATALOG (Nov 13 2026, Rob: "Every college
+# football game I haven't bet shows Gemini as NA"). Paged to the end it stopped at
+# 1,005 events — 6 college moneylines, no full-game NFL line — while
+# sport=american_football alone paged to 1,119 (116 college moneylines, 14 NFL) and
+# sport=hockey read 78 to the unfiltered 48. Games only reached memory when a bet
+# read them one by one. So the sports catalog is the UNION of each sport's own
+# filtered walk plus the unfiltered walk (for anything without a filter: UFC),
+# deduped by ticker. Probe: /api/gemini/coverage?walk=<sport>|ALL.
+SPORT_FILTERS = ("american_football", "basketball", "hockey")
+
+
+def events_all(category: str = "sports", status: str = "active", fetch=None, **filters) -> list[dict]:
+    if category != "sports" or filters:
+        return _events_walk(category, status, fetch, **filters)
+    out: list[dict] = []
+    seen: set = set()
+    for flt in [{"sport": sp} for sp in SPORT_FILTERS] + [{}]:
+        for e in _events_walk(category, status, fetch, **flt):
+            t = (e or {}).get("ticker")
+            if t and t in seen:
+                continue
+            if t:
+                seen.add(t)
+            out.append(e)
+    return out
 
 
 def event(event_ticker: str) -> dict:
