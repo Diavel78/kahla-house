@@ -1553,6 +1553,7 @@
             h += '<div class="note">' + (b.live_snipe ? 'Moved to live — yours to watch.'
                 : b.take_window ? 'Game started — the box is working the take inside your 1¢ until ' + fmtClock(b.take_window.until) + ' (' + (b.take_window.tries || 0) + ' tries so far'
                     + (b.take_window.bump && b.take_window.bump.verdict === 'amended' ? ', bid moved up to ' + b.take_window.bump.to_c + '¢ as the maker' : '') + '), then cancels.'
+                : (b.start_seen && b.start_seen_at && (Date.now() - Date.parse(b.start_seen_at)) < 180000) ? 'Game started — the box is cancelling the unfilled part now; this clears on the next refresh.'
                 : b.start_seen ? 'Game started and the cancel didn\'t take — this order is still resting at its pre-game price.'
                 : b.start_blind ? 'The box has no pre-start book for this game, so it can\'t see game start — cancel or move it yourself.'
                 : 'Past the listed time, but the makers are still quoting, so the game has not started for the box. At the drop (95% of the touch leaves) it chases live from your bid, never higher, for an hour.') + '</div>';
@@ -1873,7 +1874,12 @@
         // the start flags stayed on the pick and the card read TAKING · until
         // 9:08, frozen, for the rest of the game).
         const isMine = b => b.live_snipe || (b.in_play && !b.start_seen && !b.start_blind);
-        const bad = rows.filter(b => !isMine(b) && !b.take_window && !limbo(b)).length;
+        // THE CANCEL IS STILL IN FLIGHT (Nov 12 2026, Hornets +6.5 on Gemini: the drop
+        // fired, the box cancelled the 0.34 left and kept the 9.66 — but the strip is
+        // published once a handbets tick, so for ~a minute the page saw the drop flag
+        // beside the old "resting" row and read CANCEL FAILED). Red only after 3 min.
+        const cancelling = b => b.start_seen && b.start_seen_at && (Date.now() - Date.parse(b.start_seen_at)) < 180000;
+        const bad = rows.filter(b => !isMine(b) && !b.take_window && !limbo(b) && !cancelling(b)).length;
         const html = rows.map(b => {
             const o = b.order || {}, sl = _scoreLine(b), held = Number(b.held || 0);
             const mine = isMine(b);
@@ -1885,6 +1891,7 @@
                       : mine ? '<span class="tag amb">CHASING' + ((b.chase && b.chase.chase_venue === 'KALSHI') || b.venue === 'KALSHI' ? ' · ' + (isGemT(b.kalshi_ticker) ? 'GEMINI' : 'KALSHI') : '') + (b.chase && b.chase.cap_c != null ? ' · to ' + esc(String(b.chase.cap_c)) + '¢' : '') + (b.chase && b.chase.until ? chz : ' · no clock') + (b.getlive_from ? ' · GOT IT LIVE' : '') + '</span>'
                       : tw ? '<span class="tag amb">TAKING · take 1¢ / make 2¢ · until ' + esc(fmtClock(tw.until)) + '</span>'
                       : limbo(b) ? '<span class="tag gry">LISTED ' + esc(fmtClock(b.event_start)) + ' · WAITING FOR THE DROP</span>'
+                      : cancelling(b) ? '<span class="tag amb">GAME STARTED · CANCELLING</span>'
                       : b.start_seen ? '<span class="tag red">GAME STARTED · CANCEL FAILED</span>'
                       : '<span class="tag red">BOX CAN\'T SEE GAME START</span>';
             const lc = b.live_chase || {};
@@ -1895,7 +1902,7 @@
                     + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '')
                     + (b.cur_c != null ? ' · now ' + b.cur_c + '¢' : '');
             const lim = limbo(b);
-            return '<div class="card' + ((mine || tw || lim) ? ' rest' : ' miss') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(b.id)).replace(/"/g, '&quot;') + ')">'
+            return '<div class="card' + ((mine || tw || lim || cancelling(b)) ? ' rest' : ' miss') + '" style="cursor:pointer" onclick="openSheet(' + JSON.stringify(String(b.id)).replace(/"/g, '&quot;') + ')">'
                  + '<div class="c-top"><span class="tags">' + tag + (b.app ? '<span class="tag gry">APP</span>' : '') + venueTag(b) + '<span class="tag gry">' + esc(String(b.sport || '')) + '</span></span></div>'
                  + '<div class="c-t">' + esc(betLabel(b)) + ' <span class="g">· ' + esc(gameShort(b)) + '</span></div>'
                  + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + n + '</div>'

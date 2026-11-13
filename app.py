@@ -27334,6 +27334,7 @@ def api_bet_sheets_mine():
                           and not (contracts and held >= float(contracts) - 0.5) else None),
             "live_chase": (blob.get("live_chase") if isinstance(blob.get("live_chase"), dict) else None),
             "start_seen": bool(blob.get("game_started")), "start_blind": bool(blob.get("start_blind")),
+            "start_seen_at": (blob["game_started"].get("at") if isinstance(blob.get("game_started"), dict) else None),
             "take_window": (blob.get("start_take_window")
                             if isinstance(blob.get("start_take_window"), dict) and not blob.get("live_snipe") else None),
             "poly_cancel_sent": (blob.get("poly_cancel_sent") if isinstance(blob.get("poly_cancel_sent"), dict) else None),
