@@ -140,6 +140,13 @@ def main(argv: list[str]) -> int:
     # letting a local .env inject CELLAR_LANES / CELLAR_DRY_RUN would make it
     # assert against the box's config instead of the defaults.
     if "--selftest" in argv:
+        # …and neither may the CALLER's environment (Nov 12 2026: the box's
+        # self-kick runs this inside the daemon, which carries CELLAR_DRY_RUN=0,
+        # CELLAR_LANES=handbets, CELLAR_TAPE_SPLIT=1 — three default-config tests
+        # failed and the kick refused good code). Stripped here, in the child,
+        # so it holds whatever version of the kick launched it.
+        for _k in [k for k in os.environ if k.startswith("CELLAR_")]:
+            os.environ.pop(_k, None)
         return cmd_selftest()
 
     # Everything else needs .env. This MUST happen before `from . import
