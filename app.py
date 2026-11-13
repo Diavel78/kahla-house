@@ -52681,6 +52681,40 @@ def api_gemini_coverage():
             except Exception as e:
                 out["filters"][f"{k}={v}"] = {"error": f"{type(e).__name__}: {e}"[:200]}
         return jsonify(out)
+    if request.args.get("walk"):
+        # ?walk=american_football|ALL[&limit=500] — page one list query to the end and
+        # report each page's size + how many tickers were new (Nov 13 2026: the
+        # unfiltered catalog stopped at ~1,005 events while the football filter alone
+        # filled a 500-event page — every unbet college game read "Gemini N/A").
+        w_ = request.args.get("walk")
+        lim_ = int(request.args.get("limit") or 500)
+        flt_ = {} if w_ == "ALL" else {"sport": w_}
+        seen_: set = set()
+        pages_ = []
+        pre_: dict = {}
+        kinds_: dict = {}
+        for off_ in range(0, 6000, lim_):
+            try:
+                pg_ = _gpm.events("sports", "active", lim_, off_, **flt_)
+            except Exception as e:
+                pages_.append({"offset": off_, "error": f"{type(e).__name__}: {e}"[:200]})
+                break
+            new_ = 0
+            for e in pg_:
+                t = str(e.get("ticker") or "")
+                if t and t not in seen_:
+                    seen_.add(t)
+                    new_ += 1
+                    ps_ = t.split("-")
+                    pre_[ps_[0]] = pre_.get(ps_[0], 0) + 1
+                    if len(ps_) >= 5:
+                        kinds_[ps_[0] + ":" + ps_[-1]] = kinds_.get(ps_[0] + ":" + ps_[-1], 0) + 1
+            pages_.append({"offset": off_, "n": len(pg_), "new": new_,
+                           "first": (pg_[0] or {}).get("ticker") if pg_ else None})
+            if len(pg_) < lim_:
+                break
+        return jsonify({"ok": True, "walk": w_, "limit": lim_, "unique": len(seen_), "pages": pages_,
+                        "prefixes": pre_, "full_game": {k: v for k, v in kinds_.items() if k.split(":")[1] in ("M", "S", "T")}})
     if request.args.get("side"):
         # ?sport=&away=&home=&start=&mt=&side=&line=[&poly=50] — one bet resolved the way
         # the slip Quote will (gemini_venue + the seat rule), live
