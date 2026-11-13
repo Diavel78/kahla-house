@@ -6882,6 +6882,7 @@ def test_self_kick() -> None:
     nothing. A handled nonce never runs twice."""
     import subprocess as _sp
     import tempfile as _tf
+    import inspect
     from . import selfkick as _k
     print("\n[self-kick]")
     check("a new nonce naming this proc acts", _k.wants({"nonce": "a1", "procs": ["money"]}, "money", None) == "a1")
@@ -6936,6 +6937,9 @@ def test_self_kick() -> None:
         _sh.rmtree(root, ignore_errors=True)
     src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner.py")).read()
     check("the runner starts the watcher", "KickWatch(" in src and "box_kick" in src)
+    ksrc = inspect.getsource(_k._selftest_in)
+    check("the kick's selftest runs without the daemon's CELLAR_* settings",
+          'startswith("CELLAR_")' in ksrc)
 
 
 def test_gemini_catalog_union() -> None:

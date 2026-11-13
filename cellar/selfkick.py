@@ -133,7 +133,12 @@ def _git(*args, cwd: Optional[str] = None, timeout: int = GIT_TIMEOUT_S) -> tupl
 
 
 def _selftest_in(tree: str) -> tuple[bool, str]:
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    # THE SELFTEST CHECKS A FRESH INSTALL'S DEFAULTS (Nov 12 2026: the first real
+    # kick failed 3 config tests — "DRY_RUN defaults to True", "no lanes enabled by
+    # default" — because the subprocess inherited the daemon's own CELLAR_* settings).
+    # It runs with them stripped, the way a hand-run selftest in Terminal does.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CELLAR_")}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     r = subprocess.run([sys.executable, "-m", "cellar", "--selftest"], cwd=tree,
                        capture_output=True, text=True, timeout=SELFTEST_TIMEOUT_S, env=env)
     out = (r.stdout or "") + (r.stderr or "")
