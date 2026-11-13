@@ -35976,6 +35976,30 @@ _HAND_CHASE_LEASH_C = 2.0
 _HAND_CHASE_MAX_MOVES = 4            # amends per tick
 _HAND_CHASE_DEBOUNCE_S = 20.0        # per bet between write attempts
 _HAND_CHASE_BUDGET_S = 25.0
+_HAND_CHASE_CURSOR = {"i": 0}            # where the next budgeted chase walk starts
+
+
+def _hand_live_watch(rows, by_id) -> set:
+    """Pure. Every slug the hand lane needs on the depth socket's tape: a Kalshi/
+    Gemini bet's Polymarket twin (else its game's slug), a Polymarket bet sitting
+    out, a Polymarket bet with a resting order. Read off the blobs and the orders
+    mirror only — never cut short by the chase's budget."""
+    live: set = set()
+    for r in rows or []:
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if _kalshi_pick(blob):
+            if blob.get("pmm_twin_slug"):
+                live.add(blob["pmm_twin_slug"])
+            elif blob.get("pmm_game_slug"):
+                live.add(blob["pmm_game_slug"])
+            continue
+        slug, oid = blob.get("pmm_slug"), blob.get("order_id")
+        if not slug:
+            continue
+        o = by_id.get(oid) if oid else None
+        if blob.get("line_hold") or (o and o.get("state") in _OPEN_ORDER_STATES):
+            live.add(slug)
+    return live
 _HAND_CHASE_REST_READS = 3           # book reads per tick when the quote table is blank
 # THE THIN-TOUCH GUARD (Rob, Oct 4 2026, after the Missouri −4.5 fill: the chase
 # joined 52 because 52 was the touch, 52 was a straggler rung, the hit came 57
@@ -36278,13 +36302,28 @@ def _hand_chase_tick(sb, client, now) -> dict:
         return st
     orders = _pmm_open_orders_raw(client, fresh=False) or []
     by_id = {o["id"]: o for o in orders if o.get("id")}
-    live = set()
+    # THE WATCH LIST IS EVERY BET, NOT THE ONES THE BUDGET REACHED (Nov 12 2026,
+    # 54 of 62 bets blind on the strip: this loop runs out its 25s budget every
+    # tick on a 94-order slate, HAND_LIVE_SLUGS was built inside it, so every bet
+    # past the cut fell off the depth socket's watch set and its tape frames were
+    # dropped — no game-start baseline, no line-move read). Built from the blobs
+    # first, before any venue read.
+    live = _hand_live_watch(rows, by_id)
+    # …and the budgeted walk ROTATES, so the tail gets chased too (the same bets
+    # were cut off every tick).
+    rows = sorted(rows, key=lambda x: x.get("id") or 0)
+    if rows:
+        k = _HAND_CHASE_CURSOR["i"] % len(rows)
+        rows = rows[k:] + rows[:k]
     fresh_orders = None
     kctx: dict = {"client": client}
+    walked = 0
     for r in rows:
         if _time.monotonic() - t0 > _HAND_CHASE_BUDGET_S:
             st["gate"] = "budget"
+            st["walked"] = walked
             break
+        walked += 1
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
         if _kalshi_pick(blob):
             if blob.get("pmm_twin_slug"):
@@ -36515,6 +36554,7 @@ def _hand_chase_tick(sb, client, now) -> dict:
             nb["chase_err"] = {"verdict": v, "at": now.isoformat(), "target_c": target}
             sb.table("bot_picks").update({"signal_blob": nb}).eq("id", r["id"]).execute()
             app.logger.warning("hand chase %s: amend %s", slug, v)
+    _HAND_CHASE_CURSOR["i"] = _HAND_CHASE_CURSOR["i"] + walked if st.get("gate") == "budget" else 0
     HAND_LIVE_SLUGS = live
     return st
 
