@@ -3038,6 +3038,9 @@ def test_hand_start_plan() -> None:
     assert f([row(S - 4000, 2, 1623), row(S + 1, 2, 10), row(S + 2, 2, 8)], S, S + 3, 95)[0] == "no_baseline"
     # one post-start frame is not enough
     assert f(pre + [row(S + 2, 5000, 4000)], S, S + 3, 90)[0] == "wait"
+    # …but one that has HELD 5s+ is the book now (Nov 14 2026, Clemson −14.5 waited 13 min on a quiet book)
+    assert f(pre + [row(S + 2, 5000, 4000)], S, S + 9, 90)[0] == "started"
+    assert f(pre + [row(S + 2, 5000, 4000)], S, S + 200, 90)[0] == "wait"
     # two frames 90%+ off the 270k high → started (baseline is the HIGH, not the last pre-start size)
     v = f(pre + [row(S + 2, 5000, 4000), row(S + 3, 6000, 3000)], S, S + 4, 90)
     assert v[0] == "started" and v[1] == 270000 and v[2] == 9000 and v[3] > 96, v

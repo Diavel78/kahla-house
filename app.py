@@ -20029,6 +20029,8 @@ def _start_samples(key: str, tape, start_ts: float) -> list:
     return rows
 _HAND_START_FRAMES = 2             # consecutive post-start samples under the line
 _HAND_START_STALE_S = 90.0         # the newest sample must be this fresh
+_HAND_START_QUIET_S = 5.0          # a post-start book unchanged this long stands for now
+_HAND_START_QUIET_MAX_S = 90.0     # past this a silent book may be a dead socket — wait
 # 90% OFF THE PRE-START HIGH (Oct 12 2026, Ottawa @ New Jersey, Rob: "the
 # book HASN'T DROPPED… that's not the actual game start, that's a time…
 # I think the 70% is just way too low"). One 340k maker left on the LISTED
@@ -20088,6 +20090,13 @@ def _hand_start_plan(samples, start_ts: float, now_ts: float, drop_pct: float,
         return ("no_baseline", None, None, None)
     base = max(pre)
     post = [r for r in rows if r[0] >= start_ts]
+    # A QUIET BOOK IS AN UNCHANGED BOOK (Nov 14 2026, Clemson −14.5: the book fell 96%
+    # at the start and then sat still — a frame arrives only on a CHANGE — so the rule
+    # waited on a fresh second frame for 13 minutes, until a restart re-snapshotted
+    # it). The newest post-start frame that has held `_HAND_START_QUIET_S` stands for
+    # now (up to `_HAND_START_QUIET_MAX_S`).
+    if post and _HAND_START_QUIET_S <= now_ts - post[-1][0] <= _HAND_START_QUIET_MAX_S:
+        post = post + [(now_ts,) + tuple(post[-1][1:])]
     if len(post) < _HAND_START_FRAMES:
         return ("wait", base, (post[-1][2] + post[-1][4]) if post else None, None)
     tail = post[-_HAND_START_FRAMES:]
