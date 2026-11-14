@@ -20862,6 +20862,74 @@ def _gemini_restore_tick(sb) -> None:
     _probe_log(json.loads(json.dumps(out, default=str)))
 
 
+def _gemini_rebook_tick(sb) -> None:
+    """RE-POINT A SHEET BET AT ITS REAL GEMINI LOT (Nov 14 2026, Michigan @ Oregon
+    Under 39.5: the box "switched" it to Polymarket, the Gemini cancel never took,
+    the Gemini order filled 10 @ 50 while the sheet showed a Polymarket order).
+    `machine_flags gemini_rebook` = [{pick_id, ticker, outcome, sibling?, event_name,
+    market_type, side, line, label, contracts}]: when Gemini shows the lot, the pick
+    (or a new one copied off `sibling` if the pick is gone) becomes a filled Gemini
+    bet at Gemini's size. Stamp `gemini_rebook`, flag cleared."""
+    items = _machine_flag_val("gemini_rebook", None)
+    if not items:
+        return
+    try:
+        sb.table("machine_flags").upsert({"key": "gemini_rebook", "value": False,
+                                          "updated_at": datetime.now(timezone.utc).isoformat()},
+                                         on_conflict="key").execute()
+        _MFLAGS_CACHE["map"]["gemini_rebook"] = False
+    except Exception:
+        return
+    now = datetime.now(timezone.utc)
+    out: dict = {"kind": "gemini_rebook", "gemini_rebook": True, "at": now.isoformat(), "rows": []}
+    try:
+        import gemini_orders as _go
+        pm = _go.positions_map()
+        for it in (items if isinstance(items, list) else [items]):
+            res: dict = {"in": it}
+            out["rows"].append(res)
+            t, oc = it.get("ticker"), str(it.get("outcome") or "yes").lower()
+            held = float((pm or {}).get((t, oc)) or 0.0) if pm is not None else None
+            res["held"] = held
+            if not held:
+                res["skip"] = "Gemini shows no lot" if pm is not None else "positions unreadable"
+                continue
+            pk = (sb.table("bot_picks").select("*").eq("id", int(it.get("pick_id") or 0)).limit(1).execute().data) or []
+            if not pk and it.get("sibling"):
+                sib = (sb.table("bot_picks").select("*").eq("id", int(it["sibling"])).limit(1).execute().data) or []
+                if sib:
+                    s0 = dict(sib[0])
+                    for k in ("id", "created_at", "picked_at", "settled_at", "pnl_units", "clv_pp", "result_score", "poly_pnl"):
+                        s0.pop(k, None)
+                    s0.update({"market_type": it.get("market_type"), "side": it.get("side"),
+                               "entry_line": it.get("line"), "status": "pending",
+                               "signal_blob": {"bet_sheet": True, "manual_web_bet": True, "label": it.get("label"),
+                                               "sport": s0.get("sport"), "contracts": int(it.get("contracts") or 10)}})
+                    pk = [s0]
+            if not pk:
+                res["skip"] = "no pick and no sibling"
+                continue
+            r0 = pk[0]
+            b = dict(r0.get("signal_blob") or {})
+            pc = it.get("price_c") or b.get("price_c")
+            b.update({"venue": "KALSHI", "kalshi_ticker": t, "kalshi_buy_yes": oc == "yes", "kalshi_order_id": None,
+                      "pmm_twin_slug": b.get("pmm_slug") or b.get("pmm_twin_slug"), "pmm_slug": None,
+                      "order_id": None, "pmm_synthetic": False, "filled": True, "filled_qty": round(held, 2),
+                      "price_c": pc, "rebooked": {"at": now.isoformat(), "why": "the real lot is on Gemini"}})
+            for k in ("line_hold", "recon", "cancelled_at"):
+                b.pop(k, None)
+            if r0.get("id"):
+                sb.table("bot_picks").update({"signal_blob": b, "entry_book": "GEMINI"}).eq("id", r0["id"]).execute()
+                res["updated_id"] = r0["id"]
+            else:
+                r0.update({"signal_blob": b, "entry_book": "GEMINI"})
+                ins = sb.table("bot_picks").insert(r0).execute()
+                res["restored_id"] = (ins.data or [{}])[0].get("id")
+    except Exception as e:
+        out["err"] = f"{type(e).__name__}: {e}"[:300]
+    _probe_log(json.loads(json.dumps(out, default=str)))
+
+
 def _hand_start_worker() -> None:
     sb = client = None
     while True:
@@ -20875,6 +20943,7 @@ def _hand_start_worker() -> None:
             try:
                 _gemini_dump_tick(sb)
                 _gemini_restore_tick(sb)
+                _gemini_rebook_tick(sb)
                 _r2 = _hand_start_resync(sb, datetime.now(timezone.utc))
                 if _r2.get("checked") or _r2.get("moved"):
                     _rs = _r2
