@@ -21718,7 +21718,9 @@ def _hand_move_tick(sb, client, now) -> dict:
             anchor = blob.get("anchor_c", blob.get("price_c"))
             leash_r = _hand_leash_eff(blob, now, leash)
             if leash_r > leash and not isinstance(blob.get("auto_price"), dict):
-                touch = min(touch, _hand_fair_cap_c(blob, now))  # rejoin at the touch, never past fair
+                _fc = _hand_fair_cap_c(blob, now)
+                if _fc is not None and touch > _fc:              # rejoin at the touch, never past fair — ON THE GRID
+                    touch = round(_grid_dn(float(_fc), _pmm_tick_c(client, slug)), 2)
             if isinstance(blob.get("auto_price"), dict):
                 # THE AUTO LANE rejoins under fair − cap, no leash; no fresh fair = no rejoin
                 fc = _hand_fair_cap_c(blob, now)
@@ -24631,6 +24633,11 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
     leash_k = leash if isinstance(blob.get("auto_price"), dict) else _hand_leash_eff(blob, now, leash)
     verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash_k,
                                              cap_c=_hand_rejoin_cap(blob, now, ev), chalk_c=chalk_c)
+    if (verdict == "hold" and note == "chalk" and fair_cap is not None and chalk_c == fair_cap
+            and not isinstance(blob.get("auto_price"), dict)):
+        _ft = round(_grid_dn(float(chalk_c) - 1e-6, _KALSHI_TICK_C), 2)      # touch past fair → sit at fair
+        if price_c is not None and touch_c is not None and float(price_c) + 0.01 < _ft < float(touch_c):
+            verdict, target, note = "move", _ft, "fair"
     hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
     thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
     thin_join = None
@@ -37572,6 +37579,12 @@ def _hand_chase_tick(sb, client, now) -> dict:
         if fair_bind:
             chalk_c = fair_cap
         verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash_eff, cap_c=cap_c, chalk_c=chalk_c)
+        if verdict == "hold" and note == "chalk" and fair_bind and not auto:
+            # TOUCH PAST FAIR → SIT AT FAIR (Nov 14 2026): the best price the bookie pays,
+            # on the grid — never left behind at an old price under it
+            _ft = round(_grid_dn(float(chalk_c) - 1e-6, _pmm_tick_c(client, slug)), 2)
+            if price_c is not None and _ft > float(price_c) + 0.01 and _ft < float(touch_c):
+                verdict, target, note = "move", _ft, "fair"
         hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
         thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
         thin_join = None                                # set when the guard retargets us to the rung under a thin touch
