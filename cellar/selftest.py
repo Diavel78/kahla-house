@@ -4075,6 +4075,9 @@ def test_gemini_read_glitch_not_off_book() -> None:
           "_HAND_RED_BURST" in src and "at once" in src and "burst = list(ready)" in src)
     check("red alert: PAST LEASH and CHALK never ping (amber on the page)",
           _app._HAND_RED_QUIET == ("past_leash", "chalk") and "_HAND_RED_QUIET" in src)
+    check("the selftest reads code defaults, never live machine_flags",
+          os.environ.get("KAHLA_SELFTEST") != "1" or (_app._machine_flag("hand_start_chase", True) is True
+                                                       and _app._machine_flag_val("gem_open_under_c", 1.0) == 1.0))
     check("gemini seat: 1¢ under Polymarket by default (Rob, Nov 13 2026)", _app._GEM_OPEN_UNDER_C == 1.0)
     check("gemini open seat: Polymarket 50 → Gemini 49",
           _app._gem_open_seat({"market_type": "total"}, 50.0, 49.5, None)[0] == 49.0)
@@ -5092,12 +5095,15 @@ def test_end_state_rosters() -> None:
            "nhl_shots", "sheets_build", "sheets_grade"} <= names)
     _app._MFLAGS_CACHE["map"] = {**(_app._MFLAGS_CACHE.get("map") or {}), "lanes_off": ["paperlog", "scalp"]}
     _app._MFLAGS_CACHE["at"] = __import__("time").time()
+    _st_env = _os.environ.pop("KAHLA_SELFTEST", None)     # this one reads the (seeded) flag cache on purpose
     try:
         check("a lane in machine_flags lanes_off reads off",
               _app._lane_disabled("paperlog") and _app._lane_disabled("scalp")
               and not _app._lane_disabled("grader"))
     finally:
         _app._MFLAGS_CACHE["map"].pop("lanes_off", None)
+        if _st_env is not None:
+            _os.environ["KAHLA_SELFTEST"] = _st_env
     wf = open(_os.path.join(root, ".github", "workflows", "scanner-poll.yml")).read()
     check("the cloud cron workflow is a no-op stub (no Vercel pings, no resolver)",
           "thekahlahouse.com" not in wf and "bot_picks_resolver" not in wf
@@ -7227,7 +7233,8 @@ def test_snipe_gemini() -> None:
         t0 = g["takes"][0]
         check("…its ask at the trigger is graded after the 7¢·p(1−p) fee, and how long it sat is measured",
               t0["ask_c"] == 62.0 and abs(t0["fee_c"] - 7 * 0.62 * 0.38) < 0.01
-              and abs(t0["value_15_c"] - round(72.5 - 62.0 - 7 * 0.62 * 0.38, 2)) < 0.01 and g["stale_ms"] == 800)
+              and abs(t0["value_15_c"] - round(72.5 - 62.0 - 7 * 0.62 * 0.38, 2)) < 0.01
+              and abs(float(g["stale_ms"] or 0) - 800) <= 1)     # float clock: 799 or 800 (failed one box kick)
     finally:
         (_app.SNIPE_SHADOW, _app.SNIPE_GEM_META, _app.SNIPE_GEM_LINK, ev_, h_, l_) = sv
         _app._SNIPE_EVENTS[:] = ev_; _app._SNIPE_HIST.clear(); _app._SNIPE_HIST.update(h_)

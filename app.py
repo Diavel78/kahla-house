@@ -50226,6 +50226,11 @@ _MFLAGS_CACHE: dict = {"at": 0.0, "map": {}}
 
 
 def _machine_flag(key: str, default: bool = True) -> bool:
+    if os.environ.get("KAHLA_SELFTEST") == "1":
+        # THE SELFTEST TESTS THE CODE, NEVER THE LIVE FLAGS (Nov 13 2026: with
+        # hand_start_chase flipped off on the box, the box's selftest failed a
+        # code-default check and refused two kicks in a row; here it passed)
+        return default
     try:
         c = _MFLAGS_CACHE
         if _time.time() - c["at"] > 60.0:
@@ -50245,6 +50250,8 @@ def _machine_flag_val(key: str, default=None):
     """The raw jsonb value of a machine_flags row (same 60s cache as
     `_machine_flag`) — for flags that carry a CONFIG dict, not a bool
     (`rent_cull` thresholds, Sep 5 2026). Fail-open to `default`."""
+    if os.environ.get("KAHLA_SELFTEST") == "1":
+        return default
     try:
         _machine_flag(key)                      # refreshes the shared cache
         v = _MFLAGS_CACHE["map"].get(key)

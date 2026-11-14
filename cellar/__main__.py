@@ -147,6 +147,9 @@ def main(argv: list[str]) -> int:
         # so it holds whatever version of the kick launched it.
         for _k in [k for k in os.environ if k.startswith("CELLAR_")]:
             os.environ.pop(_k, None)
+        # …and never the box's live machine_flags (Nov 13 2026: hand_start_chase off
+        # on the box failed a code-default test and refused two kicks)
+        os.environ["KAHLA_SELFTEST"] = "1"
         return cmd_selftest()
 
     # Everything else needs .env. This MUST happen before `from . import
