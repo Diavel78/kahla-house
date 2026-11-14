@@ -2590,13 +2590,20 @@ def _sheet_retime(sb, games: list, sport: str = "") -> None:
     if not names:
         return
     by: dict = {}
+    starts = [t for t in (_aware_ts(g.get("event_start")) for g in games) if t is not None]
+    if not starts:
+        return
+    want = set(names)
     try:
-        lo = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
-        for i in range(0, len(names), 60):
-            for m in (sb.table("markets").select("id,event_name,event_start,status")
-                      .in_("event_name", names[i:i + 60]).gte("event_start", lo).execute().data) or []:
+        # by TIME WINDOW, names matched here: an in() over names breaks on "Texas A&M" / "Hawai'i"
+        lo, hi = (min(starts) - timedelta(hours=36)).isoformat(), (max(starts) + timedelta(hours=36)).isoformat()
+        rows = _sb_paged(lambda: (sb.table("markets").select("id,event_name,event_start,status")
+                                  .eq("status", "active").gte("event_start", lo).lte("event_start", hi)), 5)
+        for m in rows:
+            if m.get("event_name") in want:
                 by.setdefault(m.get("event_name"), []).append(m)
-    except Exception:
+    except Exception as e:
+        app.logger.warning("sheet retime: %s", e)
         return
     for g in games:
         a = _aware_ts(g.get("event_start"))
