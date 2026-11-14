@@ -17839,7 +17839,7 @@ def _b105_quote(sb, sport: str, it: dict, now, slates: dict) -> dict | None:
     age_min, live} or None."""
     st = _parse_iso(it.get("event_start") or "")
     started = bool(st and st <= now)
-    for live in ((True, False) if started else (False,)):
+    for live in ((True, False) if started else (False, True)):
         evs, age = _b105_events(sb, sport, now, live, slates)
         if not evs:
             continue
@@ -17863,7 +17863,7 @@ def _b105_fair_now(sb, sport: str, b: dict, now, slates: dict) -> dict | None:
     mt = _B105_MT.get(str(b.get("market_type") or ""), str(b.get("market_type") or ""))
     item = {"market_type": mt, "side": b.get("side"), "line": b.get("entry_line"),
             "away": b.get("_away"), "home": b.get("_home"), "event_start": b.get("event_start")}
-    for live in ((True, False) if started else (False,)):
+    for live in ((True, False) if started else (False, True)):
         evs, age = _b105_events(sb, sport, now, live, slates)
         if not evs:
             continue
@@ -18014,7 +18014,7 @@ def api_b105_lines():
         st = _parse_iso(gm.get("event_start") or "")
         started = bool(st and st <= now)
         blk = None
-        for live in ((True, False) if started else (False,)):
+        for live in ((True, False) if started else (False, True)):
             evs, age = _b105_events(sb, sport, now, live, slates)
             if not evs:
                 continue
