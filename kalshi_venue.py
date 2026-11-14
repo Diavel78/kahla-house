@@ -2098,7 +2098,7 @@ def _gem_order_kshape(p: dict) -> dict:
     return {"order_id": p.get("id"), "ticker": p.get("symbol"), "status": "resting",
             "yes_c": yes_c, "remaining": float(p.get("leaves") or 0.0), "filled": float(p.get("filled") or 0.0),
             "initial": p.get("qty"), "side": "bid" if p.get("outcome") != "no" else "ask", "action": "buy",
-            "client_order_id": None}
+            "client_order_id": p.get("cid")}
 
 
 def _gem_resting() -> dict:

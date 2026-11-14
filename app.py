@@ -19484,8 +19484,23 @@ def _hand_recon_flags(r: dict, blob: dict, now, ctx: dict) -> list:
     return flags
 
 
+# AT THE TOUCH, UP TO FAIR (Nov 14 2026, Rob: "I want to have a fair line at touch
+# on the correct line… you're the goddamn bookie"): with a fresh Pinnacle fair on
+# the bet the 2¢ anchor leash steps aside — the chase joins the touch and stops at
+# Pinnacle's devigged fair (`_hand_fair_cap_c`, the chalk cap below it). No fresh
+# fair = the old 2¢ leash. Kill switch `machine_flags hand_leash_fair`.
+_HAND_FAIR_LEASH_C = 99.0
+
+
+def _hand_leash_eff(blob: dict, now, leash: float) -> float:
+    if not _machine_flag("hand_leash_fair", True):
+        return leash
+    return _HAND_FAIR_LEASH_C if _hand_fair_cap_c(blob, now) is not None else leash
+
+
 _HAND_ORPHAN_SEEN: dict = {}
 _HAND_ORPHAN_ALERTED: set = set()
+_HAND_ORPHAN_CLIENT = [None]
 
 
 def _gem_ticker_start(ticker):
@@ -19528,7 +19543,8 @@ def _hand_orphan_plan(orders, k_orders, k_pos, claimed_slugs: set, claimed_ticke
         if str(oid) in claimed_oids or t in claimed_tickers:
             continue
         out.append({"key": f"G|{oid}", "venue": "GEMINI", "what": "order", "ref": t,
-                    "detail": {"id": oid, "side": o.get("side"), "remaining": o.get("remaining"), "yes_c": o.get("yes_c")}})
+                    "detail": {"id": oid, "side": o.get("side"), "remaining": o.get("remaining"), "yes_c": o.get("yes_c"),
+                               "cid": o.get("client_order_id")}})
     for t, net in (k_pos or {}).items():
         if not str(t).startswith("GEMI-") or not net:
             continue
@@ -19574,17 +19590,34 @@ def _hand_orphan_sweep(sb, now, orders, k_orders, k_pos) -> dict:
     for f in found:
         n = _HAND_ORPHAN_SEEN.get(f["key"], 0) + 1
         _HAND_ORPHAN_SEEN[f["key"]] = n
-        if n >= 2 and f["key"] not in _HAND_ORPHAN_ALERTED:
+        if n >= 3 and f["key"] not in _HAND_ORPHAN_ALERTED:
             _HAND_ORPHAN_ALERTED.add(f["key"])
             alerts.append(f)
             _probe_log({"hand_orphan": True, **f, "at": now.isoformat()})
-    if alerts:
-        lines = [f"{a['venue']} {a['what']}: {a['ref']}" for a in alerts[:8]]
+    # THE BOOKIE FIXES IT (Rob, Nov 14 2026: "I don't want a red telegram… If there's
+    # an alert, why aren't you fixing the fucking alert?"): an orphan ORDER the box
+    # placed (a Polymarket API order, a Gemini order on our own `kh-` ticket) is
+    # cancelled — it is a bet nobody tracks and it can fill. A Gemini order with
+    # another ticket is Rob's app bet and is left alone. Lots are stamped only.
+    fixed = 0
+    for a in alerts:
+        if a["what"] != "order":
+            continue
         try:
-            _tg_send_now("🔴 ON THE VENUE, NOT ON THE SHEET — " + str(len(alerts)) + "\n" + "\n".join(lines))
-        except Exception:
-            pass
-    return {"orphans": len(found), "alerted": len(alerts)}
+            if a["venue"] == "POLYMARKET" and _HAND_ORPHAN_CLIENT[0] is not None:
+                _HAND_ORPHAN_CLIENT[0].orders.cancel(a["detail"]["id"], {"marketSlug": a["ref"]})
+                fixed += 1
+            elif a["venue"] == "GEMINI" and str(a["detail"].get("cid") or "").startswith("kh-"):
+                import kalshi_venue as _kvo
+                _kvo.cancel_order(a["detail"]["id"], a["ref"])
+                fixed += 1
+            else:
+                continue
+            _probe_log({"hand_orphan_cancel": True, **a, "at": now.isoformat()})
+        except Exception as e:
+            _probe_log({"hand_orphan_cancel": True, "error": f"{type(e).__name__}: {e}"[:160], **a,
+                        "at": now.isoformat()})
+    return {"orphans": len(found), "found_twice": len(alerts), "cancelled": fixed}
 
 
 def _hand_reconcile_tick(sb, client, now) -> dict:
@@ -19691,6 +19724,7 @@ def _hand_reconcile_tick(sb, client, now) -> dict:
                 app.logger.warning("hand recon write %s: %s", r["id"], str(e)[:120])
     if k_orders is None and k_pos is None:
         k_orders, k_pos = _kalshi_acct(fresh=True)
+    _HAND_ORPHAN_CLIENT[0] = client
     try:
         st["orphans"] = _hand_orphan_sweep(sb, now, orders, k_orders, k_pos)
     except Exception as e:
@@ -21655,7 +21689,9 @@ def _hand_move_tick(sb, client, now) -> dict:
                 except (TypeError, ValueError):
                     pass
             anchor = blob.get("anchor_c", blob.get("price_c"))
-            leash_r = leash
+            leash_r = _hand_leash_eff(blob, now, leash)
+            if leash_r > leash and not isinstance(blob.get("auto_price"), dict):
+                touch = min(touch, _hand_fair_cap_c(blob, now))  # rejoin at the touch, never past fair
             if isinstance(blob.get("auto_price"), dict):
                 # THE AUTO LANE rejoins under fair − cap, no leash; no fresh fair = no rejoin
                 fc = _hand_fair_cap_c(blob, now)
@@ -24565,7 +24601,8 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
         fair_cap = round(fair_cap - _auto_cap_c(blob), 2)
     if fair_cap is not None and (chalk_c is None or fair_cap < chalk_c):
         chalk_c = fair_cap
-    verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash,
+    leash_k = leash if isinstance(blob.get("auto_price"), dict) else _hand_leash_eff(blob, now, leash)
+    verdict, target, note = _hand_chase_plan(price_c, touch_c, anchor_c, leash_k,
                                              cap_c=_hand_rejoin_cap(blob, now, ev), chalk_c=chalk_c)
     hold = blob.get("chase_hold") if isinstance(blob.get("chase_hold"), dict) else None
     thin_hold = blob.get("thin_hold") if isinstance(blob.get("thin_hold"), dict) else None
@@ -26683,6 +26720,12 @@ def _hand_switch_leash_ok(blob: dict, dest_c: float) -> bool:
         leash = float(_machine_flag_val("hand_chase_leash_c", _HAND_CHASE_LEASH_C))
     except (TypeError, ValueError):
         leash = _HAND_CHASE_LEASH_C
+    fc = _hand_fair_cap_c(blob, datetime.now(timezone.utc)) if _machine_flag("hand_leash_fair", True) else None
+    if fc is not None:
+        try:
+            return float(dest_c) <= fc + 1e-9          # a fresh fair bounds a switch, not the old anchor
+        except (TypeError, ValueError):
+            return True
     try:
         return anchor is None or abs(float(dest_c) - float(anchor)) <= leash + 1e-9
     except (TypeError, ValueError):
@@ -27324,7 +27367,9 @@ def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg
                 touch = min(touch, float(dest))
             except (TypeError, ValueError):
                 pass
-        leash_r = leash
+        leash_r = _hand_leash_eff(blob, now, leash)
+        if leash_r > leash and not isinstance(blob.get("auto_price"), dict):
+            touch = min(touch, _hand_fair_cap_c(blob, now))      # rejoin at the touch, never past fair
         if isinstance(blob.get("auto_price"), dict):
             fc = _hand_fair_cap_c(blob, now)
             if fc is None:
@@ -37494,6 +37539,8 @@ def _hand_chase_tick(sb, client, now) -> dict:
                 continue
             fair_cap = round(fair_cap - _auto_cap_c(blob), 2)
             leash_eff = _AUTO_PRICE_LEASH_C
+        else:
+            leash_eff = _hand_leash_eff(blob, now, leash)
         fair_bind = fair_cap is not None and (chalk_c is None or fair_cap < chalk_c)
         if fair_bind:
             chalk_c = fair_cap

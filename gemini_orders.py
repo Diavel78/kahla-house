@@ -198,7 +198,8 @@ def parse_order(o: dict) -> dict:
             "side": str(o.get("side") or "").lower(),
             "price_c": round(px * 100.0, 2) if px is not None else None,
             "qty": qty, "filled": filled or 0.0, "leaves": leaves,
-            "status": str(o.get("status") or o.get("orderStatus") or "").lower()}
+            "status": str(o.get("status") or o.get("orderStatus") or "").lower(),
+            "cid": o.get("clientOrderId") or o.get("client_order_id")}
 
 
 def orders_by_id() -> Optional[dict]:
