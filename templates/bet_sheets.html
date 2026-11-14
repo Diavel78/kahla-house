@@ -1930,7 +1930,8 @@
         });
         _haveByKey = hk; _betsByGame = bg;
         const sig = bets.filter(b => b.status === 'pending').map(b => { const s = betState(b); return b.id + s.cls + s.short + s.detail + (b.live ? 'L' : ''); }).join('|')
-                  + '#' + _slip.filter(i => i.op).map(i => i.key).join(',');
+                  + '#' + _slip.filter(i => i.op).map(i => i.key).join(',')
+                  + '#' + (d.missed || []).map(m => m.id + ':' + (m.cur_c != null ? m.cur_c : '') + (m.chasing ? 'c' : '')).join(',');   // the Live tab shows missed picks
         if (sig !== _gamesSig) { _gamesSig = sig; if (typeof _games !== 'undefined' && _games && _games.length) { try { renderGames(); } catch (e) {} } }
         const tabBets = bets.filter(b => String(b.sport || '').toUpperCase() === String(_sport || '').toUpperCase());
         const warn = tabBets.filter(b => b.status === 'pending' && !b.live && betState(b).cls === 'warn').length;
@@ -1958,7 +1959,15 @@
         if (!missed.length) {
             document.getElementById('bets').innerHTML = sr.html + (missedOther ? '<div class="c-n">' + missedOther + ' ended on other tabs.</div>' : '');
         } else {
-            document.getElementById('bets').innerHTML = sr.html + missed.map(m => {
+            document.getElementById('bets').innerHTML = sr.html + missed.map(m => missedCard(m, d)).join('');
+        }
+        renderSheet();
+    }
+    // One missed / chase-ended bet as a card (the Chasing card AND, since Nov 13
+    // 2026, the Live tab under its game — Rob: "I want the live tab to show the
+    // original pick then, and I can chase them manually if I want"). Tap → the
+    // action sheet: Chase it again.
+    function missedCard(m, d) {
                 _betsById[m.id] = Object.assign({ _missed: true, status: 'missed', started: true }, m);   // tap → the action sheet (Get it live)
                 const sl = _scoreLine(m);
                 const want = m.price_c != null ? Number(m.price_c) : null;
@@ -1981,9 +1990,14 @@
                      + '<button class="hidebtn" title="hide on every device" onclick="event.stopPropagation();dismissMissed(\'' + esc(m.id) + '\')">Hide</button></div>'
                      + '<div class="c-t">' + esc((m.period ? String(m.period).toUpperCase() + ' ' : '') + betLabel(m)) + ' <span class="g">· ' + esc(gameShort(m)) + '</span></div>'
                      + '<div class="c-d">' + (sl ? esc(sl) + ' · ' : '') + l2 + '</div>' + l3 + l4 + '</div>';
-            }).join('');
-        }
-        renderSheet();
+    }
+    function missedOnGame(g) {
+        const d = _lastBetsPayload || {};
+        const dis = _missedDismissed();
+        const en = String(g.event_name || '');
+        return (d.missed || []).filter(m => !dis[m.id]
+            && String(m.sport || '').toUpperCase() === String(_sport || '').toUpperCase()
+            && m.event_name && (m.event_name === en || en.indexOf(m.event_name) === 0 || String(m.event_name).indexOf(en) === 0));
     }
     // Re-peg / Cancel / Move are SLIP ITEMS, not fire-now buttons (Rob, Oct 4
     // 2026: "Repeg needs to add to betslip… select multiple ones"). The action
@@ -3072,7 +3086,9 @@
              + '<div class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + '</div></div>'
              + '<div class="gr2">' + summ + '<span class="gbtn">' + fullChip(g) + chartChip(g) + '</span></div></div>'
              + (subs.length ? '<div class="gsub">' + subs.join('') + '</div>' : '')
-             + mk + extra.map(b => betStrip(b, false, flips[b.id])).join('') + '</div>';
+             + mk + extra.map(b => betStrip(b, false, flips[b.id])).join('')
+             + (liveMode ? missedOnGame(g).map(m => '<div class="c-n" style="margin:6px 0 2px">your pick · not filled at the start</div>' + missedCard(m, _lastBetsPayload || {})).join('') : '')
+             + '</div>';
     }
     function renderGames() {
         _inflKeys = inflightKeys(); _inflOps = inflightOps();
