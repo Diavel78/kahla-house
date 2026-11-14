@@ -5841,6 +5841,9 @@ def api_bet_sheets_picks():
                         busy.add(int(q_["pick_id"]))
             except Exception:
                 pass
+            _only = {int(x) for x in re.findall(r"\d+", request.args.get("only") or "")}
+            if _only:                                  # &only=200856 → just these picks
+                cands = [r_ for r_ in cands if int(r_["id"]) in _only]
             ac = {"cands": len(cands), "queued": 0, "skipped_busy": 0, "errors": [], "rows": []}
             for r_ in cands:
                 b_ = r_["signal_blob"]
