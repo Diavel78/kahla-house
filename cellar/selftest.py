@@ -4071,8 +4071,10 @@ def test_gemini_read_glitch_not_off_book() -> None:
         raised = True
     check("gemini account read: an error dict raises (never 'no orders')", raised)
     src = _insp.getsource(_app._hand_red_alert_tick)
-    check("red alert: a burst of OFF THE BOOK reds is one summary message",
-          "_HAND_RED_BURST" in src and "at once" in src)
+    check("red alert: any burst of reds is one summary message",
+          "_HAND_RED_BURST" in src and "at once" in src and "burst = list(ready)" in src)
+    check("red alert: PAST LEASH and CHALK never ping (amber on the page)",
+          _app._HAND_RED_QUIET == ("past_leash", "chalk") and "_HAND_RED_QUIET" in src)
     check("gemini seat: 1¢ under Polymarket by default (Rob, Nov 13 2026)", _app._GEM_OPEN_UNDER_C == 1.0)
     check("gemini open seat: Polymarket 50 → Gemini 49",
           _app._gem_open_seat({"market_type": "total"}, 50.0, 49.5, None)[0] == 49.0)
@@ -4324,35 +4326,46 @@ def test_hand_red_alert() -> None:
     _app._HAND_START_ALERTED.clear(); _app._HAND_START_ALERT_Q.clear()
     try:
         _app._send_fill_telegram = lambda msg, urgent=False: sent.append(msg) or True
+        F = _app._hand_start_flush
+        _app._HAND_START_BATCH.clear()
         st1 = {"kind": "hand_start_cancel", "hand_start_cancel": True, "pick_id": "p1", "bet": bet,
                "result": {"ok": True, "deleted": True}, "window": {"tries": 3}}
         _app._hand_start_cancel_alert(st1)
-        check("start alert: sends one 🔴 with the bet, the game and the venue",
-              len(sent) == 1 and sent[0].startswith("🔴") and "Under 52.5" in sent[0] and "WAS @ SF" in sent[0]
-              and "NOT FILLED" in sent[0] and "Polymarket" in sent[0] and "5 @ 49.0¢" in sent[0], sent[-1:] )
-        check("start alert: the outcome rides the stamp", st1.get("alert", {}).get("sent") is True
+        check("start alert: queued, not sent from the cancel path (batched)", not sent and len(_app._HAND_START_BATCH) == 1)
+        check("start alert: the outcome rides the stamp", st1.get("alert", {}).get("batched") is True
               and st1["alert"]["code"] == "start_not_filled")
+        F()
+        check("start alert: one queued cancel sends as is — the bet, the game, the venue",
+              len(sent) == 1 and sent[0].startswith("🔴") and "Under 52.5" in sent[0] and "WAS @ SF" in sent[0]
+              and "NOT FILLED" in sent[0] and "Polymarket" in sent[0] and "5 @ 49.0¢" in sent[0], str(sent[-1:]))
         _app._hand_start_cancel_alert(st1)
+        F()
         check("start alert: the same pick never pings twice", len(sent) == 1)
         st2 = {**st1, "pick_id": "p2", "venue": "KALSHI", "result": {"ok": True, "deleted": False, "held": 1.0}}
+        st5 = {**st1, "pick_id": "p5"}
         _app._hand_start_cancel_alert(st2)
-        check("start alert: a Kalshi partial names Kalshi", len(sent) == 2 and "Kalshi" in sent[1] and "PARTIAL" in sent[1], sent[-1:])
+        _app._hand_start_cancel_alert(st5)
+        F()
+        check("start alert: two cancels in one tick are ONE message naming both",
+              len(sent) == 2 and "2 bets cancelled at game start" in sent[1] and "Kalshi" in sent[1] and "PARTIAL" in sent[1],
+              str(sent[-1:]))
         st3 = {k: v for k, v in st1.items() if k != "alert"} | {"pick_id": "p3", "result": {"ok": True, "deleted": False, "held": 5.0}}
         _app._hand_start_cancel_alert(st3)
+        F()
         check("start alert: a full fill is silent", len(sent) == 2 and "alert" not in st3)
         _app._send_fill_telegram = lambda msg, urgent=False: False
         st4 = {**st1, "pick_id": "p4"}
         _app._hand_start_cancel_alert(st4)
-        check("start alert: a failed send is recorded and queued for the red clock",
-              st4["alert"]["sent"] is False and len(_app._HAND_START_ALERT_Q) == 1
-              and _app._HAND_START_ALERT_Q[0]["next_at"] > _app._time.time() + 100)
+        F()
+        check("start alert: a failed send is queued for the red clock",
+              len(_app._HAND_START_ALERT_Q) == 1 and _app._HAND_START_ALERT_Q[0]["next_at"] > _app._time.time() + 100)
         _app._HAND_START_ALERT_Q[0]["next_at"] = 0
         _app._send_fill_telegram = lambda msg, urgent=False: sent.append(msg) or True
         check("start alert: the retry drains the queue", _app._hand_start_alert_retry() == 1 and not _app._HAND_START_ALERT_Q
               and len(sent) == 3)
     finally:
         _app._send_fill_telegram, _app._machine_flag = old_send, old_flag
-        _app._HAND_START_ALERTED.clear(); _app._HAND_START_ALERT_Q.clear()
+        _app._HAND_START_ALERTED.clear(); _app._HAND_START_ALERT_Q.clear(); _app._HAND_START_BATCH.clear()
     src_fin = _insp.getsource(_app._hand_start_finish_poly) + _insp.getsource(_app._hand_start_finish_kalshi) \
         + _insp.getsource(_app._hand_start_complete_poly) + _insp.getsource(_app._hand_start_kalshi)
     check("start alert: every start-cancel finish path calls the alert",

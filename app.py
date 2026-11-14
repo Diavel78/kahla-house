@@ -18528,6 +18528,7 @@ _HAND_RED_MIN_TICKS = 2
 # more than this many OFF THE BOOK reds ready in one tick is one summary message,
 # never one each — a real wipe still says so, a read glitch can't flood the phone.
 _HAND_RED_BURST = 5
+_HAND_RED_QUIET = ("past_leash", "chalk")   # never a Telegram (flag hand_red_leash_alert restores)
 _TG_RED_PREFIX = "\U0001f534"       # 🔴
 
 
@@ -18635,7 +18636,7 @@ def _hand_red_state(blob: dict, s: dict, started: bool = False, rec=None, chases
 
 def _hand_red_msg(r: dict, blob: dict, text: str) -> str:
     label = blob.get("label") or f"{r.get('side') or ''} {r.get('market_type') or ''}".strip()
-    venue = "Kalshi" if _kalshi_pick(blob) else "Polymarket"
+    venue = ("Gemini" if _is_gem(blob.get("kalshi_ticker")) else "Kalshi") if _kalshi_pick(blob) else "Polymarket"
     when = ""
     try:
         from zoneinfo import ZoneInfo
@@ -18738,20 +18739,18 @@ def _hand_start_cancel_alert(stamp: dict) -> None:
         kalshi = str(stamp.get("venue") or bet.get("venue") or "").upper() == "KALSHI"
         r = {"event_name": bet.get("event_name"), "event_start": bet.get("event_start"),
              "side": bet.get("side"), "market_type": bet.get("market_type")}
+        _tk = stamp.get("ticker") or bet.get("ticker")
         blob = {"label": bet.get("label"), "contracts": bet.get("contracts"), "price_c": bet.get("price_c"),
-                "venue": "KALSHI" if kalshi else "POLYMARKET"}
+                "venue": "KALSHI" if kalshi else "POLYMARKET", "kalshi_ticker": _tk if kalshi else None}
         msg = _hand_red_msg(r, blob, text)
         _HAND_START_ALERTED[pid] = _time.monotonic()
-        ok = False
-        try:
-            ok = bool(_send_fill_telegram(msg, urgent=True))
-        except Exception:
-            ok = False
-        stamp["alert"] = {"code": code, "text": text, "sent": ok, "creds": _tg_creds()[2],
-                          "err": None if ok else _TG_LAST_ERR.get("err")}
-        if not ok:
-            _HAND_START_ALERT_Q.append({"msg": msg, "pick_id": pid, "code": code, "tries": 1,
-                                        "next_at": _time.time() + _HAND_RED_RETRY_S})
+        # BATCHED (Nov 13 2026: with the live chase off every unfilled bet cancels at
+        # its start — a 10 AM college wave would be 20 pings). The red-alert tick
+        # sends what queued since its last pass as ONE message (`_hand_start_flush`).
+        short = (msg.split("\n")[0].replace(_TG_RED_PREFIX, "").strip()
+                 + " · " + " · ".join(str(text).split(" · ")[:2]) + " · " + (("Gemini" if _is_gem(_tk) else "Kalshi") if kalshi else "Polymarket"))
+        _HAND_START_BATCH.append({"msg": msg, "short": short, "pick_id": pid, "code": code})
+        stamp["alert"] = {"code": code, "text": text, "batched": True}
         if len(_HAND_START_ALERTED) > 500:
             for k in sorted(_HAND_START_ALERTED, key=_HAND_START_ALERTED.get)[:250]:
                 _HAND_START_ALERTED.pop(k, None)
@@ -18760,6 +18759,38 @@ def _hand_start_cancel_alert(stamp: dict) -> None:
             stamp["alert"] = {"err": f"{type(e).__name__}: {e}"[:120], "sent": False}
         except Exception:
             pass
+
+
+_HAND_START_BATCH: list = []          # game-start cancel pings waiting for the next red-alert tick
+
+
+def _hand_start_flush() -> int:
+    """Send the queued game-start cancels: one → as is, several → one message."""
+    if not _HAND_START_BATCH:
+        return 0
+    items = list(_HAND_START_BATCH)
+    del _HAND_START_BATCH[:len(items)]
+    if len(items) == 1:
+        msg = items[0]["msg"]
+    else:
+        lines = [str(it.get("short") or it["msg"].replace(_TG_RED_PREFIX, "").strip().replace("\n", " · "))[:160]
+                 for it in items[:12]]
+        msg = (f"{_TG_RED_PREFIX} {len(items)} bets cancelled at game start\n" + "\n".join("• " + x for x in lines)
+               + (f"\n… +{len(items) - 12} more" if len(items) > 12 else ""))
+    ok = False
+    try:
+        ok = bool(_send_fill_telegram(msg, urgent=True))
+    except Exception:
+        ok = False
+    try:
+        _probe_log({"hand_start_alert_batch": True, "n": len(items), "sent": ok,
+                    "picks": [it["pick_id"] for it in items], "at": datetime.now(timezone.utc).isoformat()})
+    except Exception:
+        pass
+    if not ok:
+        _HAND_START_ALERT_Q.append({"msg": msg, "pick_id": "batch", "code": "batch", "tries": 1,
+                                    "next_at": _time.time() + _HAND_RED_RETRY_S})
+    return len(items)
 
 
 def _hand_start_alert_retry() -> int:
@@ -18924,6 +18955,10 @@ def _hand_red_alert_tick(sb, now) -> dict:
     if not _machine_flag("hand_red_alert", True):
         return {"off": True}
     retried = _hand_start_alert_retry()
+    try:
+        _hand_start_flush()
+    except Exception as e:
+        app.logger.warning("hand start flush: %s", str(e)[:120])
     st = _HAND_STATUS_LAST
     strip = st.get("rows") or {}
     if not strip or _time.time() - float(st.get("at") or 0) > 120.0:
@@ -18978,6 +19013,13 @@ def _hand_red_alert_tick(sb, now) -> dict:
                     pass
             continue
         code, text = red
+        if code in _HAND_RED_QUIET and not _machine_flag("hand_red_leash_alert", False):
+            # PAST LEASH / CHALK ARE THE PAGE'S, NOT THE PHONE'S (Nov 13 2026: the
+            # live chase went off, these lost their "the start chases it" mute and 48
+            # pinged in one tick — Rob shut Telegram off). The box stopped chasing
+            # the price; he chases by hand if he wants. Amber on the page.
+            _HAND_RED_SEEN.pop(pid, None)
+            continue
         reds += 1
         e = _HAND_RED_SEEN.get(pid)
         if not e or e.get("code") != code:
@@ -18991,13 +19033,15 @@ def _hand_red_alert_tick(sb, now) -> dict:
         if float(e.get("retry_at") or 0) > _time.time():
             continue                            # a failed send waits _HAND_RED_RETRY_S, not a tick
         ready.append((r, blob, code, text, e))
-    burst = [x for x in ready if x[2] == "off_book"]
+    burst = list(ready)
     if len(burst) > _HAND_RED_BURST:
-        ready = [x for x in ready if x[2] != "off_book"]
-        names = [_hand_red_msg(x[0], x[1], "").split("\n")[0].replace(_TG_RED_PREFIX, "").strip()[:70]
-                 for x in burst[:6]]
-        msg = (f"🔴 {len(burst)} bets read OFF THE BOOK at once — usually a venue read "
-               f"glitch, check the app before acting\n" + "\n".join(names)
+        # ANY BURST IS ONE MESSAGE (Nov 13 2026, twice in a day: 90 OFF THE BOOK off a
+        # bad Gemini read, then 48 PAST LEASH/CHALK off a flag change)
+        ready = []
+        names = [(_hand_red_msg(x[0], x[1], "").split("\n")[0].replace(_TG_RED_PREFIX, "").strip()[:60]
+                  + f" · {x[2].upper().replace('_', ' ')}") for x in burst[:6]]
+        msg = (f"🔴 {len(burst)} bets went red at once — usually one cause (a venue read "
+               f"or a rule change), check the app\n" + "\n".join(names)
                + (f"\n… +{len(burst) - 6} more" if len(burst) > 6 else ""))
         ok = False
         try:
