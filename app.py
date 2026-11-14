@@ -5866,6 +5866,35 @@ def api_bet_sheets_picks():
         except Exception as e:
             out["auto_cancel_err"] = str(e)[:200]
         return jsonify(out)
+    if request.args.get("set_contracts"):
+        # ?set_contracts=200626:10[&apply=1] — corrects a pick's contracts count
+        # (the Texas +4.5 record read 1 on a 9.96 lot after the Gemini rebook).
+        # Data only: no order is placed, cancelled or resized.
+        res_sc = []
+        for part in (request.args.get("set_contracts") or "").split(",")[:10]:
+            try:
+                pid_, n_ = part.split(":")
+                pid_, n_ = int(pid_), int(n_)
+            except ValueError:
+                continue
+            if not (1 <= n_ <= 250):
+                continue
+            try:
+                sb_ = get_supabase()
+                r_ = (sb_.table("bot_picks").select("id,signal_blob").eq("id", pid_).limit(1).execute().data or [None])[0]
+                if not r_:
+                    res_sc.append({"id": pid_, "error": "no pick"})
+                    continue
+                b_ = dict(r_.get("signal_blob") or {})
+                was = b_.get("contracts")
+                if request.args.get("apply"):
+                    b_["contracts"] = n_
+                    b_["contracts_fixed"] = {"from": was, "to": n_, "at": datetime.now(timezone.utc).isoformat()}
+                    sb_.table("bot_picks").update({"signal_blob": b_}).eq("id", pid_).execute()
+                res_sc.append({"id": pid_, "from": was, "to": n_, "applied": bool(request.args.get("apply"))})
+            except Exception as e:
+                res_sc.append({"id": pid_, "error": str(e)[:160]})
+        out["set_contracts"] = res_sc
     ids_q = [int(x) for x in re.findall(r"\d+", request.args.get("ids") or "")][:20]
     if ids_q:                                          # ?ids=199717 → the picks' FULL blobs (read-only)
         try:
@@ -21225,7 +21254,7 @@ def _gemini_evacuate_run(sb, client, redo=None, cancel_ids=None, retime=None) ->
         if held is None:
             res["skip"] = "held unreadable after cancel — place from the sheet"
             continue
-        qty = max(0, contracts - int(round(float(held))))
+        qty = max(0, int(contracts - float(held)))     # floor: a 0.53 gap buys nothing (USC 10.47, Nov 14)
         if qty < 1:
             res["skip"] = "filled on Gemini — stays there"
             continue
@@ -29037,6 +29066,11 @@ def api_bet_sheets_mine():
         app.logger.warning("bet sheet live enrich: %s", e)
     _lap("live")
     try:
+        _bet_sheet_fill_finals(out)
+    except Exception as e:
+        app.logger.warning("bet sheet finals: %s", e)
+    _lap("finals")
+    try:
         _bet_sheet_reads(sb, out)
     except Exception as e:
         app.logger.warning("bet sheet reads: %s", e)
@@ -30111,6 +30145,43 @@ def _bs_grade_bet(mt: str, side: str, line, away_score, home_score):
     return "win" if d > 0 else ("loss" if d < 0 else "push")
 
 
+def _bet_sheet_fill_finals(out: list) -> None:
+    """A SETTLED BET ALWAYS SHOWS ITS SCORE (Nov 14 2026 — Ohio State −13.5 and
+    Under 44.5 read lost with no final: the venue graded them, and a venue grade
+    carries dollars, not the score). A won/lost/push row with no away/home takes
+    them from another bet on the same game, else ESPN's final (cached per
+    sport+date). Copies the dict — never edits the row's own result_score."""
+    def _has(rs):
+        return isinstance(rs, dict) and rs.get("away") is not None and rs.get("home") is not None
+    need = [b for b in out if b.get("status") in ("won", "lost", "push") and not _has(b.get("result_score"))]
+    if not need:
+        return
+    by_game = {}
+    for b in out:
+        if _has(b.get("result_score")) and b.get("event_name"):
+            by_game.setdefault(b["event_name"], b["result_score"])
+    espn: dict = {}
+    for b in need:
+        sc = by_game.get(b.get("event_name"))
+        if not sc:
+            away, home = _live_split_event(b.get("event_name") or "")
+            bdt = _parse_iso(b.get("event_start") or "")
+            if not (away and home and bdt):
+                continue
+            dk = bdt.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+            ck = ((b.get("sport") or "").lower(), dk)
+            if ck not in espn:
+                espn[ck] = _bs_espn_events(ck[0], dk)
+            m = _live_match_espn(espn[ck], away, home, b.get("event_start"))
+            if not m or not (m.get("completed") or m.get("state") == "post"):
+                continue
+            sc = {"away": m.get("away_score"), "home": m.get("home_score")}
+            by_game[b.get("event_name")] = sc
+        rs = dict(b.get("result_score")) if isinstance(b.get("result_score"), dict) else {}
+        rs["away"], rs["home"] = sc.get("away"), sc.get("home")
+        b["result_score"] = rs
+
+
 def _bet_sheet_cancelled_today(sb, now) -> list:
     """COPY PICKS KEEPS EVERY BET (Rob, Oct 31 2026: "should show all my
     picks for the grading, even if they didn't fill after live chase. I get
@@ -30142,6 +30213,27 @@ def _bet_sheet_cancelled_today(sb, now) -> list:
             by_pick.pop(int(pid), None)       # a real partial: the pick stayed and is in the feed
     if not by_pick:
         return []
+    # THE BET CAME BACK (Nov 14 2026): Iowa State −2.5, Ohio State −13.5 and SMU ML
+    # were deleted off a bad Gemini read and restored under new ids (filled), and
+    # Mississippi State +2.5 was re-placed on its moved game — each still read
+    # "didn't fill" off its old cancel stamp. A stamp is dropped when a pick on the
+    # same game + market + side exists now with a lot or a resting order.
+    live_keys: set = set()
+    try:
+        for p_ in (sb.table("bot_picks").select("event_name,market_type,side,status,signal_blob")
+                   .gte("event_start", (day0 - timedelta(hours=12)).isoformat())
+                   .lt("event_start", (day0 + timedelta(days=2)).isoformat())
+                   .limit(1000).execute().data or []):
+            b_ = p_.get("signal_blob") if isinstance(p_.get("signal_blob"), dict) else {}
+            try:
+                fq_ = float(b_.get("filled_qty") or 0)
+            except (TypeError, ValueError):
+                fq_ = 0.0
+            if fq_ >= _BS_DUST_Q or b_.get("order_id") or b_.get("kalshi_order_id"):
+                mt_ = "ml" if p_.get("market_type") in ("moneyline", "ml") else p_.get("market_type")
+                live_keys.add((p_.get("event_name"), mt_, p_.get("side")))
+    except Exception:
+        live_keys = set()
     old = {pid for pid, res in by_pick.items() if not isinstance(res.get("bet"), dict)}
     back = _bet_sheet_missed_from_queue(sb, now, old)
     out, espn = [], {}
@@ -30153,6 +30245,9 @@ def _bet_sheet_cancelled_today(sb, now) -> list:
         st_iso = res.get("start") or bet.get("event_start")
         bdt = _parse_iso(st_iso or "")
         if not bdt or bdt.astimezone(az).date() != day0.date():
+            continue
+        _mt = "ml" if bet.get("market_type") in ("moneyline", "ml") else bet.get("market_type")
+        if (bet.get("event_name"), _mt, bet.get("side")) in live_keys:
             continue
         item = {"id": f"c{pid}", "pick_id": pid, "cancelled": True,
                 "sport": bet.get("sport") or (_slug_sport(slug) if slug else None),
