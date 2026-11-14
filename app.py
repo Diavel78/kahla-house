@@ -2578,6 +2578,32 @@ def api_kalshi_livedata():
 @app.route("/api/pick-sheets")
 @app.route("/api/football-picks")
 @bot_required
+def _sheet_retime(sb, games: list) -> None:
+    """MOVED GAMES STAY ON THE SHEET (Nov 14 2026, Rob's screenshot: Auburn @ Mississippi
+    State and Tulane @ Rice, moved by the FAA ground hold, read as started at their old
+    times, and his bets on them fell under "My bets not on this sheet"). The sheet row
+    keeps the start it was built with; the `markets` row is retimed (the ESPN spine, or
+    by hand). One read; a game whose market start differs by > 10 min takes it, the old
+    one kept as `listed_start`."""
+    mids = sorted({g.get("market_id") for g in games if g.get("market_id")})
+    if not mids:
+        return
+    mk: dict = {}
+    try:
+        for i in range(0, len(mids), 100):
+            for m in (sb.table("markets").select("id,event_start").in_("id", mids[i:i + 100])
+                      .execute().data) or []:
+                mk[m["id"]] = m.get("event_start")
+    except Exception:
+        return
+    for g in games:
+        z = mk.get(g.get("market_id"))
+        a, b = _aware_ts(g.get("event_start")), _aware_ts(z)
+        if a is not None and b is not None and abs((b - a).total_seconds()) > 600:
+            g["listed_start"] = g.get("event_start")
+            g["event_start"] = z
+
+
 def api_football_picks():
     sport = (request.args.get("sport") or "NHL").upper()
     if sport not in _SHEET_SPORTS:
@@ -2651,6 +2677,7 @@ def api_football_picks():
         b = r.get("data_built_at")
         if b and (built_at is None or b < built_at):
             built_at = b
+    _sheet_retime(sb, games)                  # a MOVED game shows its new start (Nov 14 2026, the FAA hold)
     _sheet_attach_tv(sport, games)
     _sheet_attach_venue(sb, sport, games)    # the box's Poly/Kalshi bids per pick, one DB read (Oct 26 2026)
     _sheet_attach_steam(sb, sport, games)    # the books' move since the open (Nov 1 2026)
