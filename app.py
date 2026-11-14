@@ -17982,11 +17982,187 @@ def _hand_order_stuck(r: dict):
     return None
 
 
+# THE PER-BET TIME LIMIT (Nov 14 2026 — the 8:45 PM stall: one call in
+# the box's queue hung, the drain runs rows one after another with no
+# clock, so every bet behind it sat `claimed` for ten minutes and the page
+# then failed them all "submit again" — while 24 of them were already
+# resting. Rob re-sent, and the queue had to be untangled by hand.)
+# Each row now runs in its own thread with a hard limit; a row past it
+# stays `claimed` (marked `timed_out_at`), the queue moves on, and the
+# thread finishes the row itself if the call ever comes back. Three in a
+# row past the limit = the venue itself is hung: the rest of the pass goes
+# back to `pending` for the next tick instead of each waiting its turn.
+_HAND_ROW_TIMEOUT_S = 75.0
+_HAND_ROW_HUNG_RUN = 3
+_HAND_TIMED_OUT_CHECK_S = 120.0     # a timed-out row is checked against the picks this long after
+_HAND_EXEC_CTX = threading.local()  # .row_id = the queue row this thread is placing
+
+
+def _hand_order_run_bounded(sb, client, row: dict, worker: str, deferred: list,
+                            timeout_s: float | None = None):
+    """Run one row with a hard time limit. Returns its result, or None when
+    it ran past the limit (the row stays claimed; the worker thread writes
+    the result itself when the call returns)."""
+    lim = float(timeout_s if timeout_s is not None else _HAND_ROW_TIMEOUT_S)
+    box = {"res": None, "d": [], "late": False}
+    lock = threading.Lock()
+    t0 = _time.monotonic()
+
+    def _run():
+        _HAND_EXEC_CTX.row_id = row.get("id")
+        try:
+            r = _hand_order_execute(sb, client, row, worker, deferred=box["d"])
+        except Exception as e:
+            r = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
+        finally:
+            _HAND_EXEC_CTX.row_id = None
+        with lock:
+            box["res"] = r
+            late = box["late"]
+        if late:
+            try:
+                if isinstance(r, dict):
+                    r["late_s"] = int(_time.monotonic() - t0)
+                if box["d"]:
+                    _hand_verify_batch(sb, client, box["d"])   # finishes the row(s)
+                else:
+                    _hand_order_finish(sb, row["id"], r)
+                app.logger.warning("hand_orders: row %s finished %ss late", row.get("id"),
+                                   int(_time.monotonic() - t0))
+            except Exception as e:
+                app.logger.warning("hand_orders: late finish %s failed: %s", row.get("id"), e)
+
+    th = threading.Thread(target=_run, name=f"hand-row-{row.get('id')}", daemon=True)
+    th.start()
+    th.join(lim)
+    with lock:
+        if box["res"] is None:
+            box["late"] = True
+            return None
+    deferred.extend(box["d"])
+    return box["res"]
+
+
+def _hand_order_mark_timed_out(sb, row_id, timeout_s: float) -> None:
+    try:
+        sb.table("hand_orders").update({
+            "result": {"timed_out_at": datetime.now(timezone.utc).isoformat(),
+                       "timeout_s": int(timeout_s)}}).eq("id", row_id).eq("state", "claimed").execute()
+    except Exception as e:
+        app.logger.warning("hand_orders: timed-out mark %s failed: %s", row_id, e)
+
+
+def _hand_orders_unclaim(sb, ids: list) -> int:
+    """Hand claimed rows we never started back to `pending` (the next tick
+    takes them). Only rows still `claimed` — never one that finished."""
+    if not ids:
+        return 0
+    try:
+        r = (sb.table("hand_orders").update({"state": "pending", "worker": None, "claimed_at": None})
+             .in_("id", list(ids)).eq("state", "claimed").execute())
+        return len(r.data or [])
+    except Exception as e:
+        app.logger.warning("hand_orders: unclaim failed: %s", e)
+        return 0
+
+
+def _hand_stuck_check_due(r: dict, now=None):
+    """Pure. A claimed row that should be checked against the picks now:
+    'timed_out' (past the per-bet limit, ≥_HAND_TIMED_OUT_CHECK_S ago) or
+    'stuck' (claimed past _HAND_CLAIMED_STUCK_S). Else None."""
+    if r.get("state") != "claimed":
+        return None
+    now = now or datetime.now(timezone.utc)
+    try:
+        res = r.get("result") or {}
+        if isinstance(res, dict) and res.get("timed_out_at"):
+            at = datetime.fromisoformat(str(res["timed_out_at"]).replace("Z", "+00:00"))
+            if (now - at.astimezone(timezone.utc)).total_seconds() >= _HAND_TIMED_OUT_CHECK_S:
+                return "timed_out"
+        if r.get("claimed_at"):
+            at = datetime.fromisoformat(str(r["claimed_at"]).replace("Z", "+00:00"))
+            if (now - at.astimezone(timezone.utc)).total_seconds() > _HAND_CLAIMED_STUCK_S:
+                return "stuck"
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _hand_row_pick_match(row: dict, picks: list):
+    """Pure. The pick this queue row placed, else None: a pick stamped with
+    the row's id; else (rows from before the stamp) a bet-sheet pick on the
+    same game, market and side made after the row was claimed."""
+    rid = row.get("id")
+    for p in picks or []:
+        b = p.get("signal_blob") or {}
+        if rid is not None and str(b.get("hand_order_id")) == str(rid):
+            return p
+    it = ((row.get("payload") or {}).get("item") or {})
+    if not (it.get("away") and it.get("home") and it.get("side")):
+        return None
+    mt = str(it.get("market_type") or "")
+    mt = "moneyline" if mt == "ml" else mt
+    ev = f"{it.get('away')} @ {it.get('home')}"
+    try:
+        c_at = datetime.fromisoformat(str(row.get("claimed_at")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    for p in picks or []:
+        b = p.get("signal_blob") or {}
+        if b.get("hand_order_id") is not None:
+            continue                               # placed by another row
+        if (p.get("event_name") == ev and p.get("market_type") == mt
+                and str(p.get("side")) == str(it.get("side"))):
+            try:
+                pa = datetime.fromisoformat(str(p.get("picked_at")).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            if pa >= c_at - timedelta(seconds=5):
+                return p
+    return None
+
+
+def _hand_stuck_resolve(sb, rows: list) -> dict:
+    """Before a stuck/timed-out claimed row is failed "submit again", look
+    for the bet it placed. Found → the row is DONE with that pick (the bet
+    IS resting — re-sending it would double it). Not found → failed. A
+    picks read that fails decides nothing (the row waits). Returns
+    {row_id: (state, result)} for the rows it settled."""
+    out: dict = {}
+    due = [(r, _hand_stuck_check_due(r)) for r in rows]
+    due = [(r, why) for r, why in due if why]
+    if not due:
+        return out
+    try:
+        oldest = min(datetime.fromisoformat(str(r["claimed_at"]).replace("Z", "+00:00"))
+                     for r, _ in due if r.get("claimed_at")).astimezone(timezone.utc).isoformat()
+        picks = (sb.table("bot_picks").select("id,event_name,market_type,side,picked_at,status,signal_blob")
+                 .eq("query_text", "bet sheet").gte("picked_at", oldest)
+                 .order("picked_at").limit(1000).execute().data or [])
+    except Exception as e:
+        app.logger.warning("hand_orders: stuck check picks read failed: %s", e)
+        return out
+    for r, why in due:
+        p = _hand_row_pick_match(r, picks)
+        if p:
+            b = p.get("signal_blob") or {}
+            res = {"ok": True, "pick_id": p.get("id"), "recovered": why,
+                   "order_id": b.get("order_id") or b.get("kalshi_order_id"),
+                   "note": "the box was slow, but the bet is on the book"}
+        else:
+            res = {"ok": False, "recovered": why,
+                   "error": ("timed out on the box — not on the book, submit again" if why == "timed_out"
+                             else "the box stopped mid-run — not on the book, submit again")}
+        _hand_order_finish(sb, r["id"], res)
+        out[r["id"]] = ("done" if res["ok"] else "failed", res)
+    return out
+
+
 def _hand_order_read(sb, ids: list) -> dict:
     if not ids:
         return {}
     try:
-        rows = (sb.table("hand_orders").select("id,state,result,error,worker,created_at,claimed_at")
+        rows = (sb.table("hand_orders").select("id,state,result,error,worker,created_at,claimed_at,payload")
                 .in_("id", list(ids)).execute().data or [])
     except Exception:
         return {}
@@ -18072,6 +18248,9 @@ def _bet_sheet_log_pick(sb, uid, it: dict, rs: dict, out: dict, contracts: int, 
             blob["pin_bet_miss"] = str(e)[:80]
         if extra:
             blob.update(extra)
+        _qrid = getattr(_HAND_EXEC_CTX, "row_id", None)
+        if _qrid is not None:
+            blob["hand_order_id"] = _qrid       # the queue row that placed it (the stuck check reads it)
         row = {"asked_by": uid, "query_text": "bet sheet",
                "market_id": mid, "sport": sport,
                "event_name": f"{it.get('away')} @ {it.get('home')}",
@@ -26805,7 +26984,14 @@ def _hand_queue_drain(sb, now, worker: str, stats: dict, client=None, max_n: int
         n_won = 0
         todo = [r for r in live if r["id"] in won]
         warm = _hand_warm_start(client, todo) if (len(todo) > 1 and client is not None) else None
+        hung_run = 0
         for k, row in enumerate(todo):
+            if hung_run >= _HAND_ROW_HUNG_RUN:
+                # the venue itself is hung: the rest go back for the next tick
+                n_back = _hand_orders_unclaim(sb, [r["id"] for r in todo[k:]])
+                stats["unclaimed"] = stats.get("unclaimed", 0) + n_back
+                stats["gate"] = f"hung: {hung_run} bets in a row past {int(_HAND_ROW_TIMEOUT_S)}s"
+                break
             n_won += 1
             if warm is not None:
                 warm["placing"] = k                    # the warmer stays a bet or two ahead of this
@@ -26813,9 +26999,16 @@ def _hand_queue_drain(sb, now, worker: str, stats: dict, client=None, max_n: int
             try:
                 if client is None:
                     client = get_client()
-                res = _hand_order_execute(sb, client, row, worker, deferred=deferred)
+                res = _hand_order_run_bounded(sb, client, row, worker, deferred)
             except Exception as e:
                 res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
+            if res is None:
+                hung_run += 1
+                stats["timed_out"] = stats.get("timed_out", 0) + 1
+                _hand_order_mark_timed_out(sb, row["id"], _HAND_ROW_TIMEOUT_S)
+                app.logger.warning("hand_orders: row %s past %ss — moving on", row["id"], int(_HAND_ROW_TIMEOUT_S))
+                continue
+            hung_run = 0
             _hand_order_finish(sb, row["id"], res)
             stats["done" if res.get("ok") else "failed"] = stats.get("done" if res.get("ok") else "failed", 0) + 1
             _time.sleep(0.2)
@@ -27168,11 +27361,13 @@ def api_bet_sheets_queue():
     except ValueError:
         return jsonify({"ok": False, "error": "bad ids"}), 400
     rows = _hand_order_read(sb, ids[:200])
+    # a claimed row past its time: did the bet land anyway? (Nov 14 2026)
+    for rid, (st, res) in _hand_stuck_resolve(sb, list(rows.values())).items():
+        rows[rid] = dict(rows[rid], state=st, result=res, error=res.get("error"))
     out = {}
     for rid, r in rows.items():
-        if r.get("state") in ("pending", "claimed"):
-            # a row the box claimed and never finished (daemon died mid-run),
-            # or one nobody ever ran: fail it so the slip stops waiting.
+        if r.get("state") == "pending":
+            # one nobody ever ran: fail it so the slip stops waiting.
             stuck = _hand_order_stuck(r)
             if stuck:
                 _hand_order_finish(sb, rid, {"ok": False, "error": stuck})
