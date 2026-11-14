@@ -20895,6 +20895,8 @@ def _hand_start_worker() -> None:
 
 def _ensure_hand_start_worker() -> None:
     global _HAND_START_THREAD
+    if os.environ.get("KAHLA_SELFTEST") == "1":
+        return          # Nov 14 2026: the kick's selftest started a REAL start worker on the live DB (it moved 15 picks)
     if _HAND_START_THREAD is not None and _HAND_START_THREAD.is_alive():
         return
     try:
