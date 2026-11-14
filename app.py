@@ -19484,6 +19484,109 @@ def _hand_recon_flags(r: dict, blob: dict, now, ctx: dict) -> list:
     return flags
 
 
+_HAND_ORPHAN_SEEN: dict = {}
+_HAND_ORPHAN_ALERTED: set = set()
+
+
+def _gem_ticker_start(ticker):
+    """GEMI-<SPORT>-<YYMMDDHHMM>-… → the listed start (UTC), else None."""
+    m = re.match(r"GEMI-[A-Z0-9]+-(\d{10})-", str(ticker or ""))
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%y%m%d%H%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _hand_orphan_plan(orders, k_orders, k_pos, claimed_slugs: set, claimed_tickers: set,
+                      claimed_oids: set, now) -> list:
+    """Pure. THE VENUE SHOWS IT, THE SHEET DOESN'T (Nov 14 2026 — Michigan @ Oregon
+    Under 39.5: a Gemini order the box "switched" off filled 10 @ 50 with no pick
+    on it; Ohio State −13.5 rested and filled after its pick was deleted). Every
+    machine-placed Polymarket BUY no sheet pick claims, every Gemini resting order
+    no pick claims (by order id or contract), every Gemini lot no pick claims on a
+    game not long over. → [{key, venue, what, ref, detail}]."""
+    out = []
+    for o in orders or []:
+        if not isinstance(o, dict) or o.get("state") not in _OPEN_ORDER_STATES:
+            continue
+        if "BUY" not in str(o.get("intent") or ""):
+            continue
+        if not o.get("auto"):
+            continue                       # an app order is adopted by the app-adopt tick, not an orphan
+        if o.get("slug") and o["slug"] not in claimed_slugs and o.get("id") not in claimed_oids:
+            out.append({"key": f"P|{o.get('id')}", "venue": "POLYMARKET", "what": "order", "ref": o.get("slug"),
+                        "detail": {"id": o.get("id"), "intent": o.get("intent"), "price_yes": o.get("price_yes")}})
+    for oid, o in (k_orders or {}).items():
+        t = o.get("ticker")
+        if not str(t or "").startswith("GEMI-"):
+            continue
+        st = _gem_ticker_start(t)
+        if st is not None and st < now - timedelta(hours=6):
+            continue
+        if str(oid) in claimed_oids or t in claimed_tickers:
+            continue
+        out.append({"key": f"G|{oid}", "venue": "GEMINI", "what": "order", "ref": t,
+                    "detail": {"id": oid, "side": o.get("side"), "remaining": o.get("remaining"), "yes_c": o.get("yes_c")}})
+    for t, net in (k_pos or {}).items():
+        if not str(t).startswith("GEMI-") or not net:
+            continue
+        st = _gem_ticker_start(t)
+        if st is None or st < now - timedelta(hours=6):
+            continue
+        if t in claimed_tickers:
+            continue
+        out.append({"key": f"GL|{t}", "venue": "GEMINI", "what": "lot", "ref": t,
+                    "detail": {"net": net}})
+    return out
+
+
+def _hand_orphan_sweep(sb, now, orders, k_orders, k_pos) -> dict:
+    """Runs inside the reconcile. An orphan seen on TWO passes (a fresh create is
+    claimed a beat after it lands) → stamp `hand_orphan` + ONE 🔴 Telegram. Nothing
+    is cancelled — it may be a bet Rob placed in the Gemini app."""
+    try:
+        rows = (sb.table("bot_picks").select("signal_blob,status,event_start")
+                .eq("signal_blob->>bet_sheet", "true")
+                .gte("event_start", (now - timedelta(days=3)).isoformat()).limit(2000).execute().data) or []
+    except Exception as e:
+        return {"err": str(e)[:120]}
+    cs, ct, co = set(), set(), set()
+    for r in rows:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        for k in ("pmm_slug", "pmm_twin_slug"):
+            if b.get(k) and (r.get("status") == "pending" or k == "pmm_slug"):
+                cs.add(b[k])
+        if b.get("kalshi_ticker"):
+            ct.add(b["kalshi_ticker"])
+        for k in ("order_id", "kalshi_order_id"):
+            if b.get(k):
+                co.add(str(b[k]))
+    if orders is None and k_orders is None and k_pos is None:
+        return {"skip": "no reads"}
+    found = _hand_orphan_plan(orders, k_orders, k_pos, cs, ct, co, now)
+    keys = {f["key"] for f in found}
+    for k in list(_HAND_ORPHAN_SEEN):
+        if k not in keys:
+            _HAND_ORPHAN_SEEN.pop(k, None)
+    alerts = []
+    for f in found:
+        n = _HAND_ORPHAN_SEEN.get(f["key"], 0) + 1
+        _HAND_ORPHAN_SEEN[f["key"]] = n
+        if n >= 2 and f["key"] not in _HAND_ORPHAN_ALERTED:
+            _HAND_ORPHAN_ALERTED.add(f["key"])
+            alerts.append(f)
+            _probe_log({"hand_orphan": True, **f, "at": now.isoformat()})
+    if alerts:
+        lines = [f"{a['venue']} {a['what']}: {a['ref']}" for a in alerts[:8]]
+        try:
+            _tg_send_now("🔴 ON THE VENUE, NOT ON THE SHEET — " + str(len(alerts)) + "\n" + "\n".join(lines))
+        except Exception:
+            pass
+    return {"orphans": len(found), "alerted": len(alerts)}
+
+
 def _hand_reconcile_tick(sb, client, now) -> dict:
     """THE HAND-LANE RECONCILE (Oct 20 2026, Rob: "I want this fucker
     humming"). Once a minute: fresh venue reads (Polymarket orders +
@@ -19586,6 +19689,12 @@ def _hand_reconcile_tick(sb, client, now) -> dict:
             except Exception as e:
                 st["errors"] = st.get("errors", 0) + 1
                 app.logger.warning("hand recon write %s: %s", r["id"], str(e)[:120])
+    if k_orders is None and k_pos is None:
+        k_orders, k_pos = _kalshi_acct(fresh=True)
+    try:
+        st["orphans"] = _hand_orphan_sweep(sb, now, orders, k_orders, k_pos)
+    except Exception as e:
+        st["orphans"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     st["reads"] = {"orders": orders is not None, "positions": positions is not None,
                    "k_orders": k_orders is not None, "k_pos": k_pos is not None}
     return st
