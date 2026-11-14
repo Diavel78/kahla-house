@@ -5611,8 +5611,11 @@ def api_bet_sheets_picks():
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)[:200]})
         rows_ = [r for r in rows_ if not r.get("result")]
+        only = {int(x) for x in re.findall(r"\d+", request.args.get("ids") or "")}
+        if only:                     # requeue ONLY these (a stuck row whose bet already rests must not run twice)
+            rows_ = [r for r in rows_ if int(r["id"]) in only]
         res = {"ok": True, "stuck": len(rows_), "ids": [r["id"] for r in rows_], "requeued": 0}
-        if request.args.get("apply") and rows_:
+        if request.args.get("apply") and rows_ and only:
             try:
                 sb_.table("hand_orders").update({"state": "pending", "claimed_at": None, "worker": None}) \
                     .in_("id", [r["id"] for r in rows_]).eq("state", "claimed").execute()
