@@ -1162,7 +1162,8 @@ def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None, 
         if a is not None and b is not None and a + b > 0 and rl is not None:
             pr = a / (a + b)
             return {"american": _american_from_p(pr), "prob": round(pr, 4), "pin_line": rl,
-                    "push": None, "src": "rung", "price": int(rung[0]), "opp_price": int(rung[1])}
+                    "push": None, "src": "rung", "price": int(rung[0]), "opp_price": int(rung[1]),
+                    "vig": round(a + b - 1.0, 4)}
     if not isinstance(pin, dict):
         return None
     if mt == "ml":
@@ -1170,7 +1171,8 @@ def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None, 
         if a is None or b is None or a + b <= 0 or side not in ("home", "away"):
             return None
         p = (a if side == "home" else b) / (a + b)
-        return {"american": _american_from_p(p), "prob": round(p, 4), "pin_line": None, "push": None, "src": "line"}
+        return {"american": _american_from_p(p), "prob": round(p, 4), "pin_line": None, "push": None, "src": "line",
+                "vig": round(a + b - 1.0, 4)}
     try:
         rung = float(pick.get("line"))
     except (TypeError, ValueError):
@@ -1208,7 +1210,8 @@ def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None, 
         p = p * (1.0 - push) + (push if gains else 0.0)
     p = min(max(p, 0.001), 0.999)
     return {"american": _american_from_p(p), "prob": round(p, 4), "pin_line": pin_line,
-            "push": (round(push, 3) if delta > 0.01 else None), "src": ("push" if delta > 0.01 else "line")}
+            "push": (round(push, 3) if delta > 0.01 else None), "src": ("push" if delta > 0.01 else "line"),
+            "vig": round(a + b - 1.0, 4)}
 
 
 # THE LINE IS PINNACLE'S (Oct 27 2026, the NBA/MLB probe: every upcoming
@@ -17329,7 +17332,13 @@ def _pin_fair_for_item(events, sport: str, item: dict, age_min=None) -> dict | N
         return None
     if not pf or pf.get("prob") is None:
         return None
-    return {"fair_c": round(float(pf["prob"]) * 100.0, 2), "prob": pf["prob"], "american": pf.get("american"),
+    fc = round(float(pf["prob"]) * 100.0, 2)
+    vig = pf.get("vig")
+    # BET105'S PRICE (Rob, Nov 14 2026: "If it beats bet105, then it's still the right bet"):
+    # Bet105 = Pinnacle (measured Oct 19), so its price on our side is the fair plus half the
+    # overround — the most the chase pays (`_hand_fair_cap_c`)
+    b105 = (round(fc + 50.0 * float(vig), 2) if vig is not None and 0.0 <= float(vig) < 0.15 else None)
+    return {"fair_c": fc, "prob": pf["prob"], "american": pf.get("american"), "bet105_c": b105,
             "pin_line": pf.get("pin_line"), "src": pf.get("src"), "push": pf.get("push"),
             "age_min": (round(float(age_min), 1) if age_min is not None else None), "line": item.get("line")}
 
@@ -21109,6 +21118,105 @@ def _gemini_rebook_tick(sb) -> None:
     _probe_log(json.loads(json.dumps(out, default=str)))
 
 
+_GEM_EVAC_LOCK = threading.Lock()
+
+
+def _gemini_evacuate_run(sb, client) -> dict:
+    """POLYMARKET ONLY (Nov 14 2026, Rob: "Go poly only. Right now. Resting bets on
+    Gemini, cancel them. Put them on polymarket"). Every pending pre-game sheet bet
+    resting on Gemini: verified cancel (`_kalshi_cancel_exec` — Gemini's own word
+    before any delete), then the unfilled size through the ordinary create path with
+    venue "poly" (the rung rule and seat decide the price). A lot already held on
+    Gemini stays where it is. Stamp `gemini_evacuate`."""
+    now = datetime.now(timezone.utc)
+    out: dict = {"kind": "gemini_evacuate", "gemini_evacuate": True, "at": now.isoformat(), "rows": []}
+    try:
+        rows = (sb.table("bot_picks").select("id,sport,event_name,event_start,market_type,side,entry_line,asked_by,signal_blob")
+                .eq("status", "pending").gte("event_start", (now + timedelta(minutes=10)).isoformat())
+                .limit(500).execute().data) or []
+    except Exception as e:
+        out["err"] = f"picks unreadable: {e}"[:200]
+        return out
+    for r in rows:
+        b = r.get("signal_blob") or {}
+        t = str(b.get("kalshi_ticker") or "")
+        if not (b.get("bet_sheet") and t.startswith("GEMI") and b.get("kalshi_order_id")):
+            continue
+        if b.get("start_hold") or b.get("live_snipe") or b.get("start_take_window"):
+            continue
+        res: dict = {"pick_id": r["id"], "label": b.get("label"), "ticker": t, "from_c": b.get("price_c")}
+        out["rows"].append(res)
+        try:
+            contracts = int(round(float(b.get("contracts") or 0)))
+        except (TypeError, ValueError):
+            contracts = 0
+        if contracts < 1:
+            res["skip"] = "no size"
+            continue
+        oc, _st = _kalshi_cancel_exec(sb, client, r["id"])
+        res["cancel"] = {k: oc.get(k) for k in ("ok", "deleted", "held", "error")}
+        if not oc.get("ok"):
+            continue                                          # nothing placed on a failed cancel
+        held = 0.0 if oc.get("deleted") else oc.get("held")
+        if held is None:
+            res["skip"] = "held unreadable after cancel — place from the sheet"
+            continue
+        qty = max(0, contracts - int(round(float(held))))
+        if qty < 1:
+            res["skip"] = "filled on Gemini — stays there"
+            continue
+        parts = (r.get("event_name") or "").split(" @ ")
+        away, home = (parts + ["", ""])[:2]
+        item = {"key": f"evac-{r['id']}", "sport": r.get("sport"), "away": away.strip(), "home": home.strip(),
+                "event_start": r.get("event_start"), "market_type": r.get("market_type"), "side": r.get("side"),
+                "line": r.get("entry_line"), "label": b.get("label") or r.get("event_name"), "venue": "poly"}
+        bad = _bet_sheet_item_check(item)
+        if bad:
+            res["err"] = f"cancelled on Gemini, can't place: {bad}"
+            continue
+        crow = {"op": "create", "slug": None, "synthetic": False, "price_c": None, "contracts": qty,
+                "event_start": r.get("event_start"),
+                "payload": {"item": item, "asked_by": r.get("asked_by"), "contracts": qty,
+                            "evacuated_from": r["id"]}}
+        try:
+            po = _hand_order_execute(sb, client, crow, "evacuate")
+        except Exception as e:
+            po = {"ok": False, "error": f"{type(e).__name__}: {e}"[:160]}
+        res["placed"] = {k: po.get(k) for k in ("ok", "pick_id", "venue", "price_c", "error")}
+        res["qty"] = qty
+    out["n"] = len(out["rows"])
+    out["moved"] = sum(1 for x in out["rows"] if (x.get("placed") or {}).get("ok"))
+    return out
+
+
+def _gemini_evacuate_tick(sb) -> None:
+    """`machine_flags gemini_evacuate`=true → one evacuation pass on its own thread
+    (flag cleared first; a pass takes ~3s a bet and must not hold the start watcher)."""
+    if not _machine_flag_val("gemini_evacuate", None):
+        return
+    if not _GEM_EVAC_LOCK.acquire(blocking=False):
+        return
+    try:
+        sb.table("machine_flags").upsert({"key": "gemini_evacuate", "value": False,
+                                          "updated_at": datetime.now(timezone.utc).isoformat()},
+                                         on_conflict="key").execute()
+        _MFLAGS_CACHE["map"]["gemini_evacuate"] = False
+    except Exception:
+        _GEM_EVAC_LOCK.release()
+        return
+
+    def _run():
+        try:
+            out = _gemini_evacuate_run(get_supabase(), get_client())
+        except Exception as e:
+            out = {"kind": "gemini_evacuate", "gemini_evacuate": True, "err": f"{type(e).__name__}: {e}"[:200]}
+        finally:
+            _GEM_EVAC_LOCK.release()
+        _probe_log(json.loads(json.dumps(out, default=str)))
+
+    threading.Thread(target=_run, name="gemini-evacuate", daemon=True).start()
+
+
 def _fire_clv_grade(mt: str, dirn: int, line, final: dict):
     """Pure. win|loss|push for the 🔥 side (dir +1 home/over) at `line` (home spread /
     total; ml none) off a final {home, away}; None when it can't be graded."""
@@ -21290,6 +21398,7 @@ def _hand_start_worker() -> None:
                 _gemini_dump_tick(sb)
                 _gemini_restore_tick(sb)
                 _gemini_rebook_tick(sb)
+                _gemini_evacuate_tick(sb)
                 _fire_clv_tick(sb)
                 _r2 = _hand_start_resync(sb, datetime.now(timezone.utc))
                 if _r2.get("checked") or _r2.get("moved"):
@@ -25930,7 +26039,11 @@ def _hand_pin_tick(sb, now, client=None) -> dict:
                 verdict, det = _hand_fair_pull_plan(blob, blob.get("price_c"), pf["fair_c"], lead_min,
                                                     pull_c=-float(acfg["lean_c"]), reads=1)
             elif pull_on:
-                verdict, det = _hand_fair_pull_plan(blob, blob.get("price_c"), pf["fair_c"], lead_min, pull_c)
+                # the pull's base is the chase's cap (Bet105's price, Nov 14 2026) — never
+                # pull a bid the chase was allowed to move up to
+                base_c = (pf["bet105_c"] if pf.get("bet105_c") is not None
+                          and _machine_flag("hand_cap_bet105", True) else pf["fair_c"])
+                verdict, det = _hand_fair_pull_plan(blob, blob.get("price_c"), base_c, lead_min, pull_c)
             if verdict == "clear" and blob.get("fair_over"):
                 nb.pop("fair_over", None)
                 changed = True
@@ -26012,6 +26125,8 @@ def _hand_fair_cap_c(blob: dict, now):
     try:
         if (now - _parse_iso(pn.get("at"))).total_seconds() > 1800:
             return None
+        if pn.get("bet105_c") is not None and _machine_flag("hand_cap_bet105", True):
+            return round(float(pn["bet105_c"]), 2)      # the chase pays up to Bet105's price (Nov 14 2026)
         return round(float(pn["fair_c"]), 2)
     except Exception:
         return None

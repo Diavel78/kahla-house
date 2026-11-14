@@ -4743,6 +4743,11 @@ def test_hand_leash_fair() -> None:
     check("3c past the anchor, under fair → join the touch", v == "move" and tgt == 51.0, f"{v} {tgt}")
     v, tgt, _ = app._hand_chase_plan(48.0, 53.0, 48.0, app._hand_leash_eff(fresh, now, 2.0), cap_c=None, chalk_c=52.4)
     check("touch past fair → hold, never above fair", v == "hold", f"{v} {tgt}")
+    b105 = {"pin_now": {"fair_c": 52.4, "bet105_c": 54.6, "at": (now - timedelta(minutes=5)).isoformat()}}
+    check("the cap is Bet105's price when the fair carries it", app._hand_fair_cap_c(b105, now) == 54.6)
+    check("no Bet105 price → the cap is fair", app._hand_fair_cap_c(fresh, now) == 52.4)
+    src = __import__("inspect").getsource(app._gemini_evacuate_run)
+    check("the Gemini evacuation places on Polymarket only", '"venue": "poly"' in src and "_kalshi_cancel_exec" in src)
 
 
 def test_fire_clv_grade() -> None:
