@@ -20666,6 +20666,50 @@ def _hand_start_hold_open(sb, r: dict, blob: dict, now, now_ts: float, hold_s: f
                        gs.get("drop_pct"))
 
 
+# THE GAME-START WATCHER (Nov 14 2026, Rob: "95% drop is game start… start the 60
+# second clock. Cancel"): the 10:00 wave's drop went unseen because the start check
+# rode the handbets tick, and on a 118-bet slate one tick took ~4 minutes. Its own
+# thread now runs _hand_start_tick every few seconds with the CURRENT time, reading
+# the socket-fed touch tape — the drop, the 60-second hold and the cancel are
+# seconds apart, whatever the rest of the lane is doing. The handbets tick only
+# reports the watcher's last pass.
+_HAND_START_LOOP_S = 3.0
+_HAND_START_THREAD = None
+_HAND_START_LAST: dict = {}
+
+
+def _hand_start_worker() -> None:
+    sb = client = None
+    while True:
+        t0 = _time.monotonic()
+        try:
+            if sb is None:
+                sb = get_supabase()
+            if client is None:
+                client = get_client()
+            st = _hand_start_tick(sb, client, datetime.now(timezone.utc))
+            _HAND_START_LAST.clear()
+            _HAND_START_LAST.update(st or {})
+            _HAND_START_LAST["at"] = datetime.now(timezone.utc).isoformat()
+            _HAND_START_LAST["ms"] = int((_time.monotonic() - t0) * 1000)
+        except Exception as e:
+            _HAND_START_LAST["err"] = f"{type(e).__name__}: {e}"[:160]
+            _HAND_START_LAST["at"] = datetime.now(timezone.utc).isoformat()
+            client = None
+        _time.sleep(max(0.5, _HAND_START_LOOP_S - (_time.monotonic() - t0)))
+
+
+def _ensure_hand_start_worker() -> None:
+    global _HAND_START_THREAD
+    if _HAND_START_THREAD is not None and _HAND_START_THREAD.is_alive():
+        return
+    try:
+        _HAND_START_THREAD = threading.Thread(target=_hand_start_worker, name="hand-start", daemon=True)
+        _HAND_START_THREAD.start()
+    except Exception:
+        pass
+
+
 def _hand_start_tick(sb, client, now) -> dict:
     """Pending sheet bets with a resting order whose listed start has passed:
     cancel the unfilled remainder the moment the tape says the makers left.
@@ -27351,10 +27395,16 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
         except Exception as e:
             stats["tape"] = {"err": str(e)[:80]}
         _drain()
-        try:
-            stats["start"] = _hand_start_tick(sb, client, now)
-        except Exception as e:
-            stats["start"] = {"err": str(e)[:80]}
+        if worker == "box":
+            # THE GAME-START WATCHER RUNS ON ITS OWN LOOP (Nov 14 2026): inside this tick it
+            # looked once every ~4 minutes on a busy slate and the 10:00 drop went unseen.
+            _ensure_hand_start_worker()
+            stats["start"] = dict(_HAND_START_LAST)
+        else:
+            try:
+                stats["start"] = _hand_start_tick(sb, client, now)
+            except Exception as e:
+                stats["start"] = {"err": str(e)[:80]}
         try:
             stats["move"] = _hand_move_tick(sb, client, now)
         except Exception as e:

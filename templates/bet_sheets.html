@@ -1251,6 +1251,10 @@
                 why = 'post-move hold · touch ' + b.touch_c + '¢ · until ' + fmtClock(ch.rejoin_hold.until);
             else if (b.outbid) why = 'outbid · touch ' + b.touch_c + '¢ · chasing';
             else if (b.touch_c != null && o.price_c != null && Math.abs(o.price_c - b.touch_c) < 0.01) why = 'at the touch';
+            // NOT AT THE TOUCH = RED (Nov 14 2026, Rob: "Make the goddamn cards red if they're not at
+            // touch so I can repeg them") — pre-game, a bid under the touch won't fill.
+            if (!b.started && !b.in_play && b.touch_c != null && o.price_c != null && b.touch_c > o.price_c + 0.01)
+                return { cls: 'warn', short: 'NOT AT TOUCH', detail: (held > 0 ? pre + rest : qp) + ' · touch ' + b.touch_c + '¢ — re-peg it' + (why ? ' · ' + why : '') };
             return { cls: 'rest', short: held > 0 ? 'PARTIAL' : 'RESTING', detail: (held > 0 ? pre + rest : qp) + (why ? ' · ' + why : '') };
         }
         if (held > 0) return { cls: 'fill', short: 'FILLED', detail: held + ' @ ' + (b.price_c != null ? cA(b.price_c) : am(b.entry_price)) };
