@@ -22656,7 +22656,41 @@ def _bet_sheet_resolve_kalshi(item: dict, poly_seat_c=None) -> dict:
             "series": rs.get("series"), "event_ticker": rs.get("event_ticker"), "_book": book, "t": _t}
 
 
-_GEM_OPEN_UNDER_C = 5.0      # Rob, Nov 8 2026: no market on Gemini → open 5¢ under Polymarket's seat
+_GEM_OPEN_UNDER_C = 1.0      # Rob, Nov 13 2026: "1 cent under Polymarket" (was 5¢ from Nov 8 — the bets never filled)
+
+
+def _gem_open_under_c() -> float:
+    """How far under Polymarket's seat (same line) a Gemini bet sits — at
+    placement AND in the chase (`machine_flags gem_open_under_c`). Nov 13 2026:
+    at 5¢ the 65 resting Gemini bets sat a median 4.75¢ under Pinnacle's fair,
+    alone on an empty book, so nothing chased them and they filled only when the
+    market came down to them."""
+    try:
+        return max(0.0, float(_machine_flag_val("gem_open_under_c", _GEM_OPEN_UNDER_C)))
+    except (TypeError, ValueError):
+        return _GEM_OPEN_UNDER_C
+
+
+def _gem_poly_ref_c(client, blob: dict, event_start, now):
+    """Rob's Gemini price off Polymarket: Polymarket's seat on the same-line twin
+    − `_gem_open_under_c()`, whole cents. None with no twin / no book."""
+    slug = blob.get("pmm_twin_slug")
+    if not slug or client is None:
+        return None
+    pb = _hand_poly_book(client, slug)
+    if pb is None:
+        return None
+    syn = bool(blob.get("pmm_twin_synthetic"))
+    try:
+        mp_, oh_ = _hand_thin_cfg()
+        ps, _ = _hand_seat_price(pb, syn, event_start, now, mp_, oh_)
+    except Exception:
+        ps = None
+    if ps is None:
+        ps, _ = _manual_side_book(pb, syn)
+    if ps is None:
+        return None
+    return float(max(1, math.floor(float(ps) - _gem_open_under_c() + 1e-9)))
 
 
 def _poly_seat_at(client, item: dict, poly_rs, line):
@@ -22690,7 +22724,7 @@ def _gem_junk_floor(item: dict, poly_seat_c, line, seat, s_ask):
     the same line is a junk bid, not a market (Nov 9 2026, Missouri @ Georgia
     −14.5: a 9¢ bid on Gemini, Polymarket's seat 50¢, the placement compare called
     10¢ "cheaper" and rested the bet where it can never fill). Seat it where the
-    empty-book rule would: Polymarket − 5¢, a tick under any ask. Returns
+    empty-book rule would: Polymarket − `_gem_open_under_c()` (1¢ since Nov 13 2026), a tick under any ask. Returns
     (seat, raised: bool)."""
     try:
         ref = poly_seat_c(line) if callable(poly_seat_c) else poly_seat_c
@@ -22698,7 +22732,7 @@ def _gem_junk_floor(item: dict, poly_seat_c, line, seat, s_ask):
         ref = None
     if ref is None or seat is None:
         return seat, False
-    floor_c = float(math.floor(float(ref) - _GEM_OPEN_UNDER_C + 1e-9))
+    floor_c = float(math.floor(float(ref) - _gem_open_under_c() + 1e-9))
     if float(seat) >= floor_c - 1e-9:
         return seat, False
     if s_ask is not None and floor_c >= float(s_ask):
@@ -22708,11 +22742,11 @@ def _gem_junk_floor(item: dict, poly_seat_c, line, seat, s_ask):
 
 def _gem_open_seat(item: dict, poly_seat_c, line, s_ask):
     """Rob's opening seat on an EMPTY Gemini book: Polymarket's seat at the same
-    line (a number, or a callable(line) → number) − 5¢, a tick under any ask,
+    line (a number, or a callable(line) → number) − `_gem_open_under_c()` (1¢), a tick under any ask,
     never past the chalk cap. (seat, None) or (None, reason)."""
     import gemini_venue as _gv
     ref = poly_seat_c(line) if callable(poly_seat_c) else poly_seat_c
-    seat = _gv.opening_seat_c(None, ref, _GEM_OPEN_UNDER_C)
+    seat = _gv.opening_seat_c(None, ref, _gem_open_under_c())
     if seat is None:
         _ln = ""
         if line is not None:
@@ -22722,7 +22756,7 @@ def _gem_open_seat(item: dict, poly_seat_c, line, s_ask):
         seat = float(max(1, math.floor(s_ask - 1)))
     cap = _hand_chalk_cap_c(str(item.get("market_type") or ""))
     if seat >= cap - 1e-9:
-        return None, f"Gemini would open at {seat:g}¢ (Polymarket {float(ref):g}¢ − 5) — chalk, not betting it"
+        return None, f"Gemini would open at {seat:g}¢ (Polymarket {float(ref):g}¢ − {_gem_open_under_c():g}) — chalk, not betting it"
     return seat, None
 
 
@@ -23565,6 +23599,29 @@ def _hand_chase_kalshi(sb, r: dict, blob: dict, now, st: dict, leash: float,
     syn = not by
     touch_c, _a = _manual_side_book(book, syn)
     anchor_c = blob.get("anchor_c", blob.get("price_c"))
+    if _is_gem(ticker):
+        # A GEMINI BET CHASES POLYMARKET (Nov 13 2026, Rob: "1 cent under
+        # Polymarket"): nobody else bids on Gemini, so its own touch is us and the
+        # chase never moved — 65 bets sat ~5¢ under fair. The touch here is the
+        # better of Gemini's and Polymarket's same-line seat − 1¢, never on
+        # Gemini's ask; the anchor is reset ONCE to that level so the leash
+        # measures from where Rob's rule puts the bet, not the old −5¢ open.
+        gref = _gem_poly_ref_c(kctx.get("client"), blob, r.get("event_start"), now)
+        if gref is not None:
+            if _a is not None and gref >= float(_a):
+                gref = float(max(1, math.floor(float(_a) - 1)))
+            touch_c = gref if touch_c is None else max(float(touch_c), gref)
+            st["gem_ref"] = st.get("gem_ref", 0) + 1
+            if not blob.get("gem_ref_anchor"):
+                try:
+                    anchor_c = max(float(anchor_c), gref) if anchor_c is not None else gref
+                except (TypeError, ValueError):
+                    anchor_c = gref
+                blob = {**blob, "anchor_c": anchor_c, "gem_ref_anchor": now.isoformat()}
+                try:
+                    sb.table("bot_picks").update({"signal_blob": blob}).eq("id", r["id"]).execute()
+                except Exception:
+                    pass
     try:
         mp_, oh_ = _hand_thin_cfg()
         k_seat, _ = _hand_seat_price(book, syn, r.get("event_start"), now, mp_, oh_)
@@ -29428,8 +29485,15 @@ def _hand_chase_end(blob: dict, now, why: str, detail: dict | None = None) -> di
     return nb
 
 
-def _hand_chase_expired(blob: dict, now_ts: float) -> bool:
-    """Pure. True once an auto chase has run out its hour."""
+def _hand_chase_expired(blob: dict, now_ts: float, chase_on: bool = True) -> bool:
+    """Pure. True once an auto chase has run out its hour — or at once when the
+    live chase is switched off (`chase_on` False: Nov 13 2026, Rob: "we fucking
+    ourself on live" — 14 days of after-start fills went 66-87, −$85, so turning
+    the flag off ends the box's chases already running too). A bet Rob put live
+    himself (no `auto`) is never touched."""
+    ls = blob.get("live_snipe") if isinstance(blob.get("live_snipe"), dict) else {}
+    if not chase_on and ls.get("auto") and not ls.get("ended"):
+        return True
     u = _hand_chase_until_ts(blob)
     return u is not None and now_ts >= u
 
@@ -35672,6 +35736,7 @@ def _hand_live_tick(sb, client, now) -> dict:
     resting order or a live hold), cancel a resting order on a FULL lot (the
     duplicate class), start the worker, report its counters."""
     st = {"snaps": 0, "holds": 0}
+    _chase_on = bool(_machine_flag("hand_start_chase", True))   # off: the box's running chases end now
     if not _machine_flag("hand_live_chase", True):
         LIVE_SNAP.clear()
         st["gate"] = "off"
@@ -35745,7 +35810,7 @@ def _hand_live_tick(sb, client, now) -> dict:
                 except Exception as e:
                     app.logger.warning("hand live end KALSHI pick %s: %s", r.get("id"), str(e)[:120])
                 continue
-            if _hand_chase_expired(blob, now_ts):
+            if _hand_chase_expired(blob, now_ts, _chase_on):
                 try:
                     _hand_live_expire(sb, client, r, blob, now, st)
                 except Exception as e:
@@ -35835,7 +35900,7 @@ def _hand_live_tick(sb, client, now) -> dict:
             except Exception as e:
                 app.logger.warning("hand live end pick %s: %s", r.get("id"), str(e)[:120])
             continue
-        if _hand_chase_expired(blob, now_ts):
+        if _hand_chase_expired(blob, now_ts, _chase_on):
             # THE HOUR IS UP (Rob, Oct 24 2026: "You have 1 hour"): the old cancel
             try:
                 _hand_live_expire(sb, client, r, blob, now, st)

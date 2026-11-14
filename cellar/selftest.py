@@ -4073,6 +4073,18 @@ def test_gemini_read_glitch_not_off_book() -> None:
     src = _insp.getsource(_app._hand_red_alert_tick)
     check("red alert: a burst of OFF THE BOOK reds is one summary message",
           "_HAND_RED_BURST" in src and "at once" in src)
+    check("gemini seat: 1¢ under Polymarket by default (Rob, Nov 13 2026)", _app._GEM_OPEN_UNDER_C == 1.0)
+    check("gemini open seat: Polymarket 50 → Gemini 49",
+          _app._gem_open_seat({"market_type": "total"}, 50.0, 49.5, None)[0] == 49.0)
+    check("gemini junk floor: a 45¢ Gemini bid under a 50¢ Polymarket seat is raised to 49",
+          _app._gem_junk_floor({"market_type": "total"}, 50.0, 49.5, 45.0, None) == (49.0, True))
+    check("gemini chase reads Polymarket's seat − 1¢ as its touch",
+          "_gem_poly_ref_c(" in _insp.getsource(_app._hand_chase_kalshi))
+    live = {"live_snipe": {"auto": True, "until": "2099-01-01T00:00:00+00:00"}}
+    check("live chase off: a running box chase ends at once", _app._hand_chase_expired(live, 0.0, False) is True)
+    check("live chase on: it runs its clock", _app._hand_chase_expired(live, 0.0, True) is False)
+    check("live chase off: a bet Rob put live himself is untouched",
+          _app._hand_chase_expired({"live_snipe": {"sheet_live": True}}, 0.0, False) is False)
     check("publish: Gemini reads are on before the shared orders read",
           _insp.getsource(_app._hand_status_publish).index("GEM_LIVE")
           < _insp.getsource(_app._hand_status_publish).index("_kalshi_acct(fresh=True)"))
@@ -6270,8 +6282,8 @@ def test_gemini_venue_read() -> None:
         _gv.orderbook = lambda sym: {"ok": True, "bids": [], "asks": [(60.0, 10.0)]}
         q = _app._bet_sheet_resolve_gemini({"sport": "NCAAF", "market_type": "total", "side": "over",
                                             "line": 44.5, "event_start": "2026-11-14T17:00:00Z"}, poly_seat_c=50.0)
-        check("…an empty Gemini book opens at Poly − 5 (45¢), flagged opened",
-              q.get("ok") and q["price_c"] == 45.0 and q["opened"] == "poly_minus" and q["venue"] == "GEMINI")
+        check("…an empty Gemini book opens at Poly − 1 (49¢), flagged opened",
+              q.get("ok") and q["price_c"] == 49.0 and q["opened"] == "poly_minus" and q["venue"] == "GEMINI")
         q2 = _app._bet_sheet_resolve_gemini({"sport": "NCAAF", "market_type": "total", "side": "over",
                                              "line": 44.5, "event_start": "2026-11-14T17:00:00Z"})
         check("…and with no Polymarket seat it says so instead of guessing", q2.get("ok") is False)
@@ -6663,8 +6675,8 @@ def test_gemini_in_kalshi_slot() -> None:
         it = {"sport": "NCAAF", "away": "Memphis", "home": "South Florida", "market_type": "spread",
               "side": "home", "line": 5.5, "event_start": "2026-11-13T01:00:00Z"}
         k = _app._bet_sheet_resolve_kalshi(it, poly_seat_c=50.0)
-        check("empty Gemini book: the slot opens at Poly's seat − 5¢ (50 → 45)",
-              k.get("ok") and k.get("price_c") == 45.0 and k.get("opened") == "poly_minus")
+        check("empty Gemini book: the slot opens at Poly's seat − 1¢ (50 → 49)",
+              k.get("ok") and k.get("price_c") == 49.0 and k.get("opened") == "poly_minus")
         v, _d = _app._hand_venue_pick("auto", {"ok": True, "price_c": 50.0, "rung_line": 5.5}, k, 10, 0.0)
         check("…and the cheaper all-in rests it on Gemini, not Polymarket", v == "KALSHI")
         check("no Polymarket seat → no open (never guess a price)",
@@ -6787,7 +6799,7 @@ def test_gemini_open_seat() -> None:
     ref = _app._poly_seat_at(None, it, chalk_rs, 3.5)
     check("Polymarket's chalk refusal still hands over its seat at that line", ref == 55.0, ref)
     seat, why = _app._gem_open_seat(it, lambda ln: _app._poly_seat_at(None, it, chalk_rs, ln), 3.5, None)
-    check("MSU +3.5: Poly 55 chalk, Gemini empty → opens at 50¢", seat == 50.0, (seat, why))
+    check("MSU +3.5: Poly 55 chalk, Gemini empty → opens at 54¢ (1¢ under, Nov 13 2026)", seat == 54.0, str((seat, why)))
     other = {"ok": True, "rung_line": -4.5, "price_c": 12.0}
     ref = _app._poly_seat_at(None, {**it, "side": "away", "line": -6.5}, other, -6.5)
     check("a Polymarket seat on ANOTHER line is never the reference", ref is None, ref)
@@ -6832,13 +6844,13 @@ def test_gemini_open_seat() -> None:
           (L("Under 214.5", "total", 215.5), L("Washington State -9.5", "spread", -10.5)))
     # Missouri @ Georgia −14.5 (Nov 9 2026): a 10¢ Gemini seat vs Polymarket 50¢
     seat, raised = _app._gem_junk_floor(it, 50.0, -14.5, 10.0, None)
-    check("a junk Gemini bid far under Polymarket → seated at Poly − 5¢", seat == 45.0 and raised, (seat, raised))
-    seat, raised = _app._gem_junk_floor(it, 50.0, -14.5, 47.0, None)
-    check("a real Gemini bid inside 5¢ of Polymarket is left alone", seat == 47.0 and not raised, (seat, raised))
+    check("a junk Gemini bid far under Polymarket → seated at Poly − 1¢", seat == 49.0 and raised, str((seat, raised)))
+    seat, raised = _app._gem_junk_floor(it, 50.0, -14.5, 49.0, None)
+    check("a Gemini bid already 1¢ under Polymarket is left alone", seat == 49.0 and not raised, str((seat, raised)))
     seat, raised = _app._gem_junk_floor(it, None, -14.5, 10.0, None)
     check("no Polymarket price at the line → the Gemini seat stands", seat == 10.0 and not raised)
     seat, raised = _app._gem_junk_floor(it, 50.0, -14.5, 10.0, 30.0)
-    check("the raised seat stays a tick under Gemini's ask", seat == 29.0 and raised, (seat, raised))
+    check("the raised seat stays a tick under Gemini's ask", seat == 29.0 and raised, str((seat, raised)))
 
 
 def test_venue_contract() -> None:
