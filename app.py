@@ -29554,6 +29554,7 @@ def _bs_espn_events(sport: str, dk: str) -> list:
 
 
 _BS_LIVE_T: dict = {}
+_BS_LIVE_BUDGET_S = 3.0
 
 
 def _bet_sheet_live_enrich(out: list, now) -> None:
@@ -29626,7 +29627,10 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
             if b.get("twin_slug") and reads < _BS_LIVE_READS and not _venue_rl_active():
                 reads += 1
                 jobs.append((b, "poly_twin", b["twin_slug"], bool(b.get("twin_syn"))))
-            elif b.get("venue") == "KALSHI" and b.get("kalshi_ticker") and k_reads < _BS_LIVE_READS:
+            elif (b.get("venue") == "KALSHI" and b.get("kalshi_ticker") and not _is_gem(b.get("kalshi_ticker"))
+                  and k_reads < _BS_LIVE_READS):
+                # (a Gemini lot is never read from Vercel: its in-game book is empty and the
+                # box already quoted it — Nov 14 2026, those reads were most of the page's wait)
                 k_reads += 1
                 jobs.append((b, "kalshi", b["kalshi_ticker"], not bool(b.get("kalshi_buy_yes"))))
             elif b.get("slug") and reads < _BS_LIVE_READS and not _venue_rl_active():
@@ -29652,15 +29656,18 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
             if v is not None:
                 b["win_prob"], b["prob_src"] = v, kind
                 b["cur_c"] = round(v * 100.0, 2)
+        # THE PAGE WAITS AT MOST _BS_LIVE_BUDGET_S FOR LIVE PRICES: a read still out
+        # then is dropped (the row shows its box quote or none; the next poll tries again)
+        dl = t0 + _BS_LIVE_BUDGET_S
         for f in [pool.submit(_one, j) for j in jobs]:
             try:
-                f.result(timeout=8)
+                f.result(timeout=max(0.05, dl - _time.monotonic()))
             except Exception:
                 pass
         _BS_LIVE_T["reads"] = int((_time.monotonic() - t0) * 1000)
         _BS_LIVE_T["jobs"] = [j[1] for j in jobs]
         try:
-            g_fut.result(timeout=8)
+            g_fut.result(timeout=max(0.05, dl - _time.monotonic()))
         except Exception:
             pass
         _BS_LIVE_T["game"] = int((_time.monotonic() - t0) * 1000)
