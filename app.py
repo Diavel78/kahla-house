@@ -2578,7 +2578,7 @@ def api_kalshi_livedata():
 @app.route("/api/pick-sheets")
 @app.route("/api/football-picks")
 @bot_required
-def _sheet_retime(sb, games: list) -> None:
+def _sheet_retime(sb, games: list, sport: str = "") -> None:
     """MOVED GAMES STAY ON THE SHEET (Nov 14 2026, Rob's screenshot: Auburn @ Mississippi
     State and Tulane @ Rice, moved by the FAA ground hold, read as started at their old
     times, and his bets on them fell under "My bets not on this sheet"). The sheet row
@@ -2606,7 +2606,12 @@ def _sheet_retime(sb, games: list) -> None:
                 if _aware_ts(m.get("event_start")) is not None
                 and abs((_aware_ts(m["event_start"]) - a).total_seconds()) <= 36 * 3600]
         act = [m for m in near if m.get("status") == "active"]
-        pick = act[0] if len(act) == 1 else next((m for m in act if m.get("id") == g.get("market_id")), None)
+        if len(act) > 1 and str(sport).upper() in ("NCAAF", "NFL"):
+            # football: the same two teams never play twice in 36h, so two active rows are a
+            # stale duplicate and the moved game — a delay moves it LATER (the FAA hold)
+            pick = max(act, key=lambda m: _aware_ts(m["event_start"]))
+        else:
+            pick = act[0] if len(act) == 1 else next((m for m in act if m.get("id") == g.get("market_id")), None)
         if pick is None:
             continue
         z = _aware_ts(pick["event_start"])
@@ -2688,7 +2693,7 @@ def api_football_picks():
         b = r.get("data_built_at")
         if b and (built_at is None or b < built_at):
             built_at = b
-    _sheet_retime(sb, games)                  # a MOVED game shows its new start (Nov 14 2026, the FAA hold)
+    _sheet_retime(sb, games, sport)           # a MOVED game shows its new start (Nov 14 2026, the FAA hold)
     _sheet_attach_tv(sport, games)
     _sheet_attach_venue(sb, sport, games)    # the box's Poly/Kalshi bids per pick, one DB read (Oct 26 2026)
     _sheet_attach_steam(sb, sport, games)    # the books' move since the open (Nov 1 2026)
