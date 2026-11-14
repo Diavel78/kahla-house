@@ -21121,7 +21121,7 @@ def _gemini_rebook_tick(sb) -> None:
 _GEM_EVAC_LOCK = threading.Lock()
 
 
-def _gemini_evacuate_run(sb, client, redo=None, cancel_ids=None) -> dict:
+def _gemini_evacuate_run(sb, client, redo=None, cancel_ids=None, retime=None) -> dict:
     """POLYMARKET ONLY (Nov 14 2026, Rob: "Go poly only. Right now. Resting bets on
     Gemini, cancel them. Put them on polymarket"). Every pending pre-game sheet bet
     resting on Gemini: verified cancel (`_kalshi_cancel_exec` — Gemini's own word
@@ -21188,6 +21188,19 @@ def _gemini_evacuate_run(sb, client, redo=None, cancel_ids=None) -> dict:
     # REDO: bets the first pass cancelled and could not place, named by hand
     # ({sport, away, home, event_start, market_type, side, line, label, contracts})
     owner = next((r.get("asked_by") for r in rows if r.get("asked_by")), None)
+    for rt in (retime or []):
+        # a MOVED game the spine has not retimed (Nov 14 2026, Ole Miss @ Oklahoma → Sunday
+        # after the FAA hold): its `markets` rows take the venue's new start; the start
+        # resync then moves every bet on it within a minute
+        try:
+            ms_ = (sb.table("markets").select("id,event_start").eq("event_name", rt.get("event_name"))
+                   .gte("event_start", (now - timedelta(days=2)).isoformat()).execute().data) or []
+            for m_ in ms_:
+                sb.table("markets").update({"event_start": rt["event_start"]}).eq("id", m_["id"]).execute()
+            out["rows"].append({"retime": rt.get("event_name"), "markets": [m_["id"] for m_ in ms_],
+                                "from": [m_["event_start"] for m_ in ms_], "to": rt["event_start"]})
+        except Exception as e:
+            out["rows"].append({"retime": rt.get("event_name"), "err": f"{type(e).__name__}: {e}"[:160]})
     for cid_ in (cancel_ids or []):                       # a pass result to undo (verified cancel)
         try:
             oc, _st = _bet_sheet_cancel_exec(sb, client, int(cid_))
@@ -21225,6 +21238,7 @@ def _gemini_evacuate_tick(sb) -> None:
         return
     redo = fv.get("redo") if isinstance(fv, dict) else None
     cancel_ids = fv.get("cancel_ids") if isinstance(fv, dict) else None
+    retime = fv.get("retime") if isinstance(fv, dict) else None
     if not _GEM_EVAC_LOCK.acquire(blocking=False):
         return
     try:
@@ -21238,7 +21252,7 @@ def _gemini_evacuate_tick(sb) -> None:
 
     def _run():
         try:
-            out = _gemini_evacuate_run(get_supabase(), get_client(), redo, cancel_ids)
+            out = _gemini_evacuate_run(get_supabase(), get_client(), redo, cancel_ids, retime)
         except Exception as e:
             out = {"kind": "gemini_evacuate", "gemini_evacuate": True, "err": f"{type(e).__name__}: {e}"[:200]}
         finally:
