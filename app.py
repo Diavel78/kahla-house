@@ -5649,17 +5649,35 @@ def api_bet_sheets_picks():
         return jsonify(res_)
     slug = (request.args.get("slug") or "").strip()
     out: dict = {"ok": True, "slug": slug}
-    if request.args.get("auto_cancel"):
+    if request.args.get("auto_cancel") or request.args.get("cancel_all"):
+        # ?cancel_all=1 (Nov 13 2026, Rob: "Cancel all pending orders") → EVERY pending
+        # sheet/app bet with a resting order, any venue, games up to 6h started;
         # ?auto_cancel=1 → the unfilled AUTO seats a cancel sweep would take;
         # &apply=1 queues one ordinary `cancel` row per bet for the box (the
         # only place hand orders are written — the venue geo-checks Vercel).
         try:
             sb_ = get_supabase()
             now_ = datetime.now(timezone.utc)
+            _all = bool(request.args.get("cancel_all"))
             rows_ = (sb_.table("bot_picks").select("id,sport,event_name,event_start,market_type,side,status,asked_by,signal_blob")
                      .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
-                     .gte("event_start", now_.isoformat()).limit(500).execute().data) or []
-            cands = _auto_cancel_cands(rows_, now_)
+                     .gte("event_start", (now_ - timedelta(hours=6) if _all else now_).isoformat())
+                     .limit(500).execute().data) or []
+            if _all:
+                cands = []
+                for r_ in rows_:
+                    b_ = r_.get("signal_blob") if isinstance(r_.get("signal_blob"), dict) else {}
+                    if not (b_.get("order_id") or b_.get("kalshi_order_id")):
+                        continue                       # nothing resting (filled lot, sitting out, cancelled)
+                    try:
+                        if float(b_.get("filled_qty") or 0) >= float(b_.get("contracts") or 0) - 0.5 > 0:
+                            continue                   # held in full
+                    except (TypeError, ValueError):
+                        pass
+                    r_["signal_blob"] = b_
+                    cands.append(r_)
+            else:
+                cands = _auto_cancel_cands(rows_, now_)
             busy: set = set()
             try:
                 for q_ in (sb_.table("hand_orders").select("pick_id").in_("state", ["pending", "claimed"])
@@ -5682,7 +5700,7 @@ def api_bet_sheets_picks():
                 try:
                     _hand_order_enqueue(sb_, {"op": "cancel", "pick_id": r_["id"], "slug": b_.get("pmm_slug"),
                                               "synthetic": bool(b_.get("pmm_synthetic")), "order_id": b_.get("order_id"),
-                                              "payload": {"asked_by": r_.get("asked_by"), "src": "auto_cancel_all"}})
+                                              "payload": {"asked_by": r_.get("asked_by"), "src": ("cancel_all" if _all else "auto_cancel_all")}})
                     ac["queued"] += 1
                 except Exception as e:
                     ac["errors"].append(f"{r_['id']}: {e}"[:120])
