@@ -4078,6 +4078,17 @@ def test_gemini_read_glitch_not_off_book() -> None:
     check("the selftest reads code defaults, never live machine_flags",
           os.environ.get("KAHLA_SELFTEST") != "1" or (_app._machine_flag("hand_start_chase", True) is True
                                                        and _app._machine_flag_val("gem_open_under_c", 1.0) == 1.0))
+    import gemini_venue as _gvh
+    g = {"M": {}, "T": {46.5: ("GEMI-T-O46", 50, 52)}, "S": {("OSU", 10.5): ("GEMI-S-OSU10", 55, 57)}}
+    r1 = _gvh.rung_for({"market_type": "spread", "side": "home", "line": -13.5}, g, "NUW", "OSU")
+    check("Ohio State −13.5 never hops 3 points to Gemini's −10.5 (Nov 13 2026)", not r1.get("ok"), str(r1))
+    r2 = _gvh.rung_for({"market_type": "spread", "side": "home", "line": -11.5}, g, "NUW", "OSU")
+    check("…one point more favorable is still taken (−11.5 → −10.5)", r2.get("ok") and r2.get("line") == -10.5, str(r2))
+    r3 = _gvh.rung_for({"market_type": "total", "side": "under", "line": 44.5}, g, "NUW", "OSU")
+    check("Under 44.5 never hops to Gemini's 46.5", not r3.get("ok"), str(r3))
+    import kalshi_venue as _kvh
+    check("Kalshi's rung rule carries the same 1-point hop limit",
+          _kvh.MAX_HOP_PTS == 1.0 and "MAX_HOP_PTS" in _insp.getsource(_kvh.rung_for))
     check("gemini seat: 1¢ under Polymarket by default (Rob, Nov 13 2026)", _app._GEM_OPEN_UNDER_C == 1.0)
     check("gemini open seat: Polymarket 50 → Gemini 49",
           _app._gem_open_seat({"market_type": "total"}, 50.0, 49.5, None)[0] == 49.0)

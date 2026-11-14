@@ -1018,6 +1018,14 @@ def our_side_quote(m: dict, buy_yes: bool) -> dict:
     return {"bid": nb, "ask": na}
 
 
+# THE SECOND VENUE TAKES THE SLIP'S LINE OR THE NEXT HALF POINT, NEVER A
+# DIFFERENT BET (Nov 13 2026, Rob: "you put it at −10.5, when the line was
+# always 13.5"): Gemini listed no −13.5 for Northwestern @ Ohio State, "nearest
+# more favorable" hopped 3 points to −10.5, and a bid there looked like a bargain
+# against Pinnacle's −10.5 fair. Past one point, Polymarket takes the bet.
+MAX_HOP_PTS = 1.0
+
+
 def rung_for(item: dict, ev_markets: list, away: str, home: str) -> dict:
     """The Kalshi contract for a slip item {market_type ml|spread|total,
     side home|away|over|under, line}: exact rung, else the nearest MORE
@@ -1058,7 +1066,7 @@ def rung_for(item: dict, ev_markets: list, away: str, home: str) -> dict:
         return {"ok": True, "ticker": m.get("ticker"), "buy_yes": by, "line": ln, "why": "exact", "market": m,
                 "ladder": sorted({r[0] for r in ladder})}
     better = (lambda ln: ln > want) if (mt == "spread" or side == "under") else (lambda ln: ln < want)
-    fav = sorted([r for r in ladder if better(r[0])], key=lambda r: abs(r[0] - want))
+    fav = sorted([r for r in ladder if better(r[0]) and abs(r[0] - want) <= MAX_HOP_PTS + 1e-9], key=lambda r: abs(r[0] - want))
     if not fav:
         return {"ok": False, "why": f"no rung at {want:g} or better", "ladder": sorted({r[0] for r in ladder})}
     ln, m, by = fav[0]

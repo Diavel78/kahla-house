@@ -406,6 +406,14 @@ def quotes(g: dict, mt: str, away: str, home: str, center, span: float = 3.0) ->
     return sorted(out, key=lambda x: (x[0] is None, x[0] or 0))
 
 
+# THE SECOND VENUE TAKES THE SLIP'S LINE OR THE NEXT HALF POINT, NEVER A
+# DIFFERENT BET (Nov 13 2026, Rob: "you put it at −10.5, when the line was
+# always 13.5"): Gemini listed no −13.5 for Northwestern @ Ohio State, "nearest
+# more favorable" hopped 3 points to −10.5, and a bid there looked like a bargain
+# against Pinnacle's −10.5 fair. Past one point, Polymarket takes the bet.
+MAX_HOP_PTS = 1.0
+
+
 def rung_for(item: dict, g: dict, away: str, home: str) -> dict:
     """Pure. The Gemini contract for a slip item {market_type ml|spread|total,
     side home|away|over|under, line = the SIDE'S OWN line}: exact rung, else the
@@ -453,7 +461,7 @@ def rung_for(item: dict, g: dict, away: str, home: str) -> dict:
         return {"ok": True, "symbol": q[0], "buy_yes": by, "line": ln, "why": "exact",
                 "yes_bid": q[1], "yes_ask": q[2], "ladder": lines}
     better = (lambda ln: ln > want) if (mt == "spread" or side == "under") else (lambda ln: ln < want)
-    fav = sorted([r for r in ladder if better(r[0])], key=lambda r: abs(r[0] - want))
+    fav = sorted([r for r in ladder if better(r[0]) and abs(r[0] - want) <= MAX_HOP_PTS + 1e-9], key=lambda r: abs(r[0] - want))
     if not fav:
         return {"ok": False, "why": f"no Gemini rung at {want:g} or better", "ladder": lines}
     ln, q, by = fav[0]
