@@ -1216,8 +1216,14 @@
             // own bid, so the bet just sits — nothing for him to do. MLB/NHL cancel: red.
             if (hold && hold.touch_c != null && hold.chalk_c != null && b.start_chase && hold.fair_c == null)
                 return { cls: 'rest', short: 'HOLD', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, past the ' + hold.chalk_c + '¢ chalk cap, so the box won\'t chase · it stays at your ' + (o.price_c != null ? cA(o.price_c) : 'bid') + ' and at game start chases live up to it' + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢' : '') + (b.read ? ' — ' + recShort(b, rr) : '') };
+            // AMBER, NEVER RED (Nov 13 2026, Rob on Ohio State −10.5 @ 51 and U46.5 @ 45 reading
+            // red "need you" after the live chase went off): the line moved HIS way, his number
+            // now costs chalk, the bid just won't fill — say that, and offer the line that pays.
             if (hold && hold.touch_c != null && hold.chalk_c != null)
-                return { cls: hold.fair_c != null ? 'rest' : 'warn', short: hold.fair_c != null ? 'AT FAIR' : 'CHALK', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, at or past the ' + hold.chalk_c + '¢ ' + (hold.fair_c != null ? 'Pinnacle fair cap' : 'chalk cap') + ', so the box stopped chasing' + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it or cancel') : ' — ' + (b.read ? recShort(b, null) : 'no cheaper rung yet — hold or cancel')) };
+                return { cls: 'rest', short: hold.fair_c != null ? 'AT FAIR' : 'LINE MOVED YOUR WAY', detail: hold.fair_c != null
+                    ? pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢, at or past the ' + hold.chalk_c + '¢ Pinnacle fair cap, so the box stopped chasing'
+                    : pre + rest + ' · the market moved your way: ' + betLabel(b) + ' now costs ' + touch + '¢ (' + am(_probToAmer(Math.min(0.99, Math.max(0.01, Number(touch) / 100)))) + '), past the −120 chalk cap, so your ' + (o.price_c != null ? cA(o.price_c) : 'bid') + ' won\'t fill unless the line comes back'
+                      + (rr ? ' · the line that pays now: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it, keep it, or cancel') : ' — keep it in case the line comes back, or cancel') };
             // PAST LEASH IS NOT RED WHERE THE START CHASES (Rob, Oct 31 2026, Utah
             // State −7.5: "This isn't red really, let the bitch run, and get it
             // live?") — football/basketball hand the unfilled part to the live
@@ -1225,9 +1231,9 @@
             if (hold && hold.touch_c != null && b.start_chase)
                 return { cls: 'rest', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing pre-game · at game start it chases live up to your ' + (o.price_c != null ? cA(o.price_c) : 'bid') + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢' : '') + (b.read ? ' — ' + recShort(b, rr) : '') };
             if (hold && hold.touch_c != null && rr)
-                return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it, re-peg it or cancel') };
+                return { cls: 'rest', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it, re-peg it or cancel') };
             if (hold && hold.touch_c != null)
-                return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing — ' + (b.read ? recShort(b, null) : 'no model read on this game — re-peg it or cancel') };
+                return { cls: 'rest', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing — ' + (b.read ? recShort(b, null) : 'no model read on this game — re-peg it or cancel') };
             if (b.live_snipe)
                 return (b.chase && b.chase.until)
                     ? { cls: 'rest', short: 'CHASING', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · live chase' + (b.chase.cap_c != null ? ' to ' + b.chase.cap_c + '¢' : ' under the cap') + ' · ends ~' + fmtClock(b.chase.until) }
