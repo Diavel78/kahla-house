@@ -4757,6 +4757,9 @@ def test_hand_queue_thread_and_live_parallel() -> None:
     check("one drainer at a time (non-blocking lock)", "_HAND_DRAIN_LOCK.acquire(blocking=False)" in src)
     check("the lane starts the queue thread", "_ensure_hand_queue_worker()" in inspect.getsource(app._hand_orders_tick))
     check("live page reads run on a pool", "ThreadPoolExecutor" in inspect.getsource(app._bet_sheet_live_enrich))
+    eps = {r.rule: r.endpoint for r in app.app.url_map.iter_rules()}
+    check("the sheet routes serve the sheet (a helper slid under the decorators once, Nov 14 2026)",
+          eps.get("/api/pick-sheets") == "api_football_picks" and eps.get("/api/bet-sheets/mine") == "api_bet_sheets_mine")
     ok = app._HAND_DRAIN_LOCK.acquire(blocking=False)
     try:
         check("a held lock skips the drain", app._hand_queue_drain(None, None, "box", {}, "C") == "C")

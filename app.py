@@ -2575,9 +2575,6 @@ def api_kalshi_livedata():
     return jsonify(out)
 
 
-@app.route("/api/pick-sheets")
-@app.route("/api/football-picks")
-@bot_required
 def _sheet_retime(sb, games: list, sport: str = "") -> None:
     """MOVED GAMES STAY ON THE SHEET (Nov 14 2026, Rob's screenshot: Auburn @ Mississippi
     State and Tulane @ Rice, moved by the FAA ground hold, read as started at their old
@@ -2627,6 +2624,9 @@ def _sheet_retime(sb, games: list, sport: str = "") -> None:
             g["event_start"] = pick["event_start"]
 
 
+@app.route("/api/pick-sheets")
+@app.route("/api/football-picks")
+@bot_required
 def api_football_picks():
     sport = (request.args.get("sport") or "NHL").upper()
     if sport not in _SHEET_SPORTS:
