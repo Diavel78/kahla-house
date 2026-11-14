@@ -164,7 +164,7 @@
 
     const SPORTS = ['NCAAF', 'NFL', 'NHL', 'NBA'];
     let _sport = localStorage.getItem('b105_sport') || 'NCAAF';
-    let _games = [], _lines = [], _mine = [], _busy = {}, _showSettled = false;
+    let _games = [], _lines = [], _mine = [], _busy = {}, _showSettled = false, _staleLive = {};
 
     function renderTabs() {
         document.getElementById('tabs').innerHTML = SPORTS.map(s =>
@@ -273,7 +273,9 @@
         else if (modelSide(g, sheetKey) === side) cls += ' model';
         if (mine.length) cls += ' mine';
         if (_busy[key]) cls += ' busy';
-        const p = mine.length ? '✓ $' + mine.reduce((a, b) => a + b.stake, 0) + ' at ' + am(mine[mine.length - 1].price) : am(price);
+        const stale = _staleLive[gi];        // live game Pinnacle isn't pricing: the number is pre-game
+        const p = mine.length ? '✓ $' + mine.reduce((a, b) => a + b.stake, 0) + ' at ' + am(mine[mine.length - 1].price)
+                : (stale ? 'tap, enter price' : am(price));
         const click = price == null && !mine.length ? '' : ' onclick="tapSide(' + gi + ',\'' + mt + '\',\'' + side + '\',\'' + sheetKey + '\')"';
         return '<div class="' + cls + '"' + click + '><div class="n">' + (fireSide(g, sheetKey) === side ? '🔥 ' : '') + esc(nm) + '</div><div class="p">' + p + '</div></div>';
     }
@@ -304,6 +306,7 @@
             if (words.length && !words.every(w => hay.indexOf(w) >= 0)) return;
             const m = marketsOf(gi, g);
             const started = g.event_start && new Date(g.event_start).getTime() <= now;
+            _staleLive[gi] = !!(started && !m.live);
             const md = g.model || {};
             let model = [];
             if (md.spread_home != null) model.push('model ' + shortTeam(g.home) + ' ' + sgn(md.spread_home));
@@ -333,9 +336,13 @@
             market_id: g.market_id, market_type: sheetKey === 'puck' ? 'puck' : mt, side, line: s.line, price: s.price, cid: cid() });
         delete _busy[key];
         if (x.d.ok) {
-            toast('Logged ' + x.d.label + ' ' + am(x.d.price) + ' · $5 to win $' + (x.d.win_usd != null ? x.d.win_usd.toFixed(2) : '—')
-                  + (x.d.src !== 'pinnacle' ? ' (Pinnacle unreadable — board price)' : ''));
             await loadMine();
+            if (x.d.src !== 'pinnacle') {            // no Pinnacle price right now (live, unlisted): Rob types Bet105's
+                toast('Logged ' + x.d.label + ' — Pinnacle has no live price, enter what Bet105 gave you');
+                openEdit(x.d.id);
+            } else {
+                toast('Logged ' + x.d.label + ' ' + am(x.d.price) + ' · $5 to win $' + (x.d.win_usd != null ? x.d.win_usd.toFixed(2) : '—'));
+            }
         } else { toast(x.d.error || ('failed ' + x.status), true); renderGames(); }
     }
 
