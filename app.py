@@ -5598,6 +5598,40 @@ def api_bet_sheets_picks():
     want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
+    if request.args.get("replace_failed"):
+        # ?replace_failed=1&ids=…[&apply=1]: a fresh create row (same slip item,
+        # same contracts, new ticket) for each listed FAILED create — the box's
+        # create guard still refuses a second order on a slug / ticker + side.
+        sb_ = get_supabase()
+        only = [int(x) for x in re.findall(r"\d+", request.args.get("ids") or "")][:100]
+        try:
+            rows_ = (sb_.table("hand_orders").select("id,op,state,payload,contracts,event_start")
+                     .in_("id", only or [0]).execute().data) or []
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:200]})
+        res = {"ok": True, "rows": []}
+        for r in rows_:
+            pl = r.get("payload") if isinstance(r.get("payload"), dict) else {}
+            it = pl.get("item") if isinstance(pl.get("item"), dict) else None
+            ent = {"from": r["id"], "state": r.get("state"), "label": (it or {}).get("label")}
+            if r.get("op") != "create" or r.get("state") != "failed" or not it:
+                ent["skip"] = "not a failed create"
+            elif request.args.get("apply"):
+                cid = f"refail-{r['id']}"
+                seen = _hand_orders_by_cid(sb_, [cid]) or {}
+                if cid in seen:
+                    ent["queue_id"], ent["repeat"] = seen[cid][0], True
+                else:
+                    try:
+                        ent["queue_id"] = _hand_order_enqueue(sb_, {
+                            "op": "create", "slug": None, "synthetic": False, "price_c": None,
+                            "contracts": r.get("contracts") or pl.get("contracts") or 10, "event_start": r.get("event_start"),
+                            "payload": {**{k: v for k, v in pl.items() if k != "cid"}, "item": {**it, "cid": cid, "key": cid},
+                                        "cid": cid, "replaces": r["id"]}})
+                    except Exception as e:
+                        ent["error"] = str(e)[:120]
+            res["rows"].append(ent)
+        return jsonify(res)
     if request.args.get("requeue_stuck"):
         # Nov 13 2026: a handbets tick hung mid-slip with 39 rows 'claimed' and
         # no result. After the box restarts, ?requeue_stuck=1&apply=1 hands every
