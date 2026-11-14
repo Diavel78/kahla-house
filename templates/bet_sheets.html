@@ -80,6 +80,7 @@
         .tile .k { font-size: 13px; color: var(--text2); }
         .tile .v { font-family: var(--mono); font-size: 20px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .tile .s { font-size: 12px; color: var(--text3); }
+        .vpoly { color: var(--blue); } .vgem { color: #FF9F43; } .vkal { color: #c9b6ff; } .vsep { color: var(--text3); padding: 0 2px; }
         .tile.tap { cursor: pointer; }
         .tile.tap.on { border-color: var(--text3); }
         .pos { color: var(--g-tx); } .neg { color: var(--r-tx); }
@@ -1764,20 +1765,24 @@
             if (b.status === 'won') w++; else if (b.status === 'lost') l++; else if (b.status === 'push') p++; else s++;
         });
         const lv = _plMark(_liveBets(d));
-        let rest = 0, nr = 0;
+        // RESTING = ORDERS PER VENUE, NOT DOLLARS (Nov 14 2026, Rob: "resting shouldn't be a
+        // dollar figure… resting bets on Poly/Gemini, blue poly and Gemini orange")
+        const nv = { Poly: 0, Gemini: 0, Kalshi: 0 };
         bets.forEach(b => {
             const o = b.order || {};
             if (b.status !== 'pending' || !o.resting) return;
-            const pc = o.price_c != null ? Number(o.price_c) : (b.price_c != null ? Number(b.price_c) : null);
-            nr++;
-            if (pc != null) rest += Number(o.leaves || 0) * pc / 100;
+            nv[venueName(b)]++;
         });
+        const nr = nv.Poly + nv.Gemini + nv.Kalshi;
+        const restV = '<span class="vpoly">' + nv.Poly + '</span><span class="vsep">/</span><span class="vgem">' + nv.Gemini + '</span>'
+                    + (nv.Kalshi ? '<span class="vsep">/</span><span class="vkal">' + nv.Kalshi + '</span>' : '');
+        const restS = '<span class="vpoly">Poly</span> / <span class="vgem">Gemini</span>' + (nv.Kalshi ? ' / <span class="vkal">Kalshi</span>' : '');
         const nset = w + l + p + s;
         const tile = (k, v, cls, sub, tap) => '<div class="tile' + (tap ? ' tap' + (tap.on ? ' on' : '') + '" onclick="' + tap.fn + '()' : '') + '"><span class="k">' + k + '</span><span class="v ' + (cls || '') + '">' + v + '</span><span class="s">' + sub + '</span></div>';
         document.getElementById('money').innerHTML =
               tile('Settled today', nset ? money(sp) : '$0.00', nset ? _plCls(sp) : '', nset ? (w + '-' + l + (p ? '-' + p : '') + (s ? ' · ' + s + ' sold' : '')) : 'nothing yet', { on: _setOpen, fn: 'toggleSettled' })
             + tile('Live', lv.rows.length ? money(lv.pl) : '—', lv.rows.length ? _plCls(lv.pl) : '', lv.rows.length ? lv.rows.length + ' bet' + (lv.rows.length === 1 ? '' : 's') + (lv.nq ? ' · ' + lv.nq + ' no quote' : '') : 'nothing live', { on: _plOpen, fn: 'togglePl' })
-            + tile('Resting', '$' + rest.toFixed(2), '', nr + ' order' + (nr === 1 ? '' : 's'));
+            + tile('Resting', nr ? restV : '0', '', nr ? restS : 'nothing resting');
     }
     // THE SETTLED LIST (Rob, Oct 30 2026: "keep me a list if I clicked the
     // settled box that shows my wins/losses/trades"): tap the Settled today
@@ -2274,6 +2279,7 @@
               ' · lines/model updated ' + ago(d.lines_updated_at);
 
         _games = d.games.slice().sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
+        _weekRec = d.week_record || null;   // the record runs Monday→Sunday, every sport (Nov 14 2026)
         _priceRule = !!d.price_rule;                      // the verdicts on this sheet are price verdicts (Oct 27 2026)
         _games.forEach((g, i) => { g._gi = i; });
         renderGames();
@@ -2281,7 +2287,7 @@
 
     // The search bar (Rob, Oct 3 2026) filters the loaded sheet client-side:
     // every typed word must appear in either team's full or short name.
-    let _games = [], _priceRule = false;
+    let _games = [], _priceRule = false, _weekRec = null;
     function gameMatches(g, words) {
         if (!words.length) return true;
         const hay = [g.away, g.home, g.away_short, g.home_short, shortTeam(g.away), shortTeam(g.home)]
@@ -3149,8 +3155,9 @@
                 if (r in rec) rec[r]++;
             }
         }
+        if (_weekRec) { rec.win = _weekRec.win || 0; rec.loss = _weekRec.loss || 0; rec.push = _weekRec.push || 0; }
         if (rec.win + rec.loss + rec.push) {
-            html += '<div class="meta">Sheet picks (plays + leans, graded): <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>'
+            html += '<div class="meta">Sheet picks this week (plays + leans, graded): <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>'
                   + (rec.win + rec.loss ? ' (' + Math.round(100 * rec.win / (rec.win + rec.loss)) + '%)' : '') + '</div>';
         }
         // a pending pre-game bet whose game is not on this sheet (another

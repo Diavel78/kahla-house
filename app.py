@@ -2595,15 +2595,21 @@ def api_football_picks():
             q = (sb.table("football_sheets")
                  .select("market_id,event_name,event_start,tier,data_blob,friday_md,data_built_at")
                  .eq("week_key", wk["week_key"]).eq("sport", sport))
-            if sport in ("NHL", "NBA", "MLB"):
-                # A daily slate: the sheet shows what's still to play PLUS
-                # the last ~36h, so last night's games stay up with their
-                # ✅/❌ grade (Oct 3 2026) until the next slate rolls on.
-                q = q.gte("event_start", (datetime.now(timezone.utc)
-                                          - timedelta(hours=_SHEET_NHL_LOOKBACK_H)).isoformat())
             rows = q.order("event_start").execute().data or []
         except Exception as e:
             return jsonify({"ok": False, "error": f"games lookup failed: {e}"}), 500
+    old_rows = []
+    if sport in ("NHL", "NBA", "MLB"):
+        # A daily slate: the sheet SHOWS what's still to play PLUS the last
+        # ~36h, so last night's games stay up with their ✅/❌ grade (Oct 3
+        # 2026) until the next slate rolls on. The week's older finals are
+        # still read — the record runs Monday→Sunday for every sport (Nov 14
+        # 2026, Rob: "why is sheet picks 2-1 on NHL?… Every sheet should track
+        # Monday-Sunday for each sport").
+        _cut = datetime.now(timezone.utc) - timedelta(hours=_SHEET_NHL_LOOKBACK_H)
+        _old = lambda r: (_parse_iso(r.get("event_start")) or _cut) < _cut
+        old_rows = [r for r in rows if _old(r)]
+        rows = [r for r in rows if not _old(r)]
     if sport == "NHL" and not rows:
         fb = _nhl_sheet_fallback(sb)
         if fb:
@@ -2650,10 +2656,25 @@ def api_football_picks():
         _sheet_attach_price(sport, g, _now)     # THE PRICE RULE: venue bid vs Pinnacle fair decides (Oct 27 2026)
     _sheet_attach_move(sb, sport, games, _now)  # THE MOVE RULE: Pinnacle's first move picks the side (Nov 1 2026)
     _sheet_attach_fire(sport, games, _now)      # 🔥 = the first move is the button, 💨 agrees or not (Nov 1 2026)
+    week_games = list(games)
+    if old_rows:
+        # the week's older finals, for the record only: no tape, the stored 🔥
+        try:
+            olds = []
+            for r in old_rows:
+                olds.append(_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport == "NBA"
+                            else _sheet_game_mlb(r))
+            for g in olds:
+                _sheet_attach_price(sport, g, _now)
+            _sheet_attach_move(sb, sport, olds, _now, tape=False)
+            week_games += olds
+        except Exception as e:
+            app.logger.warning("week record %s: %s", sport, e)
     _play_c, _lean_c = _price_thresholds()
     return jsonify({
         "ok": True, "sport": sport, "week_key": wk.get("week_key"),
         "games": games,
+        "week_record": _sheet_week_record(week_games),
         "price_rule": {"play_c": _play_c, "lean_c": _lean_c},
         "move_rule": {"on": _move_rule_on(), "play_c": _MOVE_PLAY_C, "lean_c": _MOVE_LEAN_C,
                       "open": "first Pinnacle read on the tape", "fire": "first move >= lean_c off it, any time before the start"},
@@ -2666,6 +2687,27 @@ def api_football_picks():
         "lines_updated_at": lines_updated_at,
         "next_run_at": _sheet_next_run(sport, datetime.now(timezone.utc)),
     })
+
+
+def _sheet_week_record(games: list) -> dict:
+    """Pure. The sheet's record over the games given (the week, Monday→Sunday):
+    every PLAY/LEAN pick on a card with a grade; a chalky/longshot ML is not the
+    bet (its line pick is). The page's old count over the games on screen only."""
+    rec = {"win": 0, "loss": 0, "push": 0, "games": 0}
+    for g in games or []:
+        if not isinstance(g, dict):
+            continue
+        rec["games"] += 1
+        for k in ("ml", "spread", "total", "puck"):
+            pk = g.get(k)
+            if not isinstance(pk, dict) or pk.get("verdict") not in ("play", "lean"):
+                continue
+            if k == "ml" and (pk.get("chalky") or pk.get("longshot")):
+                continue
+            r = pk.get("grade")
+            if r in rec:
+                rec[r] += 1
+    return rec
 
 
 @app.route("/api/football-sheets-mirror", methods=["POST"])
@@ -34586,11 +34628,13 @@ def _fire_freeze(sb, sport: str, ev: str, mt: str, rd: dict, start) -> None:
         app.logger.warning("fire freeze %s %s %s: %s", sport, ev, mt, e)
 
 
-def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
+def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True) -> None:
     """THE MOVE RULE on every sheet game (see above): `g.move` per market and
     — while the rule is on — each pick's side + verdict from it, finals
     included (the record on the card is the rule's). One line_tape read per
-    sport, cached 2 min. Never raises."""
+    sport, cached 2 min. `tape=False` (the week record's older finals) reads no
+    tape: a final's 🔥 is the STORED one (`_fire_frozen_load`), no 🔥 = pass.
+    Never raises."""
     if not games:
         return
     now = now or datetime.now(timezone.utc)
@@ -34608,7 +34652,9 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None) -> None:
         lo, hi = min(starts) - timedelta(hours=1), max(starts) + timedelta(hours=1)
         ck = (sport, lo.isoformat()[:13], hi.isoformat()[:13])
         hit = _MOVE_CACHE.get(ck)
-        if hit and _time.monotonic() - hit[0] < 120:
+        if not tape:
+            by = {}
+        elif hit and _time.monotonic() - hit[0] < 120:
             by = hit[1]
         else:
             rows = _sb_paged(lambda: (sb.table("line_tape")

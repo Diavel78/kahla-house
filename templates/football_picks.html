@@ -769,13 +769,14 @@
             ? 'Model = Crease IQ v2 (score model: xG, goalies, rest). ML and puck line: play ≥ 4% over the no-vig price, lean ≥ 2%. A favorite at −150 or shorter is too chalky to bet on the ML — the puck line is the play. Totals are LEAN at most. Starting goalies are projected until confirmed.'
             : 'Model spread/total = our number (calibrated). Edges in points; fair = the price the bet is good to. PIN = Pinnacle\'s line. Bet105 = Pinnacle\'s price at it (they resell Pinnacle), the number to bet it at on Bet105.';
         _games = d.games.slice().sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
+        _weekRec = d.week_record || null;   // the record runs Monday→Sunday, every sport (Nov 14 2026)
         _games.forEach((g, i) => { g._gi = i; });
         renderGames();
     }
 
     // The search bar (Rob, Oct 3 2026) filters the loaded sheet client-side:
     // every typed word must appear in either team's full or short name.
-    let _games = [], _meta = '';
+    let _games = [], _meta = '', _weekRec = null;
     // THE LINE TAPE CHART (Rob, Oct 29 2026: "let's read the market, like a
     // stock broker"). One game's history off /api/line-tape: Pinnacle's fair
     // (devigged, at the venue's line) against the Poly bid/ask and the Kalshi
@@ -1281,8 +1282,9 @@
                 if (r in rec) rec[r]++;
             }
         }
+        if (_weekRec) { rec.win = _weekRec.win || 0; rec.loss = _weekRec.loss || 0; rec.push = _weekRec.push || 0; }
         document.getElementById('metaLine').innerHTML = esc(_meta) + (rec.win + rec.loss + rec.push
-            ? ' · picks <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>' + (rec.win + rec.loss ? ' (' + Math.round(100 * rec.win / (rec.win + rec.loss)) + '%)' : '')
+            ? ' · picks this week <b>' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + '</b>' + (rec.win + rec.loss ? ' (' + Math.round(100 * rec.win / (rec.win + rec.loss)) + '%)' : '')
             : '');
         // ORDER: in-play first with a LIVE flag, then upcoming soonest-first
         // under day headers, then finals (most recent first).
