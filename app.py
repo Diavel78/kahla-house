@@ -5598,6 +5598,29 @@ def api_bet_sheets_picks():
     want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
+    if request.args.get("requeue_stuck"):
+        # Nov 13 2026: a handbets tick hung mid-slip with 39 rows 'claimed' and
+        # no result. After the box restarts, ?requeue_stuck=1&apply=1 hands every
+        # create claimed > 5 min ago with no result back to 'pending' — the
+        # create guard (one order per slug / ticker + side) stops a double.
+        sb_ = get_supabase()
+        cut = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        try:
+            rows_ = (sb_.table("hand_orders").select("id,op,state,claimed_at,result")
+                     .eq("state", "claimed").lt("claimed_at", cut).limit(300).execute().data) or []
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:200]})
+        rows_ = [r for r in rows_ if not r.get("result")]
+        res = {"ok": True, "stuck": len(rows_), "ids": [r["id"] for r in rows_], "requeued": 0}
+        if request.args.get("apply") and rows_:
+            try:
+                sb_.table("hand_orders").update({"state": "pending", "claimed_at": None, "worker": None}) \
+                    .in_("id", [r["id"] for r in rows_]).eq("state", "claimed").execute()
+                res["requeued"] = len(rows_)
+                _probe_log({"hand_requeue_stuck": True, "ids": res["ids"], "at": datetime.now(timezone.utc).isoformat()})
+            except Exception as e:
+                res["error"] = str(e)[:200]
+        return jsonify(res)
     if request.args.get("fix_lines"):
         return jsonify(_bet_sheet_fix_lines(request.args.get("apply") or ""))
     if request.args.get("cancelled_today"):
@@ -22750,9 +22773,9 @@ def _gem_poly_ref_c(client, blob: dict, event_start, now):
     """Rob's Gemini price off Polymarket: Polymarket's seat on the same-line twin
     − `_gem_open_under_c()`, whole cents. None with no twin / no book."""
     slug = blob.get("pmm_twin_slug")
-    if not slug or client is None:
+    if not slug:
         return None
-    pb = _hand_poly_book(client, slug)
+    pb = _ws_depth(slug)            # SOCKET ONLY — never a REST read per Gemini bet per tick (Nov 13 2026: the lane stalled)
     if pb is None:
         return None
     syn = bool(blob.get("pmm_twin_synthetic"))
