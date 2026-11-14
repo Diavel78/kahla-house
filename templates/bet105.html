@@ -127,6 +127,31 @@
         .btn { flex: 1; background: var(--card2); border: 1px solid var(--line2); color: var(--text); border-radius: 10px;
                padding: 12px; font-weight: 700; font-size: 15px; cursor: pointer; }
         .btn.go { background: #1f6feb; border-color: #1f6feb; } .btn.del { color: var(--r-tx); }
+        /* THE CHART (Rob, Nov 14 2026: "Where is my chart!? Why are we showing the bunk ass model") —
+           the line-tape chart from the old Bet Sheets, opened off 📈 on every card. */
+        .chartx { position: fixed; inset: 0; z-index: 90; background: var(--bg); display: none; flex-direction: column;
+                  padding: calc(10px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); overflow: auto; }
+        .chartx.show { display: flex; }
+        .chartx .ch-h { display: flex; align-items: flex-start; gap: 10px; }
+        .chartx .ch-t { font-size: 21px; font-weight: 800; line-height: 1.2; flex: 1; }
+        .chartx .ch-s { font-size: 14px; color: var(--text2); margin-top: 2px; }
+        .chartx .ch-x { width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--line); background: var(--card);
+                        color: var(--text); font-size: 22px; cursor: pointer; flex: none; }
+        .chartx .ch-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+        .chartx .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
+        .chartx .seg button { background: transparent; border: none; color: var(--text2); font: inherit; font-size: 14px; font-weight: 600;
+                              padding: 0 13px; height: 36px; cursor: pointer; }
+        .chartx .seg button.on { background: var(--card2); color: var(--text); }
+        .chartx .ch-read { font-size: 14px; color: var(--text2); margin-top: 12px; min-height: 40px; line-height: 1.45; }
+        .chartx .ch-read b { color: var(--text); }
+        .chartx .ch-box { position: relative; margin-top: 6px; touch-action: pan-y; }
+        .chartx svg { display: block; width: 100%; }
+        .chartx .ch-leg { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--text2); margin-top: 10px; }
+        .chartx .ch-leg i { display: inline-block; width: 16px; height: 3px; border-radius: 2px; vertical-align: 3px; margin-right: 5px; }
+        .chartx .ch-note { font-size: 13px; color: var(--text3); margin-top: 10px; line-height: 1.45; }
+        .chartx .ch-h > div:first-child { flex: 1; min-width: 0; }
+        .chb { font-size: 15px; font-weight: 700; color: var(--text); background: var(--card2); border: 1px solid var(--line2); border-radius: 10px; padding: 7px 12px; line-height: 1; white-space: nowrap; cursor: pointer; }
+        .mvl { color: #ffb15a; font-size: 14px; } .mvl.mvw, .mvl .mvq { color: #8a98a8; }
     </style>
 </head>
 <body>
@@ -149,6 +174,23 @@
         <div id="main"><div class="empty">loading…</div></div>
     </div>
 </div>
+        <div class="chartx" id="chartx">
+            <div class="ch-h">
+                <div><div class="ch-t" id="chTitle"></div><div class="ch-s" id="chSub"></div></div>
+                <button class="ch-x" onclick="closeChart()" aria-label="Close">×</button>
+            </div>
+            <div class="ch-row"><div class="seg" id="chMkts"></div><div class="seg" id="chSides"></div></div>
+            <div class="ch-row"><div class="seg" id="chRange"></div></div>
+            <div class="ch-row"><div class="seg" id="chAnchor" style="overflow-x:auto;max-width:100%"></div></div>
+            <div class="ch-read" id="chRead"></div>
+            <div class="ch-box" id="chBox"></div>
+            <div class="ch-leg">
+                <span><i style="background:#E6C36A"></i>Pinnacle fair</span>
+                <span><i style="background:#4FB3FF"></i>Poly bid</span>
+                <span><i style="background:#7BE3A6"></i>Kalshi bid</span>
+            </div>
+            <div class="ch-note">One line, every book: tap a line above and every book is priced at it, in cents for the side you pick (cents = the chance it wins). Each line is that book's bid. Solid = that book lists the line. Dashed = it doesn't, so its price is carried from its nearest lines by how far it sits from Pinnacle on those lines. Pinnacle fair = Pinnacle's price with the vig taken out, off its own alternate lines; dashed = Pinnacle doesn't list the line yet, so its nearest line is carried there at the same cents-a-point the 🔥 uses. Recording began Oct 29 2026: Pinnacle every minute; Poly and Kalshi every 30 min far out, 10 min inside a day, 3 min inside 3 hours.</div>
+        </div>
 <div class="ov" id="ov" onclick="closeSheet()"></div>
 <div class="sheet" id="sheet"></div>
 <div class="toast" id="toast"></div>
@@ -266,27 +308,44 @@
     }
 
     // ---- the sheet ----
-    async function loadGames() {
-        document.getElementById('main').innerHTML = '<div class="empty">loading…</div>';
-        let r;
-        try { r = await authFetch('/api/pick-sheets?sport=' + _sport); } catch (e) { return; }
-        if (!r) return;
-        const d = await r.json().catch(() => null);
-        if (!d || !d.ok) { _games = []; render(); return; }
+    // THE SHEET SHOWS AT ONCE (Rob, Nov 14 2026: "LOAD THE FUCKING GAMES!!! No processing"):
+    // each tab's last sheet is kept on the phone and drawn the instant the tab opens; the
+    // fresh read replaces it. A slow answer for a tab you already left is thrown away.
+    let _loading = false;
+    function useGames(list, sport) {
+        if (sport !== _sport) return;
         const now = Date.now();
-        _games = (d.games || []).filter(g => !(g.grade && g.grade.final))
+        _games = (list || []).filter(g => !(g.grade && g.grade.final))
             .filter(g => !g.event_start || new Date(g.event_start).getTime() > now - 5 * 3600 * 1000)
             .sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
         _games.forEach((g, i) => { g._gi = i; });
-        _lines = [];
+    }
+    async function loadGames() {
+        const sport = _sport;
+        _lines = []; _games = []; _loading = true;
+        try { const c = JSON.parse(localStorage.getItem('b105_games_' + sport) || 'null'); if (c && c.games) useGames(c.games, sport); } catch (e) {}
         render();
-        loadLines();
+        if (_games.length) loadLines();
+        const sig = () => _games.map(g => g.event_name).join('|');
+        const before = sig();
+        let d = null;
+        try { const r = await authFetch('/api/pick-sheets?sport=' + sport); d = r ? await r.json().catch(() => null) : null; } catch (e) {}
+        if (sport !== _sport) return;
+        _loading = false;
+        if (d && d.ok) {
+            useGames(d.games, sport);
+            if (sig() !== before) _lines = [];
+            try { localStorage.setItem('b105_games_' + sport, JSON.stringify({ at: Date.now(), games: d.games || [] })); } catch (e) {}
+        }
+        render();
+        if (!_lines.length) loadLines();
     }
     async function loadLines() {
         if (!_games.length) return;
         const sport = _sport;
+        const ids = _games.map(g => g.event_name).join('|');
         const x = await postJSON('/api/bet105/lines', { sport, games: _games.map(g => ({ away: g.away, home: g.home, event_start: g.event_start })) });
-        if (sport !== _sport || !x.d.ok) return;
+        if (sport !== _sport || !x.d.ok || ids !== _games.map(g => g.event_name).join('|')) return;
         _lines = x.d.lines || [];
         render();
     }
@@ -327,7 +386,7 @@
     }
     function sideBtn(g, row, s, stale) {
         const mine = betsOn(g, row.mt, s.side);
-        const fire = fireSide(g, row.key) === s.side, mp = modelPick(g, row.key);
+        const fire = fireSide(g, row.key) === s.side;
         let cls = 'bb', inner;
         if (mine.length) {
             const b = mine[mine.length - 1];
@@ -337,7 +396,7 @@
             inner = '<span class="bs">✓ BET · ' + esc(v) + '</span><span class="bl">' + esc(sideName(g, row.mt, { side: s.side, line: b.line != null ? Number(b.line) : s.line })) + '</span><span class="pr">' + am(b.price) + wp + '</span>';
         } else {
             if (s.price == null) cls += ' none';
-            if (fire) cls += ' fire'; else if (mp && mp.side === s.side) cls += ' model';
+            if (fire) cls += ' fire';
             inner = '<span class="bl">' + (fire ? '🔥 ' : '') + esc(sideName(g, row.mt, s)) + '</span><span class="pr">' + (stale ? 'tap · enter price' : am(s.price)) + '</span>';
         }
         const key = g._gi + '|' + row.mt + '|' + s.side;
@@ -348,19 +407,21 @@
     function gameCard(g) {
         const m = marketsOf(g), st = started(g), stale = st && !m.live;
         const bets = betsOn(g);
-        const md = g.model || {};
         const sub = [];
-        if (md.spread_home != null) sub.push('Model ' + shortTeam(md.spread_home <= 0 ? g.home : g.away) + ' ' + sgn(-Math.abs(md.spread_home)) + (md.total != null ? ' · ' + md.total : ''));
         if (!m.have) sub.push(_lines.length ? 'no Pinnacle line' : 'loading Pinnacle…');
         const lb = bets.find(b => b.game && b.game.away != null);
         const right = st ? '<span class="tag live">LIVE</span>' + (lb ? ' <span class="score">' + lb.game.away + '–' + lb.game.home + '</span>' : '') : whenTxt(g.event_start);
         let h = '<div class="gc' + (bets.length ? ' hasbet' : '') + '"><div class="gh"><span class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home))
               + (g.tv && g.tv.length ? '<span class="tv">' + esc(g.tv[0]) + '</span>' : '') + '</span><span class="gs">' + right + '</span></div>';
         h += '<div class="gsub">' + (bets.length ? '<span class="tag grn">✓ ' + bets.length + ' BET' + (bets.length > 1 ? 'S' : '') + ' ON THIS GAME</span>' : '<span class="tag gry">NO BET YET</span>')
+           + '<button class="chb" onclick="event.stopPropagation();openChart(' + g._gi + ')">📈 Chart</button>'
            + (sub.length ? '<span>' + esc(sub.join(' · ')) + '</span>' : '') + '</div>';
+        const mv = moveLine(g, false);
+        if (mv) h += '<div class="gsub" style="margin-top:-4px">' + mv + '</div>';
         m.rows.forEach(row => {
-            const mp = modelPick(g, row.key);
-            h += '<div class="mk"><div class="mk-l">' + row.lb + (mp ? ' <span class="pill ' + mp.verdict + '">' + mp.verdict.toUpperCase() + '</span>' : '') + '</div>'
+            const fs = (g.move || {})[row.key === 'puck' ? 'ml' : row.key];
+            const fv = fs && (fs.state === 'play' || fs.state === 'lean') ? fs.state : null;
+            h += '<div class="mk"><div class="mk-l">' + row.lb + (fv ? ' <span class="pill ' + fv + '">🔥 ' + fv.toUpperCase() + '</span>' : '') + '</div>'
                + '<div class="two">' + row.sides.map(s => sideBtn(g, row, s, stale)).join('') + '</div></div>';
         });
         return h + '</div>';
@@ -405,10 +466,345 @@
                 if (dd !== day && _view === 'up') { day = dd; h += '<div class="day-hdr">' + dd + '</div>'; }
                 h += gameCard(g);
             });
+            if (!h && _loading) h = '<div class="empty">loading ' + _sport + ' games…</div>';
             if (!h) h = '<div class="empty">' + (_view === 'live' ? 'No ' + _sport + ' games in progress.' : 'No upcoming ' + _sport + ' games on the sheet.') + '</div>';
         }
         document.getElementById('main').innerHTML = h;
     }
+    // THE LINE TAPE CHART (Rob, Oct 29 2026: "let's read the market, like a
+    // stock broker"). One game's history off /api/line-tape: Pinnacle's fair
+    // (devigged, at the venue's line) against the Poly bid/ask and the Kalshi
+    // bid, in cents for the side picked. The API stores home / over; the
+    // other side is the mirror (bid = 100 − ask).
+    let _ch = null, _chTimer = null;
+    const CH_MK = { ml: 'ML', spread: 'Spread', puck: 'Puck line', total: 'Total' };
+    function moveLine(g, full) {
+        // 🔥 FIRE = THE FIRST MOVE (Nov 1 2026, Rob: "Fire is first movement. Steam/smoke is
+        // after fire. Say on card if smoke agrees or not"): Pinnacle's move in the first 1-2
+        // hours after it opened the market picks the side; 💨 says whether everything since
+        // has moved the same way. The card shows PLAY/LEAN markets only; the full card adds
+        // each book's cents.
+        const m = g.move; if (!m) return '';
+        const nm = { pin: 'Pin', poly: 'Poly', kalshi: 'Kalshi' };
+        const lab = { ml: 'ML', spread: _sport === 'MLB' ? 'Run line' : 'Spread', total: 'Total' };
+        const side = (k, d) => k === 'total' ? (d > 0 ? 'Over' : 'Under') : shortTeam(d > 0 ? g.home : g.away);
+        const parts = [];
+        let waiting = false, old = 0, n = 0;
+        for (const k of ['spread', 'total', 'ml']) {
+            const x = m[k]; if (!x) continue;
+            n++;
+            if (x.state === 'play' || x.state === 'lean') {
+                const s = (g.steam || {})[k];
+                // 💨 only when the trend since the open still runs the 🔥's way (Rob, Nov 1 2026:
+                // "no smoke icon, and the smoke isn't there") — against / none = no icon.
+                const smoke = s && s.dir && s.dir === x.dir ? ' <span class="smk ok" title="still moving the 🔥 way since the open">💨</span>' : '';
+                const when = x.at_h == null ? '' : x.at_h < 1 ? Math.round(x.at_h * 60) + 'm in' : x.at_h < 48 ? Math.round(x.at_h) + 'h in' : Math.round(x.at_h / 24) + 'd in';
+                const bk = full ? ' <span class="mvq">(' + when + ': ' + ['pin', 'poly', 'kalshi'].filter(b => x.books && x.books[b] != null)
+                    .map(b => nm[b] + ' ' + (x.books[b] >= 0 ? '+' : '') + Math.round(x.books[b]) + '¢').join(' · ') + ')</span>' : '';
+                parts.push('🔥 ' + lab[k] + ' <b>' + esc(side(k, x.dir)) + '</b> ' + x.state.toUpperCase() + smoke + bk);
+            } else if (g[k] && g[k].fire && g[k].fire_src === 'smoke' && g[k].side) {
+                // NO 🔥 READ, THE BUTTON FOLLOWS 💨 (Nov 2 2026, Rob on a NO ML LEAN with nothing
+                // above it: "not even listed as fire or smoke") — say so, every time.
+                parts.push('<span title="no first move recorded for this market — the button follows the move since the open">💨 ' + lab[k] + ' <b>'
+                    + esc(k === 'total' ? (g[k].side === 'over' ? 'Over' : 'Under') : shortTeam(g[k].side === 'home' ? g.home : g.away))
+                    + '</b> ' + String(g[k].verdict || 'lean').toUpperCase() + '</span>');
+            } else if (x.state === 'watching') {
+                // one book moved alone: the 🔥 waits for a second (Rob, Nov 1 2026: "2 out of the 3 books")
+                if (full) parts.push(x.lone ? lab[k] + ' ' + nm[x.lone.src] + ' ' + Math.round(x.lone.cents) + '¢ '
+                    + esc(side(k, x.lone.dir)) + ', waiting on a 2nd book' : lab[k] + ' no move yet');
+            } else if (x.state === 'reading') {
+                // the ladder tape didn't load this time — the 🔥 waits for a full read rather than guess (Nov 3 2026)
+                parts.push('<span class="mvw" title="the line history didn\'t finish loading — refresh">🔥 ' + lab[k] + ' loading…</span>');
+            } else if (x.state === 'pass') {
+                if (full) parts.push(lab[k] + ' no move');
+            } else if (x.state === 'no_open') {
+                waiting = true;
+            } else if (x.state === 'old_open') old++;
+        }
+        if (!parts.length) {
+            if (g._st && g._st !== 'up') return '';      // a started / final game waits on nothing
+            if (waiting) return '<span class="mvl mvw">🔥 waiting on the books\' open</span>';
+            if (old && old === n) return '<span class="mvl mvw">🔥 opened before we were recording — the buttons follow 💨, the move since</span>';
+            return '';
+        }
+        return '<span class="mvl" title="🔥 = the first time Pinnacle and Polymarket or Kalshi each moved 1¢+ the same way off their own opening price, whenever it came: both 2¢+ = PLAY that side, else LEAN. 💨 = the books are still moving that way since the open; no 💨 = they aren\'t.">' + parts.join(' &nbsp; ') + '</span>';
+    }
+    function fmtTime(iso) { return whenTxt(iso); }
+    function openChart(gi) {
+        const g = _games[gi]; if (!g) return;
+        _ch = { g: g, mt: null, side: null, range: '24h', data: null, hover: null, err: null };
+        document.getElementById('chTitle').textContent = shortTeam(g.away) + ' @ ' + shortTeam(g.home);
+        document.getElementById('chSub').textContent = 'Starts ' + fmtTime(g.event_start);
+        document.getElementById('chartx').classList.add('show');
+        document.body.style.overflow = 'hidden';
+        renderChart();
+        loadChart();
+        clearInterval(_chTimer);
+        _chTimer = setInterval(loadChart, 60000);
+    }
+    function closeChart() {
+        _ch = null; clearInterval(_chTimer); _chTimer = null;
+        document.getElementById('chartx').classList.remove('show');
+        document.body.style.overflow = '';
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && _ch) closeChart(); });
+    window.addEventListener('resize', () => { if (_ch) renderChart(); });
+    async function loadChart() {
+        if (!_ch) return;
+        const c = _ch;
+        try {
+            const an = (c.anchor && c.anchor.mt === c.mt) ? '&mt=' + encodeURIComponent(c.mt) + '&line=' + encodeURIComponent(c.anchor.line) : '';
+            const r = await authFetch('/api/line-tape?sport=' + encodeURIComponent(_sport) + '&event=' + encodeURIComponent(c.g.event_name) + an);
+            const j = await r.json();
+            if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+            if (_ch !== c) return;
+            c.data = j; c.err = null;
+            const have = Array.from(new Set(Object.keys(j.markets || {}).concat(Object.keys(j.ladders || {}))));
+            if (!c.mt || !have.includes(c.mt)) c.mt = ['spread', 'puck', 'total', 'ml'].find(k => have.includes(k)) || null;
+            if (c.mt && !c.side) chartPickSide();
+        } catch (e) { if (_ch === c) c.err = String(e.message || e); }
+        if (_ch === c) renderChart();
+    }
+    function chartSides(mt) { return mt === 'total' ? ['over', 'under'] : ['away', 'home']; }
+    function chartPickSide() {
+        const p = _ch.g[_ch.mt];
+        _ch.side = (p && p.side && chartSides(_ch.mt).includes(p.side)) ? p.side : chartSides(_ch.mt)[_ch.mt === 'total' ? 0 : 1];
+    }
+    // THE SIDE'S OWN RUNG (Nov 1 2026, Rob on Ball State @ UMass, Pinnacle UMass −3:
+    // "the line is +3.5, not 2.5"): the chart opened on the pick's rung (UMass −2.5) and
+    // the other side read its mirror (+2.5). A side tap anchors at THAT side's own
+    // bettable half of Pinnacle's line — dog +3 → +3.5, over 49 → 48.5 — home / over terms.
+    function chartSideRung(g, mt, side) {
+        const L = (g && g.line) || {}, half = x => Math.abs(x - Math.round(x)) > 0.01;
+        if (mt === 'spread' && L.spread_home != null) {
+            const own = side === 'home' ? Number(L.spread_home) : -Number(L.spread_home);
+            const r = half(own) ? own : own + 0.5;
+            return side === 'home' ? r : -r;
+        }
+        if (mt === 'total' && L.total != null) {
+            const t = Number(L.total);
+            return half(t) ? t : (side === 'over' ? t - 0.5 : t + 0.5);
+        }
+        return null;
+    }
+    function chartSet(k, v) {
+        if (!_ch) return;
+        _ch[k] = v; _ch.hover = null;
+        if (k === 'mt') chartPickSide();
+        renderChart();
+        if (k === 'side') {
+            const p = _ch.g[_ch.mt], r = chartSideRung(_ch.g, _ch.mt, v);
+            const want = (p && p.side === v) ? null : r;          // the pick's own side keeps the sheet's rung
+            const cur = _ch.anchor && _ch.anchor.mt === _ch.mt ? Number(_ch.anchor.line) : null;
+            if (want != null && cur !== want) { _ch.anchor = { mt: _ch.mt, line: want }; loadChart(); }
+            else if (want == null && cur != null) { _ch.anchor = null; loadChart(); }   // back to the sheet's rung
+        }
+        if (k === 'mt' && _ch.anchor && _ch.anchor.mt !== v) { _ch.anchor = null; loadChart(); }
+    }
+    // ONE LINE, EVERY BOOK (Rob, Oct 29 2026: "I need one chart"): pick the line,
+    // every book is priced there — its own price when it lists it, else carried
+    // from its nearest rungs by its gap to Pinnacle (dashed).
+    function chartAnchor(line) { if (!_ch) return; _ch.anchor = { mt: _ch.mt, line: line }; _ch.hover = null; loadChart(); }
+    function centsAm(c) {
+        if (c == null || !(c > 0 && c < 100)) return '';
+        const a = c >= 50 ? -100 * c / (100 - c) : 100 * (100 - c) / c;
+        return (a > 0 ? '+' : '') + Math.round(a);
+    }
+    function c1(x) { return x == null ? '—' : (Math.round(Number(x) * 10) / 10) + '¢'; }
+    function chartLineTxt(mt, side, ln) {
+        if (ln == null || mt === 'ml') return '';
+        return mt === 'total' ? (side === 'over' ? 'O ' : 'U ') + Number(ln) : sgn(ln, 1);
+    }
+    // the chosen side's series: venue [t, line, bid, ask], pin [t, line, price, fair]
+    function chartSeries() {
+        const canon = _ch.side === 'home' || _ch.side === 'over', spr = _ch.mt === 'spread' || _ch.mt === 'puck';
+        const L = (_ch.data && _ch.data.ladders || {})[_ch.mt];
+        if (L && ((L.pin || []).length || (L.poly || []).length || (L.kalshi || []).length)) {
+            const al = (spr && !canon) ? -L.anchor : L.anchor;
+            const fl = x => (x != null && spr && !canon) ? -x : x;
+            const v = p => canon ? [p[0], al, p[1], p[2], p[3], p[4]]
+                : [p[0], al, p[2] != null ? 100 - p[2] : null, p[1] != null ? 100 - p[1] : null, p[3], p[4] ? p[4].map(fl) : p[4]];
+            const pn = p => [p[0], al, null, p[1] == null ? null : (canon ? p[1] : 100 - p[1]), p[2] == null, p[2] == null ? null : [fl(p[2])]];   // [.., fair, exact, est. from Pinnacle's line]
+            return { ladder: true, anchor: al, rungs: (L.rungs || []).map(fl),
+                     poly: (L.poly || []).map(v), kalshi: (L.kalshi || []).map(v), pin: (L.pin || []).map(pn) };
+        }
+        const m = (_ch.data && _ch.data.markets || {})[_ch.mt]; if (!m) return null;
+        const v = p => canon ? [p[0], p[1], p[2], p[3]]
+            : [p[0], (spr && p[1] != null) ? -p[1] : p[1], p[3] != null ? 100 - p[3] : null, p[2] != null ? 100 - p[2] : null];
+        const pn = p => [p[0], (spr && p[1] != null && !canon) ? -p[1] : p[1], canon ? p[2] : p[3],
+                         p[4] == null ? null : (canon ? p[4] : 100 - p[4])];
+        return { poly: (m.poly || []).map(v), kalshi: (m.kalshi || []).map(v), pin: (m.pin || []).map(pn) };
+    }
+    function chartAt(pts, t, i) {          // the last value at or before t (a step chart)
+        let out = null;
+        for (const p of pts) { if (p[0] > t) break; out = p; }
+        return out ? out[i] : null;
+    }
+    function renderChart() {
+        if (!_ch) return;
+        const c = _ch, have = Array.from(new Set(Object.keys((c.data && c.data.markets) || {}).concat(Object.keys((c.data && c.data.ladders) || {}))));
+        const mk = ['ml', 'spread', 'puck', 'total'].filter(k => have.includes(k));
+        document.getElementById('chMkts').innerHTML = mk.map(k => '<button class="' + (k === c.mt ? 'on' : '') + '" onclick="chartSet(\'mt\',\'' + k + '\')">' + (k === 'spread' && _sport === 'MLB' ? 'Run line' : CH_MK[k]) + '</button>').join('');
+        document.getElementById('chSides').innerHTML = c.mt ? chartSides(c.mt).map(s => '<button class="' + (s === c.side ? 'on' : '') + '" onclick="chartSet(\'side\',\'' + s + '\')">' + esc(s === 'over' ? 'Over' : s === 'under' ? 'Under' : shortTeam(c.g[s])) + '</button>').join('') : '';
+        document.getElementById('chRange').innerHTML = [['3h', '3H'], ['24h', '24H'], ['all', 'All']].map(r => '<button class="' + (r[0] === c.range ? 'on' : '') + '" onclick="chartSet(\'range\',\'' + r[0] + '\')">' + r[1] + '</button>').join('');
+        const box = document.getElementById('chBox'), rd = document.getElementById('chRead');
+        if (!c.data) { box.innerHTML = '<div class="empty">' + (c.err ? 'Could not load the chart: ' + esc(c.err) : 'loading…') + '</div>'; rd.innerHTML = ''; return; }
+        const S = chartSeries();
+        const anc = document.getElementById('chAnchor');
+        anc.innerHTML = (S && S.ladder && S.rungs.length) ? S.rungs.slice().sort((a, b) => a - b).map(l =>
+            '<button class="' + (Math.abs(l - S.anchor) < 0.01 ? 'on' : '') + '" onclick="chartAnchor(' + ((c.mt !== 'total' && c.side === 'away') ? -l : l) + ')">'
+            + esc(chartLineTxt(c.mt, c.side, l)) + '</button>').join('') : '';
+        const all = S ? [].concat(S.pin, S.poly, S.kalshi) : [];
+        if (!S || !all.length) { box.innerHTML = '<div class="empty">No history for this game yet — recording began Oct 29 2026.</div>'; rd.innerHTML = ''; return; }
+        const startMs = c.g.event_start ? Date.parse(c.g.event_start) : null;
+        let tEnd = Date.now();
+        // IN-GAME (Oct 31 2026): Pinnacle is recorded through the game now — after
+        // the start the chart runs to its last point (never past now), else it ends at the start
+        if (startMs && startMs < tEnd) tEnd = Math.max(startMs, Math.min(Date.now(), Math.max.apply(null, all.map(p => p[0]))));
+        const tFirst = Math.min.apply(null, all.map(p => p[0]));
+        let tStart = c.range === '3h' ? tEnd - 3 * 3600e3 : c.range === '24h' ? tEnd - 24 * 3600e3 : tFirst;
+        if (c.range === 'all' || tStart < tFirst - 3600e3) tStart = Math.min(tFirst, tEnd - 3600e3);
+        // what's on screen: each series' value carried into the window + the points inside it
+        const vis = (pts, i) => {
+            const out = [];
+            const pre = chartAt(pts, tStart, i);
+            out.push([tStart, pre]);
+            pts.forEach(p => { if (p[0] > tStart && p[0] <= tEnd) out.push([p[0], p[i]]); });
+            return out;
+        };
+        // a book's own price at the line is solid; one carried from its other rungs is dashed
+        const visIf = (pts, i, exact) => vis(pts.map(p => [p[0], 0, p[i] == null ? null : (!!p[4] === exact ? p[i] : null), 0]), 2);
+        const lines = S.ladder ? [
+            // Pinnacle's own price at the line is solid; carried from its nearest line (est.) is dashed
+            { pts: visIf(S.pin, 3, true), col: '#E6C36A', w: 2.5, key: 'fair' },
+            { pts: visIf(S.pin, 3, false), col: '#E6C36A', w: 2.5, dash: '6 4', key: 'fair_est' },
+            { pts: visIf(S.kalshi, 2, true), col: '#7BE3A6', w: 2, key: 'kbid' },
+            { pts: visIf(S.kalshi, 2, false), col: '#7BE3A6', w: 2, dash: '6 4', key: 'kbid_est' },
+            { pts: visIf(S.poly, 2, true), col: '#4FB3FF', w: 2.5, key: 'pbid' },
+            { pts: visIf(S.poly, 2, false), col: '#4FB3FF', w: 2.5, dash: '6 4', key: 'pbid_est' },
+        ] : [
+            { pts: vis(S.pin, 3), col: '#E6C36A', w: 2.5, key: 'fair' },
+            { pts: vis(S.kalshi, 2), col: '#7BE3A6', w: 2, key: 'kbid' },
+            { pts: vis(S.poly, 2), col: '#4FB3FF', w: 2.5, key: 'pbid' },
+        ];
+        const vals = [];
+        lines.forEach(L => L.pts.forEach(p => { if (p[1] != null) vals.push(p[1]); }));
+        if (!vals.length) { box.innerHTML = '<div class="empty">Nothing recorded in this window — try All.</div>'; rd.innerHTML = ''; return; }
+        let lo = Math.min.apply(null, vals) - 2, hi = Math.max.apply(null, vals) + 2;
+        if (hi - lo < 8) { const mid = (hi + lo) / 2; lo = mid - 4; hi = mid + 4; }
+        lo = Math.max(0, lo); hi = Math.min(100, hi);
+        const W = Math.max(300, box.clientWidth || 340), H = 320, ml = 4, mr = 74, mt = 22, mb = 28;
+        const X = t => ml + (W - ml - mr) * (t - tStart) / Math.max(1, tEnd - tStart);
+        const Y = v => mt + (H - mt - mb) * (hi - v) / Math.max(0.01, hi - lo);
+        let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" height="' + H + '" id="chSvg">';
+        // grid: cents with the American price beside
+        const span = hi - lo, step = span > 40 ? 10 : span > 20 ? 5 : span > 10 ? 2 : 1;
+        for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+            svg += '<line x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="#2A3242" stroke-dasharray="2 4"/>'
+                 + '<text x="' + (W - mr + 6) + '" y="' + (Y(v) + 4) + '" fill="#98A2B3" font-size="11">' + v + '¢ ' + centsAm(v) + '</text>';
+        }
+        // time axis
+        const dt = tEnd - tStart, nt = 4;
+        for (let i = 0; i <= nt; i++) {
+            const t = tStart + dt * i / nt, d = new Date(t);
+            const lab = dt > 36 * 3600e3 ? d.toLocaleDateString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric' })
+                                        : d.toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' });
+            svg += '<text x="' + Math.min(W - mr - 4, Math.max(ml + 18, X(t))) + '" y="' + (H - 8) + '" fill="#98A2B3" font-size="11" text-anchor="middle">' + lab + '</text>';
+        }
+        if (startMs && startMs >= tStart && startMs <= tEnd + 1) {
+            svg += '<line x1="' + X(startMs) + '" x2="' + X(startMs) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#F3F5F9" stroke-dasharray="3 3" opacity=".6"/>'
+                 + '<text x="' + (X(startMs) - 4) + '" y="' + (mt - 6) + '" fill="#F3F5F9" font-size="11" text-anchor="end">start</text>';
+        }
+        // the step lines
+        lines.forEach(L => {
+            let d = '', prevY = null;
+            L.pts.forEach(p => {
+                const x = X(p[0]);
+                if (p[1] == null) {                      // a gap: carry the last value to here, then lift the pen
+                    if (prevY != null) d += 'H' + x;
+                    prevY = null; return;
+                }
+                const y = Y(p[1]);
+                d += prevY == null ? 'M' + x + ' ' + y : 'H' + x + 'V' + y;
+                prevY = y;
+            });
+            if (prevY != null) d += 'H' + X(tEnd);
+            if (d) svg += '<path d="' + d + '" fill="none" stroke="' + L.col + '" stroke-width="' + L.w + '"' + (L.dash ? ' stroke-dasharray="' + L.dash + '"' : '') + (L.op ? ' opacity="' + L.op + '"' : '') + ' stroke-linejoin="round"/>';
+        });
+        // where the line moved: the venue's rung (top) and Pinnacle's own line (bottom)
+        const marks = (pts, y, col, pre) => {
+            let last, n = 0, out = '', lastX = -1e9;
+            pts.forEach(p => {
+                if (p[0] > tEnd || p[1] == null || c.mt === 'ml') return;
+                if (last !== undefined && p[1] !== last && p[0] >= tStart && n < 12) {
+                    out += '<line x1="' + X(p[0]) + '" x2="' + X(p[0]) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="' + col + '" opacity=".25"/>';
+                    if (X(p[0]) - lastX > 64 && X(p[0]) < W - mr - 30) {     // labels that would collide are left as a tick
+                        out += '<text x="' + (X(p[0]) + 3) + '" y="' + y + '" fill="' + col + '" font-size="11">' + pre + esc(chartLineTxt(c.mt, c.side, p[1])) + '</text>';
+                        lastX = X(p[0]);
+                    }
+                    n++;
+                }
+                last = p[1];
+            });
+            return out;
+        };
+        svg += marks(S.poly, mt + 10, '#4FB3FF', '') + marks(S.pin, H - mb - 6, '#E6C36A', 'PIN ');
+        // right-edge tags: the latest of each
+        const tags = [['fair', S.pin, 3, '#E6C36A', '#1a1505'], ['pbid', S.poly, 2, '#4FB3FF', '#04121f'], ['kbid', S.kalshi, 2, '#7BE3A6', '#04170c']]
+            .map(x => ({ v: chartAt(x[1], tEnd, x[2]), col: x[3], fg: x[4] })).filter(x => x.v != null).sort((a, b) => b.v - a.v);
+        let lastY = -99;
+        tags.forEach(tg => {
+            let y = Y(tg.v); if (y < lastY + 16) y = lastY + 16; lastY = y;
+            svg += '<rect x="' + (W - mr + 2) + '" y="' + (y - 8) + '" width="' + (mr - 4) + '" height="16" rx="3" fill="' + tg.col + '"/>'
+                 + '<text x="' + (W - mr + 6) + '" y="' + (y + 4) + '" fill="' + tg.fg + '" font-size="11" font-weight="700">' + c1(tg.v) + ' ' + centsAm(tg.v) + '</text>';
+        });
+        const hx = c.hover != null ? Math.min(tEnd, Math.max(tStart, c.hover)) : null;
+        if (hx != null) svg += '<line x1="' + X(hx) + '" x2="' + X(hx) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#F3F5F9" opacity=".5"/>';
+        svg += '</svg>';
+        box.innerHTML = svg;
+        // the readout: the crosshair's moment, else now
+        const t = hx != null ? hx : tEnd;
+        const fair = chartAt(S.pin, t, 3), pl = chartAt(S.pin, t, 1), pp = chartAt(S.pin, t, 2);
+        const pb = chartAt(S.poly, t, 2), pa = chartAt(S.poly, t, 3), plin = chartAt(S.poly, t, 1);
+        const kb = chartAt(S.kalshi, t, 2), ka = chartAt(S.kalshi, t, 3), klin = chartAt(S.kalshi, t, 1);
+        // Kalshi often lists a different rung than Poly — say so, it is a different bet
+        let kTxt = (klin != null && plin != null && c.mt !== 'ml' && Math.abs(klin - plin) > 0.01) ? ' at ' + esc(chartLineTxt(c.mt, c.side, klin)) : '';
+        let pTxt = '', fTxt = '';
+        if (S.ladder) {                     // estimated at this line: name the rungs it came from
+            const est = (pts) => { const ex = chartAt(pts, t, 4), via = chartAt(pts, t, 5);
+                return (ex === false && via && via.length) ? ' ≈ est. from ' + via.map(x => esc(chartLineTxt(c.mt, c.side, x))).join(' / ') : ''; };
+            kTxt = est(S.kalshi); pTxt = est(S.poly); fTxt = est(S.pin);
+        }
+        const when = new Date(t).toLocaleString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+        const sideNm = c.mt === 'total' ? '' : shortTeam(c.g[c.side]) + ' ';
+        rd.innerHTML = S.ladder
+            ? '<b>' + esc(hx != null ? when : 'Now') + '</b> · every book at <b>' + esc(sideNm + chartLineTxt(c.mt, c.side, S.anchor)) + '</b>'
+              + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + (fair != null ? ' (' + centsAm(fair) + ')' : '') + fTxt + '</span>'
+              + '<br><span style="color:#4FB3FF">Poly ' + c1(pb) + ' / ' + c1(pa) + pTxt + '</span>'
+              + '<br><span style="color:#7BE3A6">Kalshi ' + c1(kb) + ' / ' + c1(ka) + kTxt + '</span>'
+            : '<b>' + esc(hx != null ? when : 'Now') + '</b>' + (plin != null && c.mt !== 'ml' ? ' · venue line ' + esc(chartLineTxt(c.mt, c.side, plin)) : '')
+            + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + (fair != null ? ' (' + centsAm(fair) + ')' : '') + '</span>'
+            + (pl != null && c.mt !== 'ml' ? ' · PIN ' + esc(chartLineTxt(c.mt, c.side, pl)) : '') + (pp != null ? ' ' + am(pp) : '')
+            + '<br><span style="color:#4FB3FF">Poly ' + c1(pb) + ' / ' + c1(pa) + '</span> · <span style="color:#7BE3A6">Kalshi' + kTxt + ' ' + c1(kb) + ' / ' + c1(ka) + '</span>';
+        c.lay = { W: W, ml: ml, mr: mr, tStart: tStart, tEnd: tEnd };
+    }
+    // the crosshair: listeners on the box (it survives every re-render)
+    (function () {
+        const box = document.getElementById('chBox');
+        if (!box) return;
+        const pick = ev => {
+            if (!_ch || !_ch.lay) return;
+            const L = _ch.lay, r = box.getBoundingClientRect();
+            const pt = ev.touches ? ev.touches[0] : ev;
+            const x = (pt.clientX - r.left) * L.W / Math.max(1, r.width);
+            _ch.hover = L.tStart + (x - L.ml) / Math.max(1, L.W - L.ml - L.mr) * (L.tEnd - L.tStart);
+            renderChart();
+        };
+        box.addEventListener('mousemove', pick);
+        box.addEventListener('touchstart', pick, { passive: true });
+        box.addEventListener('touchmove', pick, { passive: true });
+        box.addEventListener('mouseleave', () => { if (_ch) { _ch.hover = null; renderChart(); } });
+    })();
     function cid() { return 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
     async function tapSide(gi, mt, side, sheetKey) {
         const g = _games[gi]; if (!g) return;
