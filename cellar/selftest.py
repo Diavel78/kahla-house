@@ -4182,6 +4182,8 @@ def test_hand_red_alert() -> None:
     _bsh = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "bet_sheets.html")).read()
     check("the page reads PAST LEASH amber where the start chases",
           "hold.touch_c != null && b.start_chase" in _bsh and '"start_chase": _hand_chase_on_r(r)' in _insp.getsource(_app))
+    check("the page reads PAST LEASH red where the start does NOT chase (Nov 14 2026)",
+          "return { cls: 'warn', short: 'PAST LEASH'" in _bsh)
     check("MLB/NHL still cancel at the start (PAST LEASH stays red there)",
           not _app._hand_start_chase_on("NHL") and not _app._hand_start_chase_on("MLB") and _app._hand_start_chase_on("NCAAF"))
     r = R({"recon": {"red": [{"code": "dead_order", "msg": "the pick's order X is not on the book"}]}}, resting)

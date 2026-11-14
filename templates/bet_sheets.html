@@ -1231,10 +1231,13 @@
             // chase at game start, capped at his own bid. MLB/NHL cancel, so red.
             if (hold && hold.touch_c != null && b.start_chase)
                 return { cls: 'rest', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing pre-game · at game start it chases live up to your ' + (o.price_c != null ? cA(o.price_c) : 'bid') + (rr ? ' · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢' : '') + (b.read ? ' — ' + recShort(b, rr) : '') };
+            // ...AND RED WHERE IT DOESN'T (Nov 14 2026, Rob: "we aren't at touch, and they
+            // aren't red, because we chased live... now we don't"): with the auto chase off, a
+            // bet past its leash just cancels at the drop unfilled — that needs him.
             if (hold && hold.touch_c != null && rr)
-                return { cls: 'rest', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it, re-peg it or cancel') };
+                return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing · cheaper rung on the ladder: ' + rungLabel(b, rr.line) + ' @ ' + rr.bid_c + '¢ — ' + (b.read ? recShort(b, rr) : 'move it, re-peg it or cancel') };
             if (hold && hold.touch_c != null)
-                return { cls: 'rest', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing — ' + (b.read ? recShort(b, null) : 'no model read on this game — re-peg it or cancel') };
+                return { cls: 'warn', short: 'PAST LEASH', detail: pre + rest + ' · unfilled · bidders moved up to ' + touch + '¢' + past + ', so the box stopped chasing — ' + (b.read ? recShort(b, null) : 'no model read on this game — re-peg it or cancel') };
             if (b.live_snipe)
                 return (b.chase && b.chase.until)
                     ? { cls: 'rest', short: 'CHASING', detail: pre + rest + (b.touch_c != null ? ' · touch ' + b.touch_c + '¢' : '') + ' · live chase' + (b.chase.cap_c != null ? ' to ' + b.chase.cap_c + '¢' : ' under the cap') + ' · ends ~' + fmtClock(b.chase.until) }
