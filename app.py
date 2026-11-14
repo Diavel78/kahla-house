@@ -2582,26 +2582,37 @@ def _sheet_retime(sb, games: list) -> None:
     """MOVED GAMES STAY ON THE SHEET (Nov 14 2026, Rob's screenshot: Auburn @ Mississippi
     State and Tulane @ Rice, moved by the FAA ground hold, read as started at their old
     times, and his bets on them fell under "My bets not on this sheet"). The sheet row
-    keeps the start it was built with; the `markets` row is retimed (the ESPN spine, or
-    by hand). One read; a game whose market start differs by > 10 min takes it, the old
-    one kept as `listed_start`."""
-    mids = sorted({g.get("market_id") for g in games if g.get("market_id")})
-    if not mids:
+    keeps the start it was built with; the ACTIVE `markets` row for the game (by name,
+    within 36h — the sheet's own market_id can be a stale duplicate) carries the new
+    one. A single active row that differs by > 10 min wins; the old start is kept as
+    `listed_start`."""
+    names = sorted({g.get("event_name") for g in games if g.get("event_name")})
+    if not names:
         return
-    mk: dict = {}
+    by: dict = {}
     try:
-        for i in range(0, len(mids), 100):
-            for m in (sb.table("markets").select("id,event_start").in_("id", mids[i:i + 100])
-                      .execute().data) or []:
-                mk[m["id"]] = m.get("event_start")
+        lo = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        for i in range(0, len(names), 60):
+            for m in (sb.table("markets").select("id,event_name,event_start,status")
+                      .in_("event_name", names[i:i + 60]).gte("event_start", lo).execute().data) or []:
+                by.setdefault(m.get("event_name"), []).append(m)
     except Exception:
         return
     for g in games:
-        z = mk.get(g.get("market_id"))
-        a, b = _aware_ts(g.get("event_start")), _aware_ts(z)
-        if a is not None and b is not None and abs((b - a).total_seconds()) > 600:
+        a = _aware_ts(g.get("event_start"))
+        if a is None:
+            continue
+        near = [m for m in by.get(g.get("event_name")) or []
+                if _aware_ts(m.get("event_start")) is not None
+                and abs((_aware_ts(m["event_start"]) - a).total_seconds()) <= 36 * 3600]
+        act = [m for m in near if m.get("status") == "active"]
+        pick = act[0] if len(act) == 1 else next((m for m in act if m.get("id") == g.get("market_id")), None)
+        if pick is None:
+            continue
+        z = _aware_ts(pick["event_start"])
+        if abs((z - a).total_seconds()) > 600:
             g["listed_start"] = g.get("event_start")
-            g["event_start"] = z
+            g["event_start"] = pick["event_start"]
 
 
 def api_football_picks():
