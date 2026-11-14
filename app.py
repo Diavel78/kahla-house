@@ -21109,6 +21109,173 @@ def _gemini_rebook_tick(sb) -> None:
     _probe_log(json.loads(json.dumps(out, default=str)))
 
 
+def _fire_clv_grade(mt: str, dirn: int, line, final: dict):
+    """Pure. win|loss|push for the 🔥 side (dir +1 home/over) at `line` (home spread /
+    total; ml none) off a final {home, away}; None when it can't be graded."""
+    try:
+        h, a = float(final["home"]), float(final["away"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if mt == "total":
+        x = (h + a) - float(line)
+    elif mt == "ml":
+        x = h - a
+    else:
+        x = (h - a) + float(line)
+    x *= dirn
+    return "push" if abs(x) < 1e-9 else ("win" if x > 0 else "loss")
+
+
+def _fire_clv_scan(sb) -> dict:
+    """BETTING THE 🔥 EARLY AT BET105 — DOES IT BEAT THE CLOSE? (Nov 14 2026, Rob: "your
+    saying me being early, betting on bet105, wouldn't beat CL??"). For every stored 🔥
+    (`lookup_cache fire|…`): Pinnacle's own price on the 🔥 side at the moment it fired
+    (= Bet105's, measured Oct 19) and at Pinnacle's open, against Pinnacle's no-vig
+    fair for THAT bet (same line, its alternate ladder when the main line moved) at the
+    last read before the start. clv_c = close fair − price paid (vig in); nofee_c = close
+    fair − fair at the time. Graded off the sheet's final; $ at $5 risked a bet."""
+    out = {"rows": [], "skip": {}}
+
+    def sk(k):
+        out["skip"][k] = out["skip"].get(k, 0) + 1
+    fires = _sb_paged(lambda: sb.table("lookup_cache").select("key,payload").like("key", "fire|%").order("key"), 40)
+    finals: dict = {}
+    for f in fires or []:
+        parts = str(f.get("key") or "").split("|", 3)
+        pay = f.get("payload") if isinstance(f.get("payload"), dict) else {}
+        if len(parts) != 4 or pay.get("state") not in ("play", "lean") or not pay.get("dir"):
+            sk("not_fired")
+            continue
+        _, sport, mt, ev = parts
+        dirn = 1 if float(pay["dir"]) > 0 else -1
+        try:
+            tape = (sb.table("line_tape").select("at,event_start,line,p_home,p_away").eq("sport", sport)
+                    .eq("event_name", ev).eq("mt", mt).eq("src", "pin").order("at").limit(5000).execute().data) or []
+        except Exception:
+            sk("tape_err")
+            continue
+        start = next((_aware_ts(t.get("event_start")) for t in reversed(tape) if t.get("event_start")), None)
+        if start is None:
+            sk("no_start")
+            continue
+        pre = [t for t in tape if _aware_ts(t.get("at")) and _aware_ts(t["at"]) < start
+               and t.get("p_home") is not None and t.get("p_away") is not None]
+        if len(pre) < 2:
+            sk("thin_tape")
+            continue
+        fire_ms = pay.get("decided_ms")
+        fire_t = datetime.fromtimestamp(float(fire_ms) / 1000.0, tz=timezone.utc) if fire_ms else None
+        at_fire = [t for t in pre if fire_t is not None and _aware_ts(t["at"]) <= fire_t]
+        if not at_fire:
+            sk("no_fire_read")
+            continue
+        last = pre[-1]
+
+        def side_px(t, d):
+            return float(t["p_home"] if d > 0 else t["p_away"])
+
+        def fair(t, d):
+            a_, b_ = _amer_to_prob_py(t.get("p_home")), _amer_to_prob_py(t.get("p_away"))
+            if not a_ or not b_:
+                return None
+            ph = a_ / (a_ + b_) * 100.0
+            return ph if d > 0 else 100.0 - ph
+
+        def close_fair(line):
+            if mt == "ml" or line is None or (last.get("line") is not None and abs(float(last["line"]) - float(line)) < 1e-6):
+                return fair(last, dirn), "main"
+            try:
+                lad = (sb.table("ladder_tape").select("at,p_home,p_away").eq("sport", sport).eq("event_name", ev)
+                       .eq("mt", mt).eq("src", "pin").eq("line", float(line)).lt("at", start.isoformat())
+                       .order("at", desc=True).limit(1).execute().data) or []
+            except Exception:
+                lad = []
+            if lad and lad[0].get("p_home") is not None:
+                return fair(lad[0], dirn), "alt"
+            return None, None
+        res = {"sport": sport, "mt": mt, "ev": ev, "dir": dirn, "state": pay.get("state"),
+               "start": start.isoformat()}
+        for tag, t in (("fire", at_fire[-1]), ("open", pre[0])):
+            ln = None if mt == "ml" else (float(t["line"]) if t.get("line") is not None else None)
+            px = side_px(t, dirn)
+            imp = _amer_to_prob_py(px) * 100.0
+            cf, how = close_fair(ln)
+            fnow = fair(t, dirn)
+            res[tag] = {"line": ln, "price": px, "implied_c": round(imp, 2), "fair_c": round(fnow, 2) if fnow else None,
+                        "close_fair_c": round(cf, 2) if cf is not None else None, "close_src": how,
+                        "clv_c": round(cf - imp, 2) if cf is not None else None,
+                        "nofee_c": round(cf - fnow, 2) if (cf is not None and fnow) else None,
+                        "hours_before": round((start - _aware_ts(t["at"])).total_seconds() / 3600.0, 1)}
+        key = (sport, ev)
+        if key not in finals:
+            try:
+                sh = (sb.table("football_sheets").select("data_blob").eq("sport", sport).eq("event_name", ev)
+                      .order("week_key", desc=True).limit(1).execute().data) or []
+                finals[key] = (((sh[0].get("data_blob") or {}).get("grade") or {}).get("final")) if sh else None
+            except Exception:
+                finals[key] = None
+        fin = finals.get(key)
+        for tag in ("fire", "open"):
+            g = _fire_clv_grade(mt, dirn, res[tag]["line"], fin) if fin else None
+            px = res[tag]["price"]
+            res[tag]["res"] = g
+            res[tag]["usd"] = (None if g is None else 0.0 if g == "push" else -5.0 if g == "loss"
+                               else round(5.0 * (px / 100.0 if px > 0 else 100.0 / -px), 2))
+        out["rows"].append(res)
+
+    def agg(rows, tag):
+        a = {"n": 0, "clv_sum": 0.0, "nofee_sum": 0.0, "beat_close": 0, "w": 0, "l": 0, "p": 0, "usd": 0.0, "graded": 0}
+        for r in rows:
+            x = r[tag]
+            if x.get("clv_c") is None:
+                continue
+            a["n"] += 1
+            a["clv_sum"] += x["clv_c"]
+            a["nofee_sum"] += x["nofee_c"] or 0.0
+            a["beat_close"] += int(x["clv_c"] > 0)
+            if x.get("res"):
+                a["graded"] += 1
+                a[{"win": "w", "loss": "l", "push": "p"}[x["res"]]] += 1
+                a["usd"] += x["usd"] or 0.0
+        if a["n"]:
+            a["clv_mean_c"] = round(a["clv_sum"] / a["n"], 2)
+            a["nofee_mean_c"] = round(a["nofee_sum"] / a["n"], 2)
+            a["beat_close_pct"] = round(100.0 * a["beat_close"] / a["n"], 1)
+        a["usd"] = round(a["usd"], 2)
+        return {k: v for k, v in a.items() if not k.endswith("_sum")}
+    groups: dict = {}
+    for r in out["rows"]:
+        for k in ("ALL", r["sport"], f"{r['sport']} {r['mt']}", f"{r['state']}"):
+            groups.setdefault(k, []).append(r)
+    out["summary"] = {k: {"at_fire": agg(v, "fire"), "at_open": agg(v, "open")} for k, v in groups.items()}
+    return out
+
+
+def _fire_clv_tick(sb) -> None:
+    if not _machine_flag_val("fire_clv_scan", None):
+        return
+    try:
+        sb.table("machine_flags").upsert({"key": "fire_clv_scan", "value": False,
+                                          "updated_at": datetime.now(timezone.utc).isoformat()},
+                                         on_conflict="key").execute()
+        _MFLAGS_CACHE["map"]["fire_clv_scan"] = False
+    except Exception:
+        return
+
+    def run():
+        t0 = _time.monotonic()
+        try:
+            res = _fire_clv_scan(get_supabase())
+        except Exception as e:
+            res = {"err": f"{type(e).__name__}: {e}"[:300]}
+        res["ms"] = int((_time.monotonic() - t0) * 1000)
+        rows = res.pop("rows", [])
+        res["n_rows"] = len(rows)
+        _probe_log(json.loads(json.dumps({"kind": "fire_clv", "fire_clv": True, **res,
+                                          "rows": rows[:400]}, default=str)))
+    threading.Thread(target=run, name="fire-clv", daemon=True).start()
+
+
 def _hand_start_worker() -> None:
     sb = client = None
     while True:
@@ -21123,6 +21290,7 @@ def _hand_start_worker() -> None:
                 _gemini_dump_tick(sb)
                 _gemini_restore_tick(sb)
                 _gemini_rebook_tick(sb)
+                _fire_clv_tick(sb)
                 _r2 = _hand_start_resync(sb, datetime.now(timezone.utc))
                 if _r2.get("checked") or _r2.get("moved"):
                     _rs = _r2
