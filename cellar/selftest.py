@@ -4635,6 +4635,31 @@ def test_pmm_day_list_prefetch() -> None:
           "_BET_SHEET_MISS[miss_key]" in inspect.getsource(_app._bet_sheet_slug))
 
 
+def test_hand_start_hold() -> None:
+    """THE START HOLD (Nov 14 2026, Rob: "Hold the bet for 1 minute after drop…
+    no chase up or down… if it fills it fills, if not, cancel and no chase")."""
+    import app as _app
+    import inspect as _ins
+    P = _app._hand_start_hold_plan
+    check("start hold: default is 60s", _app._HAND_START_HOLD_S == 60.0)
+    check("start hold: drop just seen → open the hold", P({}, 1000.0, 60.0) == "open")
+    check("start hold: inside the minute → leave the order alone",
+          P({"start_hold": {"until_ts": 1060.0}}, 1030.0, 60.0) == "hold")
+    check("start hold: minute over → cancel what's left",
+          P({"start_hold": {"until_ts": 1060.0}}, 1060.0, 60.0) == "go")
+    check("start hold: 0 seconds = the old instant cancel", P({}, 1000.0, 0.0) == "go")
+    check("start hold: a broken hold record never holds forever",
+          P({"start_hold": {"until_ts": None}}, 1000.0, 60.0) == "go")
+    for fn in (_app._hand_start_tick, _app._hand_start_kalshi):
+        src = _ins.getsource(fn)
+        check(f"start hold: {fn.__name__} gates the cancel on the hold",
+              "_hand_start_hold_plan" in src and src.index("_hand_start_hold_plan") < src.rindex("_HAND_START_DONE[r[\"id\"]] = _time.monotonic()"))
+        check(f"start hold: {fn.__name__} never re-reads the drop once holding", "start_hold" in src)
+    src = _ins.getsource(_app._hand_start_hold_open)
+    check("start hold: opening it writes the pick only (no venue call)",
+          "orders." not in src and "amend" not in src and "cancel" not in src.lower().replace("cancel what", ""))
+
+
 def test_hand_queue_time_limit() -> None:
     """THE PER-BET TIME LIMIT (Nov 14 2026, the 8:45 PM stall): one hung
     call no longer holds the queue — the row stays claimed, the rest run,
@@ -9125,7 +9150,7 @@ def main() -> int:
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,
               test_pair_leg_side, test_buy_amend_sends_the_total, test_review_sep26_sizing_and_state, test_executor_one_order_per_slug, test_neutral_and_rejections_sep26,
               test_football_wall_is_checked_before_the_price, test_pair_tick_guards,
-              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_gemini_read_glitch_not_off_book, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_hand_queue_time_limit, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_gemini_tape, test_gemini_ws_book, test_venue_contract, test_pin_line_gap, test_gemini_open_seat, test_gemini_catalog_union, test_hand_live_watch, test_self_kick, test_gemini_targeted_refresh, test_gemini_venue_read, test_gemini_probe, test_gemini_v0_lane, test_gemini_in_kalshi_slot, test_gemini_settle_sold, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
+              test_side_and_phase, test_ttls_agree_with_engines, test_bet_sheet_rung, test_hand_chase_plan, test_hand_thin_touch, test_hand_start_plan, test_hand_start_take_retired, test_hand_auto_chase_cap, test_hand_take_plan, test_app_bet_side, test_hand_lot_price, test_hand_move_plan, test_rejoin_hold_until, test_slug_side_line, test_price_grid, test_pmm_short_school_names, test_pmm_unsigned_cover_questions, test_pmm_shared_prefix_schools, test_pmm_thunder_total, test_pmm_code_stopwords, test_hand_start_complete, test_hand_getlive, test_bet_sheet_live_section, test_hand_guard_and_recon, test_hand_red_alert, test_gemini_read_glitch_not_off_book, test_hand_verify_batch, test_touch_tape_dark, test_hand_rerung_target, test_touch_watch_push, test_hand_orders_ops_allowed, test_live_snipe_hands_off, test_hand_live_chase, test_touch_tape_seed, test_positions_all_pages, test_pmm_day_list_prefetch, test_hand_orders_queue, test_hand_queue_time_limit, test_hand_start_hold, test_sheet_pinnacle_line, test_sheet_pin_fair_at_rung, test_hand_venue_reset, test_pin_slate_empty_keeps_cache, test_pin_direct_feed, test_bet_sheet_missed, test_hand_dust_fold, test_hand_sold_plan, test_sheet_run_clocks, test_mlb_sheet, test_bet_sheet_reads, test_sheet_puck_and_chalk, test_bet_sheet_market_id_prefers_active, test_kalshi_venue_math, test_kalshi_hand_lane, test_kalshi_socket_trust, test_snipe_shadow, test_snipe_gemini, test_gemini_tape, test_gemini_ws_book, test_venue_contract, test_pin_line_gap, test_gemini_open_seat, test_gemini_catalog_union, test_hand_live_watch, test_self_kick, test_gemini_targeted_refresh, test_gemini_venue_read, test_gemini_probe, test_gemini_v0_lane, test_gemini_in_kalshi_slot, test_gemini_settle_sold, test_kalshi_settle_grade, test_hand_start_chase_never_cancels, test_kalshi_ws_book, test_kalshi_live_data, test_hand_game_feed, test_sheet_touch, test_sheet_audit_row, test_price_rule, test_sheet_seed_pin_picks, test_auto_price_lane, test_line_tape, test_line_tape_presheet, test_move_rule, test_move_ladder, test_fire_freeze, test_fire_side, test_steam_scan, test_end_state_rosters):
         t()
     print(f"\n  {len(_PASS)} passed, {len(_FAIL)} failed")
     if _FAIL:

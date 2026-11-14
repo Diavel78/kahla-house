@@ -20574,6 +20574,56 @@ def _hand_start_finish_poly(sb, client, r: dict, stamp: dict, take, cum0: float,
         pass
 
 
+# THE START HOLD (Nov 14 2026, Rob: "Hold the bet for 1 minute after drop (game
+# start). Hold exact line, no chase up or down, just hold our bet. If it fills it
+# fills, if not, cancel and no chase"). At the 95% drop the resting order is left
+# exactly where it is — same line, same price, no amend — for `hand_start_hold_s`
+# (60s); then the ordinary start cancel takes whatever did not fill. The pick
+# carries `start_hold {at, until, until_ts, …}`; while it is there the drop
+# verdict is not re-read (the book may refill in play and the bet must not go
+# back to "waiting"). 0 turns it off (the old instant cancel).
+_HAND_START_HOLD_S = 60.0
+
+
+def _hand_start_hold_s() -> float:
+    try:
+        return max(0.0, float(_machine_flag_val("hand_start_hold_s", _HAND_START_HOLD_S)))
+    except (TypeError, ValueError):
+        return _HAND_START_HOLD_S
+
+
+def _hand_start_hold_plan(blob: dict, now_ts: float, hold_s: float):
+    """Pure. -> 'open' (drop just seen: start the hold), 'hold' (inside it:
+    leave the order alone), or 'go' (hold over, or off: cancel what's left)."""
+    if hold_s <= 0:
+        return "go"
+    sh = blob.get("start_hold") if isinstance(blob, dict) else None
+    if not isinstance(sh, dict):
+        return "open"
+    try:
+        until = float(sh.get("until_ts"))
+    except (TypeError, ValueError):
+        return "go"
+    return "hold" if now_ts < until else "go"
+
+
+def _hand_start_hold_open(sb, r: dict, blob: dict, now, now_ts: float, hold_s: float,
+                          gs: dict, st: dict, venue: str, ref) -> None:
+    """Write the hold on the pick (nothing on the venue changes) and stamp it."""
+    until_ts = now_ts + hold_s
+    sh = {**gs, "until": datetime.fromtimestamp(until_ts, tz=timezone.utc).isoformat(),
+          "until_ts": round(until_ts, 1), "hold_s": int(hold_s)}
+    sb.table("bot_picks").update({"signal_blob": {**blob, "start_hold": sh}}).eq("id", r["id"]).execute()
+    st["held"] = st.get("held", 0) + 1
+    try:
+        _probe_log({"kind": "hand_start_hold", "pick_id": r["id"], "venue": venue, "ref": ref,
+                    "hold": sh, "bet": _hand_start_bet(r, blob)})
+    except Exception:
+        pass
+    app.logger.warning("hand start HOLD pick %s %s %ss at the drop (-%s%%)", r["id"], ref, int(hold_s),
+                       gs.get("drop_pct"))
+
+
 def _hand_start_tick(sb, client, now) -> dict:
     """Pending sheet bets with a resting order whose listed start has passed:
     cancel the unfilled remainder the moment the tape says the makers left.
@@ -20655,9 +20705,14 @@ def _hand_start_tick(sb, client, now) -> dict:
         start_ts = ev.astimezone(timezone.utc).timestamp()
         st["cands"] += 1
         _d = drop
+        _sh = blob.get("start_hold") if isinstance(blob.get("start_hold"), dict) else None
         if sat_out:
             verdict, base, cur, seen = "started", 0.0, 0.0, None
             st["sat_out"] = st.get("sat_out", 0) + 1
+        elif _sh:
+            # inside / past the start hold: the drop already fired — never re-read it
+            verdict = "started"
+            base, cur, seen = float(_sh.get("baseline_q") or 0.0), float(_sh.get("touch_q") or 0.0), _sh.get("drop_pct")
         else:
             _sp = str(r.get("sport") or "").upper()
             try:
@@ -20680,6 +20735,21 @@ def _hand_start_tick(sb, client, now) -> dict:
                 except Exception:
                     pass
             continue
+        if not sat_out:
+            hold_s = _hand_start_hold_s()
+            hp = _hand_start_hold_plan(blob, now_ts, hold_s)
+            if hp == "open":
+                try:
+                    _hand_start_hold_open(sb, r, blob, now, now_ts, hold_s,
+                                          {"at": now.isoformat(), "baseline_q": round(base, 1),
+                                           "touch_q": round(cur, 1), "drop_pct": seen}, st, "POLYMARKET", slug)
+                except Exception as e:
+                    st["errors"] += 1
+                    app.logger.warning("hand start hold pick %s: %s", r["id"], str(e)[:120])
+                continue
+            if hp == "hold":
+                st["holding"] = st.get("holding", 0) + 1
+                continue
         last = _HAND_START_DONE.get(r["id"], 0.0)
         if _time.monotonic() - last < 20.0:
             continue
@@ -24379,7 +24449,13 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
         _kalshi_hand_book(ticker, fresh=True)           # REST sample through the start window only while the socket is dark
     twin = blob.get("pmm_twin_slug")
     gem_start = twin or blob.get("pmm_game_slug")
-    if str(ticker).startswith("GEMI-") and gem_start:
+    _sh = blob.get("start_hold") if isinstance(blob.get("start_hold"), dict) else None
+    if _sh:
+        # inside / past the start hold: the drop already fired — never re-read it
+        tape_src = _sh.get("tape_src") or "hold"
+        verdict = "started"
+        base, cur, seen = float(_sh.get("baseline_q") or 0.0), float(_sh.get("touch_q") or 0.0), _sh.get("drop_pct")
+    elif str(ticker).startswith("GEMI-") and gem_start:
         # A GEMINI BET READS GAME START OFF POLYMARKET (Nov 8 2026, Rob: "How are you
         # determining the live cancel on Gemini? Small markets…"): Gemini's book can be
         # a few hundred contracts or just OUR bid (Memphis @ USF +5.5), so its touch
@@ -24409,6 +24485,16 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
                                              ).eq("id", r["id"]).execute()
             except Exception:
                 pass
+        return
+    hold_s = _hand_start_hold_s()
+    hp = _hand_start_hold_plan(blob, now_ts, hold_s)
+    if hp == "open":
+        _hand_start_hold_open(sb, r, blob, now, now_ts, hold_s,
+                              {"at": now.isoformat(), "baseline_q": round(base, 1), "touch_q": round(cur, 1),
+                               "drop_pct": seen, "tape_src": tape_src}, st, "KALSHI", ticker)
+        return
+    if hp == "hold":
+        st["holding"] = st.get("holding", 0) + 1
         return
     last = _HAND_START_DONE.get(r["id"], 0.0)
     if _time.monotonic() - last < 20.0:
@@ -27809,6 +27895,8 @@ def api_bet_sheets_mine():
                           and not (contracts and held >= float(contracts) - 0.5) else None),
             "live_chase": (blob.get("live_chase") if isinstance(blob.get("live_chase"), dict) else None),
             "start_seen": bool(blob.get("game_started")), "start_blind": bool(blob.get("start_blind")),
+            "start_hold": ({"until": blob["start_hold"].get("until"), "hold_s": blob["start_hold"].get("hold_s")}
+                           if isinstance(blob.get("start_hold"), dict) and not blob.get("game_started") else None),
             "start_seen_at": (blob["game_started"].get("at") if isinstance(blob.get("game_started"), dict) else None),
             "take_window": (blob.get("start_take_window")
                             if isinstance(blob.get("start_take_window"), dict) and not blob.get("live_snipe") else None),
