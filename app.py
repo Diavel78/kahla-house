@@ -30232,6 +30232,8 @@ def _bet_sheet_cancelled_today(sb, now) -> list:
             if fq_ >= _BS_DUST_Q or b_.get("order_id") or b_.get("kalshi_order_id"):
                 mt_ = "ml" if p_.get("market_type") in ("moneyline", "ml") else p_.get("market_type")
                 live_keys.add((p_.get("event_name"), mt_, p_.get("side")))
+                if b_.get("pmm_slug"):              # an app bet names the game its own way ("K-State @ TCU")
+                    live_keys.add(("slug", b_.get("pmm_slug"), p_.get("side")))
     except Exception:
         live_keys = set()
     old = {pid for pid, res in by_pick.items() if not isinstance(res.get("bet"), dict)}
@@ -30247,7 +30249,8 @@ def _bet_sheet_cancelled_today(sb, now) -> list:
         if not bdt or bdt.astimezone(az).date() != day0.date():
             continue
         _mt = "ml" if bet.get("market_type") in ("moneyline", "ml") else bet.get("market_type")
-        if (bet.get("event_name"), _mt, bet.get("side")) in live_keys:
+        if ((bet.get("event_name"), _mt, bet.get("side")) in live_keys
+                or (slug and ("slug", slug, bet.get("side")) in live_keys)):
             continue
         item = {"id": f"c{pid}", "pick_id": pid, "cancelled": True,
                 "sport": bet.get("sport") or (_slug_sport(slug) if slug else None),
