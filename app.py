@@ -5869,6 +5869,26 @@ def api_bet_sheets_picks():
         except Exception as e:
             out["auto_cancel_err"] = str(e)[:200]
         return jsonify(out)
+    if request.args.get("b105_probe"):
+        # ?b105_probe=NCAAF — read-only: Pinnacle's board for today's sheet games the way
+        # the Bet105 page and a tap read it (pre-game board, live board once started).
+        try:
+            sb_ = get_supabase()
+            now_ = datetime.now(timezone.utc)
+            sp_ = request.args.get("b105_probe").upper()
+            gms = _sheet_games_today(sb_, sp_, 1)[:8]
+            sl_: dict = {}
+            res_ = []
+            for gm in gms:
+                it_ = {"mt": "spread", "side": "away", "away": gm.get("away"), "home": gm.get("home"),
+                       "event_start": gm.get("event_start")}
+                res_.append({"game": f"{gm.get('away')} @ {gm.get('home')}", "start": gm.get("event_start"),
+                             "quote_away_spread": _b105_quote(sb_, sp_, it_, now_, sl_),
+                             "quote_under": _b105_quote(sb_, sp_, {**it_, "mt": "total", "side": "under"}, now_, sl_)})
+            out["b105_probe"] = {"n": len(gms), "rows": res_,
+                                 "slates": {f"{k[0]}:{'live' if k[1] else 'pre'}": (len(v[0]) if v[0] else None) for k, v in sl_.items()}}
+        except Exception as e:
+            out["b105_probe_err"] = f"{type(e).__name__}: {e}"[:200]
     if request.args.get("set_contracts"):
         # ?set_contracts=200626:10[&apply=1] — corrects a pick's contracts count
         # (the Texas +4.5 record read 1 on a 9.96 lot after the Gemini rebook).
@@ -17749,8 +17769,375 @@ def _bet_sheet_market_id_read(sb, sport: str, away: str, home: str, event_start:
 def bet_sheets_page():
     """BET SHEETS (Oct 3 2026) — the admin's betting page: the pick sheet
     with a slip. Client gate = admin only (the API routes are
-    @admin_required, which is the real gate)."""
-    return render_template("bet_sheets.html")
+    @admin_required, which is the real gate). Since Nov 14 2026 the page is the
+    Bet105 tracker (templates/bet105.html); the exchange page is ?old=1."""
+    if request.args.get("old"):
+        return render_template("bet_sheets.html")
+    return render_template("bet105.html")
+
+
+# ---------------------------------------------------------------------------
+# BET105 TRACKER (Nov 14 2026, Rob after the exchanges filled his losers and
+# missed his winners: "after today, I'll switch to bet105… I click it, you track
+# it"). He bets by hand at Bet105, $5 RISKED every bet; a tap on the sheet logs
+# the bet at PINNACLE's line + price at that moment (Bet105 copies Pinnacle,
+# measured Oct 19: 15 of 18 numbers identical). Whole numbers allowed (pushes
+# grade), both sides of every market, live games too. No venue call, no order.
+# Rows are bot_picks with entry_book BET105 + signal_blob.bet105 — NEVER
+# bet_sheet, so no order-machine path (chase, start rule, reconcile, adopt)
+# ever reads them. The resolver grades them off ESPN; /api/bet105/mine grades a
+# final it sees first so the page never waits on the grader.
+# ---------------------------------------------------------------------------
+_B105_STAKE = 5.0
+_B105_MT = {"ml": "ml", "moneyline": "ml", "spread": "spread", "puck": "spread", "total": "total"}
+_B105_SIDES = {"ml": ("home", "away"), "spread": ("home", "away"), "total": ("over", "under")}
+
+
+def _b105_win_usd(price, stake: float = _B105_STAKE):
+    """What a $stake bet at American `price` wins (pure)."""
+    try:
+        a = float(price)
+    except (TypeError, ValueError):
+        return None
+    if -100 < a < 100:
+        return None
+    return round(stake * (100.0 / -a if a < 0 else a / 100.0), 2)
+
+
+def _b105_pnl(status, price, stake: float = _B105_STAKE):
+    if status == "won":
+        return _b105_win_usd(price, stake)
+    if status == "lost":
+        return -round(float(stake), 2)
+    if status in ("push", "void"):
+        return 0.0
+    return None
+
+
+def _b105_events(sb, sport: str, now, live: bool, slates: dict):
+    """Pinnacle's slate for one sport: the games in progress (live) or the
+    pre-game board, one read per sport per request. (events, age_min)."""
+    key = (str(sport or "").upper(), bool(live))
+    if key in slates:
+        return slates[key]
+    evs, age = None, None
+    try:
+        if live:
+            evs, _why = _pin_direct_events(key[0], now, live=True)
+            age = 0.0
+        else:
+            evs, age = _pin_live_slate(sb, key[0], now, {})
+    except Exception:
+        evs, age = None, None
+    slates[key] = (evs, age)
+    return slates[key]
+
+
+def _b105_quote(sb, sport: str, it: dict, now, slates: dict) -> dict | None:
+    """Pinnacle's line + price for one side right now: the live board first
+    once the game has started, else the pre-game board. {price, line, cents,
+    age_min, live} or None."""
+    st = _parse_iso(it.get("event_start") or "")
+    started = bool(st and st <= now)
+    for live in ((True, False) if started else (False,)):
+        evs, age = _b105_events(sb, sport, now, live, slates)
+        if not evs:
+            continue
+        try:
+            q = _pin_quote_from_events(evs, {"market_type": it["mt"], "side": it["side"], "away": it.get("away"),
+                                             "home": it.get("home"), "event_start": it.get("event_start"),
+                                             "line": it.get("line")}, age)
+        except Exception:
+            q = None
+        if q:
+            q["live"] = live
+            return q
+    return None
+
+
+def _b105_fair_now(sb, sport: str, b: dict, now, slates: dict) -> dict | None:
+    """Pinnacle's devigged fair for the bet AT ITS OWN LINE right now (live
+    board once started): the win probability the page shows. None on a miss."""
+    st = _parse_iso(b.get("event_start") or "")
+    started = bool(st and st <= now)
+    mt = _B105_MT.get(str(b.get("market_type") or ""), str(b.get("market_type") or ""))
+    item = {"market_type": mt, "side": b.get("side"), "line": b.get("entry_line"),
+            "away": b.get("_away"), "home": b.get("_home"), "event_start": b.get("event_start")}
+    for live in ((True, False) if started else (False,)):
+        evs, age = _b105_events(sb, sport, now, live, slates)
+        if not evs:
+            continue
+        try:
+            pf = _pin_fair_for_item(evs, sport, item, age)
+        except Exception:
+            pf = None
+        if pf and pf.get("prob") is not None:
+            pf["live"] = live
+            return pf
+    return None
+
+
+@app.route("/api/bet105/bet", methods=["POST"])
+@admin_required
+def api_b105_bet():
+    """Log one Bet105 bet at Pinnacle's line + price right now. Body: sport,
+    away, home, event_start, market_type (ml|spread|puck|total), side,
+    optional market_id / line / price (the board's numbers — used only when
+    Pinnacle can't be read), cid (the tap's ticket; a repeat returns the same bet)."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    d = request.get_json(silent=True) or {}
+    sport = str(d.get("sport") or "").upper()
+    away, home, es = d.get("away"), d.get("home"), d.get("event_start")
+    mt = _B105_MT.get(str(d.get("market_type") or "").lower())
+    side = str(d.get("side") or "").lower()
+    cid = str(d.get("cid") or "")[:40]
+    if not (sport and away and home and es and mt and side in _B105_SIDES.get(mt, ())):
+        return jsonify({"ok": False, "error": "bad bet"}), 400
+    if cid:
+        try:
+            ex = (sb.table("bot_picks").select("id,status,entry_price,entry_line,signal_blob")
+                  .eq("asked_by", g.uid).eq("signal_blob->>cid", cid).limit(1).execute().data or [])
+            if ex:
+                return jsonify({"ok": True, "id": ex[0]["id"], "repeat": True, "price": ex[0].get("entry_price"),
+                                "line": ex[0].get("entry_line")})
+        except Exception:
+            pass
+    now = datetime.now(timezone.utc)
+    it = {"mt": mt, "side": side, "away": away, "home": home, "event_start": es, "line": d.get("line")}
+    q = _b105_quote(sb, sport, it, now, {})
+    if q:
+        price, line, src = q.get("price"), (q.get("line") if mt != "ml" else None), "pinnacle"
+    else:
+        price, line, src = d.get("price"), (d.get("line") if mt != "ml" else None), "board"
+    try:
+        price = int(round(float(price)))
+        line = float(line) if line is not None else None
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "no Pinnacle price for this side right now"}), 409
+    if mt != "ml" and line is None:
+        return jsonify({"ok": False, "error": "no Pinnacle line for this side right now"}), 409
+    mid = d.get("market_id")
+    if not mid:
+        try:
+            mid = _bet_sheet_market_id(sb, sport, away, home, es)
+        except Exception:
+            mid = None
+    if not mid:
+        return jsonify({"ok": False, "error": "game not found"}), 404
+    if mt == "ml":
+        label = f"{away if side == 'away' else home} ML"
+    elif mt == "total":
+        label = f"{'Over' if side == 'over' else 'Under'} {line:g}"
+    else:
+        label = f"{away if side == 'away' else home} {line:+g}"
+    st = _parse_iso(es)
+    blob = {"bet105": True, "cid": cid or None, "stake_usd": _B105_STAKE, "label": label, "sport": sport,
+            "sheet_mt": str(d.get("market_type") or ""), "placed_live": bool(st and st <= now),
+            "pin": {"price": price, "line": line, "src": src, "live": bool(q and q.get("live")),
+                    "age_min": q.get("age_min") if q else None, "at": now.isoformat()}}
+    row = {"asked_by": g.uid, "query_text": "bet105", "market_id": mid, "sport": sport,
+           "event_name": f"{away} @ {home}", "event_start": es,
+           "market_type": "moneyline" if mt == "ml" else mt, "side": side,
+           "entry_book": "BET105", "entry_price": price, "entry_line": line,
+           "units": 1, "confidence": "low", "reasons": [f"Bet105 — ${_B105_STAKE:g} at {price:+d}"],
+           "signal_blob": blob}
+    try:
+        ins = sb.table("bot_picks").insert(row).execute()
+        pid = (ins.data or [{}])[0].get("id")
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"save failed: {e}"[:200]}), 500
+    return jsonify({"ok": True, "id": pid, "label": label, "price": price, "line": line, "src": src,
+                    "win_usd": _b105_win_usd(price)})
+
+
+@app.route("/api/bet105/edit", methods=["POST"])
+@admin_required
+def api_b105_edit():
+    """Fix a logged bet's line / price (what Bet105 actually gave you), or
+    delete it (body {id, delete: true})."""
+    sb = get_supabase()
+    d = request.get_json(silent=True) or {}
+    try:
+        pid = int(d.get("id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "bad id"}), 400
+    r = (sb.table("bot_picks").select("id,asked_by,status,market_type,side,event_name,entry_price,entry_line,signal_blob")
+         .eq("id", pid).limit(1).execute().data or [None])[0]
+    if not r or not (r.get("signal_blob") or {}).get("bet105"):
+        return jsonify({"ok": False, "error": "not a Bet105 bet"}), 404
+    if d.get("delete"):
+        sb.table("bot_picks").delete().eq("id", pid).execute()
+        return jsonify({"ok": True, "deleted": True})
+    up, blob = {}, dict(r.get("signal_blob") or {})
+    try:
+        if d.get("price") not in (None, ""):
+            p = int(round(float(d["price"])))
+            if -100 < p < 100:
+                return jsonify({"ok": False, "error": "price must be like -110 or +120"}), 400
+            up["entry_price"] = p
+        if d.get("line") not in (None, "") and r.get("market_type") != "moneyline":
+            up["entry_line"] = float(d["line"])
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "bad number"}), 400
+    if not up:
+        return jsonify({"ok": False, "error": "nothing to change"}), 400
+    ln = up.get("entry_line", r.get("entry_line"))
+    if r.get("market_type") == "total" and ln is not None:
+        blob["label"] = f"{'Over' if r.get('side') == 'over' else 'Under'} {float(ln):g}"
+    elif r.get("market_type") == "spread" and ln is not None:
+        nm = (r.get("event_name") or " @ ").split(" @ ")
+        blob["label"] = f"{nm[0] if r.get('side') == 'away' else nm[-1]} {float(ln):+g}"
+    blob["edited"] = {"at": datetime.now(timezone.utc).isoformat(),
+                      "from": {"price": r.get("entry_price"), "line": r.get("entry_line")}}
+    up["signal_blob"] = blob
+    if r.get("status") in ("won", "lost", "push") and "entry_line" in up:
+        up["status"] = "pending"                      # a new line re-grades
+    sb.table("bot_picks").update(up).eq("id", pid).execute()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/bet105/lines", methods=["POST"])
+@admin_required
+def api_b105_lines():
+    """Pinnacle's current main lines for the sheet's games (body {sport,
+    games:[{away, home, event_start}]}): the pre-game board, the live board
+    once a game has started. One block per game, in order (None = not listed)."""
+    sb = get_supabase()
+    d = request.get_json(silent=True) or {}
+    sport = str(d.get("sport") or "").upper()
+    now = datetime.now(timezone.utc)
+    slates: dict = {}
+    out = []
+    for gm in (d.get("games") or [])[:120]:
+        st = _parse_iso(gm.get("event_start") or "")
+        started = bool(st and st <= now)
+        blk = None
+        for live in ((True, False) if started else (False,)):
+            evs, age = _b105_events(sb, sport, now, live, slates)
+            if not evs:
+                continue
+            try:
+                blk = _pin_block_from_events(evs, gm.get("away"), gm.get("home"), gm.get("event_start"))
+            except Exception:
+                blk = None
+            if blk:
+                blk["live"], blk["age_min"] = live, age
+                break
+        out.append(blk)
+    return jsonify({"ok": True, "lines": out, "at": now.isoformat()})
+
+
+def _b105_mine(sb, uid: str, now) -> list:
+    """Today's (AZ) Bet105 bets + every pending one, with the live read:
+    ESPN score/clock, Pinnacle's fair at the bet's own line (the win %), the
+    dollars, and a grade the moment ESPN calls the game final."""
+    az0 = now.astimezone(ZoneInfo("America/Phoenix")).replace(hour=0, minute=0, second=0, microsecond=0)
+    cols = "id,sport,market_id,event_name,event_start,market_type,side,entry_price,entry_line,status,result_score,settled_at,signal_blob"
+    rows: dict = {}
+    for q in (lambda: sb.table("bot_picks").select(cols).eq("entry_book", "BET105").eq("asked_by", uid)
+                      .gte("event_start", az0.astimezone(timezone.utc).isoformat())
+                      .lt("event_start", (az0 + timedelta(days=1)).astimezone(timezone.utc).isoformat()),
+              lambda: sb.table("bot_picks").select(cols).eq("entry_book", "BET105").eq("asked_by", uid)
+                      .eq("status", "pending")):
+        for r in (q().order("event_start").limit(500).execute().data or []):
+            rows[r["id"]] = r
+    espn: dict = {}
+    slates: dict = {}
+    out = []
+    for r in sorted(rows.values(), key=lambda x: (x.get("event_start") or "", x["id"])):
+        blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        sport = (r.get("sport") or blob.get("sport") or "").upper()
+        away, home = _live_split_event(r.get("event_name") or "")
+        b = {"id": r["id"], "sport": sport, "market_id": r.get("market_id"), "event_name": r.get("event_name"),
+             "event_start": r.get("event_start"), "market_type": r.get("market_type"), "side": r.get("side"),
+             "line": r.get("entry_line"), "price": r.get("entry_price"), "label": blob.get("label"),
+             "stake": float(blob.get("stake_usd") or _B105_STAKE), "status": r.get("status"),
+             "placed_live": bool(blob.get("placed_live")), "pin_at_bet": blob.get("pin"),
+             "edited": bool(blob.get("edited")), "_away": away, "_home": home}
+        b["win_usd"] = _b105_win_usd(b["price"], b["stake"])
+        rs = r.get("result_score") if isinstance(r.get("result_score"), dict) else None
+        st = _parse_iso(r.get("event_start") or "")
+        started = bool(st and st <= now)
+        if started and away and home and st:
+            dk = st.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+            ck = (sport.lower(), dk)
+            try:
+                if ck not in espn:
+                    espn[ck] = _bs_espn_events(ck[0], dk)
+                m = _live_match_espn(espn[ck], away, home, r.get("event_start"))
+            except Exception:
+                m = None
+            if m:
+                b["game"] = {"state": m.get("state"), "away": m.get("away_score"), "home": m.get("home_score"),
+                             "period": m.get("period"), "clock": m.get("clock"), "status": m.get("display_status")}
+                done = m.get("completed") or m.get("state") == "post"
+                if done and b["status"] == "pending":
+                    gr = _bs_grade_bet(b["market_type"], b["side"], b["line"], m.get("away_score"), m.get("home_score"))
+                    if gr:
+                        b["status"] = {"win": "won", "loss": "lost", "push": "push"}[gr]
+                        rs = {"away": m.get("away_score"), "home": m.get("home_score"), "graded_by": "bet105_espn"}
+                        try:
+                            sb.table("bot_picks").update({"status": b["status"], "result_score": rs,
+                                                          "settled_at": now.isoformat(),
+                                                          "pnl_units": _b105_units(b["status"], b["price"])}) \
+                                .eq("id", r["id"]).eq("status", "pending").execute()
+                        except Exception:
+                            pass
+        if rs and rs.get("away") is not None:
+            b["final"] = {"away": rs.get("away"), "home": rs.get("home")}
+        b["pnl_usd"] = _b105_pnl(b["status"], b["price"], b["stake"])
+        if b["status"] == "pending":
+            pf = _b105_fair_now(sb, sport, b, now, slates)
+            if pf:
+                p = float(pf["prob"])
+                b["now"] = {"prob": round(p, 4), "fair_c": round(p * 100.0, 1), "live": bool(pf.get("live")),
+                            "pin_line": pf.get("pin_line")}
+                if b["win_usd"] is not None:
+                    b["ev_usd"] = round(p * b["win_usd"] - (1.0 - p) * b["stake"], 2)
+        b.pop("_away", None)
+        b.pop("_home", None)
+        out.append(b)
+    return out
+
+
+def _b105_units(status, price):
+    """to-WIN units like the resolver (1u to win): a win is +1, a loss costs
+    what it took to win 1u at that price, a push 0."""
+    if status == "won":
+        return 1.0
+    if status == "lost":
+        try:
+            a = float(price)
+        except (TypeError, ValueError):
+            return -1.0
+        return -round((-a / 100.0) if a < 0 else (100.0 / a), 4)
+    return 0.0
+
+
+@app.route("/api/bet105/mine")
+@admin_required
+def api_b105_mine():
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    now = datetime.now(timezone.utc)
+    try:
+        bets = _b105_mine(sb, g.uid, now)
+    except Exception as e:
+        app.logger.warning("bet105 mine: %s", e)
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}), 500
+    az_today = now.astimezone(ZoneInfo("America/Phoenix")).date()
+    today = [b for b in bets if b["status"] in ("won", "lost", "push")
+             and (_parse_iso(b.get("event_start") or "") or now).astimezone(ZoneInfo("America/Phoenix")).date() == az_today]
+    rec = {"w": sum(1 for b in today if b["status"] == "won"), "l": sum(1 for b in today if b["status"] == "lost"),
+           "p": sum(1 for b in today if b["status"] == "push"),
+           "usd": round(sum(b.get("pnl_usd") or 0 for b in today), 2)}
+    live = [b for b in bets if b["status"] == "pending" and b.get("game")]
+    return jsonify({"ok": True, "bets": bets, "today": rec,
+                    "live_ev_usd": round(sum(b.get("ev_usd") or 0 for b in live), 2),
+                    "pending": sum(1 for b in bets if b["status"] == "pending"), "at": now.isoformat()})
 
 
 @app.route("/api/bet-sheets/place", methods=["POST"])

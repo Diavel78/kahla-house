@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kahla House — Bet Sheets</title>
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" href="/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Bet Sheets">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script>
+        firebase.initializeApp({
+            apiKey: "AIzaSyDQbjlc7VIYmFjbhq119Cl1-JhuXwKq0fY",
+            authDomain: "kahla-house.firebaseapp.com",
+            projectId: "kahla-house",
+            storageBucket: "kahla-house.firebasestorage.app",
+            messagingSenderId: "1029771942929",
+            appId: "1:1029771942929:web:76358096dbb868e375a5b0"
+        });
+    </script>
+    <style>
+        /* BET105 TRACKER (Nov 14 2026, Rob: "I click it, you track it"). Rob bets
+           by hand at Bet105, $5 risked; a tap logs the bet at Pinnacle's line +
+           price right now. Green = logged. 🔥 = the first move. */
+        :root {
+            --bg: #0D1016; --card: #161B24; --card2: #1C2230; --line: #2A3242; --line2: #3A4354;
+            --text: #F3F5F9; --text2: #C3CAD6; --text3: #98A2B3;
+            --blue: #4FB3FF; --green: #7BE3A6; --g-bg: #123B28; --g-bd: #2E9E62;
+            --red: #FFAAAA; --r-bg: #3E1818; --amber: #FCD66A; --fire: #e0a040;
+            --mono: 'JetBrains Mono', ui-monospace, monospace;
+        }
+        * { box-sizing: border-box; }
+        html, body { overflow-x: hidden; }
+        body { margin: 0; background: var(--bg); color: var(--text); font-family: 'DM Sans', system-ui, sans-serif;
+               font-size: 16px; line-height: 1.4; -webkit-font-smoothing: antialiased; }
+        button { font-family: inherit; }
+        .top { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px;
+               border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+        .nav { display: flex; gap: 16px; } .nav a { color: var(--text2); text-decoration: none; font-weight: 500; }
+        .nav a.on { color: var(--text); }
+        .wrap { max-width: 760px; margin: 0 auto; padding: 14px 14px 80px; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+        .stat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+        .stat b { display: block; font-family: var(--mono); font-size: 22px; }
+        .stat span { color: var(--text3); font-size: 13px; }
+        .pos { color: var(--green); } .neg { color: var(--red); }
+        h2 { font-size: 19px; margin: 18px 2px 8px; display: flex; align-items: baseline; gap: 8px; }
+        h2 small { color: var(--text3); font-weight: 400; font-size: 14px; }
+        .bet { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+               margin-bottom: 8px; cursor: pointer; }
+        .bet .r1 { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
+        .bet .r2 { color: var(--text3); font-size: 14px; margin-top: 2px; display: flex; justify-content: space-between; gap: 8px; }
+        .bet.won { border-color: var(--g-bd); } .bet.lost { border-color: #6a2a2a; }
+        .chip { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 99px; background: var(--card2);
+                color: var(--text2); white-space: nowrap; }
+        .chip.w { background: var(--g-bg); color: var(--green); } .chip.l { background: var(--r-bg); color: var(--red); }
+        .chip.live { background: #102a40; color: var(--blue); }
+        .tabs { display: flex; gap: 8px; margin: 18px 0 10px; overflow-x: auto; }
+        .tab { background: var(--card); border: 1px solid var(--line); color: var(--text2); border-radius: 10px;
+               padding: 8px 14px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+        .tab.on { border-color: var(--text2); color: var(--text); }
+        .search { width: 100%; background: var(--card); border: 1px solid var(--line); color: var(--text);
+                  border-radius: 10px; padding: 10px 12px; font-size: 16px; margin-bottom: 10px; }
+        .game { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; margin-bottom: 10px; }
+        .gh { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+        .gh b { font-size: 17px; } .gh span { color: var(--text3); font-size: 14px; white-space: nowrap; }
+        .gm { color: var(--text3); font-size: 13px; margin: 2px 0 8px; }
+        .mk { display: grid; grid-template-columns: 70px 1fr 1fr; gap: 6px; align-items: center; margin-top: 6px; }
+        .mk .lb { color: var(--text3); font-size: 13px; }
+        .sb { background: var(--card2); border: 1px solid var(--line2); color: var(--text); border-radius: 10px;
+              padding: 8px 6px; text-align: center; cursor: pointer; min-height: 52px; }
+        .sb .n { font-weight: 700; font-size: 15px; } .sb .p { font-family: var(--mono); font-size: 13px; color: var(--text2); }
+        .sb.model { border-color: var(--blue); } .sb.fire { border-color: var(--fire); }
+        .sb.mine { background: var(--g-bg); border-color: var(--g-bd); } .sb.mine .p { color: var(--green); }
+        .sb.busy { opacity: .55; } .sb.none { opacity: .35; cursor: default; }
+        .empty { color: var(--text3); padding: 18px 4px; }
+        .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: #22303f; color: var(--text);
+                 padding: 10px 16px; border-radius: 12px; font-size: 15px; z-index: 50; display: none; max-width: 92vw; }
+        .toast.bad { background: var(--r-bg); color: var(--red); }
+        .ov { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; z-index: 40; }
+        .sheet { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line2);
+                 border-radius: 18px 18px 0 0; padding: 16px; z-index: 41; display: none; max-width: 760px; margin: 0 auto; }
+        .sheet h3 { margin: 0 0 4px; } .sheet .sub { color: var(--text3); font-size: 14px; margin-bottom: 12px; }
+        .sheet label { display: block; color: var(--text3); font-size: 13px; margin: 8px 0 4px; }
+        .sheet input { width: 100%; background: var(--card2); border: 1px solid var(--line2); color: var(--text);
+                       border-radius: 10px; padding: 10px; font-size: 17px; font-family: var(--mono); }
+        .row { display: flex; gap: 8px; margin-top: 14px; }
+        .btn { flex: 1; background: var(--card2); border: 1px solid var(--line2); color: var(--text); border-radius: 10px;
+               padding: 12px; font-weight: 700; font-size: 15px; cursor: pointer; }
+        .btn.go { background: #1f6feb; border-color: #1f6feb; } .btn.del { color: var(--red); }
+        .more { color: var(--text3); font-size: 14px; cursor: pointer; padding: 4px 2px; }
+    </style>
+</head>
+<body>
+<div id="auth-gate" style="padding:40px;text-align:center;color:#98A2B3">Loading…</div>
+<div id="app" style="display:none">
+    <div class="top">
+        <div class="nav"><a href="/">Home</a><a href="/pick-sheets">Pick Sheets</a><a class="on" href="/bet-sheets">Bet Sheets</a><a href="/dashboard">Dashboard</a></div>
+        <a href="#" onclick="doLogout()" style="color:#98A2B3;text-decoration:none">Log out</a>
+    </div>
+    <div class="wrap">
+        <div class="stats">
+            <div class="stat"><b id="sToday">—</b><span id="sRec">today</span></div>
+            <div class="stat"><b id="sLive">—</b><span>live, expected</span></div>
+            <div class="stat"><b id="sOpen">—</b><span>open bets</span></div>
+        </div>
+        <div id="myBets"></div>
+        <div class="tabs" id="tabs"></div>
+        <input class="search" id="q" placeholder="Search teams" oninput="renderGames()">
+        <div id="games"><div class="empty">loading…</div></div>
+    </div>
+</div>
+<div class="ov" id="ov" onclick="closeSheet()"></div>
+<div class="sheet" id="sheet"></div>
+<div class="toast" id="toast"></div>
+<script>
+    async function authFetch(url, options = {}) {
+        const user = firebase.auth().currentUser;
+        if (!user) { window.location.href = '/'; return null; }
+        const token = await user.getIdToken();
+        return fetch(url, { ...options, headers: { ...(options.headers || {}), 'Authorization': 'Bearer ' + token } });
+    }
+    async function postJSON(url, body) {
+        const r = await authFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = r ? await r.json().catch(() => null) : null;
+        return { status: r ? r.status : 0, d: d || {} };
+    }
+    function doLogout() { firebase.auth().signOut().then(() => { window.location.href = '/'; }); }
+    function _gateServerError(detail) {
+        document.getElementById('auth-gate').innerHTML = '⚠️ Server error — not a permissions problem. You are still signed in.<br><small>' + esc(detail) + '</small><br><br><button onclick="location.reload()">Retry</button>';
+    }
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+    function am(x) { if (x == null || x === '') return '—'; const n = Math.round(Number(x)); return (n > 0 ? '+' : '') + n; }
+    function sgn(x) { const n = Number(x); return (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n); }
+    function money(x) { if (x == null) return '—'; return (x >= 0 ? '+$' : '−$') + Math.abs(x).toFixed(2); }
+    function clock(iso) { return iso ? new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' }) : ''; }
+    function dayOf(iso) { return iso ? new Date(iso).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) : ''; }
+    function whenTxt(iso) {
+        if (!iso) return '';
+        const today = dayOf(new Date().toISOString());
+        const d = dayOf(iso) === today ? '' : new Date(iso).toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'short' }) + ' ';
+        return d + clock(iso);
+    }
+    const _TWO = /\s(Maple Leafs|Red Wings|Blue Jackets|Golden Knights|Red Sox|White Sox|Blue Jays|Trail Blazers|Golden Bears|Green Wave|Red Raiders|Blue Devils|Tar Heels|Fighting Irish|Yellow Jackets|Crimson Tide|Sun Devils|Golden Gophers|Nittany Lions|Scarlet Knights|Horned Frogs|Demon Deacons|Golden Flashes|Mean Green|Black Knights|Golden Eagles|Ragin' Cajuns|Rainbow Warriors|Golden Hurricane|Red Wolves|Thundering Herd|Blue Hens|Wolf Pack|Fighting Illini)$/;
+    const _PRO = { NBA: 1, NHL: 1, NFL: 1, MLB: 1 };
+    function shortTeam(name, sport) {
+        if (!name) return '?';
+        const two = name.match(_TWO);
+        if (_PRO[String(sport || _sport).toUpperCase()]) { if (two) return two[1]; const w = name.split(' '); return w[w.length - 1]; }
+        if (two) return name.slice(0, two.index);
+        const p = name.split(' '); return p.length > 1 ? p.slice(0, -1).join(' ') : name;
+    }
+    function toast(msg, bad) {
+        const t = document.getElementById('toast');
+        t.textContent = msg; t.className = 'toast' + (bad ? ' bad' : ''); t.style.display = 'block';
+        clearTimeout(toast._t); toast._t = setTimeout(() => { t.style.display = 'none'; }, bad ? 5000 : 2600);
+    }
+
+    const SPORTS = ['NCAAF', 'NFL', 'NHL', 'NBA'];
+    let _sport = localStorage.getItem('b105_sport') || 'NCAAF';
+    let _games = [], _lines = [], _mine = [], _busy = {}, _showSettled = false;
+
+    function renderTabs() {
+        document.getElementById('tabs').innerHTML = SPORTS.map(s =>
+            '<div class="tab' + (s === _sport ? ' on' : '') + '" onclick="setSport(\'' + s + '\')">' + s + '</div>').join('');
+    }
+    function setSport(s) { _sport = s; localStorage.setItem('b105_sport', s); renderTabs(); loadGames(); }
+
+    // ---- my bets ----
+    async function loadMine() {
+        let r;
+        try { r = await authFetch('/api/bet105/mine'); } catch (e) { return; }
+        if (!r || !r.ok) return;
+        const d = await r.json().catch(() => null);
+        if (!d || !d.ok) return;
+        _mine = d.bets || [];
+        const t = d.today || {};
+        const el = document.getElementById('sToday');
+        el.textContent = money(t.usd || 0); el.className = (t.usd || 0) > 0 ? 'pos' : (t.usd || 0) < 0 ? 'neg' : '';
+        document.getElementById('sRec').textContent = 'today ' + (t.w || 0) + '-' + (t.l || 0) + (t.p ? '-' + t.p : '');
+        const lv = document.getElementById('sLive');
+        lv.textContent = money(d.live_ev_usd || 0); lv.className = (d.live_ev_usd || 0) > 0 ? 'pos' : (d.live_ev_usd || 0) < 0 ? 'neg' : '';
+        document.getElementById('sOpen').textContent = d.pending || 0;
+        renderMine(); renderGames();
+    }
+    function betRow(b) {
+        const game = (b.event_name || '').split(' @ ').map(n => shortTeam(n, b.sport)).join(' @ ');
+        const lab = b.market_type === 'moneyline' ? b.label : b.label;
+        let chip = '', r2l = game + ' · ' + whenTxt(b.event_start), r2r = '$' + b.stake + ' to win $' + (b.win_usd != null ? b.win_usd.toFixed(2) : '—');
+        if (b.status === 'won') chip = '<span class="chip w">✅ ' + money(b.pnl_usd) + '</span>';
+        else if (b.status === 'lost') chip = '<span class="chip l">❌ ' + money(b.pnl_usd) + '</span>';
+        else if (b.status === 'push') chip = '<span class="chip">➖ push</span>';
+        else if (b.game && b.game.state === 'in') chip = '<span class="chip live">LIVE' + (b.now ? ' ' + Math.round(b.now.prob * 100) + '%' : '') + '</span>';
+        else if (b.now) chip = '<span class="chip">' + Math.round(b.now.prob * 100) + '% now</span>';
+        if (b.game) {
+            const g = b.game;
+            const sc = shortTeam((b.event_name || '').split(' @ ')[0], b.sport) + ' ' + g.away + ' – ' + g.home + ' ' + shortTeam((b.event_name || '').split(' @ ')[1], b.sport);
+            r2l = sc + ' · ' + (g.status || '');
+            if (b.ev_usd != null && b.status === 'pending') r2r = 'worth ' + money(b.ev_usd);
+        } else if (b.final) {
+            r2l = game + ' · final ' + b.final.away + '–' + b.final.home;
+        }
+        return '<div class="bet ' + (b.status || '') + '" onclick="openEdit(' + b.id + ')">'
+            + '<div class="r1"><span>' + esc(lab) + ' <span style="font-family:var(--mono);color:var(--text2)">' + am(b.price) + '</span></span>' + chip + '</div>'
+            + '<div class="r2"><span>' + esc(r2l) + '</span><span>' + esc(r2r) + '</span></div></div>';
+    }
+    function renderMine() {
+        const live = _mine.filter(b => b.status === 'pending' && b.game && b.game.state !== 'pre');
+        const up = _mine.filter(b => b.status === 'pending' && !(b.game && b.game.state !== 'pre'));
+        const done = _mine.filter(b => b.status !== 'pending');
+        let h = '';
+        if (live.length) h += '<h2>Live <small>' + live.length + '</small></h2>' + live.map(betRow).join('');
+        if (up.length) h += '<h2>Upcoming <small>' + up.length + '</small></h2>' + up.map(betRow).join('');
+        if (done.length) {
+            h += '<h2>Settled today <small>' + done.length + '</small></h2>';
+            h += _showSettled ? done.map(betRow).join('') + '<div class="more" onclick="_showSettled=false;renderMine()">hide</div>'
+                              : '<div class="more" onclick="_showSettled=true;renderMine()">show ' + done.length + ' ›</div>';
+        }
+        document.getElementById('myBets').innerHTML = h;
+    }
+
+    // ---- the sheet ----
+    async function loadGames() {
+        document.getElementById('games').innerHTML = '<div class="empty">loading…</div>';
+        let r;
+        try { r = await authFetch('/api/pick-sheets?sport=' + _sport); } catch (e) { return; }
+        if (!r) return;
+        const d = await r.json().catch(() => null);
+        if (!d || !d.ok) { document.getElementById('games').innerHTML = '<div class="empty">' + esc((d && (d.error || d.note)) || 'no sheet') + '</div>'; return; }
+        const now = Date.now();
+        _games = (d.games || []).filter(g => !(g.grade && g.grade.final))
+            .filter(g => !g.event_start || new Date(g.event_start).getTime() > now - 5 * 3600 * 1000)
+            .sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
+        _lines = [];
+        renderGames();
+        loadLines();
+    }
+    async function loadLines() {
+        if (!_games.length) return;
+        const sport = _sport;
+        const x = await postJSON('/api/bet105/lines', { sport, games: _games.map(g => ({ away: g.away, home: g.home, event_start: g.event_start })) });
+        if (sport !== _sport || !x.d.ok) return;
+        _lines = x.d.lines || [];
+        renderGames();
+    }
+    function fireSide(g, key) {
+        const st = (g.move || {})[key === 'puck' ? 'ml' : key];
+        if (!st || !st.dir || !(st.state === 'play' || st.state === 'lean')) return null;
+        return key === 'total' ? (st.dir > 0 ? 'over' : 'under') : (st.dir > 0 ? 'home' : 'away');
+    }
+    function modelSide(g, key) {
+        const p = g[key];
+        return p && p.side && (p.verdict === 'play' || p.verdict === 'lean') ? p.side : null;
+    }
+    function mineOn(g, mt, side) {
+        return _mine.filter(b => b.event_name === g.away + ' @ ' + g.home && b.side === side
+            && (b.market_type === mt || (mt === 'ml' && b.market_type === 'moneyline')));
+    }
+    function sideBtn(gi, g, mt, side, line, price, sheetKey) {
+        const key = gi + '|' + mt + '|' + side;
+        const nm = mt === 'total' ? (side === 'over' ? 'Over ' : 'Under ') + (line != null ? line : '')
+                 : shortTeam(side === 'away' ? g.away : g.home) + (mt === 'ml' ? ' ML' : (line != null ? ' ' + sgn(line) : ''));
+        const mine = mineOn(g, mt, side);
+        let cls = 'sb';
+        if (price == null) cls += ' none';
+        if (fireSide(g, sheetKey) === side) cls += ' fire';
+        else if (modelSide(g, sheetKey) === side) cls += ' model';
+        if (mine.length) cls += ' mine';
+        if (_busy[key]) cls += ' busy';
+        const p = mine.length ? '✓ $' + mine.reduce((a, b) => a + b.stake, 0) + ' at ' + am(mine[mine.length - 1].price) : am(price);
+        const click = price == null && !mine.length ? '' : ' onclick="tapSide(' + gi + ',\'' + mt + '\',\'' + side + '\',\'' + sheetKey + '\')"';
+        return '<div class="' + cls + '"' + click + '><div class="n">' + (fireSide(g, sheetKey) === side ? '🔥 ' : '') + esc(nm) + '</div><div class="p">' + p + '</div></div>';
+    }
+    function marketsOf(gi, g) {
+        const L = _lines[gi] || null, P = g.pin || {}, LN = g.line || {};
+        const src = L || P;
+        const spr = src.spread_home != null ? Number(src.spread_home) : (LN.spread_home != null ? Number(LN.spread_home) : null);
+        const tot = src.total != null ? Number(src.total) : (LN.total != null ? Number(LN.total) : null);
+        const lineKey = _sport === 'NHL' ? 'puck' : 'spread';
+        const rows = [];
+        rows.push({ lb: _sport === 'NHL' ? 'Puck' : 'Spread', mt: 'spread', key: lineKey,
+                    a: { side: 'away', line: spr != null ? -spr : null, price: src.spread_away_odds },
+                    h: { side: 'home', line: spr, price: src.spread_home_odds } });
+        rows.push({ lb: 'Total', mt: 'total', key: 'total',
+                    a: { side: 'over', line: tot, price: src.over_odds },
+                    h: { side: 'under', line: tot, price: src.under_odds } });
+        rows.push({ lb: 'ML', mt: 'ml', key: 'ml',
+                    a: { side: 'away', line: null, price: src.ml_away != null ? src.ml_away : LN.ml_away },
+                    h: { side: 'home', line: null, price: src.ml_home != null ? src.ml_home : LN.ml_home } });
+        return { rows, live: !!(L && L.live), have: !!L };
+    }
+    function renderGames() {
+        const words = (document.getElementById('q').value || '').toLowerCase().split(/\s+/).filter(Boolean);
+        const now = Date.now();
+        let h = '';
+        _games.forEach((g, gi) => {
+            const hay = (g.away + ' ' + g.home).toLowerCase();
+            if (words.length && !words.every(w => hay.indexOf(w) >= 0)) return;
+            const m = marketsOf(gi, g);
+            const started = g.event_start && new Date(g.event_start).getTime() <= now;
+            const md = g.model || {};
+            let model = [];
+            if (md.spread_home != null) model.push('model ' + shortTeam(g.home) + ' ' + sgn(md.spread_home));
+            if (md.total != null) model.push('total ' + md.total);
+            const tv = g.tv && g.tv.length ? ' · ' + g.tv[0] : '';
+            h += '<div class="game"><div class="gh"><b>' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home)) + '</b><span>'
+               + (started ? '<span class="chip live">LIVE</span> ' : '') + whenTxt(g.event_start) + esc(tv) + '</span></div>'
+               + '<div class="gm">' + esc(model.join(' · ')) + (m.have ? '' : (_lines.length ? ' · no Pinnacle line yet' : ' · loading Pinnacle…')) + '</div>';
+            m.rows.forEach(r => {
+                h += '<div class="mk"><div class="lb">' + r.lb + '</div>' + sideBtn(gi, g, r.mt, r.a.side, r.a.line, r.a.price, r.key)
+                   + sideBtn(gi, g, r.mt, r.h.side, r.h.line, r.h.price, r.key) + '</div>';
+            });
+            h += '</div>';
+        });
+        document.getElementById('games').innerHTML = h || '<div class="empty">No games on the sheet.</div>';
+    }
+    function cid() { return 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+    async function tapSide(gi, mt, side, sheetKey) {
+        const g = _games[gi]; if (!g) return;
+        const mine = mineOn(g, mt, side);
+        if (mine.length) { openEdit(mine[mine.length - 1].id); return; }
+        const key = gi + '|' + mt + '|' + side;
+        if (_busy[key]) return;
+        const m = marketsOf(gi, g), row = m.rows.find(r => r.mt === mt), s = side === row.a.side ? row.a : row.h;
+        _busy[key] = true; renderGames();
+        const x = await postJSON('/api/bet105/bet', { sport: _sport, away: g.away, home: g.home, event_start: g.event_start,
+            market_id: g.market_id, market_type: sheetKey === 'puck' ? 'puck' : mt, side, line: s.line, price: s.price, cid: cid() });
+        delete _busy[key];
+        if (x.d.ok) {
+            toast('Logged ' + x.d.label + ' ' + am(x.d.price) + ' · $5 to win $' + (x.d.win_usd != null ? x.d.win_usd.toFixed(2) : '—')
+                  + (x.d.src !== 'pinnacle' ? ' (Pinnacle unreadable — board price)' : ''));
+            await loadMine();
+        } else { toast(x.d.error || ('failed ' + x.status), true); renderGames(); }
+    }
+
+    // ---- edit ----
+    function openEdit(id) {
+        const b = _mine.find(x => x.id === id); if (!b) return;
+        const sh = document.getElementById('sheet');
+        const at = b.pin_at_bet ? 'Pinnacle at the tap: ' + (b.pin_at_bet.line != null ? sgn(b.pin_at_bet.line) + ' ' : '') + am(b.pin_at_bet.price) : '';
+        sh.innerHTML = '<h3>' + esc(b.label) + ' ' + am(b.price) + '</h3>'
+            + '<div class="sub">' + esc(b.event_name) + ' · ' + whenTxt(b.event_start) + (at ? ' · ' + esc(at) : '') + '</div>'
+            + 'Got something different at Bet105? Fix it here.'
+            + (b.market_type !== 'moneyline' ? '<label>Line</label><input id="eLine" inputmode="decimal" value="' + (b.line != null ? b.line : '') + '">' : '')
+            + '<label>Price</label><input id="ePrice" inputmode="numeric" value="' + (b.price != null ? b.price : '') + '">'
+            + '<div class="row"><button class="btn go" onclick="saveEdit(' + id + ')">Save</button><button class="btn" onclick="closeSheet()">Close</button></div>'
+            + '<div class="row"><button class="btn del" onclick="delBet(' + id + ')">Delete this bet</button></div>';
+        document.getElementById('ov').style.display = 'block'; sh.style.display = 'block';
+    }
+    function closeSheet() { document.getElementById('ov').style.display = 'none'; document.getElementById('sheet').style.display = 'none'; }
+    async function saveEdit(id) {
+        const pe = document.getElementById('ePrice'), le = document.getElementById('eLine');
+        const x = await postJSON('/api/bet105/edit', { id, price: pe ? pe.value : null, line: le ? le.value : null });
+        if (x.d.ok) { closeSheet(); toast('Saved'); loadMine(); } else toast(x.d.error || 'save failed', true);
+    }
+    async function delBet(id) {
+        if (!confirm('Delete this bet?')) return;
+        const x = await postJSON('/api/bet105/edit', { id, delete: true });
+        if (x.d.ok) { closeSheet(); toast('Deleted'); loadMine(); } else toast(x.d.error || 'delete failed', true);
+    }
+
+    firebase.auth().onAuthStateChanged(async user => {
+        if (!user) { window.location.href = '/'; return; }
+        let me = null;
+        try {
+            const r = await authFetch('/api/me');
+            if (!r) { _gateServerError('sign-in check could not reach the server'); return; }
+            if (r.status >= 500) { _gateServerError('/api/me returned ' + r.status); return; }
+            me = await r.json().catch(() => null);
+        } catch (e) { _gateServerError('sign-in check failed: ' + e); return; }
+        if (!me || !me.ok || me.role !== 'admin') { window.location.href = '/'; return; }
+        document.getElementById('auth-gate').style.display = 'none';
+        document.getElementById('app').style.display = '';
+        renderTabs();
+        loadMine();
+        loadGames();
+        setInterval(loadMine, 20 * 1000);
+        setInterval(loadLines, 60 * 1000);
+        setInterval(() => { if (!document.hidden) loadGames(); }, 10 * 60 * 1000);
+    });
+</script>
+</body>
+</html>
