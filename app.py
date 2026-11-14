@@ -20712,6 +20712,156 @@ def _gemini_dump_tick(sb) -> None:
     _probe_log(json.loads(json.dumps(out, default=str)))
 
 
+_HAND_RESYNC_AT = [0.0]
+_HAND_RESYNC_S = 60.0
+
+
+def _hand_start_resync(sb, now) -> dict:
+    """MOVED GAMES KEEP THEIR BETS (Nov 14 2026, Rob: the FAA ground hold moved
+    Auburn @ Mississippi State 10:00 → 2:15 PM; both venues moved it, the bets did
+    not, and the sheet read BOX CAN'T SEE GAME START at 10:02). Once a minute every
+    pending sheet pick whose game the drop has not started takes its `markets` row's
+    start (the ESPN spine retimes that row) when the two differ by > 10 min; the
+    start rule then waits for the real drop. Never touches a bet the drop started
+    (start hold / take window / game_started / in play). Stamp `hand_start_moved`."""
+    out = {"moved": 0, "checked": 0}
+    if _time.monotonic() - _HAND_RESYNC_AT[0] < _HAND_RESYNC_S:
+        return out
+    _HAND_RESYNC_AT[0] = _time.monotonic()
+    lo, hi = (now - timedelta(hours=8)).isoformat(), (now + timedelta(hours=72)).isoformat()
+    rows = (sb.table("bot_picks").select("id,market_id,event_name,event_start,signal_blob")
+            .eq("status", "pending").gte("event_start", lo).lte("event_start", hi)
+            .execute().data) or []
+    rows = [r for r in rows if isinstance(r.get("signal_blob"), dict) and r["signal_blob"].get("bet_sheet")
+            and r.get("market_id")]
+    mids = sorted({r["market_id"] for r in rows})
+    mk: dict = {}
+    for i in range(0, len(mids), 100):
+        for m in (sb.table("markets").select("id,event_start,status").in_("id", mids[i:i + 100])
+                  .execute().data) or []:
+            mk[m["id"]] = m
+    for r in rows:
+        b = r["signal_blob"]
+        if (b.get("start_hold") or b.get("start_take_window") or b.get("start_take_window_done")
+                or b.get("game_started") or b.get("in_play") or b.get("live_snipe") or b.get("placed_live")):
+            continue
+        m = mk.get(r["market_id"])
+        a, z = _aware_ts(r.get("event_start")), _aware_ts((m or {}).get("event_start"))
+        if a is None or z is None:
+            continue
+        out["checked"] += 1
+        if abs((z - a).total_seconds()) <= 600:
+            continue
+        nb = {**b, "start_moved": {"from": r.get("event_start"), "to": m["event_start"], "at": now.isoformat()}}
+        nb.pop("start_blind", None)
+        sb.table("bot_picks").update({"event_start": m["event_start"], "signal_blob": nb}).eq("id", r["id"]).execute()
+        out["moved"] += 1
+        _probe_log({"hand_start_moved": True, "pick_id": r["id"], "event_name": r.get("event_name"),
+                    "slug": b.get("pmm_slug") or b.get("pmm_twin_slug"), "ticker": b.get("kalshi_ticker"),
+                    "from": r.get("event_start"), "to": m["event_start"], "at": now.isoformat()})
+    return out
+
+
+def _gemini_restore_tick(sb) -> None:
+    """RESTORE GEMINI BETS THE BOX DELETED (Nov 14 2026, the 10:14 deletes). Set
+    `machine_flags gemini_restore` = [pick ids] via /api/cellar/flag; the box (Gemini
+    keys) rebuilds each deleted pick from its `hand_start_cancel` / `hand_kalshi_gone`
+    stamp and Gemini's OWN account: a held lot → a filled pick at the held size; a
+    resting order → a resting pick on that order id. Neither → not restored (says so).
+    The game's start comes from its `markets` row (a moved game keeps its new time).
+    Stamps `exec_probe_runs gemini_restore` with each result, then clears the flag."""
+    ids = _machine_flag_val("gemini_restore", None)
+    if not ids:
+        return
+    try:
+        sb.table("machine_flags").upsert({"key": "gemini_restore", "value": False,
+                                          "updated_at": datetime.now(timezone.utc).isoformat()},
+                                         on_conflict="key").execute()
+        _MFLAGS_CACHE["map"]["gemini_restore"] = False
+    except Exception:
+        return
+    now = datetime.now(timezone.utc)
+    out: dict = {"kind": "gemini_restore", "gemini_restore": True, "at": now.isoformat(), "rows": []}
+    try:
+        import gemini_pm as _g, gemini_orders as _go
+        want = {int(x) for x in (ids if isinstance(ids, list) else [ids])}
+        st = (sb.table("exec_probe_runs").select("at,result").order("at", desc=True)
+              .limit(4000).execute().data) or []
+        stamps: dict = {}
+        for x in st:
+            rr = x.get("result") if isinstance(x.get("result"), dict) else {}
+            pid = rr.get("pick_id")
+            if pid in want and pid not in stamps and isinstance(rr.get("bet"), dict) and rr.get("ticker"):
+                stamps[pid] = rr
+        pm = _go.positions_map()
+        sib = (sb.table("bot_picks").select("asked_by").eq("status", "pending")
+               .eq("signal_blob->>bet_sheet", "true").limit(1).execute().data) or []
+        uid = (sib[0] or {}).get("asked_by") if sib else None
+        for pid in sorted(want):
+            res: dict = {"pick_id": pid}
+            out["rows"].append(res)
+            rr = stamps.get(pid)
+            if not rr:
+                res["skip"] = "no stamp with the bet"
+                continue
+            b, ticker = rr["bet"], rr["ticker"]
+            by = not bool(b.get("synthetic")) if "synthetic" in b else (str(b.get("side") or "") not in ("under",))
+            oc = "yes" if by else "no"
+            res.update({"ticker": ticker, "outcome": oc, "label": b.get("label") or b.get("event_name")})
+            try:
+                ex = (sb.table("bot_picks").select("id").eq("status", "pending")
+                      .eq("signal_blob->>kalshi_ticker", ticker).execute().data) or []
+            except Exception:
+                ex = None
+            if ex is None or ex:
+                res["skip"] = "already a pending pick on this contract" if ex else "picks unreadable"
+                continue
+            rows = _g.active_orders(symbol=ticker, limit=100) or []
+            rest = None
+            for o in rows:
+                po = _go.parse_order(o if isinstance(o, dict) else {})
+                if po.get("outcome") == oc and po.get("side") in ("", "buy") and float(po.get("leaves") or 0) > 0:
+                    rest = po
+                    break
+            held = float((pm or {}).get((ticker, oc)) or 0.0) if pm is not None else None
+            res.update({"held": held, "resting": rest and {"id": rest.get("id"), "price_c": rest.get("price_c"),
+                                                            "leaves": rest.get("leaves")}})
+            if pm is None or (not held and rest is None):
+                res["skip"] = "Gemini shows no lot and no order" if pm is not None else "positions unreadable"
+                continue
+            ev = b.get("event_start")
+            try:
+                mk = (sb.table("markets").select("event_start").eq("id", b.get("market_id")).limit(1)
+                      .execute().data) or []
+                if mk and mk[0].get("event_start"):
+                    ev = mk[0]["event_start"]
+            except Exception:
+                pass
+            price_c = (rest or {}).get("price_c") or b.get("price_c")
+            contracts = int(b.get("contracts") or 10)
+            blob = {"bet_sheet": True, "manual_web_bet": True, "venue": "KALSHI",
+                    "kalshi_ticker": ticker, "kalshi_buy_yes": by,
+                    "kalshi_order_id": (rest or {}).get("id"), "order_id": None,
+                    "pmm_slug": None, "pmm_synthetic": False, "pmm_twin_slug": rr.get("slug"),
+                    "contracts": contracts, "price_c": price_c, "anchor_c": b.get("anchor_c") or price_c,
+                    "label": b.get("label"), "sport": b.get("sport"),
+                    "restored_from": {"pick_id": pid, "at": now.isoformat(), "why": "deleted off an empty Gemini read"}}
+            if held:
+                blob.update({"filled": True, "filled_qty": round(held, 2), "fill_seen": now.isoformat()})
+            row = {"asked_by": uid, "query_text": "bet sheet", "market_id": b.get("market_id"),
+                   "sport": b.get("sport"), "event_name": b.get("event_name"), "event_start": ev,
+                   "market_type": b.get("market_type"), "side": b.get("side"), "entry_book": "GEMINI",
+                   "entry_price": _cents_to_american_py(price_c) if price_c is not None else b.get("entry_price"),
+                   "entry_line": b.get("line"), "units": 1, "confidence": "low",
+                   "reasons": [f"Bet sheet — {contracts} contracts on Gemini (restored)"], "signal_blob": blob}
+            ins = sb.table("bot_picks").insert(row).execute()
+            res["restored_id"] = (ins.data or [{}])[0].get("id")
+            res["event_start"] = ev
+    except Exception as e:
+        out["err"] = f"{type(e).__name__}: {e}"[:300]
+    _probe_log(json.loads(json.dumps(out, default=str)))
+
+
 def _hand_start_worker() -> None:
     sb = client = None
     while True:
@@ -20721,13 +20871,19 @@ def _hand_start_worker() -> None:
                 sb = get_supabase()
             if client is None:
                 client = get_client()
+            _rs = _HAND_START_LAST.get("resync")
             try:
                 _gemini_dump_tick(sb)
-            except Exception:
-                pass
+                _gemini_restore_tick(sb)
+                _r2 = _hand_start_resync(sb, datetime.now(timezone.utc))
+                if _r2.get("checked") or _r2.get("moved"):
+                    _rs = _r2
+            except Exception as e:
+                _rs = {"err": f"{type(e).__name__}: {e}"[:160]}
             st = _hand_start_tick(sb, client, datetime.now(timezone.utc))
             _HAND_START_LAST.clear()
             _HAND_START_LAST.update(st or {})
+            _HAND_START_LAST["resync"] = _rs
             _HAND_START_LAST["at"] = datetime.now(timezone.utc).isoformat()
             _HAND_START_LAST["ms"] = int((_time.monotonic() - t0) * 1000)
         except Exception as e:
@@ -23969,6 +24125,70 @@ def _kalshi_amend_pick(blob: dict, target_c: float, o: dict | None = None, total
         return "unverified", new_id, {"error": str(e)[:120]}
 
 
+_GEM_EMPTY_SEEN: dict = {}
+_GEM_EMPTY_CONFIRM_S = 20.0
+
+
+def _gem_confirm_empty(ticker, by: bool, koid=None, pick_id=None, twice: bool = True) -> tuple:
+    """A GEMINI BET IS GONE ONLY WHEN GEMINI SAYS SO, TWICE (Nov 14 2026, the 10:14
+    deletes — Iowa State −2.5, SMU ML, Ohio State −13.5 filled and Mississippi State
+    +2.5 still resting, all four deleted off an account read that came back empty).
+    (True, detail) only when: the symbol's own active orders read answers and holds
+    no buy on our outcome (the order id or a re-id); the positions read answers, is
+    NOT an empty account, and holds nothing on our side; and — `twice` — the same
+    answer stood `_GEM_EMPTY_CONFIRM_S` earlier. Anything else is (False, why):
+    keep the bet. A non-Gemini ticker passes straight through (True)."""
+    if not _is_gem(ticker):
+        return True, {"skip": "not_gemini"}
+    oc = "yes" if by else "no"
+    det: dict = {"ticker": ticker, "outcome": oc}
+    try:
+        import gemini_pm as _g
+        import gemini_orders as _go
+        rows = _g.active_orders(symbol=ticker, limit=100) or []
+    except Exception as e:
+        det["orders_err"] = f"{type(e).__name__}: {e}"[:120]
+        return False, det
+    for o in rows:
+        p = _go.parse_order(o if isinstance(o, dict) else {})
+        if p.get("symbol") not in (None, ticker):
+            continue
+        if (p.get("id") and koid and str(p["id"]) == str(koid)) or (
+                p.get("outcome") == oc and p.get("side") in ("", "buy") and float(p.get("leaves") or 0) > 0):
+            det["resting"] = {"id": p.get("id"), "price_c": p.get("price_c"), "leaves": p.get("leaves")}
+            return False, det
+    try:
+        pm = _go.positions_map()
+    except Exception as e:
+        pm = None
+        det["pos_err"] = f"{type(e).__name__}: {e}"[:120]
+    if pm is None:
+        det["why"] = "positions unreadable"
+        return False, det
+    if not pm:
+        det["why"] = "positions read came back an EMPTY account — not trusted"
+        return False, det
+    held = float(pm.get((ticker, oc)) or 0.0)
+    if held > 0:
+        det["held"] = held
+        return False, det
+    if not twice:
+        return True, det
+    k = pick_id or f"{ticker}|{oc}"
+    t0 = _GEM_EMPTY_SEEN.get(k)
+    nowm = _time.monotonic()
+    if t0 is None or nowm - t0 > 600.0:
+        _GEM_EMPTY_SEEN[k] = nowm
+        det["why"] = "first empty read — confirming"
+        return False, det
+    if nowm - t0 < _GEM_EMPTY_CONFIRM_S:
+        det["why"] = "confirming"
+        return False, det
+    _GEM_EMPTY_SEEN.pop(k, None)
+    det["confirmed_s"] = round(nowm - t0, 1)
+    return True, det
+
+
 def _hand_kalshi_gone(sb, r: dict, blob: dict, now, st: dict, ticker: str, by: bool) -> None:
     """A Kalshi pick whose order left the book without our cancel: adopt a
     re-id'd order, keep a filled lot, else retire the pick. Stamps
@@ -24023,6 +24243,13 @@ def _hand_kalshi_gone(sb, r: dict, blob: dict, now, st: dict, ticker: str, by: b
         ev = None
     if ev is not None and ev <= now:
         return                                   # started: the resolver / start tick own it
+    _ok, _gd = _gem_confirm_empty(ticker, by, blob.get("kalshi_order_id"), r["id"])
+    if not _ok:
+        st["gem_kept"] = st.get("gem_kept", 0) + 1
+        if _gd.get("resting") or _gd.get("held"):
+            _probe_log({"hand_kalshi_gone": True, "result": "kept_gemini_says_live", "pick_id": r["id"],
+                        "ticker": ticker, "gem": _gd, "bet": bet, "at": now.isoformat()})
+        return
     _probe_log({"hand_kalshi_gone": True, "result": "retired", "pick_id": r["id"], "ticker": ticker,
                 "slug": blob.get("pmm_twin_slug"), "held": held, "bet": bet, "at": now.isoformat(),
                 "why": "order gone, nothing held, no box cancel — a hand cancel"})
@@ -24338,6 +24565,17 @@ def _kalshi_cancel_exec(sb, client, pick_id, skip_cancel: bool = False):
         ph = (_bet_sheet_pick_side_held(ppos.get(blob["pmm_slug"]), bool(blob.get("pmm_synthetic")))
               if ppos is not None else None)
         held = None if (held is None or ph is None) else held + ph
+    if held is not None and held <= 0.0 and r.get("status") == "pending" and _is_gem(ticker):
+        # A GEMINI DELETE NEEDS GEMINI'S OWN WORD (Nov 14 2026): the symbol's orders and
+        # the positions read, readable and not an empty account — else keep the pick
+        _ok, _gd = _gem_confirm_empty(ticker, by, koid, r["id"], twice=False)
+        if not _ok:
+            _probe_log({"bet_sheet_cancel": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
+                        "kept": True, "gem": _gd})
+            if _gd.get("held"):
+                held = float(_gd["held"])
+            else:
+                return {"ok": False, "error": "Gemini did not confirm the bet is gone — kept", "gem": _gd}, 503
     if held is not None and held <= 0.0 and r.get("status") == "pending":
         sb.table("bot_picks").delete().eq("id", r["id"]).execute()
         _probe_log({"bet_sheet_cancel": True, "venue": "KALSHI", "pick_id": r["id"], "ticker": ticker,
@@ -24527,6 +24765,13 @@ def _hand_start_kalshi(sb, client, r: dict, blob: dict, now, now_ts: float, drop
         held = _kv.held_for(kctx.get("pos"), ticker, by)
         if held is None or held > 0:
             return                                        # unreadable, or a lot → the resolver's
+        _ok, _gd = _gem_confirm_empty(ticker, by, koid, r["id"])
+        if not _ok:
+            st["gem_kept"] = st.get("gem_kept", 0) + 1
+            if _gd.get("resting") or _gd.get("held"):
+                _probe_log({"hand_start_gem_kept": True, "pick_id": r["id"], "ticker": ticker,
+                            "slug": blob.get("pmm_twin_slug"), "gem": _gd, "at": now.isoformat()})
+            return
         # A BOX CANCEL IS THE CHASE'S, NOT THE MISSED LIST'S (Oct 24 2026): an
         # order the take window or a switch cancelled (`start_take_window_done`
         # closed order_gone, `kalshi_cancel_sent`) goes to the live chase while

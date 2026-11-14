@@ -2304,7 +2304,17 @@ def order_resting(order_id: str, ticker: str | None = None) -> dict:     # noqa:
 
 
 def _need_gem() -> bool:
-    return SECOND == "gemini" or bool(GEM_LIVE)
+    # ANY GEMINI CREDENTIAL = GEMINI IS IN EVERY ACCOUNT READ (Nov 14 2026, the 10:14
+    # deletes: a read that left Gemini out found no order and no lot on four live
+    # Gemini bets — Iowa State, SMU, Ohio State filled, Mississippi State still
+    # resting — and the start rule deleted all four as "order gone before the start")
+    if SECOND == "gemini" or bool(GEM_LIVE):
+        return True
+    try:
+        import gemini_pm as _gp
+        return bool(_gp.has_creds())
+    except Exception:
+        return False
 
 
 GEM_LIVE: set = set()          # the app sets this: Gemini tickers on pending lane picks
