@@ -214,12 +214,17 @@
         return _b105.map(b => ({ ...b, _venue: 'BET105' })).concat(poly);
     }
     function isLive(b) { return b.status === 'pending' && b.game && b.game.state && b.game.state !== 'pre'; }
-    async function loadMine() {
-        const [r1, r2] = await Promise.all([authFetch('/api/bet105/mine').catch(() => null),
-                                            authFetch('/api/bet-sheets/mine').catch(() => null)]);
-        const d1 = r1 && r1.ok ? await r1.json().catch(() => null) : null;
-        const d2 = r2 && r2.ok ? await r2.json().catch(() => null) : null;
-        if (d1 && d1.ok) _b105 = d1.bets || [];
+    async function loadB105() {
+        const r = await authFetch('/api/bet105/mine').catch(() => null);
+        const d = r && r.ok ? await r.json().catch(() => null) : null;
+        if (d && d.ok) _b105 = d.bets || [];
+        renderMoney(); render();
+    }
+    async function loadPoly() {
+        // the Polymarket lots you still hold (the old exchange feed, ~3s) — on its own clock,
+        // never on the tap path (Rob, Nov 14 2026: "Slow AS FUCK to add to the tracking")
+        const r = await authFetch('/api/bet-sheets/mine').catch(() => null);
+        const d2 = r && r.ok ? await r.json().catch(() => null) : null;
         if (d2 && d2.ok) {
             // only what you actually hold (or that settled from a fill) — resting/cancelled orders are not bets
             _poly = (d2.bets || []).filter(b => (b.status === 'pending' && Number(b.held || 0) >= 1)
@@ -241,10 +246,10 @@
                              game: live ? { state: 'in', status: per, away: ga, home: gh } : null };
                 });
         }
-        renderMoney(d1);
-        render();
+        renderMoney(); render();
     }
-    function renderMoney(d1) {
+    function loadMine() { loadB105(); loadPoly(); }
+    function renderMoney() {
         const all = allMine();
         const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
         const settled = all.filter(b => ['won', 'lost', 'push'].indexOf(b.status) >= 0 && dayOf(b.event_start) === today);
@@ -408,19 +413,29 @@
     async function tapSide(gi, mt, side, sheetKey) {
         const g = _games[gi]; if (!g) return;
         const mine = betsOn(g, mt, side).filter(b => b._venue === 'BET105');
-        if (mine.length) { openEdit(mine[mine.length - 1].id); return; }
+        if (mine.length) { if (!mine[mine.length - 1]._tmp) openEdit(mine[mine.length - 1].id); return; }
         const key = gi + '|' + mt + '|' + side;
         if (_busy[key]) return;
         const row = marketsOf(g).rows.find(r => r.mt === mt), s = row.sides.find(x => x.side === side);
-        _busy[key] = true; render();
+        // OPTIMISTIC (Rob: "something that takes no processing"): the side reads ✓ BET the
+        // instant it's tapped; the server's answer replaces it (or takes it back on a failure)
+        const temp = { id: 'tmp' + Date.now(), _tmp: true, sport: _sport, event_name: g.away + ' @ ' + g.home, event_start: g.event_start,
+                       market_type: mt === 'ml' ? 'moneyline' : mt, side, line: s.line, price: s.price, stake: 5, status: 'pending',
+                       label: sideName(g, mt, s) };
+        _b105.push(temp); _busy[key] = true; render();
         const x = await postJSON('/api/bet105/bet', { sport: _sport, away: g.away, home: g.home, event_start: g.event_start,
             market_id: g.market_id, market_type: sheetKey === 'puck' ? 'puck' : mt, side, line: s.line, price: s.price, cid: cid() });
         delete _busy[key];
         if (x.d.ok) {
-            await loadMine();
+            Object.assign(temp, { id: x.d.id, _tmp: false, price: x.d.price, line: x.d.line, label: x.d.label, win_usd: x.d.win_usd });
+            render(); renderMoney();
             if (x.d.src !== 'pinnacle') { toast('Logged ' + x.d.label + ' — Pinnacle has no live price, enter what Bet105 gave you'); openEdit(x.d.id); }
-            else toast('✓ Bet ' + x.d.label + ' ' + am(x.d.price) + ' · $5 to win $' + (x.d.win_usd != null ? x.d.win_usd.toFixed(2) : '—'));
-        } else { toast(x.d.error || ('failed ' + x.status), true); render(); }
+            else toast('✓ ' + x.d.label + ' ' + am(x.d.price) + ' · $5 to win $' + (x.d.win_usd != null ? x.d.win_usd.toFixed(2) : '—'));
+            loadB105();
+        } else {
+            _b105 = _b105.filter(b => b !== temp);
+            toast(x.d.error || ('failed ' + x.status), true); render();
+        }
     }
 
     // ---- edit ----
@@ -441,12 +456,12 @@
     async function saveEdit(id) {
         const pe = document.getElementById('ePrice'), le = document.getElementById('eLine');
         const x = await postJSON('/api/bet105/edit', { id, price: pe ? pe.value : null, line: le ? le.value : null });
-        if (x.d.ok) { closeSheet(); toast('Saved'); loadMine(); } else toast(x.d.error || 'save failed', true);
+        if (x.d.ok) { closeSheet(); toast('Saved'); loadB105(); } else toast(x.d.error || 'save failed', true);
     }
     async function delBet(id) {
         if (!confirm('Delete this bet?')) return;
         const x = await postJSON('/api/bet105/edit', { id, delete: true });
-        if (x.d.ok) { closeSheet(); toast('Deleted'); loadMine(); } else toast(x.d.error || 'delete failed', true);
+        if (x.d.ok) { closeSheet(); toast('Deleted'); _b105 = _b105.filter(b => b.id !== id); render(); renderMoney(); loadB105(); } else toast(x.d.error || 'delete failed', true);
     }
 
     firebase.auth().onAuthStateChanged(async user => {
@@ -465,7 +480,8 @@
         renderTabs();
         loadMine();
         loadGames();
-        setInterval(() => { if (!document.hidden) loadMine(); }, 20 * 1000);
+        setInterval(() => { if (!document.hidden) loadB105(); }, 20 * 1000);
+        setInterval(() => { if (!document.hidden) loadPoly(); }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadLines(); }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadGames(); }, 10 * 60 * 1000);
     });

@@ -5869,6 +5869,21 @@ def api_bet_sheets_picks():
         except Exception as e:
             out["auto_cancel_err"] = str(e)[:200]
         return jsonify(out)
+    if request.args.get("b105_list"):
+        # ?b105_list=1 — read-only: today's + pending Bet105 bets as logged (line, price, Pinnacle at the tap)
+        try:
+            now_ = datetime.now(timezone.utc)
+            az0_ = now_.astimezone(ZoneInfo("America/Phoenix")).replace(hour=0, minute=0, second=0, microsecond=0)
+            rows_ = (get_supabase().table("bot_picks")
+                     .select("id,sport,event_name,event_start,market_type,side,entry_price,entry_line,status,pnl_units,result_score,signal_blob")
+                     .eq("entry_book", "BET105").gte("event_start", (az0_ - timedelta(days=1)).isoformat())
+                     .order("event_start").limit(300).execute().data) or []
+            out["b105"] = [{k: r_.get(k) for k in ("id", "sport", "event_name", "event_start", "market_type", "side",
+                                                   "entry_price", "entry_line", "status", "result_score")}
+                           | {"label": (r_.get("signal_blob") or {}).get("label"), "pin": (r_.get("signal_blob") or {}).get("pin"),
+                              "placed_live": (r_.get("signal_blob") or {}).get("placed_live")} for r_ in rows_]
+        except Exception as e:
+            out["b105_err"] = str(e)[:200]
     if request.args.get("b105_probe"):
         # ?b105_probe=NCAAF — read-only: Pinnacle's board for today's sheet games the way
         # the Bet105 page and a tap read it (pre-game board, live board once started).
