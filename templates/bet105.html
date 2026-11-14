@@ -328,13 +328,29 @@
         if (_games.length) loadLines();
         const sig = () => _games.map(g => g.event_name).join('|');
         const before = sig();
-        let d = null;
-        try { const r = await authFetch('/api/pick-sheets?sport=' + sport); d = r ? await r.json().catch(() => null) : null; } catch (e) {}
+        // two reads: the games + lines fast (~1.5s), then the full sheet with the 🔥 read
+        const get = async q => { try { const r = await authFetch('/api/pick-sheets?sport=' + sport + q); return r ? await r.json().catch(() => null) : null; } catch (e) { return null; } };
+        let fullDone = false;
+        const full = get('').then(x => { fullDone = true; return x; });
+        const quick = await get('&fast=1');
+        if (sport !== _sport) return;
+        if (quick && quick.ok && !fullDone) {
+            const keep = {};
+            _games.forEach(g => { keep[g.event_name] = g.move; });          // the saved copy's 🔥 until the full read lands
+            useGames(quick.games, sport);
+            _games.forEach(g => { if (!g.move && keep[g.event_name]) g.move = keep[g.event_name]; });
+            _loading = false;
+            if (sig() !== before) _lines = [];
+            render();
+            if (!_lines.length) loadLines();
+        }
+        const d = await full;
         if (sport !== _sport) return;
         _loading = false;
         if (d && d.ok) {
+            const s0 = sig();
             useGames(d.games, sport);
-            if (sig() !== before) _lines = [];
+            if (sig() !== s0) _lines = [];
             try { localStorage.setItem('b105_games_' + sport, JSON.stringify({ at: Date.now(), games: d.games || [] })); } catch (e) {}
         }
         render();

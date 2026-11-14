@@ -2711,16 +2711,23 @@ def api_football_picks():
     _lap("retime_tv")
     _sheet_attach_venue(sb, sport, games)    # the box's Poly/Kalshi bids per pick, one DB read (Oct 26 2026)
     _lap("venue")
-    _sheet_attach_steam(sb, sport, games)    # the books' move since the open (Nov 1 2026)
+    # ?fast=1 (Nov 14 2026, Rob: "so slow to open college football… like I'm on dial up"):
+    # the games and lines in ~1.5s; the 🔥/💨 tape reads (15-20s cold on a college Saturday)
+    # are left to the full call the page makes right after.
+    fast = bool(request.args.get("fast"))
+    if not fast:
+        _sheet_attach_steam(sb, sport, games)    # the books' move since the open (Nov 1 2026)
     _lap("steam")
     _now = datetime.now(timezone.utc)
     for g in games:
         _sheet_attach_price(sport, g, _now)     # THE PRICE RULE: venue bid vs Pinnacle fair decides (Oct 27 2026)
-    _sheet_attach_move(sb, sport, games, _now)  # THE MOVE RULE: Pinnacle's first move picks the side (Nov 1 2026)
+    if not fast:
+        _sheet_attach_move(sb, sport, games, _now)  # THE MOVE RULE: Pinnacle's first move picks the side (Nov 1 2026)
     _lap("move")
-    _sheet_attach_fire(sport, games, _now)      # 🔥 = the first move is the button, 💨 agrees or not (Nov 1 2026)
+    if not fast:
+        _sheet_attach_fire(sport, games, _now)      # 🔥 = the first move is the button, 💨 agrees or not (Nov 1 2026)
     week_games = list(games)
-    if old_rows:
+    if old_rows and not fast:
         # the week's older finals, for the record only: no tape, the stored 🔥
         try:
             olds = []
@@ -2963,7 +2970,7 @@ def api_football_picks_debug():
     if request.args.get("timing"):
         sp = (request.args.get("sport") or "NCAAF").upper()
         t = _time.time()
-        d = _mcp_view(api_football_picks, "/api/pick-sheets?sport=" + sp)
+        d = _mcp_view(api_football_picks, "/api/pick-sheets?sport=" + sp + ("&fast=1" if request.args.get("fast") else ""))
         return jsonify({"ok": True, "sport": sp, "wall_ms": int((_time.time() - t) * 1000), "ms": d.get("ms"),
                         "games": len(d.get("games") or []), "bytes": len(json.dumps(d, default=str))})
     if request.args.get("price"):
