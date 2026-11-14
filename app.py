@@ -5894,6 +5894,14 @@ def api_bet_sheets_picks():
         except Exception as e:
             out["auto_cancel_err"] = str(e)[:200]
         return jsonify(out)
+    if request.args.get("b105_mine"):
+        # ?b105_mine=1 — the page's own Bet105 feed for the admin (live value: Poly / Pinnacle)
+        try:
+            uid_ = request.args.get("uid") or next(iter(_admin_uids() or []), None)
+            bets_ = _b105_mine(get_supabase(), uid_, datetime.now(timezone.utc))
+            out["b105_mine"] = [{k: x.get(k) for k in ("id", "label", "line", "price", "status", "game", "now", "ev_usd")} for x in bets_]
+        except Exception as e_:
+            out["b105_mine_err"] = str(e_)[:300]
     if request.args.get("b105_list"):
         # ?b105_list=1 — read-only: today's + pending Bet105 bets as logged (line, price, Pinnacle at the tap)
         try:
@@ -18085,6 +18093,7 @@ def _b105_mine(sb, uid: str, now) -> list:
             rows[r["id"]] = r
     espn: dict = {}
     slates: dict = {}
+    poly_ctx: dict = {}
     out = []
     for r in sorted(rows.values(), key=lambda x: (x.get("event_start") or "", x["id"])):
         blob = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
@@ -18129,17 +18138,73 @@ def _b105_mine(sb, uid: str, now) -> list:
             b["final"] = {"away": rs.get("away"), "home": rs.get("home")}
         b["pnl_usd"] = _b105_pnl(b["status"], b["price"], b["stake"])
         if b["status"] == "pending":
-            pf = _b105_fair_now(sb, sport, b, now, slates)
-            if pf:
-                p = float(pf["prob"])
-                b["now"] = {"prob": round(p, 4), "fair_c": round(p * 100.0, 1), "live": bool(pf.get("live")),
-                            "pin_line": pf.get("pin_line")}
-                if b["win_usd"] is not None:
-                    b["ev_usd"] = round(p * b["win_usd"] - (1.0 - p) * b["stake"], 2)
+            # in play: Polymarket's live book first (Pinnacle prices few games in-game);
+            # pre-game: Pinnacle's devigged fair
+            px = _b105_poly_now(b, away, home, poly_ctx) if started else None
+            if px:
+                p = float(px["prob"])
+                b["now"] = {"prob": round(p, 4), "fair_c": round(p * 100.0, 1), "live": True,
+                            "src": "poly", "poly_line": px.get("line")}
+            else:
+                pf = _b105_fair_now(sb, sport, b, now, slates)
+                p = float(pf["prob"]) if pf else None
+                if pf:
+                    b["now"] = {"prob": round(p, 4), "fair_c": round(p * 100.0, 1), "live": bool(pf.get("live")),
+                                "src": "pinnacle", "pin_line": pf.get("pin_line")}
+            if p is not None and b["win_usd"] is not None:
+                b["ev_usd"] = round(p * b["win_usd"] - (1.0 - p) * b["stake"], 2)
         b.pop("_away", None)
         b.pop("_home", None)
         out.append(b)
     return out
+
+
+def _b105_poly_now(b: dict, away: str, home: str, ctx: dict) -> dict | None:
+    """A Bet105 bet's live value off POLYMARKET's book (Nov 14 2026, Rob: "Does the live
+    now pull value of my bet105 bets against current Polymarket odds?" — Pinnacle prices
+    only a handful of college games in-game). The same market on Polymarket, its rung
+    nearest the bet's line (within a point), the book mid for the bet's side.
+    → {prob, line} or None."""
+    mt = {"moneyline": "ml", "ml": "ml", "spread": "spread", "total": "total"}.get(str(b.get("market_type") or ""))
+    if not mt or not away or not home:
+        return None
+    try:
+        import pmm_markets
+        if ctx.get("client") is None and not ctx.get("no_client"):
+            try:
+                ctx["client"] = get_client()
+            except Exception:
+                ctx["client"] = None
+            ctx["no_client"] = ctx["client"] is None
+        client = ctx.get("client")
+        if client is None:
+            return None
+        key = (b.get("sport"), away, home)
+        cache = ctx.setdefault("pmm", {})
+        if key not in cache:
+            try:
+                cache[key] = pmm_markets.lookup(client, b.get("sport") or "", away, home, b.get("event_start") or "")
+            except Exception:
+                cache[key] = None
+        pmm = cache.get(key)
+        if not pmm:
+            return None
+        line = b.get("line")
+        e = pmm_markets.best_line_for(pmm, mt, b.get("side"), float(line) if line is not None else None)
+        if not e:
+            return None
+        el = e.get("line")
+        if mt != "ml" and line is not None and el is not None and abs(float(el) - float(line)) > 1.0:
+            return None
+        p = _live_book_mid(client, e.get("slug"), bool(e.get("synthetic"))) if e.get("slug") else None
+        if p is None:
+            q = (e.get("quote") or {}).get("mid")
+            p = float(q) if isinstance(q, (int, float)) else None
+        if p is None or not (0.0 < p < 1.0):
+            return None
+        return {"prob": round(p, 4), "line": el}
+    except Exception:
+        return None
 
 
 def _b105_units(status, price):

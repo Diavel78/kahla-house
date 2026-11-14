@@ -449,7 +449,9 @@
         if (b.status === 'won') right = '<span class="pos">✅ ' + money(b.pnl_usd) + '</span>';
         else if (b.status === 'lost') right = '<span class="neg">❌ ' + money(b.pnl_usd) + '</span>';
         else if (b.status === 'push') right = '➖ push';
-        else if (isLive(b)) right = (b.now ? Math.round(b.now.prob * 100) + '%' : 'live') + (b.ev_usd != null ? '<small>worth ' + money(b.ev_usd) + '</small>' : '');
+        else if (isLive(b)) right = (b.now ? Math.round(b.now.prob * 100) + '%' : 'no live price')
+            + (b.ev_usd != null ? '<small>worth ' + money(b.ev_usd) + (b.now && b.now.src ? ' · ' + (b.now.src === 'poly' ? 'Poly' : 'Pin')
+            + (b.now.poly_line != null && b.line != null && Math.abs(Number(b.now.poly_line) - Number(b.line)) > 0.01 ? ' @ ' + b.now.poly_line : '') : '') + '</small>' : '');
         else right = b._venue === 'BET105' ? '$' + (b.stake || 5) + '<small>to win $' + (b.win_usd != null ? Number(b.win_usd).toFixed(2) : '—') + '</small>' : (b.held ? Number(b.held).toFixed(0) + ' held' : '');
         if (b.game && b.game.away != null) d = shortTeam(parts[0], b.sport) + ' ' + b.game.away + ' – ' + b.game.home + ' ' + shortTeam(parts[1], b.sport) + (b.game.status ? ' · ' + b.game.status : '');
         else if (b.final) d = game + ' · final ' + b.final.away + '–' + b.final.home;
