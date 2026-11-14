@@ -35415,11 +35415,13 @@ def _mcp_board(sport=None, hours=36) -> dict:
         hours = max(1, min(240, float(hours or 36)))
     except (TypeError, ValueError):
         hours = 36
-    out = []
+    out, recs = [], {}
     for sp in sports:
         if sp not in _SHEET_SPORTS:
             return {"error": f"sport must be one of {list(_SHEET_SPORTS)}"}
         d = _mcp_view(api_football_picks, f"/api/pick-sheets?sport={sp}")
+        if isinstance(d.get("week_record"), dict):
+            recs[sp] = d["week_record"]
         for g in d.get("games") or []:
             st = _parse_iso(g.get("event_start")) if g.get("event_start") else None
             if st is None or st > now + timedelta(hours=hours) or st < now - timedelta(hours=8):
@@ -35446,7 +35448,7 @@ def _mcp_board(sport=None, hours=36) -> dict:
                         "venue_age_min": (round(g["venue"]["age_s"] / 60) if isinstance(g.get("venue"), dict)
                                           and g["venue"].get("age_s") is not None else None)})
     out.sort(key=lambda x: (x["sport"], x["start_az"] or ""))
-    return {"games": out, "n": len(out),
+    return {"games": out, "n": len(out), "sheet_record_this_week": recs or None,
             "note": "picks[k].verdict play/lean/pass is the model's call at the pick's rung; "
                     "venue quotes are the bid/ask on the pick's side in cents"}
 
