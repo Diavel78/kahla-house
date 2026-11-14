@@ -18742,6 +18742,20 @@ def _hand_status_publish(sb, client) -> dict:
                                 "moves": blob.get("chase_moves") or 0}, "line_hold": blob.get("line_hold")}
             if kr.get("touch_c") is not None:
                 quoted += 1
+            tw = blob.get("pmm_twin_slug") if _is_gem(blob.get("kalshi_ticker")) else None
+            if tw:
+                # A GEMINI LOT'S LIVE PRICE IS ITS POLYMARKET TWIN, OFF THE BOX'S SOCKET (Nov 14
+                # 2026: Vercel read those books itself, ~8s of every page load)
+                if float(kr.get("held") or 0) >= 1.0:
+                    held_slugs.add(tw)
+                tq = _ws_quote(tw)
+                if tq:
+                    tsyn = bool(blob.get("pmm_twin_synthetic"))
+                    yb, ya = tq
+                    tb = ((100 - ya) if ya is not None else None) if tsyn else yb
+                    ta = ((100 - yb) if yb is not None else None) if tsyn else ya
+                    if tb is not None and ta is not None:
+                        kr["twin_cur_c"] = round((tb + ta) / 2.0, 2)
             if blob.get("pmm_slug") and float(kr.get("held") or 0) >= 1.0:
                 held_slugs.add(blob["pmm_slug"])        # a Polymarket take lot: live quotes for the strip
             out[str(r["id"])] = kr
@@ -28911,6 +28925,7 @@ def api_bet_sheets_mine():
             # U 44.5 reading 48% at 24-14 in the 2nd: "there's just no market at 44.5 on Gemini")
             "twin_slug": blob.get("pmm_twin_slug") if (kalshi and str(blob.get("kalshi_ticker") or "").startswith("GEMI-")) else None,
             "twin_syn": bool(blob.get("pmm_twin_synthetic")),
+            "twin_cur_c": (bx or {}).get("twin_cur_c") if kalshi else None,
             "held_unknown": bool((bx or {}).get("held_unknown")) if kalshi else False,
             "venue_pick": blob.get("venue_pick"),
             "app": bool(blob.get("app_adopted")), "in_play": bool(blob.get("in_play")),
@@ -29603,6 +29618,10 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
             b["win_prob"], b["prob_src"] = None, None
             if b.get("cur_c") is not None and not b.get("twin_slug"):
                 b["win_prob"], b["prob_src"] = round(float(b["cur_c"]) / 100.0, 4), "box"
+                continue
+            if b.get("twin_slug") and b.get("twin_cur_c") is not None:
+                b["cur_c"] = float(b["twin_cur_c"])          # the box's socket quote of the twin
+                b["win_prob"], b["prob_src"] = round(b["cur_c"] / 100.0, 4), "poly_twin"
                 continue
             if b.get("twin_slug") and reads < _BS_LIVE_READS and not _venue_rl_active():
                 reads += 1
