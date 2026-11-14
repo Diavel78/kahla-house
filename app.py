@@ -5598,6 +5598,8 @@ def api_bet_sheets_picks():
     want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
+    if request.args.get("fix_lines"):
+        return jsonify(_bet_sheet_fix_lines(request.args.get("apply") or ""))
     if request.args.get("cancelled_today"):
         # What Settled picks merges in (Oct 31 2026, "where's my SMU game?"):
         # the graded game-start cancels, plus every raw stamp/pick today that
@@ -36904,6 +36906,105 @@ def api_bet_sheets_ops():
             n_ok += 1
     results.extend(queued_res for _, queued_res in queued)
     return jsonify({"ok": True, "done": n_ok, "results": results})
+
+
+def _bet_sheet_fix_lines(apply: str) -> dict:
+    """THE HOP REPAIR (Nov 13 2026, Rob: "you put it at −10.5, when the line was
+    always 13.5… You can't fix them?"): every pending, unfilled, pre-game
+    Gemini/Kalshi sheet bet whose rested line sits MORE than a point off the line
+    Rob's slip asked for (the old unbounded "nearest more favorable" hop). Dry by
+    default. apply=cancel → a cancel row per bet (the ordinary cancel path);
+    apply=place → for each listed bet whose pick is gone with nothing held, the
+    ORIGINAL slip item re-queued as a create (venue auto, the 1-point hop limit)."""
+    sb = get_supabase()
+    now = datetime.now(timezone.utc)
+    out: dict = {"ok": True, "apply": apply or None, "bets": []}
+    try:
+        creates = (_sb_paged(lambda: sb.table("hand_orders").select("id,op,state,payload,result,pick_id,created_at")
+                             .eq("op", "create").gte("created_at", (now - timedelta(days=14)).isoformat()),
+                             max_pages=20) or [])
+        picks = (_sb_paged(lambda: sb.table("bot_picks").select("id,status,event_name,event_start,sport,market_type,side,entry_line,asked_by,signal_blob")
+                           .eq("signal_blob->>bet_sheet", "true").eq("status", "pending")
+                           .gte("event_start", (now + timedelta(minutes=15)).isoformat()), max_pages=10) or [])
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    by_pick: dict = {}
+    for c in creates:
+        res = c.get("result") if isinstance(c.get("result"), dict) else {}
+        pid = res.get("pick_id") or c.get("pick_id")
+        if pid:
+            by_pick[str(pid)] = c
+    live_ids = {str(r["id"]) for r in picks}
+    rows = []
+    for r in picks:
+        b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+        if not _kalshi_pick(b) or b.get("live_snipe"):
+            continue
+        try:
+            if float(b.get("filled_qty") or 0) > 0 or b.get("filled"):
+                continue
+        except (TypeError, ValueError):
+            continue
+        c = by_pick.get(str(r["id"]))
+        item = ((c or {}).get("payload") or {}).get("item") if c else None
+        if not isinstance(item, dict) or item.get("line") is None or r.get("entry_line") is None:
+            continue
+        try:
+            gap = abs(float(r["entry_line"]) - float(item["line"]))
+        except (TypeError, ValueError):
+            continue
+        if gap <= 1.0 + 1e-9:
+            continue
+        rows.append((r, b, item, c, gap))
+    # the place step also finds bets the cancel step already removed
+    if apply == "place":
+        done = {}
+        try:
+            for x in (sb.table("hand_orders").select("pick_id,payload,state,result").eq("op", "cancel")
+                      .gte("created_at", (now - timedelta(hours=6)).isoformat()).limit(500).execute().data or []):
+                if (x.get("payload") or {}).get("fix_lines"):
+                    done[str(x.get("pick_id"))] = x
+        except Exception:
+            done = {}
+        for pid, x in done.items():
+            if pid in live_ids:
+                continue                       # still pending — the cancel didn't take (or a lot is held)
+            c = by_pick.get(pid)
+            item = ((c or {}).get("payload") or {}).get("item") if c else None
+            if isinstance(item, dict):
+                rows.append(({"id": int(pid), "event_name": item.get("label"), "entry_line": None}, {}, item, c, None))
+    for r, b, item, c, gap in rows:
+        ent = {"pick_id": r["id"], "game": r.get("event_name"), "bet_line": r.get("entry_line"),
+               "asked_line": item.get("line"), "side": item.get("side"), "market_type": item.get("market_type"),
+               "ticker": b.get("kalshi_ticker"), "price_c": b.get("price_c")}
+        if apply == "cancel" and str(r["id"]) in live_ids:
+            row = {"op": "cancel", "pick_id": r["id"], "slug": b.get("pmm_slug"),
+                   "synthetic": bool(b.get("pmm_synthetic")), "order_id": b.get("order_id"),
+                   "payload": {"asked_by": r.get("asked_by"), "fix_lines": True}}
+            try:
+                ent["queue_id"] = _hand_order_enqueue(sb, row)
+            except Exception as e:
+                ent["error"] = str(e)[:120]
+        elif apply == "place" and str(r["id"]) not in live_ids:
+            cid = f"fixline-{r['id']}"
+            seen = _hand_orders_by_cid(sb, [cid]) or {}
+            if cid in seen:
+                ent["queue_id"], ent["repeat"] = seen[cid][0], True
+            else:
+                it = {**item, "venue": "auto", "key": cid, "cid": cid}
+                pl = (c or {}).get("payload") or {}
+                contracts = pl.get("contracts") or 10
+                row = {"op": "create", "slug": None, "synthetic": False, "price_c": None,
+                       "contracts": contracts, "event_start": it.get("event_start"),
+                       "payload": {"item": it, "asked_by": pl.get("asked_by"), "contracts": contracts,
+                                   "cid": cid, "fix_lines_from": r["id"]}}
+                try:
+                    ent["queue_id"] = _hand_order_enqueue(sb, row)
+                except Exception as e:
+                    ent["error"] = str(e)[:120]
+        out["bets"].append(ent)
+    out["n"] = len(out["bets"])
+    return out
 
 
 @app.route("/api/bet-sheets/repeg", methods=["POST"])
