@@ -27970,8 +27970,65 @@ def _gemini_probe_tick(sb) -> dict | None:
     return {"verdict": out.get("verdict")}
 
 
+_HAND_DRAIN_LOCK = threading.Lock()
+_HAND_QUEUE_THREAD = None
+_HAND_QUEUE_LAST: dict = {}
+_HAND_QUEUE_LOOP_S = 1.0
+
+
 def _hand_queue_drain(sb, now, worker: str, stats: dict, client=None, max_n: int = 150,
                       max_passes: int = 4):
+    """ONE DRAINER AT A TIME (Nov 14 2026): the queue thread and the lane's
+    between-phase drains share this lock; whoever holds it runs the queue,
+    the other skips (the rows are already being run)."""
+    if not _HAND_DRAIN_LOCK.acquire(blocking=False):
+        return client
+    try:
+        return _hand_queue_drain_run(sb, now, worker, stats, client, max_n, max_passes)
+    finally:
+        _HAND_DRAIN_LOCK.release()
+
+
+def _hand_queue_worker() -> None:
+    """THE ORDER QUEUE ON ITS OWN LOOP (Nov 14 2026, Rob: "The placing, the
+    cancelling… should be ALOT FUCKING FASTER"): a slip row waited 6-10s for a
+    claim because the queue only ran between the lane's maintenance phases.
+    This thread looks every second and runs whatever is pending — the same
+    claim-first drain, so a row never runs twice. Kill switch
+    `machine_flags hand_queue_thread`."""
+    sb = client = None
+    while True:
+        t0 = _time.monotonic()
+        try:
+            if _machine_flag("hand_queue_thread", True):
+                if sb is None:
+                    sb = get_supabase()
+                if (sb.table("hand_orders").select("id").eq("state", "pending").limit(1).execute().data or []):
+                    st: dict = {}
+                    client = _hand_queue_drain(sb, datetime.now(timezone.utc), "box", st, client)
+                    _HAND_QUEUE_LAST.update({"at": datetime.now(timezone.utc).isoformat(), "stats": st,
+                                             "ms": int((_time.monotonic() - t0) * 1000)})
+        except Exception as e:
+            _HAND_QUEUE_LAST["err"] = f"{type(e).__name__}: {e}"[:160]
+            sb = client = None
+        _time.sleep(max(0.2, _HAND_QUEUE_LOOP_S - (_time.monotonic() - t0)))
+
+
+def _ensure_hand_queue_worker() -> None:
+    global _HAND_QUEUE_THREAD
+    if os.environ.get("KAHLA_SELFTEST"):
+        return
+    if _HAND_QUEUE_THREAD is not None and _HAND_QUEUE_THREAD.is_alive():
+        return
+    try:
+        _HAND_QUEUE_THREAD = threading.Thread(target=_hand_queue_worker, name="hand-queue", daemon=True)
+        _HAND_QUEUE_THREAD.start()
+    except Exception:
+        pass
+
+
+def _hand_queue_drain_run(sb, now, worker: str, stats: dict, client=None, max_n: int = 150,
+                          max_passes: int = 4):
     """Claim + run every pending hand order, oldest first, in passes of
     ≤max_n until a pass comes up short (nothing left) or max_passes. Returns
     the venue client (made lazily). Folds counts into `stats`. Safe to call
@@ -28186,6 +28243,8 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
         stats["kalshi_probe"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     if worker == "box":
         _ensure_sheet_touch_worker()          # the sheet's venue quotes, its own thread (Oct 26 2026)
+        _ensure_hand_queue_worker()           # the order queue, its own 1s loop (Nov 14 2026)
+        stats["queue_thread"] = {k: _HAND_QUEUE_LAST.get(k) for k in ("at", "ms", "err")}
     client = _hand_queue_drain(sb, now, worker, stats, None, max_n=max_n)
     if stats.get("gate"):
         return stats
@@ -29473,76 +29532,98 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
     mid of the bet's OWN slug — the box quote when it has one, else one
     book read (_live_book_mid, 20s cache). A filled bet has no resting
     order, so the box never subscribed its market: that is why every
-    in-play row read 'no live quote'. Stamps live/score/win_prob/prob_src."""
-    client = None
-    reads = k_reads = 0
-    espn: dict = {}
+    in-play row read 'no live quote'. Stamps live/score/win_prob/prob_src.
+    ⚠ THE READS RUN IN PARALLEL (Nov 14 2026, Rob: "the website dashboard should
+    be ALOT FUCKING FASTER"): one at a time they were 11-22s of every page load."""
+    from concurrent.futures import ThreadPoolExecutor
+    live = []
     for b in out:
         if b.get("status") != "pending":
             continue
         bdt = _parse_iso(b.get("event_start") or "")
         if not bdt or bdt > now or (now - bdt) > timedelta(hours=_BS_LIVE_MAX_H):
             continue
-        away, home = _live_split_event(b.get("event_name") or "")
-        m = None
-        if away and home:
-            try:
-                dk = bdt.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
-                ck = ((b.get("sport") or "").lower(), dk)
-                if ck not in espn:
-                    espn[ck] = _bs_espn_events(ck[0], dk)
-                m = _live_match_espn(espn[ck], away, home, b.get("event_start"))
-            except Exception:
-                m = None
         b["live"] = True
-        if m:
-            b["score"] = {k: m.get(k) for k in ("state", "completed", "display_status", "period",
-                                                 "clock", "away_score", "home_score")}
-        wp, src = None, None
-        if m:
-            wp = _live_decided_prob({"market_type": b.get("market_type"), "side": b.get("side"),
-                                     "entry_line": b.get("line")}, m)
-            if wp is not None:
-                src = "decided"
-        if wp is None and b.get("twin_slug") and reads < _BS_LIVE_READS and not _venue_rl_active():
-            # Gemini's in-play book is empty or our own stale bid — the same bet on
-            # Polymarket is the live price (the box's cur_c for it is Gemini's).
-            if client is None:
+        live.append((b, bdt))
+    if not live:
+        return
+    keys = set()
+    for b, bdt in live:
+        keys.add(((b.get("sport") or "").lower(), bdt.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")))
+    espn: dict = {}
+    pool = ThreadPoolExecutor(max_workers=10)
+    try:
+        g_fut = pool.submit(_bet_sheet_live_game, out, now)
+        futs = {k: pool.submit(_bs_espn_events, k[0], k[1]) for k in keys}
+        for k, f in futs.items():
+            try:
+                espn[k] = f.result(timeout=8) or []
+            except Exception:
+                espn[k] = []
+        client = None
+        reads = k_reads = 0
+        jobs = []
+        for b, bdt in live:
+            away, home = _live_split_event(b.get("event_name") or "")
+            m = None
+            if away and home:
                 try:
-                    client = get_client()
+                    ck = ((b.get("sport") or "").lower(), bdt.astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d"))
+                    m = _live_match_espn(espn.get(ck) or [], away, home, b.get("event_start"))
                 except Exception:
-                    client = None
-            if client is not None:
+                    m = None
+            if m:
+                b["score"] = {k: m.get(k) for k in ("state", "completed", "display_status", "period",
+                                                     "clock", "away_score", "home_score")}
+                wp = _live_decided_prob({"market_type": b.get("market_type"), "side": b.get("side"),
+                                         "entry_line": b.get("line")}, m)
+                if wp is not None:
+                    b["win_prob"], b["prob_src"] = wp, "decided"
+                    continue
+            b["win_prob"], b["prob_src"] = None, None
+            if b.get("cur_c") is not None and not b.get("twin_slug"):
+                b["win_prob"], b["prob_src"] = round(float(b["cur_c"]) / 100.0, 4), "box"
+                continue
+            if b.get("twin_slug") and reads < _BS_LIVE_READS and not _venue_rl_active():
                 reads += 1
-                v = _live_book_mid(client, b["twin_slug"], bool(b.get("twin_syn")))
-                if v is not None:
-                    wp, src = v, "poly_twin"
-                    b["cur_c"] = round(v * 100.0, 2)
-        if wp is None and b.get("cur_c") is not None and not b.get("twin_slug"):
-            wp, src = round(float(b["cur_c"]) / 100.0, 4), "box"
-        if wp is None and b.get("venue") == "KALSHI" and b.get("kalshi_ticker") and k_reads < _BS_LIVE_READS:
-            # A KALSHI LOT HAS NO POLYMARKET SLUG (Oct 24 2026 — every Kalshi-held
-            # bet in the Live box read 'no live quote'): mid of OUR side off the
-            # Kalshi book (socket when it vouches, else one REST read).
-            k_reads += 1
-            kq = _live_kalshi_quote(b["kalshi_ticker"], not bool(b.get("kalshi_buy_yes")))
-            if kq and kq[2] is not None:
-                wp, src = round(float(kq[2]) / 100.0, 4), "kalshi"
-                b["cur_c"], b["touch_c"] = round(float(kq[2]), 2), kq[0]
-        if wp is None and b.get("slug") and reads < _BS_LIVE_READS and not _venue_rl_active():
+                jobs.append((b, "poly_twin", b["twin_slug"], bool(b.get("twin_syn"))))
+            elif b.get("venue") == "KALSHI" and b.get("kalshi_ticker") and k_reads < _BS_LIVE_READS:
+                k_reads += 1
+                jobs.append((b, "kalshi", b["kalshi_ticker"], not bool(b.get("kalshi_buy_yes"))))
+            elif b.get("slug") and reads < _BS_LIVE_READS and not _venue_rl_active():
+                reads += 1
+                jobs.append((b, "book", b["slug"], bool(b.get("synthetic"))))
+        if any(j[1] != "kalshi" for j in jobs):
+            try:
+                client = get_client()
+            except Exception:
+                client = None
+
+        def _one(j):
+            b, kind, key, syn = j
+            if kind == "kalshi":
+                kq = _live_kalshi_quote(key, syn)
+                if kq and kq[2] is not None:
+                    b["win_prob"], b["prob_src"] = round(float(kq[2]) / 100.0, 4), "kalshi"
+                    b["cur_c"], b["touch_c"] = round(float(kq[2]), 2), kq[0]
+                return
             if client is None:
-                try:
-                    client = get_client()
-                except Exception:
-                    client = None
-            if client is not None:
-                reads += 1
-                v = _live_book_mid(client, b["slug"], bool(b.get("synthetic")))
-                if v is not None:
-                    wp, src = v, "book"
-                    b["cur_c"] = round(v * 100.0, 2)
-        b["win_prob"], b["prob_src"] = wp, src
-    _bet_sheet_live_game(out, now)
+                return
+            v = _live_book_mid(client, key, syn)
+            if v is not None:
+                b["win_prob"], b["prob_src"] = v, kind
+                b["cur_c"] = round(v * 100.0, 2)
+        for f in [pool.submit(_one, j) for j in jobs]:
+            try:
+                f.result(timeout=8)
+            except Exception:
+                pass
+        try:
+            g_fut.result(timeout=8)
+        except Exception:
+            pass
+    finally:
+        pool.shutdown(wait=False)
 
 
 _BS_LIVE_GAME_MAX = 25
@@ -32907,6 +32988,9 @@ _GAME_LEAD_WINDOW_S = 45.0
 _GAME_YARD_RE = re.compile(r"\b(?:to|at) (?:the )?([A-Z]{2,4}) (\d{1,2})\b")
 
 
+_GAME_MS_LIST: dict = {}       # sport → (ts, milestones read) — one list read serves every game (Nov 14 2026)
+
+
 def _hand_game_milestone(sport, away, home, start_iso):
     """The Kalshi milestone id for a game (team names + start), cached;
     None when the venue lists no such game (re-asked every 10 min)."""
@@ -32918,8 +33002,14 @@ def _hand_game_milestone(sport, away, home, start_iso):
         return hit[1]
     import kalshi_venue as _kv
     try:
-        min_start = (datetime.now(timezone.utc) - timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        ms = _kv.milestones(str(sport).upper(), min_start)
+        sp = str(sport).upper()
+        mh = _GAME_MS_LIST.get(sp)
+        if mh and _time.time() - mh[0] < 300:
+            ms = mh[1]
+        else:
+            min_start = (datetime.now(timezone.utc) - timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            ms = _kv.milestones(sp, min_start)
+            _GAME_MS_LIST[sp] = (_time.time(), ms)
         m = _kv.pick_milestone(ms.get("milestones") or [], away, home, start_iso)
     except Exception as e:
         app.logger.warning("game feed milestone %s %s @ %s: %s", sport, away, home, str(e)[:120])
