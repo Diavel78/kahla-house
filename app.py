@@ -20678,6 +20678,40 @@ _HAND_START_THREAD = None
 _HAND_START_LAST: dict = {}
 
 
+def _gemini_dump_tick(sb) -> None:
+    """GEMINI ACCOUNT DUMP, FROM A FLAG (Nov 14 2026, Rob: "You can't tell me what bets
+    I have?" — the box deleted filled Gemini bets off a positions read that missed the
+    fills). Set `machine_flags gemini_dump`=true via /api/cellar/flag; the box (the only
+    side with Gemini keys) stamps the RAW positions + active orders rows and the parsed
+    map as `exec_probe_runs kind=gemini_dump`, then clears the flag. Read it with
+    /api/bet-sheets/picks?stamps=gemini_dump."""
+    if not _machine_flag_val("gemini_dump", None):
+        return
+    try:
+        sb.table("machine_flags").upsert({"key": "gemini_dump", "value": False,
+                                          "updated_at": datetime.now(timezone.utc).isoformat()},
+                                         on_conflict="key").execute()
+        _MFLAGS_CACHE["map"]["gemini_dump"] = False
+    except Exception:
+        return
+    out: dict = {"kind": "gemini_dump", "gemini_dump": True, "at": datetime.now(timezone.utc).isoformat()}
+    try:
+        import gemini_pm as _g, gemini_orders as _go
+        rows, off = [], 0
+        while True:
+            page = _g.positions(limit=100, offset=off) or []
+            rows += page
+            if len(page) < 100 or off > 2000:
+                break
+            off += 100
+        out["positions_raw"] = rows
+        out["positions_map"] = {f"{k[0]}|{k[1]}": v for k, v in (_go.positions_map() or {}).items()}
+        out["orders_raw"] = _g.active_orders(limit=100) or []
+    except Exception as e:
+        out["err"] = f"{type(e).__name__}: {e}"[:300]
+    _probe_log(json.loads(json.dumps(out, default=str)))
+
+
 def _hand_start_worker() -> None:
     sb = client = None
     while True:
@@ -20687,6 +20721,10 @@ def _hand_start_worker() -> None:
                 sb = get_supabase()
             if client is None:
                 client = get_client()
+            try:
+                _gemini_dump_tick(sb)
+            except Exception:
+                pass
             st = _hand_start_tick(sb, client, datetime.now(timezone.utc))
             _HAND_START_LAST.clear()
             _HAND_START_LAST.update(st or {})
