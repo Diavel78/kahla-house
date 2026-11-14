@@ -16876,6 +16876,9 @@ def _entry_bid_c(e: dict):
     return round(b * 100.0, 2) if b <= 1.0 else round(b, 2)
 
 
+_BS_MAX_HOP_PTS = 1.0     # a rung more than 1 point off the slip's line is a different bet
+
+
 def _bet_sheet_rung(entries, mt: str, side: str, want, cap_c=None):
     """Pure. Pick the venue rung for a sheet side. `entries` = the pmm
     lookup list for `mt` (each {side, line, slug, quote, synthetic?}); the
@@ -16903,6 +16906,14 @@ def _bet_sheet_rung(entries, mt: str, side: str, want, cap_c=None):
     if not lined:
         return None, "venue rungs carry no half-point line"
     fav_dir = 1.0 if (mt == "spread" or side == "under") else -1.0         # which way is MORE favorable
+    # 1 POINT, NEVER A DIFFERENT BET (Nov 13 2026, Rob: "cap polymarket at 1 point
+    # too") — the favorable hop AND the chalk step stay within a point of his line
+    near = [(ln, e) for ln, e in lined if abs(ln - want) <= _BS_MAX_HOP_PTS + 1e-9]
+    if not near:
+        have = ", ".join(f"{ln:+g}" if mt == "spread" else f"{ln:g}" for ln, _ in sorted(lined))
+        return None, (f"no rung within {_BS_MAX_HOP_PTS:g} point of {want:+g}; venue has {have}" if mt == "spread"
+                      else f"no rung within {_BS_MAX_HOP_PTS:g} point of {want:g}; venue has {have}")
+    lined = near
     exact = [(ln, e) for ln, e in lined if abs(ln - want) < 0.01]
     fav = sorted([(ln, e) for ln, e in lined if (ln - want) * fav_dir > 0.01], key=lambda t: abs(t[0] - want))
     unf = sorted([(ln, e) for ln, e in lined if (ln - want) * fav_dir < -0.01], key=lambda t: abs(t[0] - want))
