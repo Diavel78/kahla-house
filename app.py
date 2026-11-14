@@ -21121,7 +21121,7 @@ def _gemini_rebook_tick(sb) -> None:
 _GEM_EVAC_LOCK = threading.Lock()
 
 
-def _gemini_evacuate_run(sb, client) -> dict:
+def _gemini_evacuate_run(sb, client, redo=None, cancel_ids=None) -> dict:
     """POLYMARKET ONLY (Nov 14 2026, Rob: "Go poly only. Right now. Resting bets on
     Gemini, cancel them. Put them on polymarket"). Every pending pre-game sheet bet
     resting on Gemini: verified cancel (`_kalshi_cancel_exec` — Gemini's own word
@@ -21167,8 +21167,9 @@ def _gemini_evacuate_run(sb, client) -> dict:
             continue
         parts = (r.get("event_name") or "").split(" @ ")
         away, home = (parts + ["", ""])[:2]
+        mt0 = "ml" if r.get("market_type") == "moneyline" else r.get("market_type")
         item = {"key": f"evac-{r['id']}", "sport": r.get("sport"), "away": away.strip(), "home": home.strip(),
-                "event_start": r.get("event_start"), "market_type": r.get("market_type"), "side": r.get("side"),
+                "event_start": r.get("event_start"), "market_type": mt0, "side": r.get("side"),
                 "line": r.get("entry_line"), "label": b.get("label") or r.get("event_name"), "venue": "poly"}
         bad = _bet_sheet_item_check(item)
         if bad:
@@ -21184,6 +21185,33 @@ def _gemini_evacuate_run(sb, client) -> dict:
             po = {"ok": False, "error": f"{type(e).__name__}: {e}"[:160]}
         res["placed"] = {k: po.get(k) for k in ("ok", "pick_id", "venue", "price_c", "error")}
         res["qty"] = qty
+    # REDO: bets the first pass cancelled and could not place, named by hand
+    # ({sport, away, home, event_start, market_type, side, line, label, contracts})
+    owner = next((r.get("asked_by") for r in rows if r.get("asked_by")), None)
+    for cid_ in (cancel_ids or []):                       # a pass result to undo (verified cancel)
+        try:
+            oc, _st = _bet_sheet_cancel_exec(sb, client, int(cid_))
+        except Exception as e:
+            oc = {"ok": False, "error": f"{type(e).__name__}: {e}"[:160]}
+        out["rows"].append({"cancel_id": cid_, "cancel": {k: oc.get(k) for k in ("ok", "deleted", "held", "error")}})
+    for it in (redo or []):
+        res = {"redo": it.get("label")}
+        out["rows"].append(res)
+        item = {"key": f"evac-redo-{it.get('label')}", "venue": "poly",
+                **{k: it.get(k) for k in ("sport", "away", "home", "event_start", "market_type", "side", "line", "label")}}
+        bad = _bet_sheet_item_check(item)
+        if bad:
+            res["err"] = bad
+            continue
+        qty = int(it.get("contracts") or 10)
+        crow = {"op": "create", "slug": None, "synthetic": False, "price_c": None, "contracts": qty,
+                "event_start": it.get("event_start"),
+                "payload": {"item": item, "asked_by": it.get("asked_by") or owner, "contracts": qty, "evacuated_from": "redo"}}
+        try:
+            po = _hand_order_execute(sb, client, crow, "evacuate")
+        except Exception as e:
+            po = {"ok": False, "error": f"{type(e).__name__}: {e}"[:160]}
+        res["placed"] = {k: po.get(k) for k in ("ok", "pick_id", "price_c", "error")}
     out["n"] = len(out["rows"])
     out["moved"] = sum(1 for x in out["rows"] if (x.get("placed") or {}).get("ok"))
     return out
@@ -21192,8 +21220,11 @@ def _gemini_evacuate_run(sb, client) -> dict:
 def _gemini_evacuate_tick(sb) -> None:
     """`machine_flags gemini_evacuate`=true → one evacuation pass on its own thread
     (flag cleared first; a pass takes ~3s a bet and must not hold the start watcher)."""
-    if not _machine_flag_val("gemini_evacuate", None):
+    fv = _machine_flag_val("gemini_evacuate", None)
+    if not fv:
         return
+    redo = fv.get("redo") if isinstance(fv, dict) else None
+    cancel_ids = fv.get("cancel_ids") if isinstance(fv, dict) else None
     if not _GEM_EVAC_LOCK.acquire(blocking=False):
         return
     try:
@@ -21207,7 +21238,7 @@ def _gemini_evacuate_tick(sb) -> None:
 
     def _run():
         try:
-            out = _gemini_evacuate_run(get_supabase(), get_client())
+            out = _gemini_evacuate_run(get_supabase(), get_client(), redo, cancel_ids)
         except Exception as e:
             out = {"kind": "gemini_evacuate", "gemini_evacuate": True, "err": f"{type(e).__name__}: {e}"[:200]}
         finally:
