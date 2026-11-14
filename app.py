@@ -17909,7 +17909,7 @@ def _b105_fair_now(sb, sport: str, b: dict, now, slates: dict) -> dict | None:
     st = _parse_iso(b.get("event_start") or "")
     started = bool(st and st <= now)
     mt = _B105_MT.get(str(b.get("market_type") or ""), str(b.get("market_type") or ""))
-    item = {"market_type": mt, "side": b.get("side"), "line": b.get("entry_line"),
+    item = {"market_type": mt, "side": b.get("side"), "line": b.get("line") if b.get("line") is not None else b.get("entry_line"),
             "away": b.get("_away"), "home": b.get("_home"), "event_start": b.get("event_start")}
     for live in ((True, False) if started else (False, True)):
         evs, age = _b105_events(sb, sport, now, live, slates)
