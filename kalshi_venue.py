@@ -2121,17 +2121,87 @@ def _gem_positions() -> dict | None:
     return out
 
 
+def _gem_no_answer(e: Exception) -> bool:
+    """A create whose ANSWER was lost (timeout, dropped connection) — the order may
+    be on the book. An HTTP error reply is an answer and never counts."""
+    n = type(e).__name__
+    return (isinstance(e, (_http.exceptions.Timeout, _http.exceptions.ConnectionError))
+            or n in ("ReadTimeout", "ConnectTimeout", "Timeout", "ConnectionError")
+            or "timed out" in str(e).lower())
+
+
+GEM_LANDED_TRIES, GEM_LANDED_GAP_S = 4, 1.5
+
+
+def _gem_find_landed(ticker: str, buy_yes: bool, our_c: int, count: int, cid: str | None) -> dict | None:
+    """After a create with no answer: the order on Gemini's active list for this
+    contract + side at our price (our client ticket first, when the row carries it),
+    else None. Reads the list a few times — the order can show a beat late."""
+    import gemini_pm as _g
+    oc = "yes" if buy_yes else "no"
+    for n in range(GEM_LANDED_TRIES):
+        if n:
+            time.sleep(GEM_LANDED_GAP_S)
+        try:
+            rows = _g.active_orders(symbol=ticker, limit=100) or []
+        except Exception:
+            continue
+        cand = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            rc = r.get("clientOrderId") or r.get("client_order_id")
+            if cid and rc and str(rc) == str(cid):
+                return r
+            if (r.get("symbol") or r.get("instrumentSymbol")) not in (None, ticker):
+                continue
+            if str(r.get("outcome") or r.get("eventOutcome") or "").lower() != oc:
+                continue
+            if str(r.get("side") or "buy").lower() != "buy":
+                continue
+            px = r.get("price") if r.get("price") is not None else r.get("limitPrice")
+            try:
+                if px is not None and abs(float(px) * 100.0 - our_c) > 0.5:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            if rc and cid and str(rc) != str(cid):
+                continue                     # a different ticket — not ours
+            cand.append(r)
+        if len(cand) == 1:
+            return cand[0]
+    return None
+
+
 def _gem_create(ticker: str, buy_yes: bool, price_c, count: int, tif: str, post_only: bool,
                 client_order_id: str | None) -> dict:
     import gemini_pm as _g
     import gemini_orders as _go
     our = max(1, min(99, int(round(float(price_c)))))
+    if not client_order_id:
+        # every create carries our own ticket, so an order whose answer never came back can be found by it
+        import uuid as _uuid
+        client_order_id = "kh-" + _uuid.uuid4().hex[:20]
+    recovered = False
     try:
         raw = _g.place_order(ticker, "buy", "yes" if buy_yes else "no", int(count), our / 100.0,
                              post_only=bool(post_only), tif=_GEM_TIF.get(tif, "good-til-cancel"),
                              client_order_id=client_order_id)
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:300], "status": 400, "venue": "GEMINI"}
+        err = f"{type(e).__name__}: {e}"[:300]
+        if _gem_no_answer(e):
+            # NO ANSWER IS NOT A NO (Nov 14 2026, SMU ML: Gemini took 20s+ to answer a
+            # create, the box called it failed and the bet went back to the slip — the
+            # order may have landed). Look for it before calling it failed; the caller's
+            # one-order-per-side guard means an order on this contract+side is ours.
+            found = _gem_find_landed(ticker, buy_yes, our, int(count), client_order_id)
+            if found is not None:
+                raw, recovered = found, True
+            else:
+                return {"ok": False, "error": err + " — and it is not on Gemini's book (checked)",
+                        "status": 504, "venue": "GEMINI", "no_answer": True}
+        else:
+            return {"ok": False, "error": err, "status": 400, "venue": "GEMINI"}
     p = _go.parse_order(raw if isinstance(raw, dict) else {})
     fc = float(p.get("filled") or 0.0)
     rc = p.get("leaves")
@@ -2139,6 +2209,8 @@ def _gem_create(ticker: str, buy_yes: bool, price_c, count: int, tif: str, post_
         rc = max(0.0, float(count) - fc) if tif == "good_till_canceled" else 0.0
     res = {"ok": True, "status": 201, "data": raw, "order": raw, "order_id": p.get("id"),
            "fill_count": fc, "remaining_count": float(rc), "venue": "GEMINI", "schema": "gemini"}
+    if recovered:
+        res["recovered"] = "found on Gemini after the create got no answer"
     res["order_status"] = ("resting" if rc > 0 and fc == 0 else "partial" if rc > 0 and fc > 0
                            else "filled" if fc > 0 else "none")
     return res
