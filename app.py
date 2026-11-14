@@ -28977,7 +28977,7 @@ def api_bet_sheets_mine():
     if _tot > 4000:
         # the phase clock, in the Vercel log, whenever a poll is slow — the
         # read that tells the next slow night which step it is
-        app.logger.warning("bet sheets mine slow %dms n=%d %s", _tot, len(out), _ms)
+        app.logger.warning("bet sheets mine slow %dms n=%d %s live=%s", _tot, len(out), _ms, dict(_BS_LIVE_T))
     try:
         _live_c = float(_machine_flag_val("hand_live_snipe_c", _HAND_LIVE_SNIPE_C))
     except (TypeError, ValueError):
@@ -29524,6 +29524,9 @@ def _bs_espn_events(sport: str, dk: str) -> list:
     return ev or []
 
 
+_BS_LIVE_T: dict = {}
+
+
 def _bet_sheet_live_enrich(out: list, now) -> None:
     """THE LIVE STRIP (Oct 8 2026, Rob: "the bets at the top should be live
     bets only, and start displaying the live odds… This ALL used to work on
@@ -29536,6 +29539,8 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
     ⚠ THE READS RUN IN PARALLEL (Nov 14 2026, Rob: "the website dashboard should
     be ALOT FUCKING FASTER"): one at a time they were 11-22s of every page load."""
     from concurrent.futures import ThreadPoolExecutor
+    t0 = _time.monotonic()
+    _BS_LIVE_T.clear()
     live = []
     for b in out:
         if b.get("status") != "pending":
@@ -29560,6 +29565,7 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
                 espn[k] = f.result(timeout=8) or []
             except Exception:
                 espn[k] = []
+        _BS_LIVE_T["espn"] = int((_time.monotonic() - t0) * 1000)
         client = None
         reads = k_reads = 0
         jobs = []
@@ -29618,10 +29624,13 @@ def _bet_sheet_live_enrich(out: list, now) -> None:
                 f.result(timeout=8)
             except Exception:
                 pass
+        _BS_LIVE_T["reads"] = int((_time.monotonic() - t0) * 1000)
+        _BS_LIVE_T["jobs"] = [j[1] for j in jobs]
         try:
             g_fut.result(timeout=8)
         except Exception:
             pass
+        _BS_LIVE_T["game"] = int((_time.monotonic() - t0) * 1000)
     finally:
         pool.shutdown(wait=False)
 
