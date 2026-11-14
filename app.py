@@ -5881,6 +5881,33 @@ def api_bet_sheets_picks():
                               and (not slug or slug in str((x.get("result") or {}).get("slug") or ""))][:60]
         out["scanned"] = len(st)
     sb = get_supabase()
+    rh_id = (request.args.get("reseat_hold") or "").strip()
+    if rh_id.isdigit():
+        # PUT A BET BACK ON THE BOOK (Nov 14 2026, Marshall +2.5: no order, a 0.28 dust
+        # lot): the pick gets the venue-reset sit-out, and the box's rejoin re-places the
+        # unfilled size at the touch (under the fair cap) on its next pass — the same
+        # path a venue wipe uses. Pre-game, Polymarket bets with no resting order only.
+        try:
+            pr = (sb.table("bot_picks").select("id,status,event_start,signal_blob").eq("id", int(rh_id))
+                  .limit(1).execute().data or [])
+            if not pr:
+                out["reseat_hold"] = {"ok": False, "why": "no such pick"}
+            else:
+                b = pr[0].get("signal_blob") or {}
+                ev = _aware_ts(pr[0].get("event_start"))
+                held = float(b.get("filled_qty") or 0.0)
+                qty = int(float(b.get("contracts") or 0) - held + 1e-9)
+                if pr[0].get("status") != "pending" or ev is None or ev <= datetime.now(timezone.utc):
+                    out["reseat_hold"] = {"ok": False, "why": "not a pending pre-game pick"}
+                elif b.get("order_id") or _kalshi_pick(b) or not b.get("pmm_slug") or qty < 1:
+                    out["reseat_hold"] = {"ok": False, "why": "has an order / not Polymarket / nothing unfilled"}
+                else:
+                    nb = {**b, "line_hold": {"at": datetime.now(timezone.utc).isoformat(), "why": "venue_reset",
+                                             "qty": qty, "from_c": b.get("price_c"), "by": "reseat_hold"}}
+                    sb.table("bot_picks").update({"signal_blob": nb}).eq("id", int(rh_id)).execute()
+                    out["reseat_hold"] = {"ok": True, "qty": qty, "from_c": b.get("price_c")}
+        except Exception as e:
+            out["reseat_hold"] = {"ok": False, "why": str(e)[:160]}
     rs_id = (request.args.get("reseat") or "").strip()
     if rs_id:
         # RE-SEAT A BET THROUGH THE BOX (Oct 18 2026, the ARI +13.5 Rob wanted
