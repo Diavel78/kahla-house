@@ -2634,6 +2634,10 @@ def api_football_picks():
     sb = get_supabase()
     if not sb:
         return jsonify({"ok": False, "error": "database unavailable"}), 503
+    # where the time goes, phase by phase (Nov 14 2026, Rob: "so slow to open college football")
+    _t0 = _time.time(); _ms = {}
+    def _lap(k):
+        _ms[k] = int((_time.time() - _t0) * 1000)
     try:
         wk_rows = (sb.table("football_sheet_weeks").select("*")
                    .eq("sport", sport).order("week_key", desc=True)
@@ -2680,6 +2684,7 @@ def api_football_picks():
         return (f"{base}/storage/v1/object/public/football-sheets/{path}"
                 if path else None)
 
+    _lap("rows")
     games, lines_updated_at, built_at = [], None, None
     _pin_evs = _pin_sheet_slate(sb, sport, datetime.now(timezone.utc), {})[0] if rows else None
     _now0 = datetime.now(timezone.utc)
@@ -2700,14 +2705,19 @@ def api_football_picks():
         b = r.get("data_built_at")
         if b and (built_at is None or b < built_at):
             built_at = b
+    _lap("shape")
     _sheet_retime(sb, games, sport)           # a MOVED game shows its new start (Nov 14 2026, the FAA hold)
     _sheet_attach_tv(sport, games)
+    _lap("retime_tv")
     _sheet_attach_venue(sb, sport, games)    # the box's Poly/Kalshi bids per pick, one DB read (Oct 26 2026)
+    _lap("venue")
     _sheet_attach_steam(sb, sport, games)    # the books' move since the open (Nov 1 2026)
+    _lap("steam")
     _now = datetime.now(timezone.utc)
     for g in games:
         _sheet_attach_price(sport, g, _now)     # THE PRICE RULE: venue bid vs Pinnacle fair decides (Oct 27 2026)
     _sheet_attach_move(sb, sport, games, _now)  # THE MOVE RULE: Pinnacle's first move picks the side (Nov 1 2026)
+    _lap("move")
     _sheet_attach_fire(sport, games, _now)      # 🔥 = the first move is the button, 💨 agrees or not (Nov 1 2026)
     week_games = list(games)
     if old_rows:
@@ -2724,9 +2734,11 @@ def api_football_picks():
         except Exception as e:
             app.logger.warning("week record %s: %s", sport, e)
     _play_c, _lean_c = _price_thresholds()
+    _lap("total")
+    app.logger.warning("pick-sheets %s %d games ms=%s", sport, len(games), _ms)
     return jsonify({
         "ok": True, "sport": sport, "week_key": wk.get("week_key"),
-        "games": games,
+        "games": games, "ms": _ms,
         "week_record": _sheet_week_record(week_games),
         "price_rule": {"play_c": _play_c, "lean_c": _lean_c},
         "move_rule": {"on": _move_rule_on(), "play_c": _MOVE_PLAY_C, "lean_c": _MOVE_LEAN_C,
@@ -2948,6 +2960,12 @@ def api_football_picks_debug():
     if not sb:
         out["error"] = "get_supabase() returned None"
         return jsonify(out)
+    if request.args.get("timing"):
+        sp = (request.args.get("sport") or "NCAAF").upper()
+        t = _time.time()
+        d = _mcp_view(api_football_picks, "/api/pick-sheets?sport=" + sp)
+        return jsonify({"ok": True, "sport": sp, "wall_ms": int((_time.time() - t) * 1000), "ms": d.get("ms"),
+                        "games": len(d.get("games") or []), "bytes": len(json.dumps(d, default=str))})
     if request.args.get("price"):
         # THE PRICE RULE, READ FROM A SANDBOX (Oct 27 2026): the sheet API is
         # Firebase-gated, so this runs its pipeline for one sport and returns
