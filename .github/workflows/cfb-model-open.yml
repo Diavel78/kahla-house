@@ -1,0 +1,34 @@
+name: College football: model vs the opener
+
+# Rob, Nov 15 2026: "Go… as it stands, we aren't betting" — does the model vs the opener call the move?
+# ESPN schedules + DK open/close lines, walk-forward ratings, seasons back.
+# Read-only: no secrets, no DB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "seasons (the year the season starts)"
+        required: false
+        default: "2023,2024,2025,2026"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - uses: actions/cache@v4
+        with:
+          path: kahla-scanner/.cfb_cache
+          key: cfb-cache-v1-${{ github.run_id }}
+          restore-keys: cfb-cache-v1-
+      - name: Model vs opener
+        run: python -m scripts.cfb_model_open --seasons "${{ inputs.seasons }}" --cache .cfb_cache
