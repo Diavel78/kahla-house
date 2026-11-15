@@ -456,7 +456,8 @@
         const sub = [];
         if (!m.have) sub.push(_lines.length ? 'no Pinnacle line' : 'loading Pinnacle…');
         const lb = bets.find(b => b.game && b.game.away != null);
-        const right = st ? '<span class="tag live">LIVE</span>' + (lb ? ' <span class="score">' + lb.game.away + '–' + lb.game.home + '</span>' : '') : whenTxt(g.event_start);
+        const right = st ? '<span class="tag live">LIVE</span>' + (lb ? ' <span class="score">' + lb.game.away + '–' + lb.game.home + '</span>'
+            + (lb.game.status ? '<br><span style="font-size:12px;color:var(--text2)">' + esc(lb.game.status) + '</span>' : '') : '') : whenTxt(g.event_start);
         let h = '<div class="gc' + (bets.length ? ' hasbet' : '') + '"><div class="gh"><span class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home))
               + (g.tv && g.tv.length ? '<span class="tv">' + esc(g.tv[0]) + '</span>' : '') + '</span><span class="gs">' + right + '</span></div>';
         h += '<div class="gsub">' + (bets.length ? '<span class="tag grn">✓ ' + bets.length + ' BET' + (bets.length > 1 ? 'S' : '') + ' ON THIS GAME</span>' : '<span class="tag gry">NO BET YET</span>')
@@ -538,7 +539,7 @@
             const g = list.map(b => b.game).find(x => x && x.away != null);
             let tag = clock(b0.event_start);
             if (f) tag = 'FINAL ' + f.away + '-' + f.home;
-            else if (list.some(isLive)) tag = 'LIVE' + (g ? ' ' + g.away + '-' + g.home : '');
+            else if (list.some(isLive)) tag = 'LIVE' + (g ? ' ' + g.away + '-' + g.home + (g.status ? ' · ' + g.status : '') : '');
             out.push(t[0] + ' @ ' + t[1] + ' · ' + tag);
             list.forEach(b => {
                 const r = RES[b.status]; if (r) rec[r[0]]++;
