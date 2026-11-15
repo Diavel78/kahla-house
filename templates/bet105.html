@@ -610,20 +610,19 @@
         try { const c = JSON.parse(localStorage.getItem('b105_games_' + sp) || 'null'); return c && c.games ? c.games : []; } catch (e) { return []; }
     }
     function fireItems() {
+        // ANY bet on the game takes it off the tab (Rob, Nov 15 2026: "only non-bet games… a quick
+        // cue of, hey, you should be betting this stuff")
         const now = Date.now(), soon = now + 3600e3, out = [], bet = {};
-        allMine().forEach(b => {
-            const mt = b.market_type === 'moneyline' ? 'ml' : b.market_type;
-            bet[b.event_name + '|' + mt] = 1;
-            if (mt === 'spread' && (b.sport || '').toUpperCase() === 'NHL') bet[b.event_name + '|ml'] = 1;   // the puck line is the ML's 🔥
-        });
+        allMine().forEach(b => { bet[b.event_name] = 1; });
         FIRE_SPORTS.forEach(sp => fireCache(sp).forEach(g => {
             const t = g.event_start ? Date.parse(g.event_start) : 0;
             if (!t || t <= now || (g.grade && g.grade.final)) return;
             const en = g.away + ' @ ' + g.home, mv = g.move || {};
+            if (bet[en] || bet[g.event_name] || Object.values(mv).some(x => x && (x.bet_lock || x.bet_before_fire))) return;
             ['spread', 'total', 'ml'].forEach(k => {
-                const x = mv[k]; if (!x || bet[en + '|' + k]) return;
+                const x = mv[k]; if (!x) return;
                 if ((x.state === 'play' || x.state === 'lean') && x.dir) {
-                    if (!x.bet_lock) out.push({ sp, g, k, x, t, fired: true });
+                    out.push({ sp, g, k, x, t, fired: true });
                 } else if (x.state === 'watching') {
                     let e = null;
                     (x.zones || []).forEach(z => { if (z.to_ms > now && z.to_ms <= soon && (e == null || z.to_ms < e)) e = z.to_ms; });
