@@ -36570,12 +36570,27 @@ _ZONES = (
 #  · NFL spread, fade the whole move: Polymarket Sep 14 – Oct 6 followers 13-23, Pinnacle
 #    Oct 29 → 2-11 (≥2¢ open → T-1h); 34-15 faded across the two.
 _STANDING_ZONES = (
+    # COLLEGE, every game (Nov 15 2026, Rob: "We are going to bet college football, every game…
+    # Based on this season… I want fire"). 2026 only, ESPN/DK open → close, graded at the close:
+    #  · NIGHT (6:30 PM ET+): follow the money — moved 1+ 162-107 (+15%), 2+ 105-63, winning 8 of
+    #    11 weeks; our Pinnacle tape since Oct 29 agrees (24-15). It LOST in 2024 and 2025 — this
+    #    season's market, re-checked weekly.
+    #  · DAY: fade the money — since mid-October (week 7) 77-50; a coin flip before that, so LEAN.
+    #  · nobody moved it (under 1 point): the favorite — 101-76.
+    #  · a 10+ dog the money went to (2026 39-25 at 2+) and weeknight money (34-14) stay; the
+    #    home-dog spot is gone (day games since week 7: 9-11).
+    ("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 2.5, 5.1, 15.1,
+     "night game: follow the money", {"slot": "night"}),
+    ("NCAAF", "spread", ("o", 0), ("s", -0.5), "fade", 2.5, 99.0, 6.0,
+     "day game: fade the money", {"slot": "day"}),
+    ("NCAAF", "spread", ("o", 0), ("s", -0.5), "quiet", 2.5, 99.0, 5.0,
+     "nobody moved it: the favorite"),
     ("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 5.1, 7.7, 11.0,
-     "money on a 10+ dog, open → close", {"dog": 10}),
-    ("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 2.5, 5.1, 7.0,
-     "money on a home dog, open → close", {"home_dog": True}),
+     "money on a 10+ dog", {"dog": 10}),
     ("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 5.1, 7.7, 15.0,
-     "weeknight money, open → close", {"dow": ["Tue", "Wed", "Thu", "Fri"]}),
+     "weeknight money", {"dow": ["Tue", "Wed", "Thu", "Fri"]}),
+    # NFL spread, fade the whole move: Polymarket Sep 14 – Oct 6 followers 13-23, Pinnacle
+    # Oct 29 → 2-11 (≥2¢ open → T-1h); 34-15 faded across the two.
     ("NFL", "spread", ("o", 0), ("s", -1), "fade", 2.0, 3.0, 35.0, "the whole move since the open"),
 )
 _ZONE_LOG: dict = {}
@@ -36587,6 +36602,14 @@ def _zone_filter_ok(flt: dict, d: int, home_line, start_ms: int, static: bool = 
     is known before the move (the weekday; a game that can't become the dog it needs)."""
     if not flt:
         return True
+    if flt.get("slot"):
+        try:
+            k = datetime.fromtimestamp(start_ms / 1000, ZoneInfo("America/New_York"))
+        except (OverflowError, OSError, ValueError):
+            return False
+        night = k.hour + k.minute / 60.0 >= 18.5
+        if (flt["slot"] == "night") != night:
+            return False
     if flt.get("dow"):
         try:
             wd = datetime.fromtimestamp(start_ms / 1000, ZoneInfo("America/New_York")).strftime("%a")
@@ -36668,6 +36691,20 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
         if not a or not b:
             continue
         mv = (b[1] - a[1]) * slope
+        if kind == "quiet":
+            # nobody moved it: the favorite at the window's end (a pick'em names no one)
+            try:
+                hl = float(b[2])
+            except (TypeError, ValueError):
+                continue
+            if abs(mv) >= float(min_c) or abs(hl) < 1e-9 or not _zone_filter_ok(flt, 0, hl, start_ms, static=True):
+                continue
+            d = 1 if hl < 0 else -1
+            fired.append({"state": "lean", "dir": d, "cents": round(abs(mv), 1), "moved_dir": 0,
+                          "faded_dir": None, "zone": label, "kind": kind, "strength": float(roi),
+                          "decided_ms": int(tb), "at_h": round((tb - o) / H, 1), "open_ms": o,
+                          "books": {"pin": round(abs(mv), 1)}, "agree": ["pin"], "zone_rule": True})
+            continue
         if abs(mv) < float(min_c):
             continue
         moved = 1 if mv > 0 else -1

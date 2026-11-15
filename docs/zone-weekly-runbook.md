@@ -40,3 +40,7 @@ Never place, cancel or change a bet. Never touch any flag but `zones`.
 The `_STANDING_ZONES` in app.py (college follow-the-money spots, the NFL spread fade) are NOT
 in `zones` and the weekly flag never replaces them — leave them alone; report in the review
 how each fired and graded this week.
+The college night-follow / day-fade zones are THIS season's regime: dispatch
+`cfb-dump.yml`, parse the log (`DUMP-BEGIN`…`DUMP-END`, gzip+base64), and report the last
+4 weeks' night-follow and day-fade records at the close. If either has turned (losing 4
+weeks running), tell Rob — don't change it yourself.

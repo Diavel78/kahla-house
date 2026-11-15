@@ -9253,6 +9253,18 @@ def test_zone_rule() -> None:
     sat = _app._zone_filter_ok({"dow": ["Tue", "Wed", "Thu", "Fri"]}, 1, -3.0,
                                int(_dt.datetime(2026, 11, 14, 20, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000))
     check("standing zone: weeknight = the game's Eastern weekday (Thu 8pm ET yes, Sat no)", wk and not sat)
+    # night / day / quiet (Nov 15 2026): a Saturday 7:30 PM ET game follows, a noon game fades
+    nst = int(_dt.datetime(2026, 11, 22, 0, 30, tzinfo=_dt.timezone.utc).timestamp() * 1000)
+    dst = int(_dt.datetime(2026, 11, 21, 17, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000)
+    NZ = [z for z in _app._STANDING_ZONES if z[0] == "NCAAF" and (len(z) < 10 or "slot" in z[9])]
+    def _pts(st, a, b):
+        return [(st - int(100 * H), a, -a), (st - int(10 * H), b, -b)]
+    rd = _app._zone_read("NCAAF", "spread", _pts(nst, 3.0, 4.5), 2.6, nst, nst - int(0.4 * H), zones=NZ)
+    check("college night: follow the money", rd["state"] in ("play", "lean") and rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
+    rd = _app._zone_read("NCAAF", "spread", _pts(dst, 3.0, 4.5), 2.6, dst, dst - int(0.4 * H), zones=NZ)
+    check("college day: fade the money (lean)", rd["state"] == "lean" and rd["dir"] == -1 and rd["kind"] == "fade", str(rd))
+    rd = _app._zone_read("NCAAF", "spread", _pts(dst, 7.0, 7.2), 2.6, dst, dst - int(0.4 * H), zones=NZ)
+    check("college: nobody moved it → the favorite", rd["state"] == "lean" and rd["dir"] == 1 and rd["kind"] == "quiet", str(rd))
     check("standing zones ride beside the weekly review's list",
           any(len(z) > 9 for z in _app._STANDING_ZONES) and "standing_zones" in open(_app.__file__).read())
 
