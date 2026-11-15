@@ -290,6 +290,43 @@ def main():
     line("  ...favorite the line moved toward 1+", [r for r in mv if r["move"] <= -1 and r["fav"]], seasons)
     line("team the line moved toward 1+, at the OPEN line", [r for r in mv if r["move"] <= -1], seasons, key="ats_open")
     line("no move (open = close)", [r for r in mv if abs(r["move"]) < 0.25], seasons)
+    # FOLLOW THE MONEY, BY SITUATION (Rob, Nov 15 2026: "I'm trying to follow the money"):
+    # the team the line moved toward, split by its spot — graded at the CLOSE (bettable
+    # after the move) and at the OPEN (what getting there first was worth)
+    print("\n-- FOLLOW THE MONEY: the team the line moved toward, by spot --")
+    for th in (1.0, 2.0):
+        mm = [r for r in mv if r["move"] <= -th]
+        spots = [
+            ("all", lambda r: True),
+            ("home", hm), ("road", aw), ("neutral", lambda r: r["side"] == "neutral"),
+            ("home favorite", lambda r: hm(r) and r["fav"]), ("home dog", lambda r: hm(r) and not r["fav"]),
+            ("road favorite", lambda r: aw(r) and r["fav"]), ("road dog", lambda r: aw(r) and not r["fav"]),
+            ("off a bye", bye), ("opponent off a bye", lambda r: r["orest"] is not None and r["orest"] >= 13),
+            ("2nd straight road game", lambda r: aw(r) and r["prev_road"] is True),
+            ("noon start", lambda r: r["slot"] == "noon"), ("afternoon start", lambda r: r["slot"] == "afternoon"),
+            ("night start", lambda r: r["slot"] == "night"), ("weeknight", lambda r: r["day"] in ("Tue", "Wed", "Thu", "Fri")),
+            ("conference game", lambda r: r["conf"]), ("non-conference", lambda r: not r["conf"]),
+            ("dog +10 or more", lambda r: r["line"] >= 10), ("fav -10 or more", lambda r: r["line"] <= -10),
+            ("within a TD (|line| ≤ 7)", lambda r: abs(r["line"]) <= 7),
+            ("crossed a key number (3 or 7)", lambda r: any(min(abs(r["line"]), abs(r["line"] - r["move"])) < k
+                                                            < max(abs(r["line"]), abs(r["line"] - r["move"])) for k in (3, 7))),
+        ]
+        print(f"   moved toward {th:g}+ pts      (at the CLOSE)                                (at the OPEN)")
+        for nm, f in spots:
+            sel = [r for r in mm if f(r)]
+            c, o = rec(sel), rec(sel, "ats_open")
+            by = " ".join(f"{s}:" + (lambda q: f"{q['w']}-{q['l']}" if q else "—")(rec([r for r in sel if r["season"] == s]))
+                          for s in seasons)
+            flag = " ◀" if c and abs(c["z"]) >= 2 else ""
+            print(f"    {nm:30s} close {fmt(c):36s} | open {fmt(o):36s} [{by}]{flag}")
+    # the total: the side the total moved toward, by spot
+    print("\n-- FOLLOW THE MONEY on totals: the side the total moved toward (1.5+), at the close --")
+    tm = [r for r in rows if r.get("ou") is not None and abs(r.get("tmove") or 0) >= 1.5]
+    for nm, f in (("all", lambda r: True), ("noon", lambda r: r["slot"] == "noon"),
+                  ("afternoon", lambda r: r["slot"] == "afternoon"), ("night", lambda r: r["slot"] == "night"),
+                  ("conference", lambda r: r["conf"]), ("non-conference", lambda r: not r["conf"])):
+        sel = [dict(r, fol=(r["ou"] * (1 if r["tmove"] > 0 else -1))) for r in tm if f(r)]
+        line(f"total moved, follow it — {nm}", sel, seasons, key="fol", pkey="_")
     print("\n-- spread size (by the team's own line) --")
     for lo, hi, nm in ((-99, -21, "fav -21 or more"), (-21, -10, "fav -10.5 to -20.5"), (-10, -3, "fav -3.5 to -10"),
                        (-3, 0, "fav -0.5 to -3"), (0, 3.01, "dog +0.5 to +3"), (3.01, 10.01, "dog +3.5 to +10"),
