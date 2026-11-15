@@ -18191,17 +18191,29 @@ def _b105_mine(sb, uid: str, now, poly: bool = False, budget=(7, 5)) -> list:
         _B105_LAST["lookup_ms"] = int((_time.time() - _t0) * 1000)
         _b105_client(poly_ctx)
         _B105_LAST["client_ms"] = int((_time.time() - _t0) * 1000)
-        ex = _cf.ThreadPoolExecutor(max_workers=min(10, len(live)))
-        futs = {ex.submit(_b105_poly_now, b, b["_away"], b["_home"], poly_ctx): b["id"] for b in live}
-        try:
-            for fu in _cf.as_completed(futs, timeout=budget[1]):
-                try:
-                    pxs[futs[fu]] = fu.result()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        ex.shutdown(wait=False)
+        evs = {}
+        for b in live:
+            hit = _B105_PMM_CACHE.get((b["sport"], b["_away"], b["_home"]))
+            es = (hit[1] or {}).get("event_slug") if hit else None
+            if es:
+                evs[es] = True
+        mids: dict = {}
+        if evs:
+            ex = _cf.ThreadPoolExecutor(max_workers=min(10, len(evs)))
+            futs = {ex.submit(_b105_event_mids, sb, poly_ctx.get("client"), es): es for es in evs}
+            try:
+                for fu in _cf.as_completed(futs, timeout=budget[1]):
+                    try:
+                        mids[futs[fu]] = fu.result()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            ex.shutdown(wait=False)
+        poly_ctx["mids"] = mids
+        _B105_LAST["events"] = len(evs)
+        for b in live:
+            pxs[b["id"]] = _b105_poly_now(b, b["_away"], b["_home"], poly_ctx)
         _B105_LAST.update(book_ms=int((_time.time() - _t0) * 1000), priced=sum(1 for v in pxs.values() if v))
     # the fast feed (poly=False) values every open bet off Pinnacle; the live call (poly=True)
     # prices only the bets in play, Polymarket first
@@ -18254,8 +18266,71 @@ def _b105_pmm_key(sport, away, home) -> str:
 
 
 def _b105_pmm_compact(pm: dict) -> dict:
-    return {mt: [{k: e.get(k) for k in ("side", "line", "slug", "synthetic")} for e in (pm.get(mt) or []) if e.get("slug")]
-            for mt in ("ml", "spread", "total")}
+    out = {mt: [{k: e.get(k) for k in ("side", "line", "slug", "synthetic")} for e in (pm.get(mt) or []) if e.get("slug")]
+           for mt in ("ml", "spread", "total")}
+    out["event_slug"] = pm.get("event_slug")
+    return out
+
+
+# ONE PRICE READ PER GAME (Nov 14 2026 — a book read per bet tripped Polymarket's rate limit
+# on the website and the 20s breaker then blanked every live value): markets.list for the
+# game's event returns every market's best bid/ask in one call; the mids are shared 20s
+# across containers through lookup_cache.
+_B105_Q_MEM: dict = {}               # event_slug -> (ts, {market slug: yes mid 0-1})
+_B105_Q_S = 20
+
+
+def _b105_event_mids(sb, client, event_slug: str) -> dict | None:
+    if not event_slug:
+        return None
+    hit = _B105_Q_MEM.get(event_slug)
+    if hit and _time.time() - hit[0] < _B105_Q_S:
+        return hit[1]
+    key = "b105q|" + event_slug
+    stale = None
+    try:
+        r = (sb.table("lookup_cache").select("fetched_at,payload").eq("key", key).limit(1).execute().data or [None])[0]
+        at = _parse_iso((r or {}).get("fetched_at") or "")
+        if r and at and isinstance(r.get("payload"), dict):
+            age = (datetime.now(timezone.utc) - at).total_seconds()
+            if age < _B105_Q_S:
+                _B105_Q_MEM[event_slug] = (_time.time() - age, r["payload"])
+                return r["payload"]
+            if age < 180:
+                stale = r["payload"]
+    except Exception:
+        pass
+    if client is None or _venue_rl_active():
+        return stale
+    try:
+        import pmm_markets
+        core = event_slug.split("-", 1)[-1]
+        mids: dict = {}
+        for pg in range(3):
+            resp = client.markets.list({"eventSlug": [event_slug], "closed": False, "limit": 100, "offset": pg * 100})
+            ms = (resp.get("markets") if isinstance(resp, dict) else getattr(resp, "markets", None)) or []
+            n0 = len(mids)
+            for m in ms:
+                sl = m.get("slug") if isinstance(m, dict) else None
+                if not sl or core not in sl:
+                    continue
+                q = pmm_markets._get_market_quote(m)
+                if q and q.get("bid") is not None and q.get("ask") is not None:
+                    mids[sl] = round((float(q["bid"]) + float(q["ask"])) / 2.0, 4)
+            if len(ms) < 100 or len(mids) == n0:
+                break
+    except Exception as e:
+        _venue_rl_trip(e)
+        return stale
+    if not mids:
+        return stale
+    _B105_Q_MEM[event_slug] = (_time.time(), mids)
+    try:
+        sb.table("lookup_cache").upsert({"key": key, "sport": "ANY", "fetched_at": datetime.now(timezone.utc).isoformat(),
+                                         "payload": mids}).execute()
+    except Exception:
+        pass
+    return mids
 
 
 def _b105_pmm_db_load(sb, keys: list) -> None:
@@ -18270,7 +18345,8 @@ def _b105_pmm_db_load(sb, keys: list) -> None:
     now = datetime.now(timezone.utc)
     for r in rows:
         at = _parse_iso(r.get("fetched_at") or "")
-        if at and (now - at).total_seconds() < _B105_PMM_DB_S and isinstance(r.get("payload"), dict):
+        if (at and (now - at).total_seconds() < _B105_PMM_DB_S and isinstance(r.get("payload"), dict)
+                and r["payload"].get("event_slug")):
             _B105_PMM_CACHE[want[r["key"]]] = (_time.time(), r["payload"])
 
 
@@ -18352,8 +18428,7 @@ def _b105_poly_now(b: dict, away: str, home: str, ctx: dict) -> dict | None:
         import pmm_markets
         hit = _B105_PMM_CACHE.get((b.get("sport"), away, home))
         pmm = hit[1] if hit else None
-        client = _b105_client(ctx)
-        if not pmm or client is None:
+        if not pmm:
             return None
         line = b.get("line")
         want = _b105_poly_rung(mt, b.get("side"), line)
@@ -18367,10 +18442,9 @@ def _b105_poly_now(b: dict, away: str, home: str, ctx: dict) -> dict | None:
         el = e.get("line")
         if mt != "ml" and want is not None and el is not None and abs(float(el) - float(want)) > 1.0:
             return None
-        p = _live_book_mid(client, e.get("slug"), bool(e.get("synthetic"))) if e.get("slug") else None
-        if p is None:
-            q = (e.get("quote") or {}).get("mid")
-            p = float(q) if isinstance(q, (int, float)) else None
+        mids = ctx.get("mids", {}).get(pmm.get("event_slug")) or {}
+        y = mids.get(e.get("slug"))
+        p = (1.0 - float(y) if e.get("synthetic") else float(y)) if y is not None else None
         if p is None or not (0.0 < p < 1.0):
             return None
         return {"prob": round(p, 4), "line": el}
