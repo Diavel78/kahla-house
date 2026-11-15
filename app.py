@@ -18171,8 +18171,12 @@ def _b105_mine(sb, uid: str, now) -> list:
         games: dict = {}
         for b in live:
             games.setdefault((b["sport"], b["_away"], b["_home"]), b)
+        poly_ctx["sb"] = sb
+        _b105_pmm_db_load(sb, list(games))
+        hit_ = {k for k in games if (_B105_PMM_CACHE.get(k) or (0,))[0] > _time.time() - _B105_PMM_DB_S}
+        games = {k: v for k, v in games.items() if k not in hit_}
         # never `with`: its exit waits on every thread, the timeouts would mean nothing
-        ex = _cf.ThreadPoolExecutor(max_workers=min(10, len(games)))
+        ex = _cf.ThreadPoolExecutor(max_workers=max(1, min(10, len(games))))
         futs = {ex.submit(_b105_pmm_lookup, k[0], k[1], k[2], b.get("event_start"), poly_ctx): k for k, b in games.items()}
         try:
             for fu in _cf.as_completed(futs, timeout=7):
@@ -18227,6 +18231,38 @@ def _b105_client(ctx: dict):
     return ctx.get("client")
 
 
+# THE GAME'S POLYMARKET MARKETS ARE SAVED (Nov 14 2026 — the event lookup takes seconds a
+# game, a cold container ran out of time on half the live slate and those bets read "no
+# live price"): the slug list per game goes to lookup_cache for 30 min, so every later read
+# — any container — is one DB read plus one book read per bet.
+_B105_PMM_DB_S = 1800
+
+
+def _b105_pmm_key(sport, away, home) -> str:
+    return "b105pmm|" + "|".join(str(x or "") for x in (sport, away, home))
+
+
+def _b105_pmm_compact(pm: dict) -> dict:
+    return {mt: [{k: e.get(k) for k in ("side", "line", "slug", "synthetic")} for e in (pm.get(mt) or []) if e.get("slug")]
+            for mt in ("ml", "spread", "total")}
+
+
+def _b105_pmm_db_load(sb, keys: list) -> None:
+    """Fill the memory cache from the saved slug lists (one read for every game)."""
+    want = {_b105_pmm_key(*k): k for k in keys if k not in _B105_PMM_CACHE}
+    if not want or sb is None:
+        return
+    try:
+        rows = (sb.table("lookup_cache").select("key,fetched_at,payload").in_("key", list(want)).execute().data) or []
+    except Exception:
+        return
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        at = _parse_iso(r.get("fetched_at") or "")
+        if at and (now - at).total_seconds() < _B105_PMM_DB_S and isinstance(r.get("payload"), dict):
+            _B105_PMM_CACHE[want[r["key"]]] = (_time.time(), r["payload"])
+
+
 def _b105_pmm_lookup(sport, away, home, event_start, ctx: dict):
     key = (sport, away, home)
     hit = _B105_PMM_CACHE.get(key)
@@ -18241,7 +18277,17 @@ def _b105_pmm_lookup(sport, away, home, event_start, ctx: dict):
     except Exception:
         pm = None
     if pm:
-        _B105_PMM_CACHE[key] = (_time.time(), pm)
+        comp = _b105_pmm_compact(pm)
+        _B105_PMM_CACHE[key] = (_time.time(), comp)
+        try:
+            sb = ctx.get("sb")
+            if sb is not None and any(comp.values()):
+                sb.table("lookup_cache").upsert({"key": _b105_pmm_key(sport, away, home), "sport": str(sport or "ANY"),
+                                                 "fetched_at": datetime.now(timezone.utc).isoformat(),
+                                                 "payload": comp}).execute()
+        except Exception:
+            pass
+        return comp
     return pm
 
 
