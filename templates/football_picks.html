@@ -798,7 +798,7 @@
         const lab = { ml: 'ML', spread: _sport === 'MLB' ? 'Run line' : 'Spread', total: 'Total' };
         const side = (k, d) => k === 'total' ? (d > 0 ? 'Over' : 'Under') : shortTeam(d > 0 ? g.home : g.away);
         const parts = [];
-        let waiting = false, old = 0, n = 0, expMs = null;
+        let waiting = false, old = 0, n = 0, expMs = {};
         for (const k of ['spread', 'total', 'ml']) {
             const x = m[k]; if (!x) continue;
             n++;
@@ -813,7 +813,7 @@
                         + ' <span class="mvq">(' + esc(x.zone || '') + (x.cents != null ? ', Pin ' + x.cents + '¢' : '') + (tw ? ', ' + tw : '') + ')</span>');
                 } else if (x.state === 'watching' && (x.zones || []).length && (!g._st || g._st === 'up')) {
                     // Rob, Nov 15 2026: "Don't need all the words, just 🔥 expected at (show the time)"
-                    for (const z of x.zones) if (z.to_ms > Date.now() && (expMs == null || z.to_ms < expMs)) expMs = z.to_ms;
+                    for (const z of x.zones) if (z.to_ms > Date.now() && (expMs[k] == null || z.to_ms < expMs[k])) expMs[k] = z.to_ms;
                 }
                 continue;
             }
@@ -845,7 +845,11 @@
                 waiting = true;
             } else if (x.state === 'old_open') old++;
         }
-        if (expMs != null) parts.push('<span class="mvq">🔥 expected at ' + new Date(expMs).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' }) + '</span>');
+        {   // one time per market, soonest first (Rob, Nov 15 2026: the total's 11:30 AM read as the game's)
+            const ks = Object.keys(expMs).sort((a, b) => expMs[a] - expMs[b]);
+            const tt = ms => new Date(ms).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' });
+            if (ks.length) parts.push('<span class="mvq">🔥 expected: ' + ks.map(k => lab[k] + ' ' + tt(expMs[k])).join(' · ') + '</span>');
+        }
         if (!parts.length) {
             if (g._st && g._st !== 'up') return '';      // a started / final game waits on nothing
             if (waiting) return '<span class="mvl mvw">🔥 waiting on the books\' open</span>';
