@@ -1,0 +1,33 @@
+name: "NFL — data dump"
+
+# Nov 15 2026: every college game (schedule, open/close, final, model) as an artifact for
+# offline research. Read-only: no secrets, no DB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "seasons"
+        required: false
+        default: "2024,2025,2026"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - uses: actions/cache@v4
+        with:
+          path: kahla-scanner/.nfl_cache
+          key: nfl-cache-v1-${{ github.run_id }}
+          restore-keys: nfl-cache-v1-
+      - name: Dump
+        run: python -m scripts.nfl_dump --seasons "${{ inputs.seasons }}" --cache .nfl_cache
