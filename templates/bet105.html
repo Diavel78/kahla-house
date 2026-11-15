@@ -616,7 +616,7 @@
     // replace it. Tap a game → its sport tab, scrolled to the card.
     const FIRE_SPORTS = ['NCAAF', 'NFL', 'NHL', 'NBA', 'MLB'];
     const FIRE_NM = { NCAAF: 'College', NFL: 'NFL', NHL: 'NHL', NBA: 'NBA', MLB: 'MLB' };
-    let _fireList = [], _fireBusy = false, _fire = {}, _fireLoading = false, _fireAt = 0, _fireN = null, _scrollTo = null;
+    let _fireList = [], _fireBusy = false, _fireLines = {}, _fireLinesAt = 0, _fire = {}, _fireLoading = false, _fireAt = 0, _fireN = null, _scrollTo = null;
     function fireCache(sp) {
         if (_fire[sp]) return _fire[sp];
         try { const c = JSON.parse(localStorage.getItem('b105_games_' + sp) || 'null'); return c && c.games ? c.games : []; } catch (e) { return []; }
@@ -666,6 +666,21 @@
         }));
         _fireLoading = false; _fireAt = Date.now();
         if (_sport === 'FIRE') render();
+        loadFireLines();
+    }
+    // THE 🔥 TAB PRICES OFF PINNACLE NOW, NOT THE SHEET (Rob, Nov 15 2026: Celtics −13.5 read
+    // −102 / −110 off the sheet's last build while Bet105 had +100 / −113): the same live read
+    // the sport tabs use, for the games on the tab, every minute
+    async function loadFireLines() {
+        const by = {};
+        fireItems().filter(it => it.fired).forEach(it => { (by[it.sp] = by[it.sp] || {})[it.g.event_name] = it.g; });
+        await Promise.all(Object.keys(by).map(async sp => {
+            const gs = Object.values(by[sp]);
+            const x = await postJSON('/api/bet105/lines', { sport: sp, games: gs.map(g => ({ away: g.away, home: g.home, event_start: g.event_start })) });
+            if (x && x.d && x.d.ok) gs.forEach((g, i) => { _fireLines[sp + '|' + g.event_name] = x.d.lines[i] || null; });
+        }));
+        _fireLinesAt = Date.now();
+        if (_sport === 'FIRE') render();
     }
     function fireLine(it) {
         const g = it.g, k = it.k, sp = it.sp, x = it.x;
@@ -674,7 +689,9 @@
             const mins = Math.max(1, Math.round((it.at - Date.now()) / 60000));
             return '<div class="fxl"><span class="fxe">' + lab + ' · 🔥 expected ' + clock(new Date(it.at).toISOString()) + ' <span class="fxp">(' + mins + 'm)</span></span></div>';
         }
-        const P = Object.assign({}, g.line || {}); Object.entries(g.pin || {}).forEach(([kk, v]) => { if (v != null) P[kk] = v; });
+        const live = _fireLines[sp + '|' + g.event_name];
+        const SH = Object.assign({}, g.line || {}, g.pin || {});
+        const P = live ? Object.assign({}, live) : { spread_home: SH.spread_home, total: SH.total };   // no live read yet: the line, never a stale price
         const side = k === 'total' ? (x.dir > 0 ? 'over' : 'under') : (x.dir > 0 ? 'home' : 'away');
         let line = null, price = null, name;
         if (k === 'total') { line = P.total; price = side === 'over' ? P.over_odds : P.under_odds; name = (side === 'over' ? 'O ' : 'U ') + (line != null ? line : ''); }
@@ -684,7 +701,7 @@
                 price = side === 'home' ? P.spread_home_odds : P.spread_away_odds; if (line != null) name += ' ' + sgn(line); }
             else price = side === 'home' ? P.ml_home : P.ml_away;
         }
-        let px = price != null ? 'Bet105 ' + am(price) : '';
+        let px = price != null ? 'Bet105 ' + am(price) : (live === undefined ? 'Bet105 …' : '');
         const pt = polyTake(g, k, side);
         if (pt && pt.am) {
             const b105c = price != null ? (Number(price) < 0 ? -Number(price) / (-Number(price) + 100) : 100 / (Number(price) + 100)) * 100 : null;
@@ -1241,7 +1258,7 @@
         setInterval(() => { if (!document.hidden) loadLines(); }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadGames(); }, 10 * 60 * 1000);
         // the 🔥 tab: the minutes count down every minute, every sheet re-read every 3
-        setInterval(() => { if (document.hidden || _sport !== 'FIRE') return; if (Date.now() - _fireAt > 3 * 60e3) loadFire(); render(); }, 60 * 1000);
+        setInterval(() => { if (document.hidden || _sport !== 'FIRE') return; if (Date.now() - _fireAt > 3 * 60e3) loadFire(); else { loadFireLines(); render(); } }, 60 * 1000);
     });
 </script>
 </body>
