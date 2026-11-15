@@ -36599,8 +36599,11 @@ _STANDING_ZONES = (
     #  · NBA spread: fade a 2¢+ move (⅔ pt) — ESPN 68-58, our tape 43-28, 1 pt+ 35-21 (it LOST the
     #    two seasons before: this season's market). NHL ML rest-else-follow, replayed: this season
     #    163-95 (+10.8%), and positive both seasons before (+2.2%, +1.2%).
-    ("NHL", "ml", ("o", 0), ("s", -0.5), "rest", 0.0, 99.0, 20.0, "the other team played last night"),
-    ("NHL", "ml", ("o", 0), ("s", -0.5), "chase", 1.0, 2.0, 14.0, "follow the money"),
+    # NHL ML fires at T-1h, the same moment as the weekly list's NHL ML zone, so one read decides
+    # it and the 🔥 can't flip later (a stored 🔥 is only replaced by a STRONGER zone that fires
+    # AFTER it — Rob, Nov 15 2026: "is it possible for the fire to move/change?").
+    ("NHL", "ml", ("o", 0), ("s", -1), "rest", 0.0, 99.0, 20.0, "the other team played last night"),
+    ("NHL", "ml", ("o", 0), ("s", -1), "chase", 1.0, 2.0, 14.0, "follow the money"),
     ("NHL", "total", ("o", 0), ("s", -0.5), "chase", 2.0, 4.0, 11.0, "follow the money"),
     ("NBA", "spread", ("o", 0), ("s", -0.5), "fade", 2.0, 3.0, 15.0, "fade the money"),
     # NFL, every game (same day, Rob: "And the NFL"), ESPN/DK open → close, positive all three
