@@ -6065,6 +6065,34 @@ def test_sheet_pin_fair_at_rung() -> None:
         check(f"{tpl}: Bet105's vig-inclusive price is the hover, not the label", "Bet105 charges ' + am(pf.price)" in src and "PIN fair '" not in src)
 
 
+def test_pin_college_names() -> None:
+    """Nov 15 2026 (Rob: "College of Charleston, sometimes it's COLL… I guarantee you
+    they have lines on most of those"): Pinnacle's college spellings find ESPN's game."""
+    print("\n[pin college names]")
+    import app as _app
+    ev = lambda a, h, t: {"away_team": a, "home_team": h, "commence_time": t}
+    sl = [ev("South Carolina State", "College of Charleston", "2026-11-15T19:00:00Z"),
+          ev("IPFW", "Eastern Illinois", "2026-11-15T20:00:00Z"),
+          ev("Texas State", "Texas San Antonio", "2026-11-16T01:00:00Z"),
+          ev("St. Peter's", "Iona", "2026-11-16T01:00:00Z"),
+          ev("Coll Charleston X", "Elon", "2026-11-17T01:00:00Z"),
+          ev("Charleston Southern", "Winthrop", "2026-11-15T19:00:00Z")]
+    m = lambda a, h, t: (_app._pin_match_event(sl, a, h, t)[0] or {}).get("home_team")
+    check("College of Charleston = ESPN's Charleston Cougars",
+          m("South Carolina State Bulldogs", "Charleston Cougars", "2026-11-15T19:00:00Z") == "College of Charleston")
+    check("IPFW = Purdue Fort Wayne", m("Purdue Fort Wayne Mastodons", "Eastern Illinois Panthers",
+                                       "2026-11-15T20:00:00Z") == "Eastern Illinois")
+    check("Texas San Antonio = UTSA", m("Texas State Bobcats", "UTSA Roadrunners",
+                                        "2026-11-16T01:00:00Z") == "Texas San Antonio")
+    check("St. = Saint", m("Saint Peter's Peacocks", "Iona Gaels", "2026-11-16T01:00:00Z") == "Iona")
+    check("one side exact + the other loose + the same start = the game",
+          m("Charleston Cougars", "Elon Phoenix", "2026-11-17T01:00:00Z") == "Elon")
+    check("Charleston Southern stays Charleston Southern",
+          m("Charleston Southern Buccaneers", "Winthrop Eagles", "2026-11-15T19:00:00Z") == "Winthrop")
+    check("a team Pinnacle doesn't list matches nothing",
+          m("Emmanuel (MA) Lions", "Yale Bulldogs", "2026-11-15T19:00:00Z") is None)
+
+
 def test_sheet_pin_quote() -> None:
     """BET105 = PINNACLE (Oct 19 2026): every sheet game carries one `pin`
     price block, and the slip quote prices the same bet off Pinnacle's slate
@@ -9534,7 +9562,7 @@ def main() -> int:
               test_dry_run_blackout, test_overrun_detector,
               test_ws_quote_presence, test_ws_mkts_request_budget,
               test_gridiron_value_window, test_gridiron_move_favorable, test_gridiron_key_hook, test_cfbd_consensus, test_gridiron_qb_adjust,
-              test_pin_line_center, test_sheet_pin_quote, test_page_onclick_handlers_exist,
+              test_pin_line_center, test_sheet_pin_quote, test_pin_college_names, test_page_onclick_handlers_exist,
               test_gridiron_bounds, test_game_sport_key, test_snipe_target,
               test_entry_sync_guard, test_lot_ledger_floor, test_no_mangled_fresh_kwarg, test_snipe_target_at_cost, test_gridiron_join_touch, test_seat_topup_plan, test_vsin_dates_and_names,
               test_lane_covers_its_documented_engines, test_pair_plan, test_pair_candidates, test_pair_owner_guard, test_pair_priority_gate, test_pair_rerung, test_pair_mlb_totals, test_pair_off_touch_rule, test_pair_dead_ladder, test_pair_uses_executor_rule, test_pair_window, test_pair_reline, test_pair_keep_still_records_the_price, test_pair_recovers_a_missing_lot_cost, test_pair_sign_rule_does_not_freeze_the_whole_pair, test_pair_price_refusal_triggers_a_rerung, test_pair_lot_cost_never_from_the_venue_blend, test_pairs_own_football_spreads_and_totals, test_pair_slugs_span_every_row_and_retired_leg, test_pair_leg_cap_in_the_engine, test_ladder_window_total_sides, test_team_totals_are_not_the_game_total, test_pair_seed_throughput, test_pair_completion_exempt, test_pair_read_budget, test_pair_venue_reads,

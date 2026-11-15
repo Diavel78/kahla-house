@@ -56794,7 +56794,30 @@ _PIN_ALIAS = {"mississippi": "ole miss", "central florida": "ucf",
               # team folds to the long form (aliases are whole-name only).
               **{f"la {t}": f"los angeles {t}" for t in
                  ("clippers", "lakers", "rams", "chargers", "kings", "dodgers", "angels",
-                  "galaxy", "fc", "sparks")}}
+                  "galaxy", "fc", "sparks")},
+              # Nov 15 2026, college basketball (Rob: "College of Charleston, sometimes
+              # it's COLL… I guarantee you they have lines on most of those"). Pinnacle's
+              # spelling → a piece of ESPN's display name. 'saint' is folded to 'st' first.
+              "college of charleston": "charleston cougars", "albany ny": "ualbany",
+              "ipfw": "purdue fort wayne", "fort wayne": "purdue fort wayne",
+              "texas san antonio": "utsa", "cal poly slo": "cal poly",
+              "texas arlington": "ut arlington", "tennessee martin": "ut martin",
+              "texas rio grande valley": "ut rio grande valley", "illinois chicago": "uic",
+              "wisconsin milwaukee": "milwaukee", "wisconsin green bay": "green bay",
+              "massachusetts lowell": "umass lowell",
+              "maryland baltimore county": "umbc", "nebraska omaha": "omaha",
+              "missouri kansas city": "kansas city", "umkc": "kansas city",
+              "southern mississippi": "southern miss", "florida international": "fiu",
+              "louisiana state": "lsu", "southern methodist": "smu", "brigham young": "byu",
+              "virginia commonwealth": "vcu", "central connecticut state": "central connecticut",
+              "north carolina wilmington": "unc wilmington", "north carolina greensboro": "unc greensboro",
+              "north carolina asheville": "unc asheville", "north carolina state": "nc state",
+              "louisiana monroe": "ul monroe", "usc upstate": "south carolina upstate",
+              "mcneese state": "mcneese", "nicholls state": "nicholls", "grambling state": "grambling",
+              "st francis pa": "st francis red flash", "st thomas mn": "st thomas tommies",
+              "st marys ca": "st marys gaels", "queens nc": "queens university",
+              "cal state northridge": "csun", "long island": "long island university",
+              "detroit": "detroit mercy", "seattle": "seattle u"}
 
 
 def _pin_norm(name) -> str:
@@ -56805,7 +56828,37 @@ def _pin_norm(name) -> str:
     t = unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode().lower()
     t = t.replace("&", " and ").replace("'", "").replace("\u2019", "")
     t = " ".join("".join(c if c.isalnum() else " " for c in t).split())
+    t = " ".join("st" if w == "saint" else w for w in t.split())   # Saint Peter's = St. Peters
     return _PIN_ALIAS.get(t, t)
+
+
+_PIN_LOOSE_STOP = {"state", "university", "college", "of", "the", "st", "and", "a", "m",
+                   "at", "u", "north", "south", "east", "west", "southern", "northern",
+                   "eastern", "western", "central"}
+
+
+def _pin_name_loose(a: str, b: str) -> bool:
+    """Pure. A weak 'same school' test for the fallback below: a shared word of
+    4+ letters (either inside the other: 'albany' / 'ualbany'), or 3+ initials
+    of one name's consecutive words inside a word of the other ('purdue fort
+    wayne' → 'pfw' in 'ipfw', 'texas san antonio' → 'tsa' in 'utsa')."""
+    ta = [w for w in (a or "").split() if w]
+    tb = [w for w in (b or "").split() if w]
+    if not ta or not tb:
+        return False
+    for x in ta:
+        if len(x) < 4 or x in _PIN_LOOSE_STOP:
+            continue
+        for y in tb:
+            if len(y) >= 4 and y not in _PIN_LOOSE_STOP and (x in y or y in x):
+                return True
+    for s1, s2 in ((ta, tb), (tb, ta)):
+        for i in range(len(s1)):
+            for j in range(i + 3, len(s1) + 1):
+                ini = "".join(w[0] for w in s1[i:j])
+                if any(ini in y and len(y) <= len(ini) + 2 for y in s2):
+                    return True
+    return False
 
 
 def _pin_name_q(a: str, b: str) -> float:
@@ -56854,7 +56907,38 @@ def _pin_match_event(events, away: str, home: str, start=None):
             qa, qh = _pin_name_q(x, aw), _pin_name_q(y, hm)
             if qa > 0 and qh > 0 and qa + qh > best_q:
                 best, best_q, swapped = e, qa + qh, sw
-    return best, swapped
+    if best is not None or st0 is None:
+        return best, swapped
+    # THE ONE-SIDE FALLBACK (Nov 15 2026, college basketball): one team matches
+    # Pinnacle's name outright, the other only loosely ('College of Charleston' /
+    # 'Charleston Cougars', 'IPFW' / 'Purdue Fort Wayne Mastodons'). A team plays
+    # one game a day, so it is the game when the start agrees within 3h and that
+    # team is in no other slate game within 12h.
+    cands = []
+    for e in (events or []):
+        try:
+            ct = datetime.fromisoformat(str(e.get("commence_time")).replace("Z", "+00:00"))
+            dt = abs((ct - st0).total_seconds())
+        except Exception:
+            continue
+        if dt > 12 * 3600:
+            continue
+        ea, eh = _pin_norm(e.get("away_team")), _pin_norm(e.get("home_team"))
+        for sw, (x, y) in ((False, (ea, eh)), (True, (eh, ea))):
+            qa, qh = _pin_name_q(x, aw), _pin_name_q(y, hm)
+            if (qa > 0) == (qh > 0):
+                continue
+            exact = "away" if qa > 0 else "home"
+            loose = _pin_name_loose(y, hm) if qa > 0 else _pin_name_loose(x, aw)
+            cands.append((e, sw, exact, loose, dt))
+    for side in ("away", "home"):
+        mine = [c for c in cands if c[2] == side]
+        if len({id(c[0]) for c in mine}) != 1:
+            continue
+        e, sw, _x, loose, dt = mine[0]
+        if loose and dt <= 3 * 3600:
+            return e, sw
+    return None, False
 
 
 def _pin_rung_prices(events, away: str, home: str, mt: str, side: str, line, start=None,
