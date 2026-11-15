@@ -36,3 +36,7 @@ S=kahla-scanner/scripts/site_curl.sh
 7. **Tell Rob** in the session's final message, plain and short: what changed, what didn't, why.
 
 Never place, cancel or change a bet. Never touch any flag but `zones`.
+
+The `_STANDING_ZONES` in app.py (college follow-the-money spots, the NFL spread fade) are NOT
+in `zones` and the weekly flag never replaces them — leave them alone; report in the review
+how each fired and graded this week.

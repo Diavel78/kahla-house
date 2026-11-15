@@ -36548,7 +36548,7 @@ def _fire_freeze_on() -> bool:
 # Each zone: (sport, mt, from, to, kind, min_c, play_c, roi%, label); a mark is
 # ("o", h) hours after Pinnacle's first read or ("s", h) hours from the start.
 # ══════════════════════════════════════════════════════════════════════
-ZONE_RULE_ENABLED = False      # flipped on once the football zones are measured (Nov 15 2026)
+ZONE_RULE_ENABLED = True       # ON Nov 15 2026 (Rob: "Go… as it stands, we aren't betting")
 _ZONES = (
     # measured by kahla-scanner/scripts/zone_review.py over Oct 29 – Nov 14 2026 (Pinnacle's
     # price at the window's end, vig in); the weekly review replaces this via machine_flags `zones`
@@ -36559,7 +36559,60 @@ _ZONES = (
     ("NBA", "ml", ("s", -1), ("s", -0.25), "chase", 1.0, 2.0, 42.9, "last hour before tip"),
     ("NCAAF", "total", ("o", 0), ("o", 6), "fade", 1.5, 2.0, 49.3, "first 6h after Pinnacle opens"),
 )
+# STANDING ZONES (Nov 15 2026, Rob: "we aren't betting… pretty pointless" — volume): measured
+# over SEASONS or eras the weekly review can't see, so they ride beside whatever the weekly
+# review sets in `zones` (it never drops them; kill switch `machine_flags standing_zones`).
+# A 10th element filters the side the 🔥 lands on: dog = that side's line ≥ N, home_dog =
+# that side is the home team getting points, dow = the game's Eastern weekday.
+#  · college, follow the money to the CLOSE (kahla-scanner/scripts/cfb_spots.py, ESPN open
+#    → DK close, 2024-26; points × 2.6¢, a hair under so a clean 2-point move counts): a dog of 10+ the line moved 2+ toward 106-77 (+11%), a home dog
+#    moved 1+ toward 140-111 (+7%), a weeknight game moved 2+ 84-59 (+15%). Bet at the close.
+#  · NFL spread, fade the whole move: Polymarket Sep 14 – Oct 6 followers 13-23, Pinnacle
+#    Oct 29 → 2-11 (≥2¢ open → T-1h); 34-15 faded across the two.
+_STANDING_ZONES = (
+    ("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 5.1, 7.7, 11.0,
+     "money on a 10+ dog, open → close", {"dog": 10}),
+    ("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 2.5, 5.1, 7.0,
+     "money on a home dog, open → close", {"home_dog": True}),
+    ("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 5.1, 7.7, 15.0,
+     "weeknight money, open → close", {"dow": ["Tue", "Wed", "Thu", "Fri"]}),
+    ("NFL", "spread", ("o", 0), ("s", -1), "fade", 2.0, 3.0, 35.0, "the whole move since the open"),
+)
 _ZONE_LOG: dict = {}
+
+
+def _zone_filter_ok(flt: dict, d: int, home_line, start_ms: int, static: bool = False) -> bool:
+    """Pure. Does a zone's side filter pass for the 🔥 on side d (+1 home / −1 away)?
+    home_line = Pinnacle's home spread at the window's end. static=True checks only what
+    is known before the move (the weekday; a game that can't become the dog it needs)."""
+    if not flt:
+        return True
+    if flt.get("dow"):
+        try:
+            wd = datetime.fromtimestamp(start_ms / 1000, ZoneInfo("America/New_York")).strftime("%a")
+        except (OverflowError, OSError, ValueError):
+            return False
+        if wd not in flt["dow"]:
+            return False
+    try:
+        hl = float(home_line) if home_line is not None else None
+    except (TypeError, ValueError):
+        hl = None
+    if static:
+        if flt.get("dog") is not None and (hl is None or abs(hl) < float(flt["dog"]) - 3):
+            return False
+        if flt.get("home_dog") and (hl is None or hl < -3):
+            return False
+        return True
+    if flt.get("dog") is not None or flt.get("home_dog"):
+        if hl is None:
+            return False
+        own = hl if d > 0 else -hl
+        if flt.get("dog") is not None and own < float(flt["dog"]) - 1e-9:
+            return False
+        if flt.get("home_dog") and not (d > 0 and own > 0):
+            return False
+    return True
 
 
 def _zone_rule_on() -> bool:
@@ -36568,7 +36621,9 @@ def _zone_rule_on() -> bool:
 
 def _zones_for(sport: str, mt: str) -> list:
     z = _machine_flag_val("zones", None)
-    src = z if isinstance(z, list) and z else _ZONES
+    src = list(z) if isinstance(z, list) and z else list(_ZONES)
+    if _machine_flag("standing_zones", True):
+        src += list(_STANDING_ZONES)
     out = []
     for x in src:
         try:
@@ -36595,12 +36650,15 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
     H = 3600e3
     fired, waiting = [], []
     for z in zones:
-        _, _, za, zb, kind, min_c, play_c, roi, label = z
+        _, _, za, zb, kind, min_c, play_c, roi, label = z[:9]
+        flt = z[9] if len(z) > 9 and isinstance(z[9], dict) else {}
         ta = (o if za[0] == "o" else start_ms) + int(float(za[1]) * H)
         tb = (o if zb[0] == "o" else start_ms) + int(float(zb[1]) * H)
         if ta < o or tb > start_ms or tb <= ta:
             continue                                   # the window isn't on this game's clock
         if now_ms < tb:
+            if flt and not _zone_filter_ok(flt, 0, pts[-1][2] if now_ms >= o else None, start_ms, static=True):
+                continue
             a = _steam_at(pts, ta) if now_ms >= ta else None
             b = _steam_at(pts, min(now_ms, tb)) if a else None
             waiting.append({"zone": label, "kind": kind, "from_ms": ta, "to_ms": tb,
@@ -36614,6 +36672,8 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
             continue
         moved = 1 if mv > 0 else -1
         d = moved if kind == "chase" else -moved
+        if flt and not _zone_filter_ok(flt, d, b[2], start_ms):
+            continue
         fired.append({"state": "play" if abs(mv) >= float(play_c) else "lean", "dir": d,
                       "cents": round(abs(mv), 1), "moved_dir": moved,
                       "faded_dir": moved if kind == "fade" else None,

@@ -9203,6 +9203,7 @@ def _test_fire_side_body(_app) -> None:
 def test_zone_rule() -> None:
     """🔥 THE ZONES (Nov 15 2026): chase = the moved side, fade = the other side + 💨 on the
     moved one, fired at the window's end, the stronger zone wins, a stored 🔥 stays."""
+    import datetime as _dt
     import app as _app
     H = 3600e3
     o, st = 0, int(30 * H)
@@ -9232,6 +9233,28 @@ def test_zone_rule() -> None:
     out, store = _app._zone_settle({"state": "lean", "dir": -1, "strength": 10.0}, frozen, False)
     check("zone settle: a weaker one never does", out["dir"] == 1 and out.get("frozen") and not store, str(out))
     check("zone: no zone for the market = pass", _app._zone_read("NFL", "spread", pin, 3.0, st, st, zones=[])["state"] == "pass")
+    # STANDING ZONES: side filters (college follow-the-money spots)
+    D = [("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 5.1, 7.7, 11.0, "dog", {"dog": 10})]
+    toward_dog = [(o, 12.0, -12.0), (int(20 * H), 10.0, -10.0)]          # away +12 → +10
+    rd = _app._zone_read("NCAAF", "spread", toward_dog, 2.6, st, int(29.6 * H), zones=D)
+    check("standing zone: money on a 10+ dog fires the dog", rd["state"] == "lean" and rd["dir"] == -1, str(rd))
+    toward_fav = [(o, 12.0, -12.0), (int(20 * H), 14.0, -14.0)]
+    rd = _app._zone_read("NCAAF", "spread", toward_fav, 2.6, st, int(29.6 * H), zones=D)
+    check("standing zone: money on the favorite never fires the dog zone", rd["state"] == "pass", str(rd))
+    HD = [("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 2.5, 5.1, 7.0, "hd", {"home_dog": True})]
+    rd = _app._zone_read("NCAAF", "spread", [(o, -4.0, 4.0), (int(20 * H), -3.0, 3.0)], 2.6, st,
+                         int(29.6 * H), zones=HD)
+    check("standing zone: money on a home dog fires the home team", rd["state"] == "lean" and rd["dir"] == 1, str(rd))
+    rd = _app._zone_read("NCAAF", "spread", [(o, 4.0, -4.0), (int(20 * H), 5.0, -5.0)], 2.6, st,
+                         int(29.6 * H), zones=HD)
+    check("standing zone: a home favorite is not a home dog", rd["state"] == "pass", str(rd))
+    wk = _app._zone_filter_ok({"dow": ["Tue", "Wed", "Thu", "Fri"]}, 1, -3.0,
+                              int(_dt.datetime(2026, 11, 13, 1, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000))
+    sat = _app._zone_filter_ok({"dow": ["Tue", "Wed", "Thu", "Fri"]}, 1, -3.0,
+                               int(_dt.datetime(2026, 11, 14, 20, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000))
+    check("standing zone: weeknight = the game's Eastern weekday (Thu 8pm ET yes, Sat no)", wk and not sat)
+    check("standing zones ride beside the weekly review's list",
+          any(len(z) > 9 for z in _app._STANDING_ZONES) and "standing_zones" in open(_app.__file__).read())
 
 
 def test_fire_freeze() -> None:
