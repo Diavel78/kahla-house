@@ -38186,7 +38186,8 @@ def api_b105_vs_poly():
 
 @app.route("/api/zone-data")
 def api_zone_data():
-    """The saved zone checkpoints (zcp|…, kept forever), paged by key: ?sport=&off=&n=.
+    """The saved zone checkpoints (zcp|…, kept forever), paged by key: ?sport=&off=&n=;
+    ?sig=1 reads the recorded 🔥 (zsig|…) instead.
     Shared-secret, read-only — the weekly zone review reads its whole history here."""
     want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
     if not want or request.args.get("key", "") != want:
@@ -38195,7 +38196,8 @@ def api_zone_data():
     sport = (request.args.get("sport") or "").upper()
     off, n = int(request.args.get("off") or 0), max(1, min(400, int(request.args.get("n") or 300)))
     try:
-        rows = (sb.table("lookup_cache").select("key,payload").like("key", f"zcp|{sport}%")
+        pre = "zsig" if request.args.get("sig") else "zcp"     # ?sig=1: every 🔥 recorded (the tracker)
+        rows = (sb.table("lookup_cache").select("key,payload").like("key", f"{pre}|{sport}%")
                 .order("key").range(off, off + n - 1).execute().data) or []
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)[:200]})
