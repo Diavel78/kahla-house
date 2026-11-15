@@ -31,7 +31,9 @@ jobs:
           restore-keys: cfb-cache-v1-
       - name: Dump
         run: python -m scripts.cfb_dump --seasons "${{ inputs.seasons }}" --cache .cfb_cache --out cfb_dump.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cfb-dump
-          path: kahla-scanner/cfb_dump.json
+      - name: Print (the sandbox can't download artifacts — it reads the log)
+        run: |
+          echo "DUMP-BEGIN"
+          gzip -9c cfb_dump.json | base64 -w 0
+          echo
+          echo "DUMP-END"
