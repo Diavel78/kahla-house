@@ -643,7 +643,7 @@
                     out.push({ sp, g, k, x, t, fired: true });
                 } else if (x.state === 'watching') {
                     let e = null;
-                    (x.zones || []).forEach(z => { if (z.to_ms > now && z.to_ms <= soon && (e == null || z.to_ms < e)) e = z.to_ms; });
+                    (x.zones || []).forEach(z => { if (z.to_ms > now && z.to_ms < t && (e == null || z.to_ms < e)) e = z.to_ms; });   // every window still to close; the page splits next hour / next up
                     if (e != null) out.push({ sp, g, k, x, t, at: e, fired: false });
                 }
             });
@@ -687,7 +687,7 @@
         const lab = { spread: sp === 'MLB' ? 'Run line' : 'Spread', total: 'Total', ml: 'ML' }[k];
         if (!it.fired) {
             const mins = Math.max(1, Math.round((it.at - Date.now()) / 60000));
-            return '<div class="fxl"><span class="fxe">' + lab + ' · 🔥 expected ' + clock(new Date(it.at).toISOString()) + ' <span class="fxp">(' + mins + 'm)</span></span></div>';
+            return '<div class="fxl"><span class="fxe">' + lab + ' · 🔥 expected ' + clock(new Date(it.at).toISOString()) + ' <span class="fxp">(' + (mins >= 60 ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm' : mins + 'm') + ')</span></span></div>';
         }
         const live = _fireLines[sp + '|' + g.event_name];
         const SH = Object.assign({}, g.line || {}, g.pin || {});
@@ -759,12 +759,22 @@
             order.sort((a, b) => key(by[a]) - key(by[b]));
             return order.map(id => fireCard(by[id][0].sp, by[id][0].g, by[id])).join('');
         };
-        const fired = items.filter(it => it.fired), soon = items.filter(it => !it.fired);
+        const hr = Date.now() + 3600e3;
+        const fired = items.filter(it => it.fired), soon = items.filter(it => !it.fired && it.at <= hr);
+        // NEXT UP (Rob, Nov 15 2026: "add the next fire… It's boring showing none and none"): the
+        // soonest 🔥 windows past the hour, the next 3 games
+        const later = items.filter(it => !it.fired && it.at > hr);
         let h = '';
         h += '<div class="day-hdr">🔥 Not bet · ' + new Set(fired.map(it => it.sp + it.g.event_name)).size + '</div>';
         h += fired.length ? group(fired, l => l[0].t) : '<div class="empty">' + (_fireLoading ? 'reading every sheet…' : 'No unbet 🔥 right now.') + '</div>';
         h += '<div class="day-hdr">🔥 Next hour · ' + new Set(soon.map(it => it.sp + it.g.event_name)).size + '</div>';
         h += soon.length ? group(soon, l => Math.min.apply(null, l.map(it => it.at))) : '<div class="empty">' + (_fireLoading ? 'reading every sheet…' : 'No 🔥 due in the next hour.') + '</div>';
+        if (later.length) {
+            const keep = [];
+            later.slice().sort((a, b) => a.at - b.at).forEach(it => { const id = it.sp + '|' + it.g.event_name; if (keep.indexOf(id) < 0 && keep.length < 3) keep.push(id); });
+            const nx = later.filter(it => keep.indexOf(it.sp + '|' + it.g.event_name) >= 0);
+            h += '<div class="day-hdr">🔥 Next up</div>' + group(nx, l => Math.min.apply(null, l.map(it => it.at)));
+        }
         if (_fireAt) h += '<div class="empty" style="font-size:12px">updated ' + clock(new Date(_fireAt).toISOString()) + (_fireLoading ? ' · refreshing…' : '') + '</div>';
         return h;
     }
