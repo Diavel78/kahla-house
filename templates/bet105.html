@@ -262,7 +262,7 @@
     async function loadB105() {
         const r = await authFetch('/api/bet105/mine').catch(() => null);
         const d = r && r.ok ? await r.json().catch(() => null) : null;
-        if (d && d.ok) { _b105 = d.bets || []; _b105In = true; }
+        if (d && d.ok) { _b105 = d.bets || []; _b105In = true; try { localStorage.setItem('b105_mine', JSON.stringify({ at: Date.now(), bets: _b105 })); } catch (e) {} }
         renderMoney(); render();
     }
     async function loadPoly() {
@@ -291,9 +291,20 @@
                              game: live ? { state: 'in', status: per, away: ga, home: gh } : null };
                 });
         }
+        try { localStorage.setItem('b105_poly', JSON.stringify({ at: Date.now(), bets: _poly })); } catch (e) {}
         renderMoney(); render();
     }
-    function loadMine() { loadB105(); loadPoly(); }
+    function loadMine() {
+        // your bets draw at once from the phone's copy (the live values take ~10s to price)
+        try {
+            const c = JSON.parse(localStorage.getItem('b105_mine') || 'null');
+            if (c && c.bets && Date.now() - c.at < 12 * 3600e3) { _b105 = c.bets; _b105In = true; }
+            const p = JSON.parse(localStorage.getItem('b105_poly') || 'null');
+            if (p && p.bets && Date.now() - p.at < 12 * 3600e3) _poly = p.bets;
+        } catch (e) {}
+        renderMoney(); render();
+        loadB105(); loadPoly();
+    }
     function renderMoney() {
         const all = allMine();
         const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
