@@ -1,0 +1,34 @@
+name: College football situations (ATS / totals)
+
+# Rob, Nov 15 2026: "We are betting college football… home vs away? game start? back to back
+# road games? coming off bye week?" — ESPN schedules + DK open/close lines, seasons back.
+# Read-only: no secrets, no DB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "seasons (the year the season starts)"
+        required: false
+        default: "2023,2024,2025,2026"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - uses: actions/cache@v4
+        with:
+          path: kahla-scanner/.cfb_cache
+          key: cfb-cache-v1-${{ github.run_id }}
+          restore-keys: cfb-cache-v1-
+      - name: College situations
+        run: python -m scripts.cfb_spots --seasons "${{ inputs.seasons }}" --cache .cfb_cache
