@@ -613,18 +613,21 @@
         try { const c = JSON.parse(localStorage.getItem('b105_games_' + sp) || 'null'); return c && c.games ? c.games : []; } catch (e) { return []; }
     }
     function fireItems() {
-        // ANY bet on the game takes it off the tab (Rob, Nov 15 2026: "only non-bet games… a quick
-        // cue of, hey, you should be betting this stuff")
+        // A BET TAKES ITS OWN MARKET OFF THE TAB, NOT THE GAME (Rob, Nov 15 2026: "The spread, the
+        // money line, and the total all have different fire zones") — an Under bet never hides
+        // the spread's 🔥. Your bet list is the truth, never the server's cached lock.
         const now = Date.now(), soon = now + 3600e3, out = [], bet = {};
-        allMine().forEach(b => { bet[b.event_name] = 1; });
+        allMine().forEach(b => {
+            const mt = b.market_type === 'moneyline' ? 'ml' : b.market_type;
+            bet[b.event_name + '|' + mt] = 1;
+            if (mt === 'spread' && (b.sport || '').toUpperCase() === 'NHL') bet[b.event_name + '|ml'] = 1;   // the puck line is the ML's 🔥
+        });
         FIRE_SPORTS.forEach(sp => fireCache(sp).forEach(g => {
             const t = g.event_start ? Date.parse(g.event_start) : 0;
             if (!t || t <= now || (g.grade && g.grade.final)) return;
             const en = g.away + ' @ ' + g.home, mv = g.move || {};
-            // your bet list is the truth — a cached server lock outlives a deleted bet (Rob, Nov 15 2026)
-            if (bet[en] || bet[g.event_name]) return;
             ['spread', 'total', 'ml'].forEach(k => {
-                const x = mv[k]; if (!x) return;
+                const x = mv[k]; if (!x || bet[en + '|' + k] || bet[g.event_name + '|' + k]) return;
                 if ((x.state === 'play' || x.state === 'lean') && x.dir) {
                     out.push({ sp, g, k, x, t, fired: true });
                 } else if (x.state === 'watching') {
