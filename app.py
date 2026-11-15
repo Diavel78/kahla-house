@@ -36828,6 +36828,15 @@ _STANDING_ZONES = (
      "money on a 10+ dog", {"dog": 10}),
     ("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 5.1, 7.7, 15.0,
      "weeknight money", {"dow": ["Tue", "Wed", "Thu", "Fri"]}),
+    # COLLEGE TOTALS (Nov 15 2026, Rob: "I want totals"; scripts/football_totals_open.py, ESPN/DK
+    # open → close, graded at the close): follow a 1½-point+ move — 2026 240-194 (+6.0%), NIGHT
+    # 115-86 (+9.5%), day 125-108 (+2.9%, so LEAN). Same regime as the night spread rule: it LOST
+    # in 2024 (−12%) and 2025 (−6%) — this season's market, re-checked weekly. Our model's own
+    # total does NOT beat the open (2026 −5%), nor does any NFL totals rule (every one flips by season).
+    ("NCAAF", "total", ("o", 0), ("s", -0.5), "chase", 3.7, 5.0, 9.5,
+     "night game: follow the total's move", {"slot": "night"}),
+    ("NCAAF", "total", ("o", 0), ("s", -0.5), "chase", 3.7, 99.0, 2.9,
+     "day game: follow the total's move", {"slot": "day"}),
     # NBA / NHL, every game (Nov 15 2026, Rob: "Do the same for NBA and NHL"). This season (ESPN
     # 2027 = Oct 2026 →, DK open → close) checked against our Pinnacle tape since Oct 29:
     #  · NHL: a team on the 2nd night of a back-to-back vs a rested one → the RESTED team's ML —
