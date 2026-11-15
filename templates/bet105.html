@@ -61,7 +61,7 @@
         .sheet { max-height: 82vh; overflow-y: auto; }
         .sheet .sp-h { font-size: 13px; font-weight: 700; color: var(--text3); letter-spacing: .06em; margin: 14px 0 6px; }
         .pos { color: var(--g-tx); } .neg { color: var(--r-tx); }
-        .tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 18px; }
+        .tabs { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-top: 18px; }
         .tab { height: 48px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 12px;
                border: 1px solid var(--line); background: var(--card); color: var(--text2); cursor: pointer; }
         .tab img { max-width: 30px; max-height: 30px; object-fit: contain; opacity: .5; filter: grayscale(.7); }
@@ -69,6 +69,18 @@
         .tab.nolg img { display: none; } .tab.nolg .tl { display: block; }
         .tab.on { border-color: var(--text2); background: var(--card2); color: var(--text); }
         .tab.on img { opacity: 1; filter: none; }
+        .tab.firet { position: relative; font-size: 22px; }
+        .tab.firet .fn { position: absolute; top: 3px; right: 5px; font-size: 11px; font-weight: 800; background: #E8590C; color: #fff; border-radius: 9px; padding: 0 5px; line-height: 16px; }
+        .fx { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; }
+        .fx:active { background: var(--card2); }
+        .fx .fxh { display: flex; justify-content: space-between; gap: 8px; font-weight: 700; }
+        .fx .fxs { font-size: 11px; font-weight: 800; letter-spacing: .06em; color: var(--text3); margin-right: 6px; }
+        .fx .fxw { font-family: var(--mono); font-size: 13px; color: var(--text2); white-space: nowrap; }
+        .fx .fxl { font-size: 14px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+        .fx .fxp { font-family: var(--mono); font-size: 13px; color: var(--text2); }
+        .fx .fxp .win { color: var(--g-tx); font-weight: 700; }
+        .fx .fxe { color: var(--text2); }
+        .gc.flash { border-color: #E8590C; }
         .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
         .fchip { height: 38px; padding: 0 14px; border-radius: 19px; border: 1px solid var(--line); background: transparent;
                  color: var(--text); font-size: 14px; font-weight: 600; cursor: pointer; }
@@ -248,9 +260,12 @@
     let _games = [], _lines = [], _b105 = [], _poly = [], _busy = {}, _b105In = false;
 
     function renderTabs() {
+        if (_fireN == null) _fireN = fireItems().filter(it => it.fired).length;
         document.getElementById('tabs').innerHTML = SPORTS.map(([s, nm]) =>
             '<button class="tab' + (s === _sport ? ' on' : '') + '" onclick="setSport(\'' + s + '\')" aria-label="' + nm + '">'
-            + '<img src="/league-logo/' + s + '.png" alt="" onerror="this.parentNode.classList.add(\'nolg\')"><span class="tl">' + nm + '</span></button>').join('');
+            + '<img src="/league-logo/' + s + '.png" alt="" onerror="this.parentNode.classList.add(\'nolg\')"><span class="tl">' + nm + '</span></button>').join('')
+            + '<button class="tab firet' + (_sport === 'FIRE' ? ' on' : '') + '" onclick="setSport(\'FIRE\')" aria-label="Fire across every sport">🔥'
+            + (_fireN ? '<span class="fn">' + _fireN + '</span>' : '') + '</button>';
     }
     function setSport(s) { _sport = s; localStorage.setItem('b105_sport', s); renderTabs(); loadGames(); }
     function setView(v) { _view = v; render(); }
@@ -353,6 +368,7 @@
         _games.forEach((g, i) => { g._gi = i; });
     }
     async function loadGames() {
+        if (_sport === 'FIRE') { _games = []; _lines = []; render(); return loadFire(); }
         const sport = _sport;
         _lines = []; _games = []; _loading = true;
         try { const c = JSON.parse(localStorage.getItem('b105_games_' + sport) || 'null'); if (c && c.games) useGames(c.games, sport); } catch (e) {}
@@ -488,7 +504,7 @@
         const lb = bets.find(b => b.game && b.game.away != null);
         const right = st ? '<span class="tag live">LIVE</span>' + (lb ? ' <span class="score">' + lb.game.away + '–' + lb.game.home + '</span>'
             + (lb.game.status ? '<br><span style="font-size:12px;color:var(--text2)">' + esc(lb.game.status) + '</span>' : '') : '') : whenTxt(g.event_start);
-        let h = '<div class="gc' + (bets.length ? ' hasbet' : '') + '"><div class="gh"><span class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home))
+        let h = '<div class="gc' + (bets.length ? ' hasbet' : '') + '" data-en="' + esc(g.event_name) + '"><div class="gh"><span class="gm">' + esc(shortTeam(g.away)) + ' @ ' + esc(shortTeam(g.home))
               + (g.tv && g.tv.length ? '<span class="tv">' + esc(g.tv[0]) + '</span>' : '') + '</span><span class="gs">' + right + '</span></div>';
         h += '<div class="gsub">' + (bets.length ? '<span class="tag grn">✓ ' + bets.length + ' BET' + (bets.length > 1 ? 'S' : '') + ' ON THIS GAME</span>' : '<span class="tag gry">NO BET YET</span>')
            + '<button class="chb" onclick="event.stopPropagation();openChart(' + g._gi + ')">📈 Chart</button>'
@@ -581,7 +597,121 @@
         const ok = await copyText(out.join('\n'));
         toast(ok ? 'Copied ' + (settled ? 'settled ' : '') + nm + ' picks · ' + bets.length + ' bet' + (bets.length === 1 ? '' : 's') : 'Copy failed', !ok);
     }
+    // THE 🔥 TAB (Rob, Nov 15 2026: "you click that fire icon… these four games have fire icons
+    // you haven't bet. And these three will have a fire icon in the next 20 minutes"): every
+    // sport's sheet, two lists — a 🔥 that's live and not bet, and a 🔥 window closing inside the
+    // hour. Each sport's last sheet is kept on the phone, so the tab draws at once; the full reads
+    // replace it. Tap a game → its sport tab, scrolled to the card.
+    const FIRE_SPORTS = ['NCAAF', 'NFL', 'NHL', 'NBA', 'MLB'];
+    const FIRE_NM = { NCAAF: 'College', NFL: 'NFL', NHL: 'NHL', NBA: 'NBA', MLB: 'MLB' };
+    let _fire = {}, _fireLoading = false, _fireAt = 0, _fireN = null, _scrollTo = null;
+    function fireCache(sp) {
+        if (_fire[sp]) return _fire[sp];
+        try { const c = JSON.parse(localStorage.getItem('b105_games_' + sp) || 'null'); return c && c.games ? c.games : []; } catch (e) { return []; }
+    }
+    function fireItems() {
+        const now = Date.now(), soon = now + 3600e3, out = [], bet = {};
+        allMine().forEach(b => {
+            const mt = b.market_type === 'moneyline' ? 'ml' : b.market_type;
+            bet[b.event_name + '|' + mt] = 1;
+            if (mt === 'spread' && (b.sport || '').toUpperCase() === 'NHL') bet[b.event_name + '|ml'] = 1;   // the puck line is the ML's 🔥
+        });
+        FIRE_SPORTS.forEach(sp => fireCache(sp).forEach(g => {
+            const t = g.event_start ? Date.parse(g.event_start) : 0;
+            if (!t || t <= now || (g.grade && g.grade.final)) return;
+            const en = g.away + ' @ ' + g.home, mv = g.move || {};
+            ['spread', 'total', 'ml'].forEach(k => {
+                const x = mv[k]; if (!x || bet[en + '|' + k]) return;
+                if ((x.state === 'play' || x.state === 'lean') && x.dir) {
+                    if (!x.bet_lock) out.push({ sp, g, k, x, t, fired: true });
+                } else if (x.state === 'watching') {
+                    let e = null;
+                    (x.zones || []).forEach(z => { if (z.to_ms > now && z.to_ms <= soon && (e == null || z.to_ms < e)) e = z.to_ms; });
+                    if (e != null) out.push({ sp, g, k, x, t, at: e, fired: false });
+                }
+            });
+        }));
+        return out;
+    }
+    async function loadFire() {
+        if (_fireLoading) return;
+        _fireLoading = true;
+        await Promise.all(FIRE_SPORTS.map(async sp => {
+            try {
+                const r = await authFetch('/api/pick-sheets?sport=' + sp);
+                const d = r && r.ok ? await r.json().catch(() => null) : null;
+                if (d && d.ok) {
+                    _fire[sp] = d.games || [];
+                    try { localStorage.setItem('b105_games_' + sp, JSON.stringify({ at: Date.now(), games: d.games || [] })); } catch (e) {}
+                    if (_sport === 'FIRE') render();
+                }
+            } catch (e) {}
+        }));
+        _fireLoading = false; _fireAt = Date.now();
+        if (_sport === 'FIRE') render();
+    }
+    function fireLine(it) {
+        const g = it.g, k = it.k, sp = it.sp, x = it.x;
+        const lab = { spread: sp === 'MLB' ? 'Run line' : 'Spread', total: 'Total', ml: 'ML' }[k];
+        if (!it.fired) {
+            const mins = Math.max(1, Math.round((it.at - Date.now()) / 60000));
+            return '<div class="fxl"><span class="fxe">' + lab + ' · 🔥 expected ' + clock(new Date(it.at).toISOString()) + ' <span class="fxp">(' + mins + 'm)</span></span></div>';
+        }
+        const P = Object.assign({}, g.line || {}); Object.entries(g.pin || {}).forEach(([kk, v]) => { if (v != null) P[kk] = v; });
+        const side = k === 'total' ? (x.dir > 0 ? 'over' : 'under') : (x.dir > 0 ? 'home' : 'away');
+        let line = null, price = null, name;
+        if (k === 'total') { line = P.total; price = side === 'over' ? P.over_odds : P.under_odds; name = (side === 'over' ? 'O ' : 'U ') + (line != null ? line : ''); }
+        else {
+            name = shortTeam(side === 'home' ? g.home : g.away, sp);
+            if (k === 'spread') { const sh = P.spread_home != null ? Number(P.spread_home) : null; line = sh == null ? null : (side === 'home' ? sh : -sh);
+                price = side === 'home' ? P.spread_home_odds : P.spread_away_odds; if (line != null) name += ' ' + sgn(line); }
+            else price = side === 'home' ? P.ml_home : P.ml_away;
+        }
+        let px = price != null ? 'Bet105 ' + am(price) : '';
+        const pt = polyTake(g, k, side);
+        if (pt && pt.am) {
+            const b105c = price != null ? (Number(price) < 0 ? -Number(price) / (-Number(price) + 100) : 100 / (Number(price) + 100)) * 100 : null;
+            const same = k === 'ml' || pt.line == null || line == null || Math.abs(pt.line - Number(line)) < 0.01;
+            const poly = 'Poly ' + pt.am + (same ? '' : ' @ ' + (k === 'total' ? pt.line : sgn(pt.line)));
+            const pw = same && b105c != null && pt.cost < b105c - 0.05, bw = same && b105c != null && pt.cost > b105c + 0.05;
+            px = (bw ? '<span class="win">' + px + '</span>' : px) + (px ? ' · ' : '') + (pw ? '<span class="win">' + poly + '</span>' : poly);
+        }
+        return '<div class="fxl">🔥 ' + lab + ' <b>' + esc(name) + '</b> <span class="pill ' + x.state + '">' + x.state.toUpperCase() + '</span>'
+             + (px ? '<span class="fxp">' + px + '</span>' : '') + '</div>';
+    }
+    function fireCard(sp, g, items) {
+        return '<div class="fx" onclick="goFire(\'' + sp + '\',' + JSON.stringify(g.event_name).replace(/"/g, '&quot;') + ')"><div class="fxh"><span><span class="fxs">' + FIRE_NM[sp] + '</span>'
+             + esc(shortTeam(g.away, sp)) + ' @ ' + esc(shortTeam(g.home, sp)) + '</span><span class="fxw">' + esc(whenTxt(g.event_start)) + '</span></div>'
+             + items.map(fireLine).join('') + '</div>';
+    }
+    function renderFire(hit) {
+        const items = fireItems().filter(it => hit(it.g.away + ' ' + it.g.home + ' ' + FIRE_NM[it.sp]));
+        _fireN = items.filter(it => it.fired).length;
+        const group = (list, key) => {
+            const order = [], by = {};
+            list.forEach(it => { const id = it.sp + '|' + it.g.event_name; if (!by[id]) { by[id] = []; order.push(id); } by[id].push(it); });
+            order.sort((a, b) => key(by[a]) - key(by[b]));
+            return order.map(id => fireCard(by[id][0].sp, by[id][0].g, by[id])).join('');
+        };
+        const fired = items.filter(it => it.fired), soon = items.filter(it => !it.fired);
+        let h = '';
+        h += '<div class="day-hdr">🔥 Not bet · ' + new Set(fired.map(it => it.sp + it.g.event_name)).size + '</div>';
+        h += fired.length ? group(fired, l => l[0].t) : '<div class="empty">' + (_fireLoading ? 'reading every sheet…' : 'No unbet 🔥 right now.') + '</div>';
+        h += '<div class="day-hdr">🔥 Next hour · ' + new Set(soon.map(it => it.sp + it.g.event_name)).size + '</div>';
+        h += soon.length ? group(soon, l => Math.min.apply(null, l.map(it => it.at))) : '<div class="empty">' + (_fireLoading ? 'reading every sheet…' : 'No 🔥 due in the next hour.') + '</div>';
+        if (_fireAt) h += '<div class="empty" style="font-size:12px">updated ' + clock(new Date(_fireAt).toISOString()) + (_fireLoading ? ' · refreshing…' : '') + '</div>';
+        return h;
+    }
+    function goFire(sp, en) { _scrollTo = en; _view = 'up'; document.getElementById('q').value = ''; setSport(sp); }
     function render() {
+        if (_sport === 'FIRE') {
+            document.getElementById('chips').innerHTML = '';
+            const words = (document.getElementById('q').value || '').toLowerCase().split(/\s+/).filter(Boolean);
+            const n0 = _fireN;
+            document.getElementById('main').innerHTML = renderFire(txt => !words.length || words.every(w => txt.toLowerCase().indexOf(w) >= 0));
+            if (n0 !== _fireN) renderTabs();
+            return;
+        }
         renderChips();
         const words = (document.getElementById('q').value || '').toLowerCase().split(/\s+/).filter(Boolean);
         const hit = txt => !words.length || words.every(w => txt.toLowerCase().indexOf(w) >= 0);
@@ -604,6 +734,11 @@
             if (!h) h = '<div class="empty">' + (_view === 'live' ? 'No ' + _sport + ' games in progress.' : 'No upcoming ' + _sport + ' games on the sheet.') + '</div>';
         }
         document.getElementById('main').innerHTML = h;
+        if (_scrollTo) {
+            const el = Array.from(document.querySelectorAll('.gc[data-en]')).find(e => e.dataset.en === _scrollTo);
+            if (el) { _scrollTo = null; el.scrollIntoView({ block: 'start', behavior: 'smooth' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 2500); }
+            else if (!_loading) _scrollTo = null;
+        }
     }
     // THE LINE TAPE CHART (Rob, Oct 29 2026: "let's read the market, like a
     // stock broker"). One game's history off /api/line-tape: Pinnacle's fair
@@ -1060,6 +1195,8 @@
         setInterval(() => { if (!document.hidden) loadPoly(); }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadLines(); }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadGames(); }, 10 * 60 * 1000);
+        // the 🔥 tab: the minutes count down every minute, every sheet re-read every 3
+        setInterval(() => { if (document.hidden || _sport !== 'FIRE') return; if (Date.now() - _fireAt > 3 * 60e3) loadFire(); render(); }, 60 * 1000);
     });
 </script>
 </body>
