@@ -626,17 +626,19 @@
         // money line, and the total all have different fire zones") — an Under bet never hides
         // the spread's 🔥. Your bet list is the truth, never the server's cached lock.
         const now = Date.now(), soon = now + 3600e3, out = [], bet = {};
+        // SPREAD AND ML ARE ONE BET (Rob, Nov 15 2026: "I will NEVER bet a spread and a ML, on any
+        // sport. If I click one of them, they both should go away") — the puck/run line included
+        const grp = mt => (mt === 'total' ? 'total' : 'side');
         allMine().forEach(b => {
             const mt = b.market_type === 'moneyline' ? 'ml' : b.market_type;
-            bet[b.event_name + '|' + mt] = 1;
-            if (mt === 'spread' && (b.sport || '').toUpperCase() === 'NHL') bet[b.event_name + '|ml'] = 1;   // the puck line is the ML's 🔥
+            bet[b.event_name + '|' + grp(mt)] = 1;
         });
         FIRE_SPORTS.forEach(sp => fireCache(sp).forEach(g => {
             const t = g.event_start ? Date.parse(g.event_start) : 0;
             if (!t || t <= now || (g.grade && g.grade.final)) return;
             const en = g.away + ' @ ' + g.home, mv = g.move || {};
             ['spread', 'total', 'ml'].forEach(k => {
-                const x = mv[k]; if (!x || bet[en + '|' + k] || bet[g.event_name + '|' + k]) return;
+                const x = mv[k]; if (!x || bet[en + '|' + grp(k)] || bet[g.event_name + '|' + grp(k)]) return;
                 if ((x.state === 'play' || x.state === 'lean') && x.dir) {
                     out.push({ sp, g, k, x, t, fired: true });
                 } else if (x.state === 'watching') {
