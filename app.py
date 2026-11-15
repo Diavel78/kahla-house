@@ -36753,6 +36753,10 @@ def _zone_signals_note(sb, sport: str, ev: str, mt: str, start, rd: dict) -> Non
     try:
         cur = rd.get("later") if rd.get("bet_lock") else None
         sigs = [x for x in (rd, cur) if isinstance(x, dict) and x.get("state") in ("play", "lean")]
+        if isinstance(rd.get("blend"), dict):
+            b = rd["blend"]
+            sigs.append({"state": "blend", "kind": "blend", "dir": b.get("dir"), "cents": b.get("score"),
+                         "zone": "blend: " + " + ".join(str(p.get("zone")) for p in b.get("parts") or [])})
         if not sigs:
             return
         st = start if isinstance(start, datetime) else _parse_iso(start)
@@ -36864,7 +36868,7 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
         return {"state": "no_open"}
     o = pts[0][0]
     H = 3600e3
-    fired, waiting = [], []
+    fired, waiting, near = [], [], []
     for z in zones:
         _, _, za, zb, kind, min_c, play_c, roi, label = z[:9]
         flt = z[9] if len(z) > 9 and isinstance(z[9], dict) else {}
@@ -36914,6 +36918,12 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
                           "books": {"pin": round(abs(mv), 1)}, "agree": ["pin"], "zone_rule": True})
             continue
         if abs(mv) < float(min_c):
+            # a near-miss: kept for THE BLEND (Rob, Nov 15 2026: "this was almost fire, and almost
+            # here… those combined might equal fire") — tracked, not drawn, until it proves out
+            if mv and float(min_c) > 0:
+                dd = (1 if mv > 0 else -1) * (1 if kind == "chase" else -1)
+                if not flt or _zone_filter_ok(flt, dd, b[2], start_ms):
+                    near.append((min(abs(mv) / float(min_c), 1.0), dd, label))
             continue
         moved = 1 if mv > 0 else -1
         d = moved if kind == "chase" else -moved
@@ -36930,9 +36940,18 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
         if len(fired) > 1:
             best["also"] = [{k: r[k] for k in ("zone", "kind", "dir", "cents")} for r in fired if r is not best]
         return best
+    blend = None
+    tot = sum(f * d for f, d, _ in near)
+    if near and abs(tot) >= 1.0 and sum(1 for f, d, _ in near if f >= 0.4 and d == (1 if tot > 0 else -1)) >= 2:
+        blend = {"dir": 1 if tot > 0 else -1, "score": round(abs(tot), 2),
+                 "parts": [{"zone": l, "frac": round(f, 2), "dir": d} for f, d, l in near]}
     if waiting:
-        return {"state": "watching", "open_ms": o, "zones": waiting, "zone_rule": True, "dir": 0}
-    return {"state": "pass", "open_ms": o, "why": "no zone moved enough", "zone_rule": True}
+        out = {"state": "watching", "open_ms": o, "zones": waiting, "zone_rule": True, "dir": 0}
+    else:
+        out = {"state": "pass", "open_ms": o, "why": "no zone moved enough", "zone_rule": True}
+    if blend:
+        out["blend"] = blend
+    return out
 
 
 def _zone_settle(rd: dict, frozen, partial: bool):
@@ -37149,7 +37168,7 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
                     elif partial and rd.get("state") in ("play", "lean"):
                         rd = {"state": "reading", "open_ms": rd.get("open_ms"),
                               "why": "ladder tape not read this load — the 🔥 waits for a full read"}
-                    if not partial and rd.get("state") in ("play", "lean") and tape:
+                    if not partial and tape and (rd.get("state") in ("play", "lean") or rd.get("blend")):
                         _zone_signals_note(sb, sport, ev, mt, sd, rd)
                 elif freeze_on:
                     ev = g.get("event_name")

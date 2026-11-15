@@ -9298,6 +9298,12 @@ def test_zone_rule() -> None:
     check("bet lock: bet before any 🔥 → the live read", lk["dir"] == -1 and lk["bet_before_fire"], str(lk))
     src = open(_app.__file__).read()
     check("zones: no stored 🔥 under the zone rule — live until a bet", "LIVE UNTIL YOU BET" in src)
+    BZ = [("NBA", "spread", ("o", 0), ("o", 6), "chase", 2.0, 3.0, 10.0, "a"),
+          ("NBA", "spread", ("o", 6), ("o", 12), "chase", 2.0, 3.0, 10.0, "b")]
+    near = [(o, 3.0, -3.0), (int(5 * H), 3.5, -3.5), (int(11 * H), 4.0, -4.0)]   # 1.5¢ + 1.5¢, each under 2¢
+    rd = _app._zone_read("NBA", "spread", near, 3.0, st, int(13 * H), zones=BZ)
+    check("blend: two near-misses the same way are recorded, not fired",
+          rd["state"] == "pass" and rd.get("blend", {}).get("dir") == 1, str(rd))
     check("standing zones ride beside the weekly review's list",
           any(len(z) > 9 for z in _app._STANDING_ZONES) and "standing_zones" in open(_app.__file__).read())
 

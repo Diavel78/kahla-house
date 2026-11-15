@@ -48,3 +48,7 @@ weeks running), tell Rob — don't change it yourself.
 SIGNALS THAT CAME AND WENT: `lookup_cache` rows `zsig|SPORT|mt|start|event` hold every distinct
 🔥 a market showed (zone, side, first seen) and the one Rob's bet locked (`bet_lock`). Grade both:
 the locked 🔥 vs the later signal when they differ — that is the review Rob asked for.
+BLENDS: `zsig` signals with `kind: blend` are markets where no zone fired but 2+ near-misses
+(each ≥40% of its threshold) pointed the same way, summing to a full threshold. Not on the card.
+Grade them weekly; first read (Pinnacle tape Oct 29 – Nov 14): NHL 17-15, NBA 4-0, college 1-2.
+Recommend promoting a sport's blend to the card only when it's beating the close over 50+ games.
