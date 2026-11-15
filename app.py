@@ -36550,18 +36550,14 @@ def _fire_freeze_on() -> bool:
 # ══════════════════════════════════════════════════════════════════════
 ZONE_RULE_ENABLED = False      # flipped on once the football zones are measured (Nov 15 2026)
 _ZONES = (
-    # hockey: the ML move is chased — open to 15 min before puck drop
-    ("NHL", "ml", ("o", 0), ("s", -0.25), "chase", 1.5, 2.0, 21.0, "the move since Pinnacle opened"),
-    ("NHL", "total", ("s", -12), ("s", -6), "chase", 1.0, 2.0, 31.0, "game-day morning move"),
-    # NBA: the daytime drift is faded, the last hour chased
-    ("NBA", "spread", ("o", 3), ("o", 12), "fade", 1.5, 2.0, 35.0, "daytime move (3–12h after open)"),
-    ("NBA", "ml", ("o", 3), ("o", 12), "fade", 1.0, 2.0, 30.0, "daytime move (3–12h after open)"),
-    ("NBA", "spread", ("s", -1), ("s", -0.25), "chase", 1.0, 2.0, 20.0, "last hour before tip"),
-    ("NBA", "ml", ("s", -1), ("s", -0.25), "chase", 1.0, 2.0, 35.0, "last hour before tip"),
-    ("NBA", "total", ("o", 3), ("o", 12), "chase", 1.0, 2.0, 12.0, "daytime move (3–12h after open)"),
-    # college totals: the first move off the open is faded, game-day morning chased
-    ("NCAAF", "total", ("o", 0), ("o", 6), "fade", 1.0, 2.0, 40.0, "first 6h after Pinnacle opens"),
-    ("NCAAF", "total", ("s", -12), ("s", -6), "chase", 1.0, 1.5, 29.0, "game-day morning move"),
+    # measured by kahla-scanner/scripts/zone_review.py over Oct 29 – Nov 14 2026 (Pinnacle's
+    # price at the window's end, vig in); the weekly review replaces this via machine_flags `zones`
+    ("NHL", "ml", ("o", 0), ("s", -1), "chase", 1.0, 2.0, 15.4, "the move since Pinnacle opened"),
+    ("NHL", "total", ("s", -12), ("s", -6), "chase", 1.0, 1.5, 31.5, "game-day morning move"),
+    ("NBA", "spread", ("o", 3), ("o", 12), "fade", 2.0, 3.0, 45.7, "daytime move (3–12h after open)"),
+    ("NBA", "ml", ("o", 3), ("o", 12), "fade", 1.0, 1.5, 27.6, "daytime move (3–12h after open)"),
+    ("NBA", "ml", ("s", -1), ("s", -0.25), "chase", 1.0, 2.0, 42.9, "last hour before tip"),
+    ("NCAAF", "total", ("o", 0), ("o", 6), "fade", 1.5, 2.0, 49.3, "first 6h after Pinnacle opens"),
 )
 _ZONE_LOG: dict = {}
 
@@ -37434,7 +37430,7 @@ def api_move_thresh_scan():
             games.append({"ev": r["event_name"], "start": r["event_start"], "final": fin})
     total = len(games)
     games = games[off:off + n]
-    out_rows, skip = [], {}
+    out_rows, skip, to_save = [], {}, []
     if not games:
         return jsonify({"ok": True, "sport": sport, "games_total": total, "rows": []})
     t_dead = _time.monotonic() + 45
@@ -37506,6 +37502,11 @@ def api_move_thresh_scan():
                         cps[f"{a_}{h:g}"] = cp
                 row["cp"] = cps
                 out_rows.append(row)
+                if request.args.get("save") and cps:
+                    # THE ZONE HISTORY IS KEPT (Nov 15 2026, Rob: "every Sunday… add it to the
+                    # database"): the line tape lives 60 days, the checkpoints forever
+                    to_save.append({"key": f"zcp|{sport}|{mt}|{gm['start'][:16]}|{ev}"[:400], "sport": sport,
+                                    "fetched_at": "2099-01-01T00:00:00+00:00", "payload": {**row, "sport": sport}})
                 continue
             for lc in leans:
                 rd = _move_read(sport, nums, sl, sms, sms, play_c=max(_MOVE_PLAY_C, lc), lean_c=lc)
@@ -37526,8 +37527,38 @@ def api_move_thresh_scan():
                                       else round(5.0 * (px / 100.0 if px > 0 else 100.0 / -px), 2)))
                 row[str(lc)] = x
             out_rows.append(row)
+    saved = 0
+    if to_save:
+        try:
+            sb.table("lookup_cache").upsert(to_save, on_conflict="key").execute()
+            saved = len(to_save)
+        except Exception as e:
+            skip["save_err"] = str(e)[:120]
     return jsonify({"ok": True, "sport": sport, "games_total": total, "off": off, "n": len(games),
-                    "skip": skip, "rows": out_rows})
+                    "skip": skip, "saved": saved,
+                    "rows": ([] if request.args.get("quiet") else out_rows)})
+
+
+@app.route("/api/zone-data")
+def api_zone_data():
+    """The saved zone checkpoints (zcp|…, kept forever), paged by key: ?sport=&off=&n=.
+    Shared-secret, read-only — the weekly zone review reads its whole history here."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    sport = (request.args.get("sport") or "").upper()
+    off, n = int(request.args.get("off") or 0), max(1, min(400, int(request.args.get("n") or 300)))
+    try:
+        rows = (sb.table("lookup_cache").select("key,payload").like("key", f"zcp|{sport}%")
+                .order("key").range(off, off + n - 1).execute().data) or []
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200]})
+    zz = _machine_flag_val("zones", None)
+    return jsonify({"ok": True, "sport": sport or "ALL", "off": off, "n": len(rows),
+                    "next": (off + n if len(rows) == n else None),
+                    "zones_live": zz if zz else [list(z) for z in _ZONES], "zone_rule": _zone_rule_on(),
+                    "rows": [r.get("payload") for r in rows]})
 
 
 @app.route("/api/move-scan")
