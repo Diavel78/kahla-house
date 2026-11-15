@@ -5894,6 +5894,26 @@ def api_bet_sheets_picks():
         except Exception as e:
             out["auto_cancel_err"] = str(e)[:200]
         return jsonify(out)
+    if request.args.get("b105_poly"):
+        # ?b105_poly=<bet id> — why a Bet105 bet has (or lacks) a Polymarket live value
+        try:
+            r_ = (get_supabase().table("bot_picks").select("id,sport,event_name,event_start,market_type,side,entry_line")
+                  .eq("id", int(request.args.get("b105_poly"))).limit(1).execute().data or [None])[0]
+            aw_, hm_ = _live_split_event(r_.get("event_name") or "")
+            t_ = _time.time(); ctx_ = {}
+            pm_ = _b105_pmm_lookup(r_.get("sport"), aw_, hm_, r_.get("event_start"), ctx_)
+            lk_ms = int((_time.time() - t_) * 1000)
+            mt_ = {"moneyline": "ml"}.get(r_.get("market_type"), r_.get("market_type"))
+            ents_ = [{k: e.get(k) for k in ("side", "line", "slug", "synthetic")} | {"mid": (e.get("quote") or {}).get("mid")}
+                     for e in ((pm_ or {}).get(mt_) or []) if e.get("side") == r_.get("side")]
+            b_ = {"sport": r_.get("sport"), "market_type": r_.get("market_type"), "side": r_.get("side"),
+                  "line": r_.get("entry_line"), "event_start": r_.get("event_start")}
+            out["b105_poly"] = {"bet": r_, "away": aw_, "home": hm_, "lookup_ms": lk_ms, "matched": bool(pm_),
+                                "meta": (pm_ or {}).get("diag") and {k: (pm_.get("diag") or {}).get(k) for k in ("matched", "event_title", "matched_slug", "counts")},
+                                "entries": sorted(ents_, key=lambda e: e.get("line") or 0),
+                                "now": _b105_poly_now(b_, aw_, hm_, ctx_)}
+        except Exception as e_:
+            out["b105_poly_err"] = repr(e_)[:300]
     if request.args.get("b105_mine"):
         # ?b105_mine=1 — the page's own Bet105 feed for the admin (live value: Poly / Pinnacle)
         try:
