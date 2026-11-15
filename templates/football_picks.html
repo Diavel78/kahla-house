@@ -802,6 +802,20 @@
         for (const k of ['spread', 'total', 'ml']) {
             const x = m[k]; if (!x) continue;
             n++;
+            if (x.zone_rule) {
+                // 🔥 THE ZONES (Nov 15 2026): the 🔥 fires at the end of a zone where Pinnacle's move
+                // means something — chase = that side, fade = the other side, 💨 = the side faded
+                if (x.state === 'play' || x.state === 'lean') {
+                    const tw = x.decided_ms ? new Date(x.decided_ms).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' }) : '';
+                    parts.push('🔥 ' + lab[k] + ' <b>' + esc(side(k, x.dir)) + '</b> ' + x.state.toUpperCase()
+                        + (x.kind === 'fade' && x.faded_dir ? ' <span class="smk" title="the money went this way in the zone — we fade it">💨 fading ' + esc(side(k, x.faded_dir)) + '</span>' : '')
+                        + ' <span class="mvq">(' + esc(x.zone || '') + (x.cents != null ? ', Pin ' + x.cents + '¢' : '') + (tw ? ', ' + tw : '') + ')</span>');
+                } else if (x.state === 'watching' && (x.zones || []).length && (!g._st || g._st === 'up')) {
+                    const z = x.zones[0], t = ms => new Date(ms).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' });
+                    parts.push('<span class="mvq" title="the 🔥 for this market comes only from this zone">⏳ ' + lab[k] + ': ' + esc(z.zone) + ' ' + t(z.from_ms) + '–' + t(z.to_ms) + '</span>');
+                }
+                continue;
+            }
             if (x.state === 'play' || x.state === 'lean') {
                 const s = (g.steam || {})[k];
                 // 💨 only when the trend since the open still runs the 🔥's way (Rob, Nov 1 2026:

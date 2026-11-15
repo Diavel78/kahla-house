@@ -36529,8 +36529,138 @@ def _fire_freeze_on() -> bool:
     return bool(_machine_flag("fire_freeze", FIRE_FREEZE_ENABLED))
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 🔥 THE ZONES (Nov 15 2026, Rob: "Find the zones, that's the trigger… fade patterns
+# trigger fire on the other side, chase patterns 🔥 on the correct side… that fire
+# stays there… the smoke becomes the fade"). The first-move rule fired on ~86% of
+# markets and only hockey's ML made money. The window study (every finished game since
+# Oct 29, Pinnacle's move inside a window, bet at Pinnacle's price at the window's end)
+# found WHERE a move means something, and which way: hockey's ML move is chased all
+# day; NBA's daytime move (3-12h after Pinnacle opens) is faded, its last hour before
+# tip chased; a college total's first move off the Sunday open is faded, its game-day
+# morning move chased. A zone fires at its window's END when Pinnacle moved ≥ min_c
+# inside it: chase = the 🔥 on the side it moved to, fade = the 🔥 on the OTHER side and
+# 💨 on the side the money went (`faded_dir`). PLAY at ≥ play_c, else LEAN. Two zones
+# fired opposite ways: the STRONGER (its measured ROI) owns the market. A fired zone is
+# stored (`zfire|…`) and stays; only a stronger zone the other way replaces it. No zone
+# fired = no 🔥 (no 💨 fallback). Re-run /api/move-thresh-scan?pts=1 + the window
+# grading to re-measure; kill switch `machine_flags zone_rule` (off = the first-move rule).
+# Each zone: (sport, mt, from, to, kind, min_c, play_c, roi%, label); a mark is
+# ("o", h) hours after Pinnacle's first read or ("s", h) hours from the start.
+# ══════════════════════════════════════════════════════════════════════
+ZONE_RULE_ENABLED = False      # flipped on once the football zones are measured (Nov 15 2026)
+_ZONES = (
+    # hockey: the ML move is chased — open to 15 min before puck drop
+    ("NHL", "ml", ("o", 0), ("s", -0.25), "chase", 1.5, 2.0, 21.0, "the move since Pinnacle opened"),
+    ("NHL", "total", ("s", -12), ("s", -6), "chase", 1.0, 2.0, 31.0, "game-day morning move"),
+    # NBA: the daytime drift is faded, the last hour chased
+    ("NBA", "spread", ("o", 3), ("o", 12), "fade", 1.5, 2.0, 35.0, "daytime move (3–12h after open)"),
+    ("NBA", "ml", ("o", 3), ("o", 12), "fade", 1.0, 2.0, 30.0, "daytime move (3–12h after open)"),
+    ("NBA", "spread", ("s", -1), ("s", -0.25), "chase", 1.0, 2.0, 20.0, "last hour before tip"),
+    ("NBA", "ml", ("s", -1), ("s", -0.25), "chase", 1.0, 2.0, 35.0, "last hour before tip"),
+    ("NBA", "total", ("o", 3), ("o", 12), "chase", 1.0, 2.0, 12.0, "daytime move (3–12h after open)"),
+    # college totals: the first move off the open is faded, game-day morning chased
+    ("NCAAF", "total", ("o", 0), ("o", 6), "fade", 1.0, 2.0, 40.0, "first 6h after Pinnacle opens"),
+    ("NCAAF", "total", ("s", -12), ("s", -6), "chase", 1.0, 1.5, 29.0, "game-day morning move"),
+)
+_ZONE_LOG: dict = {}
+
+
+def _zone_rule_on() -> bool:
+    return bool(_machine_flag("zone_rule", ZONE_RULE_ENABLED))
+
+
+def _zones_for(sport: str, mt: str) -> list:
+    z = _machine_flag_val("zones", None)
+    src = z if isinstance(z, list) and z else _ZONES
+    out = []
+    for x in src:
+        try:
+            if str(x[0]).upper() == sport and x[1] == mt:
+                out.append(tuple(x))
+        except (TypeError, IndexError):
+            continue
+    return out
+
+
+def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_ms: int,
+               zones=None) -> dict:
+    """Pure. The zones for one market off Pinnacle's series `pin` [(t_ms, number, line)]
+    (_steam_numbers' scale, home / over). → the fired zone's read {state play|lean, dir,
+    cents (the move), faded_dir, zone, kind, strength, decided_ms, at_h, open_ms, books,
+    agree} — the strongest if several fired — else {state watching|pass, zones: [...]}."""
+    zones = _zones_for(sport, mt) if zones is None else zones
+    pts = [p for p in (pin or []) if p[0] < start_ms]
+    if not zones:
+        return {"state": "pass", "why": "no zone for this market"}
+    if not pts:
+        return {"state": "no_open"}
+    o = pts[0][0]
+    H = 3600e3
+    fired, waiting = [], []
+    for z in zones:
+        _, _, za, zb, kind, min_c, play_c, roi, label = z
+        ta = (o if za[0] == "o" else start_ms) + int(float(za[1]) * H)
+        tb = (o if zb[0] == "o" else start_ms) + int(float(zb[1]) * H)
+        if ta < o or tb > start_ms or tb <= ta:
+            continue                                   # the window isn't on this game's clock
+        if now_ms < tb:
+            a = _steam_at(pts, ta) if now_ms >= ta else None
+            b = _steam_at(pts, min(now_ms, tb)) if a else None
+            waiting.append({"zone": label, "kind": kind, "from_ms": ta, "to_ms": tb,
+                            "so_far_c": round((b[1] - a[1]) * slope, 2) if a and b else None})
+            continue
+        a, b = _steam_at(pts, ta), _steam_at(pts, tb)
+        if not a or not b:
+            continue
+        mv = (b[1] - a[1]) * slope
+        if abs(mv) < float(min_c):
+            continue
+        moved = 1 if mv > 0 else -1
+        d = moved if kind == "chase" else -moved
+        fired.append({"state": "play" if abs(mv) >= float(play_c) else "lean", "dir": d,
+                      "cents": round(abs(mv), 1), "moved_dir": moved,
+                      "faded_dir": moved if kind == "fade" else None,
+                      "zone": label, "kind": kind, "strength": float(roi), "decided_ms": int(tb),
+                      "at_h": round((tb - o) / H, 1), "open_ms": o, "books": {"pin": round(abs(mv), 1)},
+                      "agree": ["pin"], "zone_rule": True})
+    if fired:
+        best = max(fired, key=lambda r: (r["strength"], -r["decided_ms"]))
+        if len(fired) > 1:
+            best["also"] = [{k: r[k] for k in ("zone", "kind", "dir", "cents")} for r in fired if r is not best]
+        return best
+    if waiting:
+        return {"state": "watching", "open_ms": o, "zones": waiting, "zone_rule": True, "dir": 0}
+    return {"state": "pass", "open_ms": o, "why": "no zone moved enough", "zone_rule": True}
+
+
+def _zone_settle(rd: dict, frozen, partial: bool):
+    """Pure. (the read to show, store it?). A stored zone 🔥 stays — unless a STRONGER zone
+    fired the other way (Rob: "Which one has stronger signal?"), which replaces it."""
+    fired = rd.get("state") in ("play", "lean")
+    if isinstance(frozen, dict) and frozen.get("state") in ("play", "lean"):
+        if (fired and not partial and rd.get("dir") != frozen.get("dir")
+                and float(rd.get("strength") or 0) > float(frozen.get("strength") or 0)):
+            out = dict(rd)
+            out["replaced"] = {k: frozen.get(k) for k in ("zone", "dir", "cents", "strength")}
+            return out, True
+        out = dict(frozen)
+        out["frozen"] = True
+        return out, False
+    if partial:
+        if fired:
+            return {"state": "reading", "open_ms": rd.get("open_ms"),
+                    "why": "ladder tape not read this load — the 🔥 waits for a full read"}, False
+        return rd, False
+    return rd, fired
+
+
+def _fire_prefix() -> str:
+    return "zfire" if _zone_rule_on() else "fire"
+
+
 def _fire_key(sport: str, mt: str, ev: str) -> str:
-    return f"fire|{sport}|{mt}|{ev}"
+    return f"{_fire_prefix()}|{sport}|{mt}|{ev}"
 
 
 def _move_settle(rd: dict, frozen, partial: bool):
@@ -36552,12 +36682,12 @@ def _move_settle(rd: dict, frozen, partial: bool):
 
 def _fire_frozen_load(sb, sport: str):
     """{(event_name, mt): stored read} for a sport, 60s cache. None = unreadable."""
-    hit = _FIRE_FROZEN.get(sport)
+    hit = _FIRE_FROZEN.get((_fire_prefix(), sport))
     if hit and _time.monotonic() - hit[0] < _FIRE_FROZEN_TTL_S:
         return hit[1]
     try:
         rows = _sb_paged(lambda: (sb.table("lookup_cache").select("key,payload")
-                                  .like("key", f"fire|{sport}|%").order("key")), 20)
+                                  .like("key", f"{_fire_prefix()}|{sport}|%").order("key")), 20)
     except Exception as e:
         app.logger.warning("fire frozen load %s: %s", sport, e)
         return None
@@ -36566,11 +36696,11 @@ def _fire_frozen_load(sb, sport: str):
         parts = str(r.get("key") or "").split("|", 3)
         if len(parts) == 4 and isinstance(r.get("payload"), dict):
             out[(parts[3], parts[2])] = r["payload"]
-    _FIRE_FROZEN[sport] = (_time.monotonic(), out)
+    _FIRE_FROZEN[(_fire_prefix(), sport)] = (_time.monotonic(), out)
     return out
 
 
-def _fire_freeze(sb, sport: str, ev: str, mt: str, rd: dict, start) -> None:
+def _fire_freeze(sb, sport: str, ev: str, mt: str, rd: dict, start, replace: bool = False) -> None:
     """Store a market's first 🔥; an existing row is never overwritten. Never raises."""
     pay = {k: v for k, v in rd.items() if k != "model_side"}
     pay["frozen_at"] = datetime.now(timezone.utc).isoformat()
@@ -36578,12 +36708,15 @@ def _fire_freeze(sb, sport: str, ev: str, mt: str, rd: dict, start) -> None:
         sb.table("lookup_cache").upsert(
             {"key": _fire_key(sport, mt, ev), "sport": sport,
              "fetched_at": (start + timedelta(days=_FIRE_FREEZE_KEEP_D)).isoformat(), "payload": pay},
-            ignore_duplicates=True, on_conflict="key").execute()
-        hit = _FIRE_FROZEN.get(sport)
+            ignore_duplicates=not replace, on_conflict="key").execute()
+        hit = _FIRE_FROZEN.get((_fire_prefix(), sport))
         if hit:
-            hit[1].setdefault((ev, mt), pay)
-        _probe_log({"kind": "fire_freeze", "sport": sport, "event": ev, "mt": mt,
-                    **{k: pay.get(k) for k in ("state", "dir", "cents", "decided_ms", "books", "anchor")}})
+            if replace:
+                hit[1][(ev, mt)] = pay
+            else:
+                hit[1].setdefault((ev, mt), pay)
+        _probe_log({"kind": "fire_freeze", "sport": sport, "event": ev, "mt": mt, "replace": replace,
+                    **{k: pay.get(k) for k in ("state", "dir", "cents", "decided_ms", "books", "anchor", "zone", "kind")}})
     except Exception as e:
         app.logger.warning("fire freeze %s %s %s: %s", sport, ev, mt, e)
 
@@ -36682,15 +36815,18 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
                             g.pop("steam", None)
                     except Exception:
                         pass
-                rd = _move_read(sport, nums, sl, sms, now_ms)
+                zone_on = _zone_rule_on()
+                rd = (_zone_read(sport, mt, nums.get("pin") or [], sl, sms, now_ms) if zone_on
+                      else _move_read(sport, nums, sl, sms, now_ms))
                 if anc is not None:
                     rd["anchor"] = anc
                 if freeze_on:
                     ev = g.get("event_name")
                     partial = anc is not None and (ev, mt, anc) not in lad_rows
-                    rd, store = _move_settle(rd, (frozen or {}).get((ev, mt)), partial)
+                    fz = (frozen or {}).get((ev, mt))
+                    rd, store = (_zone_settle(rd, fz, partial) if zone_on else _move_settle(rd, fz, partial))
                     if store and frozen is not None:
-                        _fire_freeze(sb, sport, ev, mt, rd, sd)
+                        _fire_freeze(sb, sport, ev, mt, rd, sd, replace=bool(rd.get("replaced")))
                 if key == "ml" and sport in _FIRE_ML_SPREAD_SPORTS:
                     spl = _fire_ml_spread(g)
                     if spl is None or abs(spl) > _FIRE_ML_MAX_SPREAD + 1e-9:
@@ -36805,7 +36941,7 @@ def _sheet_attach_fire(sport: str, games: list, now=None) -> None:
                 want = _fire_want(mt, rd.get("dir")) if rd.get("state") in ("play", "lean") else None
                 sm = _fire_want(mt, (steam.get(mt) or {}).get("dir"))
                 src = "fire"
-                if rd.get("state") in ("off_rule", "reading"):
+                if rd.get("state") in ("off_rule", "reading") or (_zone_rule_on() and want is None):
                     sm = None                          # off the rule (a football ML past a pick'em), or a read
                     #                                    missing its ladder rows this load: no 💨 fallback either
                 if want is None and sm is not None:
