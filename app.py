@@ -37893,6 +37893,96 @@ def api_move_thresh_scan():
                     "rows": ([] if request.args.get("quiet") else out_rows)})
 
 
+def _poly_taker_cost_c(ask_c: float) -> float:
+    """Pure. Cents to buy one Polymarket contract by TAKING: the ask + the taker fee (6.95¢ ×
+    p(1−p), the venue's schedule)."""
+    p = float(ask_c) / 100.0
+    return float(ask_c) + 6.95 * p * (1.0 - p)
+
+
+@app.route("/api/b105-vs-poly")
+def api_b105_vs_poly():
+    """BET105 OR TAKE ON POLYMARKET? (Nov 15 2026, Rob: "what we never analyzed was with the
+    fees, was it still better to take on Polymarket than to take on Bet 105?") — off our own
+    line tape: at `?at=` minutes before each start (default 30), Pinnacle's price (Bet105 =
+    Pinnacle) vs Polymarket's ask + taker fee, same side, SAME line, both sides of every market.
+    ?sport=&days=. Shared-secret, read-only."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    sport = (request.args.get("sport") or "NFL").upper()
+    days = max(1, min(30, int(request.args.get("days") or 14)))
+    at_min = float(request.args.get("at") or 30)
+    now = datetime.now(timezone.utc)
+    try:
+        rows = _sb_paged(lambda: (sb.table("line_tape")
+                                  .select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_name,event_start")
+                                  .eq("sport", sport).in_("src", ["pin", "poly"]).in_("mt", ["ml", "spread", "total"])
+                                  .gte("event_start", (now - timedelta(days=days)).isoformat())
+                                  .lt("event_start", now.isoformat()).order("at").order("id")), 150)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:200]})
+    by: dict = {}
+    for r in rows:
+        by.setdefault((r.get("event_name"), r.get("event_start"), r.get("mt")), []).append(r)
+    agg: dict = {}
+    sample = []
+    for (ev, es, mt), rs in by.items():
+        st = _parse_iso(es) if es else None
+        if not st:
+            continue
+        t = st - timedelta(minutes=at_min)
+        pin = poly = None
+        for r in rs:
+            d = _parse_iso(r.get("at"))
+            if not d or d > t:
+                break
+            if r["src"] == "pin":
+                pin = (d, r)
+            else:
+                poly = (d, r)
+        if not pin or not poly or (t - poly[0]).total_seconds() > 1800 or (t - pin[0]).total_seconds() > 1800:
+            continue
+        pr, vr = pin[1], poly[1]
+        if mt != "ml":
+            try:
+                if pr.get("line") is None or vr.get("line") is None or abs(float(pr["line"]) - float(vr["line"])) > 1e-6:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        try:
+            bid, ask = float(vr["bid_c"]), float(vr["ask_c"])
+            ph, pa = _amer_to_prob_py(float(pr["p_home"])), _amer_to_prob_py(float(pr["p_away"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+        if not ph or not pa or ask < bid:
+            continue
+        for side, b105_c, ask_c in (("home/over", ph * 100.0, ask), ("away/under", pa * 100.0, 100.0 - bid)):
+            if not (2 <= ask_c <= 98):
+                continue
+            diff = _poly_taker_cost_c(ask_c) - b105_c          # + = Polymarket costs more
+            a = agg.setdefault(mt, {"n": 0, "sum": 0.0, "poly_cheaper": 0, "b105_cheaper": 0, "tie": 0,
+                                    "fav": {"n": 0, "sum": 0.0}, "dog": {"n": 0, "sum": 0.0}})
+            a["n"] += 1
+            a["sum"] += diff
+            a["poly_cheaper" if diff < -0.05 else "b105_cheaper" if diff > 0.05 else "tie"] += 1
+            fd = a["fav" if b105_c >= 50 else "dog"]
+            fd["n"] += 1
+            fd["sum"] += diff
+            if len(sample) < 12:
+                sample.append({"ev": ev, "mt": mt, "side": side, "line": pr.get("line"), "b105_c": round(b105_c, 1),
+                               "poly_ask": ask_c, "poly_cost_c": round(_poly_taker_cost_c(ask_c), 1)})
+    out = {}
+    for mt, a in agg.items():
+        out[mt] = {"n": a["n"], "avg_poly_minus_b105_c": round(a["sum"] / a["n"], 2) if a["n"] else None,
+                   "poly_cheaper": a["poly_cheaper"], "b105_cheaper": a["b105_cheaper"], "tie": a["tie"],
+                   "favorites_avg": round(a["fav"]["sum"] / a["fav"]["n"], 2) if a["fav"]["n"] else None,
+                   "dogs_avg": round(a["dog"]["sum"] / a["dog"]["n"], 2) if a["dog"]["n"] else None}
+    return jsonify({"ok": True, "sport": sport, "days": days, "at_min_before": at_min, "markets": out,
+                    "sample": sample, "rows": len(rows)})
+
+
 @app.route("/api/zone-data")
 def api_zone_data():
     """The saved zone checkpoints (zcp|…, kept forever), paged by key: ?sport=&off=&n=.
