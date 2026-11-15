@@ -676,7 +676,7 @@
         fireItems().filter(it => it.fired).forEach(it => { (by[it.sp] = by[it.sp] || {})[it.g.event_name] = it.g; });
         await Promise.all(Object.keys(by).map(async sp => {
             const gs = Object.values(by[sp]);
-            const x = await postJSON('/api/bet105/lines', { sport: sp, games: gs.map(g => ({ away: g.away, home: g.home, event_start: g.event_start })) });
+            const x = await postJSON('/api/bet105/lines', { sport: sp, ladder: true, games: gs.map(g => ({ away: g.away, home: g.home, event_start: g.event_start, event_name: g.event_name })) });
             if (x && x.d && x.d.ok) gs.forEach((g, i) => { _fireLines[sp + '|' + g.event_name] = x.d.lines[i] || null; });
         }));
         _fireLinesAt = Date.now();
@@ -702,8 +702,18 @@
             else price = side === 'home' ? P.ml_home : P.ml_away;
         }
         let px = price != null ? 'Bet105 ' + am(price) : (live === undefined ? 'Bet105 …' : '');
-        const pt = polyTake(g, k, side);
-        if (pt && pt.am) {
+        const lad = k !== 'ml' && line != null && live && live.poly_ladder && live.poly_ladder[k];
+        const pts = lad ? fireLadder(lad, k, side, Number(line)) : null;
+        const pt = pts ? null : polyTake(g, k, side);
+        if (pts && pts.length) {
+            const b105c = price != null ? (Number(price) < 0 ? -Number(price) / (-Number(price) + 100) : 100 / (Number(price) + 100)) * 100 : null;
+            px += (px ? ' · ' : '') + 'Poly ' + pts.map(q => {
+                const same = Math.abs(q.line - Number(line)) < 0.01;
+                const t = (pts.length > 1 || !same ? (k === 'total' ? q.line : sgn(q.line)) + ' ' : '') + q.am;
+                return same && b105c != null && q.cost < b105c - 0.05 ? '<span class="win">' + t + '</span>' : t;
+            }).join(' / ');
+            if (pts.length === 1 && Math.abs(pts[0].line - Number(line)) < 0.01 && b105c != null && pts[0].cost > b105c + 0.05) px = px.replace('Bet105 ' + am(price), '<span class="win">Bet105 ' + am(price) + '</span>');
+        } else if (pt && pt.am) {
             const b105c = price != null ? (Number(price) < 0 ? -Number(price) / (-Number(price) + 100) : 100 / (Number(price) + 100)) * 100 : null;
             const same = k === 'ml' || pt.line == null || line == null || Math.abs(pt.line - Number(line)) < 0.01;
             const poly = 'Poly ' + pt.am + (same ? '' : ' @ ' + (k === 'total' ? pt.line : sgn(pt.line)));
@@ -713,6 +723,25 @@
         it.bet = { side, line, price, name };
         return '<div class="fxl fxb" onclick="event.stopPropagation();fireBet(' + it._i + ')">🔥 ' + lab + ' <b>' + esc(name) + '</b> <span class="pill ' + x.state + '">' + x.state.toUpperCase() + '</span>'
              + (px ? '<span class="fxp">' + px + '</span>' : '') + '<span class="fxt">TAP TO BET $5</span></div>';
+    }
+    // Polymarket's taker price on the rungs at Bet105's line: the same rung on a half point, the
+    // two either side of a whole number (Bet105 +9 → Poly +8.5 and +9.5). Ladder rows are HOME /
+    // OVER: the away / under side buys at 100 − the home bid.
+    function fireLadder(lad, k, side, line) {
+        const flip = k !== 'total' && side === 'away';
+        const want = Math.abs(line % 1) > 0.01 ? [line] : [line - 0.5, line + 0.5];
+        const out = [];
+        want.forEach(ln => {
+            const key = String(k === 'total' ? ln : (flip ? -ln : ln));
+            const q = lad[key] || lad[String(Number(key))];
+            if (!q) return;
+            const homeSide = k === 'total' ? side === 'over' : !flip;
+            const ask = homeSide ? q[1] : (q[0] != null ? 100 - Number(q[0]) : null);
+            if (ask == null || !(ask > 1 && ask < 99)) return;
+            const cost = Number(ask) + 6.95 * (ask / 100) * (1 - ask / 100);
+            out.push({ line: ln, cost, am: centsAm(cost) });
+        });
+        return out;
     }
     function fireCard(sp, g, items) {
         return '<div class="fx" onclick="goFire(\'' + sp + '\',' + JSON.stringify(g.event_name).replace(/"/g, '&quot;') + ')"><div class="fxh"><span><span class="fxs">' + FIRE_NM[sp] + '</span>'

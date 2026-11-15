@@ -18183,6 +18183,35 @@ def api_b105_lines():
                 blk["live"], blk["age_min"] = live, age
                 break
         out.append(blk)
+    # THE POLYMARKET LADDER AT BET105'S LINE (Rob, Nov 15 2026: "7.5 on a 9 when an 8.5
+    # exists"): with {ladder: true} each game also carries Polymarket's latest bid/ask on every
+    # spread/total rung the touch walk recorded (ladder_tape, HOME / OVER terms) so the 🔥 tab
+    # prices Polymarket on the rungs next to Bet105's line, never the sheet's old rung.
+    if d.get("ladder") and sb is not None:
+        since = (now - timedelta(hours=6)).isoformat()
+        for i, gm in enumerate((d.get("games") or [])[:40]):
+            ev = gm.get("event_name") or f"{gm.get('away')} @ {gm.get('home')}"
+            try:
+                rows = (sb.table("ladder_tape").select("at,mt,line,bid_c,ask_c")
+                        .eq("sport", sport).eq("event_name", ev).eq("src", "poly").gte("at", since)
+                        .order("at", desc=True).limit(1500).execute().data or [])
+            except Exception:
+                rows = []
+            lad: dict = {}
+            for r in rows:                                    # newest first: the first row per rung wins
+                mt_ = r.get("mt")
+                if mt_ not in ("spread", "total"):
+                    continue
+                k = f"{float(r['line']):g}"
+                if k in lad.setdefault(mt_, {}):
+                    continue
+                lad[mt_][k] = (None if r.get("bid_c") is None and r.get("ask_c") is None
+                               else [r.get("bid_c"), r.get("ask_c"), r.get("at")])
+            for mt_ in lad:
+                lad[mt_] = {k: v for k, v in lad[mt_].items() if v}
+            if out[i] is None:
+                out[i] = {}
+            out[i]["poly_ladder"] = lad
     return jsonify({"ok": True, "lines": out, "at": now.isoformat()})
 
 
