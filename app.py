@@ -37139,6 +37139,8 @@ def api_move_thresh_scan():
     leans = [float(x) for x in (request.args.get("lean") or "0.5,0.7,1.0").split(",") if x.strip()]
     now = datetime.now(timezone.utc)
     keys = (("ml", "ml"), ("total", "total")) if sport == "NHL" else (("spread", "spread"), ("total", "total"))
+    if request.args.get("pts"):
+        keys = (("ml", "ml"), ("spread", "spread"), ("total", "total"))
     keys = tuple(kv for kv in keys if (sport, kv[1]) in _STEAM_SLOPE_SCAN)
     try:
         rows = _sb_paged(lambda: (sb.table("football_sheets").select("event_name,event_start,data_blob")
@@ -37194,6 +37196,41 @@ def api_move_thresh_scan():
                 nums = _move_merge_nums(nums, _move_nums_ladder(lr, anc, sl, sign=-1 if mt == "total" else 1))
             pin = [r for r in rs if r.get("src") == "pin" and r.get("mt") == mt and r.get("p_home") is not None]
             row = {"ev": ev, "mt": mt, "start": gm["start"], "final": gm["final"]}
+            if request.args.get("pts"):
+                # CHECKPOINTS (Nov 15 2026, Rob: "I'm looking for the window. The movement that
+                # matters"): each book's number (home margin / total / home ML cents, one scale)
+                # and Pinnacle's own line + prices at fixed points from its open and before the start
+                H = 3600e3
+                o_ms = (nums.get("pin") or [[None]])[0][0]
+                row["slope"] = sl
+                row["open_ms"], row["start_ms"] = o_ms, sms
+                cps = {}
+                if o_ms is not None and o_ms < sms:
+                    marks = [("o", h) for h in (0, 0.25, 0.5, 1, 2, 3, 6, 12, 24)] + \
+                            [("s", h) for h in (-48, -24, -12, -6, -3, -2, -1, -0.5, -0.25, -0.0833, 0)]
+                    for a_, h in marks:
+                        t = (o_ms if a_ == "o" else sms) + int(h * H)
+                        if t < o_ms or t > sms:
+                            continue
+                        cp = {}
+                        for s_ in ("pin", "poly", "kalshi"):
+                            v = _steam_at([p for p in (nums.get(s_) or []) if p[0] < sms], t)
+                            if v is not None:
+                                cp[s_] = round(float(v[1]), 3)
+                        pr = None
+                        for r_ in pin:
+                            ta = _aware_ts(r_.get("at"))
+                            if ta and ta.timestamp() * 1000 <= t:
+                                pr = r_
+                            elif ta:
+                                break
+                        if pr:
+                            cp["pl"] = None if mt == "ml" else (float(pr["line"]) if pr.get("line") is not None else None)
+                            cp["ph"], cp["pa"] = pr.get("p_home"), pr.get("p_away")
+                        cps[f"{a_}{h:g}"] = cp
+                row["cp"] = cps
+                out_rows.append(row)
+                continue
             for lc in leans:
                 rd = _move_read(sport, nums, sl, sms, sms, play_c=max(_MOVE_PLAY_C, lc), lean_c=lc)
                 x = {"state": rd.get("state")}
