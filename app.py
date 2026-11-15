@@ -22451,6 +22451,63 @@ def _ensure_hand_start_worker() -> None:
         pass
 
 
+# THE FIRE TRACKER (Nov 15 2026, Rob on college basketball: "No bets yet, start tracking your
+# fire"). Every 🔥 is recorded in lookup_cache zsig|… by _sheet_attach_move — but only when a
+# page loaded the sheet, so an unviewed market's fire was never kept. This thread reads every
+# sheet sport's zones every FIRE_TRACK_S on the box (the touch walk's rows, copied), which notes
+# every fire whoever looks; the week record and the Sunday review grade them. Read-only.
+# Kill switch machine_flags fire_track.
+FIRE_TRACK_S = 300
+_FIRE_TRACK_THREAD = None
+_FIRE_TRACK_LAST: dict = {}
+
+
+def _fire_track_once(sb, now) -> dict:
+    import copy as _copy
+    st = {"at": now.isoformat(), "sports": {}}
+    rows = [(sp, r, _copy.deepcopy(g)) for sp, r, g in (_sheet_touch_rows_cached(sb, now) or [])]
+    for sp in sorted({t[0] for t in rows}):
+        gs = [t[2] for t in rows if t[0] == sp]
+        try:
+            _sheet_attach_move(sb, sp, gs, now)
+            fires = sum(1 for g in gs for k in ("ml", "spread", "total")
+                        if isinstance((g.get("move") or {}).get(k), dict)
+                        and g["move"][k].get("state") in ("play", "lean"))
+            st["sports"][sp] = {"games": len(gs), "fires": fires}
+        except Exception as e:
+            st["sports"][sp] = {"err": f"{type(e).__name__}: {e}"[:100]}
+    return st
+
+
+def _fire_track_worker() -> None:
+    while True:
+        t0 = _time.time()
+        try:
+            if _machine_flag("fire_track", True):
+                sb = get_supabase()
+                if sb is not None:
+                    r = _fire_track_once(sb, datetime.now(timezone.utc))
+                    r["ms"] = int((_time.time() - t0) * 1000)
+                    _FIRE_TRACK_LAST.clear()
+                    _FIRE_TRACK_LAST.update(r)
+        except Exception as e:
+            _FIRE_TRACK_LAST["err"] = f"{type(e).__name__}: {e}"[:120]
+        _time.sleep(max(30.0, FIRE_TRACK_S - (_time.time() - t0)))
+
+
+def _ensure_fire_track_worker() -> None:
+    global _FIRE_TRACK_THREAD
+    if os.environ.get("KAHLA_SELFTEST") == "1":
+        return
+    if _FIRE_TRACK_THREAD is not None and _FIRE_TRACK_THREAD.is_alive():
+        return
+    try:
+        _FIRE_TRACK_THREAD = threading.Thread(target=_fire_track_worker, name="fire-track", daemon=True)
+        _FIRE_TRACK_THREAD.start()
+    except Exception:
+        pass
+
+
 def _hand_start_tick(sb, client, now) -> dict:
     """Pending sheet bets with a resting order whose listed start has passed:
     cancel the unfilled remainder the moment the tape says the makers left.
@@ -29313,6 +29370,8 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
             # looked once every ~4 minutes on a busy slate and the 10:00 drop went unseen.
             _ensure_hand_start_worker()
             stats["start"] = dict(_HAND_START_LAST)
+            _ensure_fire_track_worker()
+            stats["fire_track"] = dict(_FIRE_TRACK_LAST)
         else:
             try:
                 stats["start"] = _hand_start_tick(sb, client, now)

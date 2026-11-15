@@ -24,6 +24,7 @@ from scripts.open_close_moves import parse_item
 log = logging.getLogger("cbb_dump")
 SB = ("https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
       "?groups=50&limit=500&dates={d}")
+SUM = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event={e}"
 CORE = ("https://sports.core.api.espn.com/v2/sports/basketball/leagues/mens-college-basketball/"
         "events/{e}/competitions/{e}/odds")
 
@@ -90,11 +91,32 @@ def fetch_odds(eid):
     return r
 
 
+def fetch_box(eid):
+    """Team box per side {fgm, fga, 3pm, 3pa, ftm, fta, orb, drb, to} — possessions for a
+    pace × efficiency totals model (Rob, Nov 15 2026: "find something for totals")."""
+    from scripts.nba_fetch import _box
+    s = get(SUM.format(e=eid)) or {}
+    comp = ((s.get("header") or {}).get("competitions") or [{}])[0]
+    side_of = {str((c.get("team") or {}).get("id")): c.get("homeAway") for c in comp.get("competitors") or []}
+    out = {}
+    for t in (s.get("boxscore") or {}).get("teams") or []:
+        side = side_of.get(str((t.get("team") or {}).get("id")))
+        if side not in ("home", "away"):
+            continue
+        b = _box(t.get("statistics"))
+        out[side] = [b.get("fieldGoalsMade"), b.get("fieldGoalsAttempted"), b.get("threePointFieldGoalsMade"),
+                     b.get("threePointFieldGoalsAttempted"), b.get("freeThrowsMade"), b.get("freeThrowsAttempted"),
+                     b.get("offensiveRebounds"), b.get("defensiveRebounds"),
+                     b.get("totalTurnovers") if b.get("totalTurnovers") is not None else b.get("turnovers")]
+    return out if len(out) == 2 else None
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--seasons", default="2025,2026,2027")
     ap.add_argument("--cache", default=".cbb_cache")
+    ap.add_argument("--box", action="store_true", help="also every game's team box score")
     a = ap.parse_args()
     os.makedirs(a.cache, exist_ok=True)
     games = []
@@ -113,6 +135,21 @@ def main():
         log.info("odds %d/%d", min(i + 400, len(todo)), len(todo))
     for g in games:
         g["odds"] = have.get(g["id"])
+    if a.box:
+        bpath = os.path.join(a.cache, "box.json")
+        bx = json.load(open(bpath)) if os.path.exists(bpath) else {}
+        todo = [g["id"] for g in games if not bx.get(g["id"])]
+        log.info("box: %d cached, %d to fetch", len(bx), len(todo))
+        for i in range(0, len(todo), 400):
+            chunk = todo[i:i + 400]
+            with ThreadPoolExecutor(8) as ex:
+                for eid, r in zip(chunk, ex.map(fetch_box, chunk)):
+                    bx[eid] = r
+            json.dump(bx, open(bpath, "w"))
+            log.info("box %d/%d", min(i + 400, len(todo)), len(todo))
+        for g in games:
+            g["box"] = bx.get(g["id"])
+        print("with box", sum(1 for g in games if g.get("box")))
     print("rows", len(games), "with odds", sum(1 for g in games if g["odds"]))
     b = base64.b64encode(gzip.compress(json.dumps(games).encode())).decode()
     print("DUMP-BEGIN")

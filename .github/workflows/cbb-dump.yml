@@ -10,6 +10,10 @@ on:
         description: "ESPN season years (Y = the Nov Y-1 .. Apr Y season)"
         required: false
         default: "2025,2026,2027"
+      box:
+        description: "also every game's team box score (1 = yes)"
+        required: false
+        default: "1"
 
 jobs:
   run:
@@ -30,4 +34,4 @@ jobs:
           key: cbb-cache-v1-${{ github.run_id }}
           restore-keys: cbb-cache-v1-
       - name: Dump
-        run: python -m scripts.cbb_dump --seasons "${{ inputs.seasons }}" --cache .cbb_cache
+        run: python -m scripts.cbb_dump --seasons "${{ inputs.seasons }}" --cache .cbb_cache ${{ inputs.box == '1' && '--box' || '' }}
