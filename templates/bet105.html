@@ -368,8 +368,8 @@
         const live = allMine().filter(isLive);
         const ev = live.reduce((a, b) => a + (Number(b.ev_usd) || 0), 0);
         const bet = live.reduce((a, b) => a + (worthOf(b) != null ? betCost(b) : 0), 0);
-        set('sLive', live.length ? dollars(bet + ev) : '—', ev > 0 ? 'pos' : ev < 0 ? 'neg' : '');
-        document.getElementById('sLiveN').textContent = live.length ? live.length + ' · ' + dollars(bet).replace('.00', '') + ' in' : 'nothing in play';
+        set('sLive', live.length ? money(ev) : '—', ev > 0 ? 'pos' : ev < 0 ? 'neg' : '');   // the tile = projected net
+        document.getElementById('sLiveN').textContent = live.length ? live.length + ' in play' : 'nothing in play';
         set('sOpen', _b105In ? String(_b105.filter(b => b.status === 'pending').length) : '…');
     }
 
@@ -1261,7 +1261,7 @@
         list.forEach(b => { usd += Number(kind === 'live' ? b.ev_usd : b.pnl_usd) || 0; if (kind === 'live' && worthOf(b) != null) inn += betCost(b); });
         let h = '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><h3>' + title + ' · ' + list.length + '</h3>'
               + '<button class="btn" style="flex:none;padding:8px 14px" onclick="closeSheet()">Close</button></div>';
-        if (kind !== 'open') h += '<div class="sub">' + (kind === 'live' ? 'worth now ' : 'total ') + '<b class="' + (usd > 0 ? 'pos' : usd < 0 ? 'neg' : '') + '">' + (kind === 'live' ? dollars(inn + usd) + '</b> · bet ' + dollars(inn) : money(usd) + '</b>') + '</div>';
+        if (kind !== 'open') h += '<div class="sub">' + (kind === 'live' ? 'net now ' : 'total ') + '<b class="' + (usd > 0 ? 'pos' : usd < 0 ? 'neg' : '') + '">' + (kind === 'live' ? money(usd) + '</b> · ' + dollars(inn + usd) + ' on ' + dollars(inn) : money(usd) + '</b>') + '</div>';
         const by = {};
         list.forEach(b => { const s = (b.sport || '').toUpperCase() || 'OTHER'; (by[s] = by[s] || []).push(b); });
         Object.keys(by).forEach(s => { h += '<div class="sp-h">' + esc(s === 'NCAAF' ? 'COLLEGE' : s) + ' · ' + by[s].length + '</div>' + by[s].map(betRow).join(''); });
