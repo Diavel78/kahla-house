@@ -37121,6 +37121,102 @@ def _move_series_points(rows: list, start_ms: int, max_w: float = 4.0) -> dict |
     return out
 
 
+@app.route("/api/move-thresh-scan")
+def api_move_thresh_scan():
+    """THE 🔥 AT A SMALLER MOVE (Nov 15 2026, Rob: "Can you run an analysis on the first .7
+    cent move?"). Shared-secret, read-only. For finished sheet games (`sport`, last `days`,
+    a chunk `off`/`n` by start), re-runs the first-move read (_move_read, Pinnacle plus a
+    book, the ladder merge exactly as the card does) at each `lean` threshold and grades
+    the fired side at PINNACLE'S line + price at the moment it fired (= Bet105's), $5
+    risked, off the sheet's final. One row per game-market."""
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or request.args.get("key", "") != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    sport = (request.args.get("sport") or "NBA").upper()
+    days = float(request.args.get("days") or 17)
+    off, n = int(request.args.get("off") or 0), int(request.args.get("n") or 25)
+    leans = [float(x) for x in (request.args.get("lean") or "0.5,0.7,1.0").split(",") if x.strip()]
+    now = datetime.now(timezone.utc)
+    keys = (("ml", "ml"), ("total", "total")) if sport == "NHL" else (("spread", "spread"), ("total", "total"))
+    keys = tuple(kv for kv in keys if (sport, kv[1]) in _STEAM_SLOPE_SCAN)
+    try:
+        rows = _sb_paged(lambda: (sb.table("football_sheets").select("event_name,event_start,data_blob")
+                                  .eq("sport", sport).gte("event_start", (now - timedelta(days=days)).isoformat())
+                                  .lt("event_start", (now - timedelta(hours=4)).isoformat())
+                                  .order("event_start").order("event_name")), 40)
+    except Exception as e:
+        return jsonify({"ok": False, "error": "sheets " + str(e)[:200]})
+    games, seen = [], set()
+    for r in rows:
+        fin = (((r.get("data_blob") or {}).get("grade") or {}).get("final")) if isinstance(r.get("data_blob"), dict) else None
+        k = (r.get("event_name"), str(r.get("event_start"))[:16])
+        if fin and fin.get("home") is not None and k not in seen:
+            seen.add(k)
+            games.append({"ev": r["event_name"], "start": r["event_start"], "final": fin})
+    total = len(games)
+    games = games[off:off + n]
+    out_rows, skip = [], {}
+    if not games:
+        return jsonify({"ok": True, "sport": sport, "games_total": total, "rows": []})
+    t_dead = _time.monotonic() + 45
+    for gm in games:
+        if _time.monotonic() > t_dead:
+            skip["time"] = skip.get("time", 0) + 1
+            continue
+        ev, sd = gm["ev"], _parse_iso(gm["start"])
+        try:
+            rs = _sb_paged(lambda: (sb.table("line_tape").select("at,src,mt,line,bid_c,ask_c,p_home,p_away,event_name")
+                                    .eq("sport", sport).eq("event_name", ev).in_("mt", [kv[1] for kv in keys])
+                                    .gte("event_start", (sd - timedelta(hours=2)).isoformat())
+                                    .lt("event_start", (sd + timedelta(hours=2)).isoformat())
+                                    .order("at").order("id")), 30)
+        except Exception:
+            skip["tape_err"] = skip.get("tape_err", 0) + 1
+            continue
+        sms = int(sd.timestamp() * 1000)
+        jobs = []
+        for _, mt in keys:
+            if mt != "ml":
+                anc = _move_anchor(rs, mt)
+                if anc is not None:
+                    jobs.append((ev, mt, anc, True))
+        lad = _move_ladder_rows(sb, sport, jobs, _time.monotonic() + 10) if jobs else {}
+        for key, mt in keys:
+            sl = _STEAM_SLOPE_SCAN[(sport, mt)]
+            nums = _steam_numbers(sport, mt, rs, wide=_MOVE_VENUE_WIDE_C)
+            anc = _move_anchor(rs, mt) if mt != "ml" else None
+            lr = lad.get((ev, mt, anc)) if anc is not None else None
+            if anc is not None and not lr:
+                skip["no_ladder"] = skip.get("no_ladder", 0) + 1
+                continue
+            if lr:
+                nums = _move_merge_nums(nums, _move_nums_ladder(lr, anc, sl, sign=-1 if mt == "total" else 1))
+            pin = [r for r in rs if r.get("src") == "pin" and r.get("mt") == mt and r.get("p_home") is not None]
+            row = {"ev": ev, "mt": mt, "start": gm["start"], "final": gm["final"]}
+            for lc in leans:
+                rd = _move_read(sport, nums, sl, sms, sms, play_c=max(_MOVE_PLAY_C, lc), lean_c=lc)
+                x = {"state": rd.get("state")}
+                if rd.get("state") in ("play", "lean"):
+                    d = 1 if rd["dir"] > 0 else -1
+                    t = datetime.fromtimestamp(rd["decided_ms"] / 1000.0, tz=timezone.utc)
+                    at = [r for r in pin if _aware_ts(r.get("at")) and _aware_ts(r["at"]) <= t]
+                    pr = at[-1] if at else None
+                    x.update(dir=d, cents=rd.get("cents"), at_h=rd.get("at_h"),
+                             hours_before=round((sd - t).total_seconds() / 3600.0, 1))
+                    if pr:
+                        ln = None if mt == "ml" else (float(pr["line"]) if pr.get("line") is not None else None)
+                        px = float(pr["p_home"] if d > 0 else pr["p_away"])
+                        g_ = _fire_clv_grade(mt, d, ln, gm["final"])
+                        x.update(line=ln, price=px, res=g_,
+                                 usd=(None if g_ is None else 0.0 if g_ == "push" else -5.0 if g_ == "loss"
+                                      else round(5.0 * (px / 100.0 if px > 0 else 100.0 / -px), 2)))
+                row[str(lc)] = x
+            out_rows.append(row)
+    return jsonify({"ok": True, "sport": sport, "games_total": total, "off": off, "n": len(games),
+                    "skip": skip, "rows": out_rows})
+
+
 @app.route("/api/move-scan")
 def api_move_scan():
     key = request.args.get("key", "")
