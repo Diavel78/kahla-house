@@ -34,6 +34,6 @@ jobs:
       - name: Print (the sandbox can't download artifacts — it reads the log)
         run: |
           echo "DUMP-BEGIN"
-          gzip -9c cfb_dump.json | base64 -w 0
+          gzip -9c cfb_dump.json | base64 -w 2000
           echo
           echo "DUMP-END"
