@@ -7,8 +7,8 @@
 --          self-applies this when it finds psql on disk)
 alter table football_sheets drop constraint if exists football_sheets_sport_check;
 alter table football_sheets add constraint football_sheets_sport_check
-    check (sport in ('NFL','NCAAF','NHL','MLB','NBA','CBB','UFC'));
+    check (sport in ('NFL','NCAAF','NHL','MLB','NBA','CBB','NCAAB','UFC'));
 alter table football_sheet_weeks drop constraint if exists football_sheet_weeks_sport_check;
 alter table football_sheet_weeks add constraint football_sheet_weeks_sport_check
-    check (sport in ('NFL','NCAAF','NHL','MLB','NBA','CBB','UFC'));
+    check (sport in ('NFL','NCAAF','NHL','MLB','NBA','CBB','NCAAB','UFC'));
 notify pgrst, 'reload schema';

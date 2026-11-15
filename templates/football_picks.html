@@ -128,7 +128,7 @@
         /* sport tabs: one row, the league's logo over its name (Rob, Oct 17 2026:
            "Blob is ugly… logo's??"). Logos come from /league-logo/<code>.png;
            a logo that fails to load leaves just the name. */
-        .seg { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-top: 26px; }
+        .seg { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; margin-top: 26px; }
         .tab { height: 48px; padding: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
                gap: 5px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--text3);
                font-size: 12px; font-weight: 600; cursor: pointer; transition: border-color .15s, background .15s; }
@@ -297,6 +297,7 @@
                 <button class="tab on" data-sport="NHL" aria-label="NHL" onclick="switchSport('NHL')"><span class="lg"><img src="/league-logo/NHL.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NHL</span></button>
                 <button class="tab" data-sport="NBA" aria-label="NBA" onclick="switchSport('NBA')"><span class="lg"><img src="/league-logo/NBA.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">NBA</span></button>
                 <button class="tab" data-sport="MLB" aria-label="MLB" onclick="switchSport('MLB')"><span class="lg"><img src="/league-logo/MLB.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">MLB</span></button>
+                <button class="tab" data-sport="NCAAB" aria-label="College basketball" onclick="switchSport('NCAAB')"><span class="lg"><img src="/league-logo/NCAAB.png" alt="" onerror="this.parentNode.classList.add('nolg')"></span><span class="tl">CBB</span></button>
             </div>
             <div class="chips" id="fchips"></div>
             <input class="search" id="search" type="search" placeholder="Search a game or team…"
@@ -368,7 +369,7 @@
     }
 
     let _sport = 'NHL';
-    const _daily = () => _sport === 'NHL' || _sport === 'NBA' || _sport === 'MLB';
+    const _daily = () => _sport === 'NHL' || _sport === 'NBA' || _sport === 'MLB' || _sport === 'NCAAB';
     function switchSport(s) {
         _sport = s;
         document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.sport === s));
@@ -715,7 +716,7 @@
     }
     function marketsFor(g) {
         if (_sport === 'NHL') return mlMarket(g) + puckMarket(g) + totalMarket(g, false);
-        if (_sport === 'NBA' || _sport === 'MLB') return mlMarket(g) + nbaSpreadMarket(g) + totalMarket(g, false);
+        if (_sport === 'NBA' || _sport === 'MLB' || _sport === 'NCAAB') return mlMarket(g) + nbaSpreadMarket(g) + totalMarket(g, false);
         return footballMarkets(g);
     }
     function hasPick(g) {
@@ -761,7 +762,9 @@
             return;
         }
         _meta = _daily() ? d.games.length + ' games' : 'Week of ' + d.week_key + ' · ' + d.games.length + ' games';
-        document.getElementById('hint').innerHTML = _sport === 'NBA'
+        document.getElementById('hint').innerHTML = _sport === 'NCAAB'
+            ? 'College hoops: no model — the line is Pinnacle\'s and the 🔥 picks the side. Bet105 = Pinnacle\'s price.'
+            : _sport === 'NBA'
             ? 'Model = Hoops IQ (pace × efficiency, opponent-adjusted, rest, who is OUT). ML play ≥ 4% over the no-vig line, lean ≥ 2%. Spread and total are LEAN at most — neither has beaten the closing number in backtest. A favorite at −140 or shorter is too chalky to bet on the ML, and a dog at +200 or longer is a longshot — either way the spread is the bet. Injuries read at build time — check late scratches.'
             : _sport === 'MLB'
             ? 'Model = Diamond IQ (starter FIP, bullpen + fatigue, lineup wOBA, park). It trails the betting market in backtest, so every pick is LEAN at most — ML and run line need 4% over the no-vig price. The total is our number only, never a pick (the totals model failed its backtest). A favorite at −150 or shorter is too chalky to bet on the ML — see the run line. Starters are ESPN probables; * = no starts on record.'
@@ -1261,7 +1264,7 @@
     }
     // 'up' = not started; 'final' = graded final or started > FINAL_AFTER_H
     // ago (a grade lands within ~5 min of the final); 'live' = in between.
-    const FINAL_AFTER_H = { NHL: 3.5, NBA: 3.0, MLB: 3.5, NFL: 4.5, NCAAF: 4.5 };
+    const FINAL_AFTER_H = { NHL: 3.5, NBA: 3.0, MLB: 3.5, NFL: 4.5, NCAAF: 4.5, NCAAB: 3.0 };
     function gameStatus(g) {
         const t = g.event_start ? new Date(g.event_start).getTime() : null;
         if (t === null || t > Date.now()) return 'up';

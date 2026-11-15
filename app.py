@@ -998,7 +998,7 @@ _WELL_RED_LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stati
 # the `dark` variant first — the pages are dark), fetched server-side and
 # cached in memory, so the page never guesses a CDN path and never depends on
 # the phone reaching ESPN. `?meta=1` returns the chosen URL instead (site-curl).
-_LEAGUE_LOGO_SPORT = {"NHL": "nhl", "NBA": "nba", "MLB": "mlb", "NFL": "nfl", "NCAAF": "ncaaf"}
+_LEAGUE_LOGO_SPORT = {"NHL": "nhl", "NBA": "nba", "MLB": "mlb", "NFL": "nfl", "NCAAF": "ncaaf", "NCAAB": "ncaab"}
 _LEAGUE_LOGO_CACHE: dict = {}          # code -> (fetched_mono, bytes, mimetype, href)
 _LEAGUE_LOGO_TTL_S = 86400.0
 
@@ -1102,7 +1102,7 @@ def football_picks_page():
     return render_template("football_picks.html")
 
 
-_SHEET_SPORTS = ("NHL", "NBA", "MLB", "NCAAF", "NFL")
+_SHEET_SPORTS = ("NHL", "NBA", "MLB", "NCAAF", "NFL", "NCAAB")
 _SHEET_NHL_LOOKBACK_H = 36   # hockey sheet keeps last night's graded games on the page
 
 
@@ -1233,7 +1233,7 @@ def _pin_fair_at_rung(sport: str, mt: str, pick: dict | None, pin: dict | None, 
 # it has a 🔥 (`fire: True`), the spread and total stay the football card.
 _SHEET_SEED_KEYS = {"NFL": ("spread", "total", "ml"), "NCAAF": ("spread", "total", "ml"),
                     "NHL": ("ml", "puck", "total"), "NBA": ("ml", "spread", "total"),
-                    "MLB": ("ml", "spread", "total")}
+                    "MLB": ("ml", "spread", "total"), "NCAAB": ("ml", "spread", "total")}
 
 
 def _sheet_seed_pin_picks(sport: str, g: dict, slate=None, now=None) -> list:
@@ -1342,7 +1342,7 @@ def _sheet_seed_pin_picks(sport: str, g: dict, slate=None, now=None) -> list:
             pk = {"side": side, "line": None, "price": px}
             if px <= _SHEET_CHALK_ML:
                 pk["chalky"] = True
-            if sport in ("NBA", "MLB") and px >= _SHEET_LONGSHOT_ML:
+            if sport in ("NBA", "MLB", "NCAAB") and px >= _SHEET_LONGSHOT_ML:
                 pk["longshot"] = True
         if pk is None:
             continue
@@ -1599,7 +1599,7 @@ def _sheet_flip_pick(g: dict, key: str, pick: dict, pv: dict, sport=None) -> dic
             px = float(npf["american"])
             if px <= _SHEET_CHALK_ML:
                 out["chalky"] = True
-            if str(sport or g.get("sport") or "").upper() in ("NBA", "MLB") and px >= _SHEET_LONGSHOT_ML:
+            if str(sport or g.get("sport") or "").upper() in ("NBA", "MLB", "NCAAB") and px >= _SHEET_LONGSHOT_ML:
                 out["longshot"] = True
         except (TypeError, ValueError):
             pass
@@ -2065,6 +2065,7 @@ _SHEET_RUN_CLOCKS = {
     "NHL": ((7, 0, None), (11, 5, None), (14, 0, None), (15, 35, None)),
     "NBA": ((7, 5, None), (12, 10, None), (15, 45, None)),
     "MLB": ((7, 10, None), (11, 15, None), (15, 50, None)),
+    "NCAAB": ((7, 15, None), (10, 0, None), (13, 0, None), (15, 55, None)),
 }
 
 
@@ -2091,7 +2092,7 @@ def _sheet_next_run(sport: str, now: datetime) -> str | None:
 # by the teams' regional networks shows those. College football needs
 # groups=80&limit=400 or ESPN returns only the featured slate. 10-min cache;
 # any failure means no channel, never a broken sheet.
-_SHEET_TV_LEAGUE = {"NFL": "nfl", "NCAAF": "ncaaf", "NHL": "nhl", "NBA": "nba", "MLB": "mlb"}
+_SHEET_TV_LEAGUE = {"NFL": "nfl", "NCAAF": "ncaaf", "NHL": "nhl", "NBA": "nba", "MLB": "mlb", "NCAAB": "ncaab"}
 _SHEET_TV_CACHE: dict = {}
 _SHEET_TV_DEBUG: dict = {}
 _SHEET_TV_TTL_S = 600
@@ -2142,7 +2143,8 @@ def _sheet_tv_map(sport: str, starts: list) -> dict:
     # One request per ET day: ESPN 400s a dates RANGE with limit on NHL
     # (seen Oct 17 2026). limit/groups only for college football, where
     # ESPN otherwise returns just the featured slate.
-    params = {"limit": 400, "groups": 80} if sport == "NCAAF" else {}
+    params = ({"limit": 400, "groups": 80} if sport == "NCAAF"
+              else {"limit": 400, "groups": 50} if sport == "NCAAB" else {})
     events, fails, out, t0 = [], [], {}, _time.time()
     for day in days[:8]:
         if _time.time() - t0 > 7:
@@ -2223,7 +2225,7 @@ def api_sheet_tv():
             .eq("week_key", wk.get("week_key")).eq("sport", sport)
             .gte("event_start", (datetime.now(timezone.utc) - timedelta(hours=36)).isoformat())
             .order("event_start").limit(400).execute().data or [])
-    shape = {"NHL": _sheet_game_nhl, "NBA": _sheet_game_nba, "MLB": _sheet_game_mlb}.get(sport, _sheet_game_football)
+    shape = {"NHL": _sheet_game_nhl, "NBA": _sheet_game_nba, "NCAAB": _sheet_game_nba, "MLB": _sheet_game_mlb}.get(sport, _sheet_game_football)
     games = [shape(r) for r in rows]
     _SHEET_TV_CACHE.clear()
     _SHEET_TV_DEBUG.clear()
@@ -2260,7 +2262,7 @@ def _sheet_games_today(sb, sport: str, days: int = 1, include_started: bool = Fa
             .gte("event_start", day0.astimezone(timezone.utc).isoformat())
             .lte("event_start", (day0 + timedelta(days=max(1, int(days)))).astimezone(timezone.utc).isoformat())
             .order("event_start").limit(200).execute().data or [])
-    shape = {"NHL": _sheet_game_nhl, "NBA": _sheet_game_nba, "MLB": _sheet_game_mlb}.get(sport, _sheet_game_football)
+    shape = {"NHL": _sheet_game_nhl, "NBA": _sheet_game_nba, "NCAAB": _sheet_game_nba, "MLB": _sheet_game_mlb}.get(sport, _sheet_game_football)
     now = datetime.now(timezone.utc)
     out = []
     for r in rows:
@@ -2655,7 +2657,7 @@ def api_football_picks():
         except Exception as e:
             return jsonify({"ok": False, "error": f"games lookup failed: {e}"}), 500
     old_rows = []
-    if sport in ("NHL", "NBA", "MLB"):
+    if sport in ("NHL", "NBA", "MLB", "NCAAB"):
         # A daily slate: the sheet SHOWS what's still to play PLUS the last
         # ~36h, so last night's games stay up with their ✅/❌ grade (Oct 3
         # 2026) until the next slate rolls on. The week's older finals are
@@ -2690,7 +2692,7 @@ def api_football_picks():
     _now0 = datetime.now(timezone.utc)
     for r in rows:
         games.append(_sheet_game_nhl(r) if sport == "NHL"
-                     else _sheet_game_nba(r) if sport == "NBA"
+                     else _sheet_game_nba(r) if sport in ("NBA", "NCAAB")
                      else _sheet_game_mlb(r) if sport == "MLB"
                      else _sheet_game_football(r))
         _sheet_seed_pin_picks(sport, games[-1], _pin_evs, _now0)   # the line is Pinnacle's: missing picks seeded at its rung
@@ -2732,7 +2734,7 @@ def api_football_picks():
         try:
             olds = []
             for r in old_rows:
-                olds.append(_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport == "NBA"
+                olds.append(_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport in ("NBA", "NCAAB")
                             else _sheet_game_mlb(r))
             for g in olds:
                 _sheet_attach_price(sport, g, _now)
@@ -2991,7 +2993,7 @@ def api_football_picks_debug():
         games, raw_by_id = [], {}
         pin_evs = _pin_sheet_slate(sb, sport, now, {})[0] if rows else None
         for r in rows:
-            g = (_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport == "NBA"
+            g = (_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport in ("NBA", "NCAAB")
                  else _sheet_game_mlb(r) if sport == "MLB" else _sheet_game_football(r))
             _sheet_seed_pin_picks(sport, g, pin_evs, now)
             _sheet_attach_pin_fair(sport, g, pin_evs)
@@ -30500,16 +30502,18 @@ def _bs_espn_events(sport: str, dk: str) -> list:
     pair = _ESPN_PATH.get((sport or "").lower())
     if not pair:
         return []
-    if (sport or "").lower() != "ncaaf":
+    lo = (sport or "").lower()
+    if lo not in ("ncaaf", "ncaab"):
         return _espn_scoreboard_raw(pair[0], pair[1], dates=dk)
     import time
-    key = f"cfb-all?{dk}"
+    # college hoops too: groups=50 is all of Division I (else the featured slate)
+    key = f"{'cfb' if lo == 'ncaaf' else 'cbb'}-all?{dk}"
     hit = _ESPN_CACHE.get(key)
     if hit and (time.time() - hit[0]) < _ESPN_TTL:
         return hit[1]
     try:
-        r = _http.get("https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard",
-                      params={"dates": dk, "groups": "80", "limit": "400"}, timeout=8)
+        r = _http.get(f"https://site.api.espn.com/apis/site/v2/sports/{pair[0]}/{pair[1]}/scoreboard",
+                      params={"dates": dk, "groups": "80" if lo == "ncaaf" else "50", "limit": "400"}, timeout=8)
         ev = (r.json() or {}).get("events", []) if r.status_code == 200 else []
     except Exception:
         ev = []
@@ -35614,7 +35618,7 @@ def _sheet_touch_rows(sb, now) -> list:
         pin_evs = _pin_sheet_slate(sb, sport, now, slates)[0] if rows else None
         for r in rows:
             try:
-                g = (_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport == "NBA"
+                g = (_sheet_game_nhl(r) if sport == "NHL" else _sheet_game_nba(r) if sport in ("NBA", "NCAAB")
                      else _sheet_game_mlb(r) if sport == "MLB" else _sheet_game_football(r))
                 _sheet_seed_pin_picks(sport, g, pin_evs, now)   # the same rungs the page quotes
             except Exception as e:
@@ -35638,7 +35642,7 @@ def _sheet_touch_rows(sb, now) -> list:
 # games under their own budget. Names are the spine's ESPN names — the sheet
 # builders use the same "Away @ Home", so the series continues on the card
 # once the sheet lands. Kill switch `machine_flags line_tape_presheet`.
-_LINE_TAPE_PRESHEET_H = {"NCAAF": 9 * 24.0, "NFL": 9 * 24.0, "NBA": 72.0, "NHL": 72.0}
+_LINE_TAPE_PRESHEET_H = {"NCAAF": 9 * 24.0, "NFL": 9 * 24.0, "NBA": 72.0, "NHL": 72.0, "NCAAB": 72.0}
 _LINE_TAPE_PRESHEET_MAX = 400
 _LINE_TAPE_PRESHEET_BUDGET_S = 300.0
 _LINE_TAPE_PRESHEET_STATS: dict = {"games": 0, "read": 0, "at": None, "err": None}
@@ -36076,13 +36080,14 @@ def _line_tape_series(sport: str, rows: list) -> dict:
 # Polymarket offered at bet time. Read-only: /api/steam-scan (shared-secret).
 _STEAM_SLOPE = {("NCAAF", "spread"): 2.6, ("NCAAF", "total"): 2.5,
                 ("NFL", "spread"): 3.0, ("NFL", "total"): 3.2,
-                ("NBA", "spread"): 3.0, ("NBA", "total"): 2.2}
+                ("NBA", "spread"): 3.0, ("NBA", "total"): 2.2,
+                ("NCAAB", "spread"): 3.0, ("NCAAB", "total"): 2.4}
 # The SCAN's markets (a superset — the card tag reads `_STEAM_SLOPE` only).
 # A moneyline's number IS its devigged home price in cents (slope 1, no line).
 # NHL total: a goal moves the over ~17¢ around 6 (sd ≈ 2.3 goals) — a guess,
 # like the others; the scan thresholds in CENTS so it only scales the display.
 _STEAM_SLOPE_SCAN = {**_STEAM_SLOPE, ("NHL", "total"): 17.0,
-                     **{(s, "ml"): 1.0 for s in ("NCAAF", "NFL", "NBA", "NHL")}}
+                     **{(s, "ml"): 1.0 for s in ("NCAAF", "NFL", "NBA", "NHL", "NCAAB")}}
 
 
 def _key_hop_c(sport: str, ln: float, p: float, ref: float) -> float:
@@ -55936,7 +55941,8 @@ def api_handicapper_paperlog():
 _PARLAY_BASE = "https://parlay-api.com/v1"
 _PARLAY_SPORT_KEY = {"MLB": "baseball_mlb", "NBA": "basketball_nba",
                      "NHL": "icehockey_nhl", "NFL": "americanfootball_nfl",
-                     "CBB": "basketball_ncaab", "NCAAF": "americanfootball_ncaaf"}
+                     "CBB": "basketball_ncaab", "NCAAB": "basketball_ncaab",
+                     "NCAAF": "americanfootball_ncaaf"}
 _PARLAY_CACHE_MIN = 90        # slate cache TTL — DB-backed (cold-start safe)
 _PARLAY_BUDGET = 900          # hard stop inside the 1,000 free credits
 _PARLAY_CREDITS_PER_CALL = 3  # h2h,spreads,totals × pinnacle (1 region-equiv)
@@ -55986,7 +55992,7 @@ def _pin_pull_log(sb, sport: str, now, rec: dict) -> None:
 # — free, keyless for us, the whole league in two calls — so the sheets
 # read Pinnacle first and fall back to parlay-api only when it fails.
 _PINDIRECT_BASE = "https://guest.api.arcadia.pinnacle.com/0.1"
-_PINDIRECT_LEAGUE = {"NCAAF": 880, "NFL": 889, "NHL": 1456, "NBA": 487, "MLB": 246}
+_PINDIRECT_LEAGUE = {"NCAAF": 880, "NFL": 889, "NHL": 1456, "NBA": 487, "MLB": 246, "NCAAB": 493}
 _PINDIRECT_KEY = "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R"   # the site's own public guest key
 _PINDIRECT_HDR = {"User-Agent": "Mozilla/5.0", "Accept": "application/json",
                   "Referer": "https://www.pinnacle.com/", "Origin": "https://www.pinnacle.com",

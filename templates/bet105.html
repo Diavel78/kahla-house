@@ -61,7 +61,7 @@
         .sheet { max-height: 82vh; overflow-y: auto; }
         .sheet .sp-h { font-size: 13px; font-weight: 700; color: var(--text3); letter-spacing: .06em; margin: 14px 0 6px; }
         .pos { color: var(--g-tx); } .neg { color: var(--r-tx); }
-        .tabs { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-top: 18px; }
+        .tabs { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; margin-top: 18px; }
         .tab { height: 48px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 12px;
                border: 1px solid var(--line); background: var(--card); color: var(--text2); cursor: pointer; }
         .tab img { max-width: 30px; max-height: 30px; object-fit: contain; opacity: .5; filter: grayscale(.7); }
@@ -257,7 +257,7 @@
         clearTimeout(toast._t); toast._t = setTimeout(() => { t.style.display = 'none'; }, bad ? 5000 : 2600);
     }
 
-    const SPORTS = [['NCAAF', 'College'], ['NFL', 'NFL'], ['NHL', 'NHL'], ['NBA', 'NBA'], ['MLB', 'MLB']];
+    const SPORTS = [['NCAAF', 'College'], ['NFL', 'NFL'], ['NHL', 'NHL'], ['NBA', 'NBA'], ['NCAAB', 'CBB'], ['MLB', 'MLB']];
     let _sport = localStorage.getItem('b105_sport') || 'NCAAF';
     let _view = 'up';                       // up | live | mine
     let _games = [], _lines = [], _b105 = [], _poly = [], _busy = {}, _b105In = false;
@@ -614,8 +614,8 @@
     // sport's sheet, two lists — a 🔥 that's live and not bet, and a 🔥 window closing inside the
     // hour. Each sport's last sheet is kept on the phone, so the tab draws at once; the full reads
     // replace it. Tap a game → its sport tab, scrolled to the card.
-    const FIRE_SPORTS = ['NCAAF', 'NFL', 'NHL', 'NBA', 'MLB'];
-    const FIRE_NM = { NCAAF: 'College', NFL: 'NFL', NHL: 'NHL', NBA: 'NBA', MLB: 'MLB' };
+    const FIRE_SPORTS = ['NCAAF', 'NFL', 'NHL', 'NBA', 'NCAAB', 'MLB'];
+    const FIRE_NM = { NCAAF: 'College', NFL: 'NFL', NHL: 'NHL', NBA: 'NBA', NCAAB: 'CBB', MLB: 'MLB' };
     let _fireList = [], _fireBusy = false, _fireLines = {}, _fireLinesAt = 0, _fire = {}, _fireLoading = false, _fireAt = 0, _fireN = null, _scrollTo = null;
     function fireCache(sp) {
         if (_fire[sp]) return _fire[sp];

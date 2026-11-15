@@ -5857,7 +5857,7 @@ def test_pin_direct_feed() -> None:
            {"designation": "away", "points": 2.5, "price": -110}),
     ]
     check("direct: every sheet sport has a Pinnacle league (one table, defined once)",
-          _app._PINDIRECT_LEAGUE == {"NCAAF": 880, "NFL": 889, "NHL": 1456, "NBA": 487, "MLB": 246}
+          _app._PINDIRECT_LEAGUE == {"NCAAF": 880, "NFL": 889, "NHL": 1456, "NBA": 487, "MLB": 246, "NCAAB": 493}
           and open(_app.__file__).read().count("\n_PINDIRECT_LEAGUE =") == 1)
     ev = _app._pin_direct_to_events(matchups, markets, now)
     check("direct: started games and child matchups are dropped",
@@ -5961,7 +5961,8 @@ def test_sheet_run_clocks() -> None:
         sports = (("NCAAF",) if j.name.startswith("sheets_cfb") else
                   ("NCAAF", "NFL") if j.name.startswith("sheets_") and j.name != "sheets_grade"
                   else ("NHL",) if j.name.startswith("nhl_sheet") else ("NBA",) if j.name.startswith("nba_sheet")
-                  else ("MLB",) if j.name.startswith("mlb_sheet") else ())
+                  else ("MLB",) if j.name.startswith("mlb_sheet")
+                  else ("NCAAB",) if j.name.startswith("cbb_sheet") else ())
         for sp in sports:
             want.setdefault(sp, set()).add((j.hour, j.minute, j.weekday))
     have = {sp: set(c) for sp, c in _app._SHEET_RUN_CLOCKS.items()}

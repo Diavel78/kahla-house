@@ -40,16 +40,18 @@ _HDRS = {"Accept": "application/json", "User-Agent": "kahla-house/1.0"}
 # total series are CANDIDATES — the catalog discovery below finds the real
 # ticker when a guess is wrong, and the coverage probe prints what it found.
 SERIES_ML = {"MLB": "KXMLBGAME", "NBA": "KXNBAGAME", "NHL": "KXNHLGAME",
-             "NFL": "KXNFLGAME", "NCAAF": "KXNCAAFGAME"}
+             "NFL": "KXNFLGAME", "NCAAF": "KXNCAAFGAME", "NCAAB": "KXNCAAMBGAME"}
 SERIES_LINE = {
     "MLB": {"total": ["KXMLBTOTAL"], "spread": ["KXMLBSPREAD"]},
     "NBA": {"total": ["KXNBATOTAL"], "spread": ["KXNBASPREAD"]},
     "NHL": {"total": ["KXNHLTOTAL"], "spread": ["KXNHLSPREAD"]},
     "NFL": {"total": ["KXNFLTOTAL"], "spread": ["KXNFLSPREAD"]},
     "NCAAF": {"total": ["KXNCAAFTOTAL"], "spread": ["KXNCAAFSPREAD"]},
+    "NCAAB": {"total": ["KXNCAAMBTOTAL"], "spread": ["KXNCAAMBSPREAD"]},
 }
 _SPORT_TAGS = {"MLB": ("MLB",), "NBA": ("NBA",), "NHL": ("NHL",),
-               "NFL": ("NFL",), "NCAAF": ("NCAAF", "CFB", "COLLEGEFOOTBALL")}
+               "NFL": ("NFL",), "NCAAF": ("NCAAF", "CFB", "COLLEGEFOOTBALL"),
+               "NCAAB": ("NCAAMB", "NCAAB")}
 
 # ───────────────────────────── fees (pure) ─────────────────────────────
 # Polymarket US: taker 5¢·p(1−p), maker 1.25¢·p(1−p) charged at fill

@@ -55,6 +55,7 @@ _SPORT_TAG_SLUG: dict[str, str] = {
     "NFL":   "nfl",
     "NCAAF": "cfb",
     "CBB":   "college-basketball",
+    "NCAAB": "college-basketball",
     "UFC":   "ufc",
 }
 
@@ -71,6 +72,7 @@ _SPORT_TAG_SLUG: dict[str, str] = {
 _SPORT_TAG_FALLBACKS: dict[str, list[str]] = {
     "NCAAF": ["college-football", "ncaaf"],
     "CBB":   ["cbb", "mens-college-basketball"],
+    "NCAAB": ["cbb", "mens-college-basketball"],
 }
 
 # Caches. Module-level so they survive across requests on a warm Vercel

@@ -190,11 +190,24 @@ JOBS: tuple[Job, ...] = (
         hour=11, minute=15, timeout_s=1500, note="MLB pick sheet (box, Pinnacle feed)"),
     Job("mlb_sheet_1550", ["scripts.mlb_sheet_data", "--days", "1", "--commit"],
         hour=15, minute=50, timeout_s=1500, note="MLB pick sheet (box, pre-game probables, Pinnacle feed)"),
+    # College hoops (Nov 15 2026, Rob: "College basketball time"): no model —
+    # the line is Pinnacle's own free feed (league 493, no --pin: no paid
+    # fallback), the 🔥 zones pick the side. Today + tomorrow, so the next
+    # day's openers land on the tape. MIRRORS app._SHEET_RUN_CLOCKS["NCAAB"].
+    Job("cbb_sheet_0715", ["scripts.cbb_sheet_data", "--days", "1", "--commit"],
+        hour=7, minute=15, timeout_s=1500, note="college hoops sheet (box, Pinnacle feed)"),
+    Job("cbb_sheet_10", ["scripts.cbb_sheet_data", "--days", "1", "--commit"],
+        hour=10, minute=0, timeout_s=1500, note="college hoops sheet (box, Pinnacle feed)"),
+    Job("cbb_sheet_13", ["scripts.cbb_sheet_data", "--days", "1", "--commit"],
+        hour=13, minute=0, timeout_s=1500, note="college hoops sheet (box, Pinnacle feed)"),
+    Job("cbb_sheet_1555", ["scripts.cbb_sheet_data", "--days", "1", "--commit"],
+        hour=15, minute=55, timeout_s=1500, note="college hoops sheet (box, Pinnacle feed)"),
     # Yesterday's sheet record, every sport, stamped to exec_probe_runs
     # (kind=sheet_grade) so a sandbox can read it through the site.
     Job("sheets_grade", ["scripts.grade_football_sheets", "--sport", "NFL",
                          "--sport", "NCAAF", "--sport", "NHL",
-                         "--sport", "NBA", "--sport", "MLB", "--days-back", "2", "--stamp", "--write"],
+                         "--sport", "NBA", "--sport", "MLB", "--sport", "NCAAB",
+                         "--days-back", "2", "--stamp", "--write"],
         hour=9, minute=0, timeout_s=600, note="pick-sheet record (yesterday + day before)"),
     # Intraday ✅/❌ ride the `grader` lane every ~5 min (cellar/lanes.py
     # lane_grader) — this job owns only the stamped daily record.

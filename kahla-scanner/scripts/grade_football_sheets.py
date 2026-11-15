@@ -39,7 +39,7 @@ log = logging.getLogger("grade_football_sheets")
 # event ids, so they grade off the same scoreboard shape; football_sheet_data
 # only knows the two football leagues.
 _GRADE_LEAGUES = dict(_LEAGUES, NHL=("hockey", "nhl"), NBA=("basketball", "nba"),
-                     MLB=("baseball", "mlb"))
+                     MLB=("baseball", "mlb"), NCAAB=("basketball", "mens-college-basketball"))
 AZ = ZoneInfo("America/Phoenix")
 
 
@@ -67,6 +67,8 @@ def espn_finals(sport: str, date: str) -> dict[str, dict]:
         params = {"dates": f"{dd:%Y%m%d}"}
         if sport == "NCAAF":
             params.update({"groups": "80", "limit": "400"})
+        elif sport == "NCAAB":
+            params.update({"groups": "50", "limit": "400"})   # all of Division I
         doc = _espn_get(url, params)
         if not doc:
             continue
@@ -152,7 +154,7 @@ def grade_model(sport: str, data_blob: dict, hs: float, aws: float) -> dict:
     A model number that lands exactly on the line has no side → no key."""
     out: dict = {}
     db = data_blob or {}
-    if sport in ("NHL", "NBA", "MLB"):
+    if sport in ("NHL", "NBA", "MLB", "NCAAB"):
         m = db.get("model") or {}
         ln = db.get("lines") or {}
         em, ls = m.get("exp_margin"), ln.get("spread_home")
@@ -196,7 +198,7 @@ def grade_model(sport: str, data_blob: dict, hs: float, aws: float) -> dict:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sport", action="append", choices=["NFL", "NCAAF", "NHL", "NBA", "MLB"], required=True)
+    ap.add_argument("--sport", action="append", choices=["NFL", "NCAAF", "NHL", "NBA", "MLB", "NCAAB"], required=True)
     ap.add_argument("--date", action="append", default=[],
                      help="AZ-anchored date YYYY-MM-DD; repeatable")
     ap.add_argument("--days-back", type=int, default=0,
@@ -258,7 +260,7 @@ def main() -> int:
             eid = r["espn_id"]
             fin = finals.get(eid)
             blob = _model_block(r.get("data_blob"))
-            hockey = (r.get("data_blob") or {}).get("picks") if sport in ("NHL", "NBA", "MLB") else None
+            hockey = (r.get("data_blob") or {}).get("picks") if sport in ("NHL", "NBA", "MLB", "NCAAB") else None
             row_detail = {
                 "sport": sport, "event_name": r["event_name"],
                 "espn_id": eid, "espn_state": (fin or {}).get("state"),
