@@ -9290,6 +9290,16 @@ def test_zone_rule() -> None:
     check("NFL 1 PM: fade the money", rd["dir"] == -1 and rd["kind"] == "fade", str(rd))
     rd = _app._zone_read("NFL", "spread", mvh(four), 3.0, four, four - int(0.4 * H), zones=FZ)
     check("NFL 4 PM: follow the money", rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
+    CZ = [z for z in _app._STANDING_ZONES if z[0] == "NCAAB"]
+    cb = lambda a, b, ln: [(one - int(20 * H), a, ln), (one - int(2 * H), b, ln)]
+    rd = _app._zone_read("NCAAB", "spread", cb(3.0, 3.0, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
+    check("NCAAB: nobody moved it → the dog", rd["dir"] == -1 and rd["kind"] == "quiet", str(rd))
+    rd = _app._zone_read("NCAAB", "spread", cb(3.0, 6.5, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
+    check("NCAAB: 3+ pts onto the favorite → fade it", rd["dir"] == -1 and rd["kind"] == "fade", str(rd))
+    rd = _app._zone_read("NCAAB", "spread", cb(3.0, 4.5, 5.0), 3.0, one, one - int(0.4 * H), zones=CZ)
+    check("NCAAB: money on the dog → follow", rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
+    rd = _app._zone_read("NCAAB", "spread", cb(3.0, 4.5, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
+    check("NCAAB: 1-3 pts onto the favorite fires nothing", rd["state"] not in ("play", "lean"), str(rd))
     live = {"state": "lean", "dir": -1, "zone": "last hour", "kind": "chase", "cents": 2.0, "decided_ms": 9}
     atb = {"state": "play", "dir": 1, "zone": "daytime", "kind": "fade", "cents": 3.0, "decided_ms": 5}
     lk = _app._zone_bet_lock(live, atb, 7)

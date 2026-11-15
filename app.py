@@ -36742,6 +36742,19 @@ _STANDING_ZONES = (
     ("NFL", "spread", ("o", 0), ("s", -0.5), "chase", 3.0, 6.0, 12.0,
      "4 PM game: follow the money", {"et": [[15, 19]]}),
     ("NFL", "spread", ("o", 0), ("s", -0.5), "quiet", 1.5, 99.0, 5.0, "nobody moved it: the favorite"),
+    # COLLEGE BASKETBALL (same day, Rob: "College basketball time"), ESPN open → close, every D1
+    # game (scripts/cbb_dump.py), graded at the close. Open → close is a coin flip all three
+    # seasons as a whole; THIS season (Nov 3-14) the dog covers 327-276, and the market's move
+    # says which dogs: nobody moved it (under 1 pt) → the dog 85-57 (+14%, last season +1%);
+    # 3+ pts onto the favorite → fade it, the dog 60-42 (+12%; 5+ pts 18-5); 1+ pt onto the dog →
+    # follow 90-72 (+6%). A 1-3 pt move onto the favorite fires nothing. Early-season regime —
+    # re-check as conference play starts (January).
+    ("NCAAB", "spread", ("o", 0), ("s", -0.5), "quiet", 2.9, 99.0, 14.0,
+     "nobody moved it: the dog", {"pick": "dog"}),
+    ("NCAAB", "spread", ("o", 0), ("s", -0.5), "fade", 8.9, 14.9, 12.0,
+     "3+ points onto the favorite: fade it", {"dog": 0.5}),
+    ("NCAAB", "spread", ("o", 0), ("s", -0.5), "chase", 2.9, 99.0, 6.0,
+     "money on the dog: follow", {"dog": 0.5}),
 )
 _ZONE_LOG: dict = {}
 
@@ -37039,6 +37052,8 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
             if abs(mv) >= float(min_c) or abs(hl) < 1e-9 or not _zone_filter_ok(flt, 0, hl, start_ms, static=True):
                 continue
             d = 1 if hl < 0 else -1
+            if flt.get("pick") == "dog":
+                d = -d                                  # college hoops: nobody moved it = the dog
             fired.append({"state": "lean", "dir": d, "cents": round(abs(mv), 1), "moved_dir": 0,
                           "faded_dir": None, "zone": label, "kind": kind, "strength": float(roi),
                           "decided_ms": int(tb), "at_h": round((tb - o) / H, 1), "open_ms": o,
