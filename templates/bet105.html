@@ -322,12 +322,21 @@
         const d = r && r.ok ? await r.json().catch(() => null) : null;
         if (!d || !d.ok) return;
         _b105Live = d.live || {};
+        Object.keys(_b105Live).forEach(id => { const x = _b105Live[id]; if (x && x.now) _lastNow[id] = { now: x.now, ev_usd: x.ev_usd, at: Date.now() }; });
+        try { localStorage.setItem('b105_lastnow', JSON.stringify(_lastNow)); } catch (e) {}
         applyLive(); renderMoney(); render();
     }
+    // NEVER "NO LIVE PRICE" (Rob, Nov 15 2026: "If you can't find a live price, then show the
+    // last value"): the server prices off the books, then the score; a bet that still comes back
+    // with nothing keeps the last value it had, kept on the phone across refreshes
+    let _lastNow = (() => { try { return JSON.parse(localStorage.getItem('b105_lastnow') || '{}') || {}; } catch (e) { return {}; } })();
     function applyLive() {
         _b105.forEach(b => {
-            const x = _b105Live[String(b.id)];
-            if (x && b.status === 'pending') { b.now = x.now; b.ev_usd = x.ev_usd; if (x.game) b.game = x.game; }
+            const id = String(b.id), x = _b105Live[id];
+            if (b.status !== 'pending') return;
+            if (x && x.now) { b.now = x.now; b.ev_usd = x.ev_usd; if (x.game) b.game = x.game; }
+            else if (b.now) _lastNow[id] = { now: b.now, ev_usd: b.ev_usd, at: Date.now() };
+            else if (_lastNow[id]) { b.now = Object.assign({}, _lastNow[id].now, { last: _lastNow[id].at }); b.ev_usd = _lastNow[id].ev_usd; }
         });
     }
     function loadMine() {
@@ -530,7 +539,7 @@
         else if (b.status === 'lost') right = '<span class="neg">❌ ' + money(b.pnl_usd) + '</span>';
         else if (b.status === 'push') right = '➖ push';
         else if (isLive(b)) right = (b.now ? 'now ' + (centsAm(b.now.prob * 100) || '—') : 'no live price')
-            + (b.ev_usd != null ? '<small>worth ' + money(b.ev_usd) + (b.now && b.now.src ? ' · ' + (b.now.src === 'poly' ? 'Poly' : 'Pin')
+            + (b.ev_usd != null ? '<small>worth ' + money(b.ev_usd) + (b.now && b.now.src ? ' · ' + (b.now.last ? 'last ' + clock(new Date(b.now.last).toISOString()) + ' · ' : '') + (b.now.src === 'poly' ? 'Poly' : b.now.src === 'score' ? 'from the score' : 'Pin')
             + (b.now.poly_line != null && b.line != null && Math.abs(Number(b.now.poly_line) - Number(b.line)) > 0.01 ? ' @ ' + b.now.poly_line : '') : '') + '</small>' : '');
         else right = b._venue === 'BET105' ? '$' + (b.stake || 5) + '<small>to win $' + (b.win_usd != null ? Number(b.win_usd).toFixed(2) : '—') + '</small>' : (b.held ? Number(b.held).toFixed(0) + ' held' : '');
         if (b.game && b.game.away != null) d = shortTeam(parts[0], b.sport) + ' ' + b.game.away + ' – ' + b.game.home + ' ' + shortTeam(parts[1], b.sport) + (b.game.status ? ' · ' + b.game.status : '');

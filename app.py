@@ -17924,6 +17924,92 @@ def _b105_quote(sb, sport: str, it: dict, now, slates: dict) -> dict | None:
     return None
 
 
+# THE SCORE IS A PRICE TOO (Rob, Nov 15 2026, Lions −2.5 up 28-3 in the 3rd reading "no live
+# price" and dragging the live tile negative: "If you can't find a live price, then show the
+# last value… You can't just show no live price"). When no book quotes a bet in play, value it
+# off the score and the clock: final margin ~ normal around (margin now + the market's expected
+# margin for the time left), sd shrinking with the square root of the time left. A final game
+# is decided. Full-game sds measured the usual way (NFL margin ~13.5, NBA ~12, NHL ~2.3 goals).
+_B105_PERIODS = {"NFL": (4, 15.0), "NCAAF": (4, 15.0), "NBA": (4, 12.0), "NCAAB": (2, 20.0),
+                 "CBB": (2, 20.0), "NHL": (3, 20.0), "MLB": (9, None)}
+_B105_SD = {"NFL": (13.5, 13.5), "NCAAF": (16.0, 17.0), "NBA": (12.0, 18.0), "NCAAB": (11.0, 15.0),
+            "CBB": (11.0, 15.0), "NHL": (2.3, 2.3), "MLB": (4.0, 4.4)}
+
+
+def _b105_time_left(sport: str, game: dict):
+    """Pure. Fraction of the game left (0..1) off ESPN's period + clock, None when unreadable."""
+    sp = (sport or "").upper()
+    per = _B105_PERIODS.get(sp)
+    try:
+        period = int(game.get("period") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not per or period <= 0:
+        return None
+    n, plen = per
+    if plen is None:                                   # baseball: innings
+        st = str(game.get("status") or "").lower()
+        half = 0.5 if st.startswith(("bot", "mid", "end")) else 0.0
+        if st.startswith("end"):
+            half = 1.0
+        return max(0.0, min(1.0, (n - (period - 1) - half) / n))
+    if period > n:                                     # overtime
+        return 0.02
+    clk = str(game.get("clock") or "").strip()
+    left = 0.0
+    try:
+        if ":" in clk:
+            mm, ss = clk.split(":", 1)
+            left = int(mm) + float(ss) / 60.0
+        elif clk:
+            left = float(clk) / 60.0
+    except ValueError:
+        return None
+    left = max(0.0, min(plen, left))
+    return max(0.0, min(1.0, ((n - period) * plen + left) / (n * plen)))
+
+
+def _b105_score_prob(sport: str, mt: str, side: str, line, game: dict):
+    """Pure. P(this bet wins) off the score + clock; None when the game can't be read."""
+    import math
+    if not game:
+        return None
+    a, h = game.get("away"), game.get("home")
+    if a is None or h is None:
+        return None
+    try:
+        a, h = float(a), float(h)
+        ln = float(line) if line is not None else None
+    except (TypeError, ValueError):
+        return None
+    mt = {"moneyline": "ml"}.get(mt, mt)
+    if game.get("state") == "post":
+        gr = _bs_grade_bet(mt if mt != "ml" else "moneyline", side, ln, int(a), int(h))
+        return {"win": 1.0, "loss": 0.0, "push": 0.5}.get(gr)
+    rem = _b105_time_left(sport, game)
+    if rem is None:
+        return None
+    sd_m, sd_t = _B105_SD.get((sport or "").upper(), (12.0, 15.0))
+    phi = lambda z: 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+    if mt == "total":
+        if ln is None:
+            return None
+        sd = max(0.35, sd_t * math.sqrt(rem))
+        z = (a + h + ln * rem - ln) / sd
+        p = phi(z) if side == "over" else 1.0 - phi(z)
+    else:
+        sd = max(0.35, sd_m * math.sqrt(rem))
+        if mt == "ml" or ln is None:
+            mu_full = 0.0
+            edge = 0.0
+        else:
+            mu_full = -ln if side == "home" else ln            # the market's expected home margin
+            edge = ln
+        m = (h - a) + mu_full * rem                             # expected final home margin
+        p = phi((m + edge) / sd) if side == "home" else phi((-m + edge) / sd)
+    return max(0.001, min(0.999, p))
+
+
 def _b105_fair_now(sb, sport: str, b: dict, now, slates: dict) -> dict | None:
     """Pinnacle's devigged fair for the bet AT ITS OWN LINE right now (live
     board once started): the win probability the page shows. None on a miss."""
@@ -18232,6 +18318,11 @@ def _b105_mine(sb, uid: str, now, poly: bool = False, budget=(7, 5)) -> list:
                 p = float(pf["prob"])
                 b["now"] = {"prob": round(p, 4), "fair_c": round(p * 100.0, 1), "live": bool(pf.get("live")),
                             "src": "pinnacle", "pin_line": pf.get("pin_line")}
+        if p is None and b.get("_started") and b.get("game"):
+            ps = _b105_score_prob(b["sport"], b["market_type"], b["side"], b["line"], b["game"])
+            if ps is not None:
+                p = ps
+                b["now"] = {"prob": round(p, 4), "fair_c": round(p * 100.0, 1), "live": True, "src": "score"}
         if p is not None and b["win_usd"] is not None:
             b["ev_usd"] = round(p * b["win_usd"] - (1.0 - p) * b["stake"], 2)
     for b in out:
