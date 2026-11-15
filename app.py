@@ -5920,6 +5920,7 @@ def api_bet_sheets_picks():
             uid_ = request.args.get("uid") or next(iter(_admin_uids() or []), None)
             bets_ = _b105_mine(get_supabase(), uid_, datetime.now(timezone.utc))
             out["b105_mine"] = [{k: x.get(k) for k in ("id", "label", "line", "price", "status", "game", "now", "ev_usd")} for x in bets_]
+            out["b105_timing"] = dict(_B105_LAST)
         except Exception as e_:
             out["b105_mine_err"] = str(e_)[:300]
     if request.args.get("b105_list"):
@@ -18172,9 +18173,12 @@ def _b105_mine(sb, uid: str, now) -> list:
         for b in live:
             games.setdefault((b["sport"], b["_away"], b["_home"]), b)
         poly_ctx["sb"] = sb
+        _st = {"games": len(games)}; _t0 = _time.time()
         _b105_pmm_db_load(sb, list(games))
         hit_ = {k for k in games if (_B105_PMM_CACHE.get(k) or (0,))[0] > _time.time() - _B105_PMM_DB_S}
         games = {k: v for k, v in games.items() if k not in hit_}
+        _st.update(db_hits=len(hit_), db_ms=int((_time.time() - _t0) * 1000), lookups=len(games))
+        _B105_LAST.clear(); _B105_LAST.update(_st)
         # never `with`: its exit waits on every thread, the timeouts would mean nothing
         ex = _cf.ThreadPoolExecutor(max_workers=max(1, min(10, len(games))))
         futs = {ex.submit(_b105_pmm_lookup, k[0], k[1], k[2], b.get("event_start"), poly_ctx): k for k, b in games.items()}
@@ -18184,6 +18188,9 @@ def _b105_mine(sb, uid: str, now) -> list:
         except Exception:
             pass
         ex.shutdown(wait=False)
+        _B105_LAST["lookup_ms"] = int((_time.time() - _t0) * 1000)
+        _b105_client(poly_ctx)
+        _B105_LAST["client_ms"] = int((_time.time() - _t0) * 1000)
         ex = _cf.ThreadPoolExecutor(max_workers=min(10, len(live)))
         futs = {ex.submit(_b105_poly_now, b, b["_away"], b["_home"], poly_ctx): b["id"] for b in live}
         try:
@@ -18195,6 +18202,7 @@ def _b105_mine(sb, uid: str, now) -> list:
         except Exception:
             pass
         ex.shutdown(wait=False)
+        _B105_LAST.update(book_ms=int((_time.time() - _t0) * 1000), priced=sum(1 for v in poly.values() if v))
     for b in pend:
         px = poly.get(b["id"])
         p = None
@@ -18219,6 +18227,7 @@ def _b105_mine(sb, uid: str, now) -> list:
 
 _B105_PMM_CACHE: dict = {}          # (sport, away, home) -> (ts, lookup) — 2 min, across requests
 _B105_PMM_LOCK = threading.Lock()
+_B105_LAST: dict = {}               # the last feed's Polymarket timings (the b105_mine probe prints them)
 
 
 def _b105_client(ctx: dict):
