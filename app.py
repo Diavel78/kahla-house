@@ -5918,7 +5918,7 @@ def api_bet_sheets_picks():
         # ?b105_mine=1 — the page's own Bet105 feed for the admin (live value: Poly / Pinnacle)
         try:
             uid_ = request.args.get("uid") or next(iter(_admin_uids() or []), None)
-            bets_ = _b105_mine(get_supabase(), uid_, datetime.now(timezone.utc))
+            bets_ = _b105_mine(get_supabase(), uid_, datetime.now(timezone.utc), poly=bool(request.args.get("poly")), budget=(12, 14))
             out["b105_mine"] = [{k: x.get(k) for k in ("id", "label", "line", "price", "status", "game", "now", "ev_usd")} for x in bets_]
             out["b105_timing"] = dict(_B105_LAST)
         except Exception as e_:
@@ -18098,7 +18098,7 @@ def api_b105_lines():
     return jsonify({"ok": True, "lines": out, "at": now.isoformat()})
 
 
-def _b105_mine(sb, uid: str, now) -> list:
+def _b105_mine(sb, uid: str, now, poly: bool = False, budget=(7, 5)) -> list:
     """Today's (AZ) Bet105 bets + every pending one, with the live read:
     ESPN score/clock, Pinnacle's fair at the bet's own line (the win %), the
     dollars, and a grade the moment ESPN calls the game final."""
@@ -18165,8 +18165,8 @@ def _b105_mine(sb, uid: str, now) -> list:
     # Bet105 bets). In play: Polymarket's live book (Pinnacle prices few games in-game);
     # pre-game or no Polymarket price: Pinnacle's devigged fair.
     pend = [b for b in out if b["status"] == "pending"]
-    live = [b for b in pend if b.get("_started")]
-    poly: dict = {}
+    live = [b for b in pend if b.get("_started")] if poly else []
+    pxs: dict = {}
     if live:
         import concurrent.futures as _cf
         games: dict = {}
@@ -18183,7 +18183,7 @@ def _b105_mine(sb, uid: str, now) -> list:
         ex = _cf.ThreadPoolExecutor(max_workers=max(1, min(10, len(games))))
         futs = {ex.submit(_b105_pmm_lookup, k[0], k[1], k[2], b.get("event_start"), poly_ctx): k for k, b in games.items()}
         try:
-            for fu in _cf.as_completed(futs, timeout=7):
+            for fu in _cf.as_completed(futs, timeout=budget[0]):
                 pass
         except Exception:
             pass
@@ -18194,17 +18194,19 @@ def _b105_mine(sb, uid: str, now) -> list:
         ex = _cf.ThreadPoolExecutor(max_workers=min(10, len(live)))
         futs = {ex.submit(_b105_poly_now, b, b["_away"], b["_home"], poly_ctx): b["id"] for b in live}
         try:
-            for fu in _cf.as_completed(futs, timeout=5):
+            for fu in _cf.as_completed(futs, timeout=budget[1]):
                 try:
-                    poly[futs[fu]] = fu.result()
+                    pxs[futs[fu]] = fu.result()
                 except Exception:
                     pass
         except Exception:
             pass
         ex.shutdown(wait=False)
-        _B105_LAST.update(book_ms=int((_time.time() - _t0) * 1000), priced=sum(1 for v in poly.values() if v))
-    for b in pend:
-        px = poly.get(b["id"])
+        _B105_LAST.update(book_ms=int((_time.time() - _t0) * 1000), priced=sum(1 for v in pxs.values() if v))
+    # the fast feed (poly=False) values every open bet off Pinnacle; the live call (poly=True)
+    # prices only the bets in play, Polymarket first
+    for b in (live if poly else pend):
+        px = pxs.get(b["id"])
         p = None
         if px:
             p = float(px["prob"])
@@ -18412,6 +18414,24 @@ def api_b105_mine():
     return jsonify({"ok": True, "bets": bets, "today": rec,
                     "live_ev_usd": round(sum(b.get("ev_usd") or 0 for b in live), 2),
                     "pending": sum(1 for b in bets if b["status"] == "pending"), "at": now.isoformat()})
+
+
+@app.route("/api/bet105/live")
+@admin_required
+def api_b105_live():
+    """The live value of every Bet105 bet in play, off Polymarket's book (Pinnacle where
+    Polymarket has none) — its own call so the bet list never waits on it (Nov 14 2026)."""
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    now = datetime.now(timezone.utc)
+    try:
+        bets = _b105_mine(sb, g.uid, now, poly=True, budget=(12, 14))
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}), 500
+    return jsonify({"ok": True, "at": now.isoformat(), "timing": dict(_B105_LAST),
+                    "live": {str(b["id"]): {"now": b.get("now"), "ev_usd": b.get("ev_usd"), "game": b.get("game"),
+                                            "status": b.get("status")} for b in bets if b.get("now")}})
 
 
 @app.route("/api/bet-sheets/place", methods=["POST"])

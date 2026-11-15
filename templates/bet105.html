@@ -262,7 +262,7 @@
     async function loadB105() {
         const r = await authFetch('/api/bet105/mine').catch(() => null);
         const d = r && r.ok ? await r.json().catch(() => null) : null;
-        if (d && d.ok) { _b105 = d.bets || []; _b105In = true; try { localStorage.setItem('b105_mine', JSON.stringify({ at: Date.now(), bets: _b105 })); } catch (e) {} }
+        if (d && d.ok) { _b105 = d.bets || []; _b105In = true; applyLive(); try { localStorage.setItem('b105_mine', JSON.stringify({ at: Date.now(), bets: _b105 })); } catch (e) {} }
         renderMoney(); render();
     }
     async function loadPoly() {
@@ -294,6 +294,22 @@
         try { localStorage.setItem('b105_poly', JSON.stringify({ at: Date.now(), bets: _poly })); } catch (e) {}
         renderMoney(); render();
     }
+    // THE LIVE VALUES ARE THEIR OWN CALL (Nov 14 2026): Polymarket's in-play price for every
+    // Bet105 bet in play; the bet list never waits on it
+    let _b105Live = {};
+    async function loadB105Live() {
+        const r = await authFetch('/api/bet105/live').catch(() => null);
+        const d = r && r.ok ? await r.json().catch(() => null) : null;
+        if (!d || !d.ok) return;
+        _b105Live = d.live || {};
+        applyLive(); renderMoney(); render();
+    }
+    function applyLive() {
+        _b105.forEach(b => {
+            const x = _b105Live[String(b.id)];
+            if (x && b.status === 'pending') { b.now = x.now; b.ev_usd = x.ev_usd; if (x.game) b.game = x.game; }
+        });
+    }
     function loadMine() {
         // your bets draw at once from the phone's copy (the live values take ~10s to price)
         try {
@@ -303,7 +319,7 @@
             if (p && p.bets && Date.now() - p.at < 12 * 3600e3) _poly = p.bets;
         } catch (e) {}
         renderMoney(); render();
-        loadB105(); loadPoly();
+        loadB105(); loadPoly(); loadB105Live();
     }
     function renderMoney() {
         const all = allMine();
@@ -932,6 +948,7 @@
         loadMine();
         loadGames();
         setInterval(() => { if (!document.hidden) loadB105(); }, 20 * 1000);
+        setInterval(() => { if (!document.hidden) loadB105Live(); }, 20 * 1000);
         setInterval(() => { if (!document.hidden) loadPoly(); }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadLines(); }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadGames(); }, 10 * 60 * 1000);
