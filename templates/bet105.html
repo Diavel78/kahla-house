@@ -57,6 +57,9 @@
         .tile .k { font-size: 13px; color: var(--text2); }
         .tile .v { font-family: var(--mono); font-size: 20px; font-weight: 600; white-space: nowrap; }
         .tile .s { font-size: 12px; color: var(--text3); }
+        .tile.tap { cursor: pointer; } .tile.tap:active { background: var(--card2); }
+        .sheet { max-height: 82vh; overflow-y: auto; }
+        .sheet .sp-h { font-size: 13px; font-weight: 700; color: var(--text3); letter-spacing: .06em; margin: 14px 0 6px; }
         .pos { color: var(--g-tx); } .neg { color: var(--r-tx); }
         .tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 18px; }
         .tab { height: 48px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 12px;
@@ -164,9 +167,9 @@
     <div class="wrap">
         <div class="hd1"><h1>Bet Sheets<span class="b105">BET105</span></h1><span class="hd-date" id="today"></span></div>
         <div class="money">
-            <div class="tile"><span class="k">Settled today</span><span class="v" id="sToday">—</span><span class="s" id="sRec"></span></div>
-            <div class="tile"><span class="k">Live now</span><span class="v" id="sLive">—</span><span class="s" id="sLiveN"></span></div>
-            <div class="tile"><span class="k">Open bets</span><span class="v" id="sOpen">—</span><span class="s">$5 each at Bet105</span></div>
+            <div class="tile tap" onclick="openList('settled')"><span class="k">Settled today ›</span><span class="v" id="sToday">—</span><span class="s" id="sRec"></span></div>
+            <div class="tile tap" onclick="openList('live')"><span class="k">Live now ›</span><span class="v" id="sLive">—</span><span class="s" id="sLiveN"></span></div>
+            <div class="tile tap" onclick="openList('open')"><span class="k">Open bets ›</span><span class="v" id="sOpen">—</span><span class="s">$5 each at Bet105</span></div>
         </div>
         <div class="tabs" id="tabs"></div>
         <div class="chips" id="chips"></div>
@@ -864,6 +867,29 @@
             + '<label>Price</label><input id="ePrice" inputmode="numeric" value="' + (b.price != null ? b.price : '') + '">'
             + '<div class="row"><button class="btn go" onclick="saveEdit(' + id + ')">Save</button><button class="btn" onclick="closeSheet()">Close</button></div>'
             + '<div class="row"><button class="btn del" onclick="delBet(' + id + ')">Delete this bet</button></div>';
+        document.getElementById('ov').style.display = 'block'; sh.style.display = 'block';
+    }
+    // THE TILES OPEN THEIR BETS (Rob, Nov 14 2026: "Settled today and live click no longer
+    // works"): every sport, Bet105 + Polymarket, in the bottom sheet; a Bet105 row opens its edit.
+    function openList(kind) {
+        const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
+        const all = allMine();
+        const list = kind === 'settled' ? all.filter(b => ['won', 'lost', 'push'].indexOf(b.status) >= 0 && dayOf(b.event_start) === today)
+                   : kind === 'live' ? all.filter(isLive)
+                   : all.filter(b => b._venue === 'BET105' && b.status === 'pending');
+        list.sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
+        const title = kind === 'settled' ? 'Settled today' : kind === 'live' ? 'Live now' : 'Open bets';
+        let usd = 0;
+        list.forEach(b => { usd += Number(kind === 'live' ? b.ev_usd : b.pnl_usd) || 0; });
+        let h = '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><h3>' + title + ' · ' + list.length + '</h3>'
+              + '<button class="btn" style="flex:none;padding:8px 14px" onclick="closeSheet()">Close</button></div>';
+        if (kind !== 'open') h += '<div class="sub">' + (kind === 'live' ? 'worth now ' : 'total ') + '<b class="' + (usd > 0 ? 'pos' : usd < 0 ? 'neg' : '') + '">' + money(usd) + '</b></div>';
+        const by = {};
+        list.forEach(b => { const s = (b.sport || '').toUpperCase() || 'OTHER'; (by[s] = by[s] || []).push(b); });
+        Object.keys(by).forEach(s => { h += '<div class="sp-h">' + esc(s === 'NCAAF' ? 'COLLEGE' : s) + ' · ' + by[s].length + '</div>' + by[s].map(betRow).join(''); });
+        if (!list.length) h += '<div class="empty">Nothing here.</div>';
+        const sh = document.getElementById('sheet');
+        sh.innerHTML = h; sh.scrollTop = 0;
         document.getElementById('ov').style.display = 'block'; sh.style.display = 'block';
     }
     function closeSheet() { document.getElementById('ov').style.display = 'none'; document.getElementById('sheet').style.display = 'none'; }
