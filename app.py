@@ -18304,21 +18304,21 @@ def _b105_event_mids(sb, client, event_slug: str) -> dict | None:
         return stale
     try:
         import pmm_markets
+        # the event itself, every market on it (markets.list ignores eventSlug — Oct 15 2026)
         core = event_slug.split("-", 1)[-1]
         mids: dict = {}
-        for pg in range(3):
-            resp = client.markets.list({"eventSlug": [event_slug], "closed": False, "limit": 100, "offset": pg * 100})
-            ms = (resp.get("markets") if isinstance(resp, dict) else getattr(resp, "markets", None)) or []
-            n0 = len(mids)
-            for m in ms:
-                sl = m.get("slug") if isinstance(m, dict) else None
-                if not sl or core not in sl:
-                    continue
-                q = pmm_markets._get_market_quote(m)
-                if q and q.get("bid") is not None and q.get("ask") is not None:
-                    mids[sl] = round((float(q["bid"]) + float(q["ask"])) / 2.0, 4)
-            if len(ms) < 100 or len(mids) == n0:
-                break
+        full = client.events.retrieve_by_slug(event_slug)
+        ev = full.get("event") if isinstance(full, dict) else getattr(full, "event", None)
+        ms = (ev.get("markets") if isinstance(ev, dict) else getattr(ev, "markets", None)) or []
+        _B105_LAST["ev_markets"] = len(ms)
+        for m in ms:
+            sl = m.get("slug") if isinstance(m, dict) else None
+            if not sl or core not in sl:
+                continue
+            q = pmm_markets._get_market_quote(m)
+            if q and q.get("bid") is not None and q.get("ask") is not None:
+                mids[sl] = round((float(q["bid"]) + float(q["ask"])) / 2.0, 4)
+        _B105_LAST["ev_mids"] = len(mids)
     except Exception as e:
         _venue_rl_trip(e)
         return stale
