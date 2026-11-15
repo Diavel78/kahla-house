@@ -54,9 +54,9 @@
         .hd-date { font-size: 14px; color: var(--text2); }
         .money { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
         .tile { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-        .tile .k { font-size: 13px; color: var(--text2); }
+        .tile .k { font-size: 13px; color: var(--text2); white-space: nowrap; }
         .tile .v { font-family: var(--mono); font-size: 20px; font-weight: 600; white-space: nowrap; }
-        .tile .s { font-size: 12px; color: var(--text3); }
+        .tile .s { font-size: 12px; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .tile.tap { cursor: pointer; } .tile.tap:active { background: var(--card2); }
         .sheet { max-height: 82vh; overflow-y: auto; }
         .sheet .sp-h { font-size: 13px; font-weight: 700; color: var(--text3); letter-spacing: .06em; margin: 14px 0 6px; }
@@ -167,9 +167,9 @@
     <div class="wrap">
         <div class="hd1"><h1>Bet Sheets<span class="b105">BET105</span></h1><span class="hd-date" id="today"></span></div>
         <div class="money">
-            <div class="tile tap" onclick="openList('settled')"><span class="k">Settled today ›</span><span class="v" id="sToday">—</span><span class="s" id="sRec"></span></div>
-            <div class="tile tap" onclick="openList('live')"><span class="k">Live now ›</span><span class="v" id="sLive">—</span><span class="s" id="sLiveN"></span></div>
-            <div class="tile tap" onclick="openList('open')"><span class="k">Open bets ›</span><span class="v" id="sOpen">—</span><span class="s">$5 each at Bet105</span></div>
+            <div class="tile tap" onclick="openList('settled')"><span class="k">Today ›</span><span class="v" id="sToday">—</span><span class="s" id="sRec"></span></div>
+            <div class="tile tap" onclick="openList('live')"><span class="k">Live ›</span><span class="v" id="sLive">—</span><span class="s" id="sLiveN"></span></div>
+            <div class="tile tap" onclick="openList('open')"><span class="k">Open ›</span><span class="v" id="sOpen">—</span><span class="s">at Bet105</span></div>
         </div>
         <div class="tabs" id="tabs"></div>
         <div class="chips" id="chips"></div>
@@ -243,7 +243,7 @@
     const SPORTS = [['NCAAF', 'College'], ['NFL', 'NFL'], ['NHL', 'NHL'], ['NBA', 'NBA'], ['MLB', 'MLB']];
     let _sport = localStorage.getItem('b105_sport') || 'NCAAF';
     let _view = 'up';                       // up | live | mine
-    let _games = [], _lines = [], _b105 = [], _poly = [], _busy = {};
+    let _games = [], _lines = [], _b105 = [], _poly = [], _busy = {}, _b105In = false;
 
     function renderTabs() {
         document.getElementById('tabs').innerHTML = SPORTS.map(([s, nm]) =>
@@ -262,7 +262,7 @@
     async function loadB105() {
         const r = await authFetch('/api/bet105/mine').catch(() => null);
         const d = r && r.ok ? await r.json().catch(() => null) : null;
-        if (d && d.ok) _b105 = d.bets || [];
+        if (d && d.ok) { _b105 = d.bets || []; _b105In = true; }
         renderMoney(); render();
     }
     async function loadPoly() {
@@ -302,12 +302,12 @@
         const w = settled.filter(b => b.status === 'won').length, l = settled.filter(b => b.status === 'lost').length;
         const set = (id, v, cls) => { const el = document.getElementById(id); el.textContent = v; if (cls !== undefined) el.className = 'v ' + cls; };
         set('sToday', money(usd), usd > 0 ? 'pos' : usd < 0 ? 'neg' : '');
-        document.getElementById('sRec').textContent = w + '-' + l + ' · Bet105 + Poly';
+        document.getElementById('sRec').textContent = w + '–' + l;
         const live = allMine().filter(isLive);
         const ev = live.reduce((a, b) => a + (Number(b.ev_usd) || 0), 0);
         set('sLive', live.length ? money(ev) : '—', ev > 0 ? 'pos' : ev < 0 ? 'neg' : '');
-        document.getElementById('sLiveN').textContent = live.length ? live.length + ' bet' + (live.length === 1 ? '' : 's') + ' in play' : 'nothing in play';
-        set('sOpen', String(_b105.filter(b => b.status === 'pending').length));
+        document.getElementById('sLiveN').textContent = live.length ? live.length + ' in play' : 'nothing in play';
+        set('sOpen', _b105In ? String(_b105.filter(b => b.status === 'pending').length) : '…');
     }
 
     // ---- the sheet ----

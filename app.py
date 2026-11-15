@@ -18137,26 +18137,92 @@ def _b105_mine(sb, uid: str, now) -> list:
         if rs and rs.get("away") is not None:
             b["final"] = {"away": rs.get("away"), "home": rs.get("home")}
         b["pnl_usd"] = _b105_pnl(b["status"], b["price"], b["stake"])
-        if b["status"] == "pending":
-            # in play: Polymarket's live book first (Pinnacle prices few games in-game);
-            # pre-game: Pinnacle's devigged fair
-            px = _b105_poly_now(b, away, home, poly_ctx) if started else None
-            if px:
-                p = float(px["prob"])
-                b["now"] = {"prob": round(p, 4), "fair_c": round(p * 100.0, 1), "live": True,
-                            "src": "poly", "poly_line": px.get("line")}
-            else:
-                pf = _b105_fair_now(sb, sport, b, now, slates)
-                p = float(pf["prob"]) if pf else None
-                if pf:
-                    b["now"] = {"prob": round(p, 4), "fair_c": round(p * 100.0, 1), "live": bool(pf.get("live")),
-                                "src": "pinnacle", "pin_line": pf.get("pin_line")}
-            if p is not None and b["win_usd"] is not None:
-                b["ev_usd"] = round(p * b["win_usd"] - (1.0 - p) * b["stake"], 2)
+        b["_started"] = started
+        out.append(b)
+    # THE VALUE, IN PARALLEL (Nov 14 2026 — one Polymarket lookup per live game, one after
+    # another, took the feed to 12-32s on a college Saturday and the page drew with no
+    # Bet105 bets). In play: Polymarket's live book (Pinnacle prices few games in-game);
+    # pre-game or no Polymarket price: Pinnacle's devigged fair.
+    pend = [b for b in out if b["status"] == "pending"]
+    live = [b for b in pend if b.get("_started")]
+    poly: dict = {}
+    if live:
+        import concurrent.futures as _cf
+        games: dict = {}
+        for b in live:
+            games.setdefault((b["sport"], b["_away"], b["_home"]), b)
+        # never `with`: its exit waits on every thread, the timeouts would mean nothing
+        ex = _cf.ThreadPoolExecutor(max_workers=min(10, len(games)))
+        futs = {ex.submit(_b105_pmm_lookup, k[0], k[1], k[2], b.get("event_start"), poly_ctx): k for k, b in games.items()}
+        try:
+            for fu in _cf.as_completed(futs, timeout=7):
+                pass
+        except Exception:
+            pass
+        ex.shutdown(wait=False)
+        ex = _cf.ThreadPoolExecutor(max_workers=min(10, len(live)))
+        futs = {ex.submit(_b105_poly_now, b, b["_away"], b["_home"], poly_ctx): b["id"] for b in live}
+        try:
+            for fu in _cf.as_completed(futs, timeout=5):
+                try:
+                    poly[futs[fu]] = fu.result()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        ex.shutdown(wait=False)
+    for b in pend:
+        px = poly.get(b["id"])
+        p = None
+        if px:
+            p = float(px["prob"])
+            b["now"] = {"prob": round(p, 4), "fair_c": round(p * 100.0, 1), "live": True,
+                        "src": "poly", "poly_line": px.get("line")}
+        else:
+            pf = _b105_fair_now(sb, b["sport"], b, now, slates)
+            if pf:
+                p = float(pf["prob"])
+                b["now"] = {"prob": round(p, 4), "fair_c": round(p * 100.0, 1), "live": bool(pf.get("live")),
+                            "src": "pinnacle", "pin_line": pf.get("pin_line")}
+        if p is not None and b["win_usd"] is not None:
+            b["ev_usd"] = round(p * b["win_usd"] - (1.0 - p) * b["stake"], 2)
+    for b in out:
         b.pop("_away", None)
         b.pop("_home", None)
-        out.append(b)
+        b.pop("_started", None)
     return out
+
+
+_B105_PMM_CACHE: dict = {}          # (sport, away, home) -> (ts, lookup) — 2 min, across requests
+_B105_PMM_LOCK = threading.Lock()
+
+
+def _b105_client(ctx: dict):
+    with _B105_PMM_LOCK:
+        if "client" not in ctx:
+            try:
+                ctx["client"] = get_client()
+            except Exception:
+                ctx["client"] = None
+    return ctx.get("client")
+
+
+def _b105_pmm_lookup(sport, away, home, event_start, ctx: dict):
+    key = (sport, away, home)
+    hit = _B105_PMM_CACHE.get(key)
+    if hit and _time.time() - hit[0] < 120:
+        return hit[1]
+    client = _b105_client(ctx)
+    if client is None:
+        return None
+    try:
+        import pmm_markets
+        pm = pmm_markets.lookup(client, sport or "", away, home, event_start or "")
+    except Exception:
+        pm = None
+    if pm:
+        _B105_PMM_CACHE[key] = (_time.time(), pm)
+    return pm
 
 
 def _b105_poly_now(b: dict, away: str, home: str, ctx: dict) -> dict | None:
@@ -18170,24 +18236,10 @@ def _b105_poly_now(b: dict, away: str, home: str, ctx: dict) -> dict | None:
         return None
     try:
         import pmm_markets
-        if ctx.get("client") is None and not ctx.get("no_client"):
-            try:
-                ctx["client"] = get_client()
-            except Exception:
-                ctx["client"] = None
-            ctx["no_client"] = ctx["client"] is None
-        client = ctx.get("client")
-        if client is None:
-            return None
-        key = (b.get("sport"), away, home)
-        cache = ctx.setdefault("pmm", {})
-        if key not in cache:
-            try:
-                cache[key] = pmm_markets.lookup(client, b.get("sport") or "", away, home, b.get("event_start") or "")
-            except Exception:
-                cache[key] = None
-        pmm = cache.get(key)
-        if not pmm:
+        hit = _B105_PMM_CACHE.get((b.get("sport"), away, home))
+        pmm = hit[1] if hit else None
+        client = _b105_client(ctx)
+        if not pmm or client is None:
             return None
         line = b.get("line")
         e = pmm_markets.best_line_for(pmm, mt, b.get("side"), float(line) if line is not None else None)
