@@ -80,6 +80,9 @@
         .fx .fxp { font-family: var(--mono); font-size: 13px; color: var(--text2); }
         .fx .fxp .win { color: var(--g-tx); font-weight: 700; }
         .fx .fxe { color: var(--text2); }
+        .fx .fxb { background: rgba(232,89,12,.12); border: 1px solid #E8590C; border-radius: 10px; padding: 8px 10px; cursor: pointer; }
+        .fx .fxb:active { background: rgba(232,89,12,.3); }
+        .fx .fxt { margin-left: auto; font-size: 11px; font-weight: 800; letter-spacing: .05em; color: #E8590C; }
         .gc.flash { border-color: #E8590C; }
         .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
         .fchip { height: 38px; padding: 0 14px; border-radius: 19px; border: 1px solid var(--line); background: transparent;
@@ -604,7 +607,7 @@
     // replace it. Tap a game → its sport tab, scrolled to the card.
     const FIRE_SPORTS = ['NCAAF', 'NFL', 'NHL', 'NBA', 'MLB'];
     const FIRE_NM = { NCAAF: 'College', NFL: 'NFL', NHL: 'NHL', NBA: 'NBA', MLB: 'MLB' };
-    let _fire = {}, _fireLoading = false, _fireAt = 0, _fireN = null, _scrollTo = null;
+    let _fireList = [], _fireBusy = false, _fire = {}, _fireLoading = false, _fireAt = 0, _fireN = null, _scrollTo = null;
     function fireCache(sp) {
         if (_fire[sp]) return _fire[sp];
         try { const c = JSON.parse(localStorage.getItem('b105_games_' + sp) || 'null'); return c && c.games ? c.games : []; } catch (e) { return []; }
@@ -675,8 +678,9 @@
             const pw = same && b105c != null && pt.cost < b105c - 0.05, bw = same && b105c != null && pt.cost > b105c + 0.05;
             px = (bw ? '<span class="win">' + px + '</span>' : px) + (px ? ' · ' : '') + (pw ? '<span class="win">' + poly + '</span>' : poly);
         }
-        return '<div class="fxl">🔥 ' + lab + ' <b>' + esc(name) + '</b> <span class="pill ' + x.state + '">' + x.state.toUpperCase() + '</span>'
-             + (px ? '<span class="fxp">' + px + '</span>' : '') + '</div>';
+        it.bet = { side, line, price, name };
+        return '<div class="fxl fxb" onclick="event.stopPropagation();fireBet(' + it._i + ')">🔥 ' + lab + ' <b>' + esc(name) + '</b> <span class="pill ' + x.state + '">' + x.state.toUpperCase() + '</span>'
+             + (px ? '<span class="fxp">' + px + '</span>' : '') + '<span class="fxt">TAP TO BET $5</span></div>';
     }
     function fireCard(sp, g, items) {
         return '<div class="fx" onclick="goFire(\'' + sp + '\',' + JSON.stringify(g.event_name).replace(/"/g, '&quot;') + ')"><div class="fxh"><span><span class="fxs">' + FIRE_NM[sp] + '</span>'
@@ -685,6 +689,8 @@
     }
     function renderFire(hit) {
         const items = fireItems().filter(it => hit(it.g.away + ' ' + it.g.home + ' ' + FIRE_NM[it.sp]));
+        items.forEach((it, i) => { it._i = i; });
+        _fireList = items;
         _fireN = items.filter(it => it.fired).length;
         const group = (list, key) => {
             const order = [], by = {};
@@ -700,6 +706,31 @@
         h += soon.length ? group(soon, l => Math.min.apply(null, l.map(it => it.at))) : '<div class="empty">' + (_fireLoading ? 'reading every sheet…' : 'No 🔥 due in the next hour.') + '</div>';
         if (_fireAt) h += '<div class="empty" style="font-size:12px">updated ' + clock(new Date(_fireAt).toISOString()) + (_fireLoading ? ' · refreshing…' : '') + '</div>';
         return h;
+    }
+    // BET IT FROM THE 🔥 TAB (Rob, Nov 15 2026: "Any way I could just tap it on the fire screen if
+    // I make the bet?"): the 🔥 line logs the $5 Bet105 bet right here, the same call as the sport
+    // tab's button; the game leaves the tab the instant it's tapped
+    async function fireBet(i) {
+        const it = _fireList[i]; if (!it || !it.bet || _fireBusy) return;
+        const g = it.g, b = it.bet, mt = it.k;
+        if (b.price == null) { toast('No Pinnacle price on this one — open the game', true); return; }
+        _fireBusy = true;
+        const temp = { id: 'tmp' + Date.now(), _tmp: true, sport: it.sp, event_name: g.away + ' @ ' + g.home, event_start: g.event_start,
+                       market_type: mt === 'ml' ? 'moneyline' : mt, side: b.side, line: b.line, price: b.price, stake: 5, status: 'pending', label: b.name };
+        _b105.push(temp); render();
+        const x = await postJSON('/api/bet105/bet', { sport: it.sp, away: g.away, home: g.home, event_start: g.event_start,
+            market_id: g.market_id, market_type: mt, side: b.side, line: b.line, price: b.price, cid: cid() });
+        _fireBusy = false;
+        if (x.d.ok) {
+            Object.assign(temp, { id: x.d.id, _tmp: false, price: x.d.price, line: x.d.line, label: x.d.label, win_usd: x.d.win_usd });
+            renderMoney(); render();
+            if (x.d.src !== 'pinnacle') { toast('Logged ' + x.d.label + ' — Pinnacle has no live price, enter what Bet105 gave you'); openEdit(x.d.id); }
+            else toast('✓ ' + x.d.label + ' ' + am(x.d.price) + ' · $5 to win $' + (x.d.win_usd != null ? x.d.win_usd.toFixed(2) : '—'));
+            loadB105();
+        } else {
+            _b105 = _b105.filter(z => z !== temp);
+            toast(x.d.error || ('failed ' + x.status), true); render();
+        }
     }
     function goFire(sp, en) { _scrollTo = en; _view = 'up'; document.getElementById('q').value = ''; setSport(sp); }
     function render() {
