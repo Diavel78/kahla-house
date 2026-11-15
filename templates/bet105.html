@@ -99,6 +99,8 @@
               gap: 1px; padding: 6px 8px; cursor: pointer; text-align: center; }
         .bb .bl { font-family: var(--mono); font-size: 16px; font-weight: 600; }
         .bb .pr { font-family: var(--mono); font-size: 14px; color: var(--text2); }
+        .bb .px2 { font-family: var(--mono); font-size: 12px; color: var(--text2); display: block; margin-top: 2px; }
+        .bb .px2 .win { color: var(--g-tx); font-weight: 600; }
         .bb .bs { font-size: 11px; font-weight: 800; letter-spacing: .05em; }
         .bb.model { border-color: var(--blue); }
         .bb.fire { border-color: var(--fire); }
@@ -430,6 +432,21 @@
         return mt === 'total' ? (s.side === 'over' ? 'O ' : 'U ') + (s.line != null ? s.line : '')
              : shortTeam(s.side === 'away' ? g.away : g.home) + (mt === 'ml' ? '' : (s.line != null ? ' ' + sgn(s.line) : ''));
     }
+    // POLYMARKET IF YOU TAKE IT (Rob, Nov 15 2026: "list them both, but you're going to have to
+    // calculate Polymarket's actual taker line"): the ask on this side + the taker fee
+    // (6.95¢ × p(1−p)), as an American price, at Polymarket's own line — beside Bet105's.
+    function polyTake(g, key, side) {
+        const vq = ((g.venue || {}).picks || {})[key];
+        const q = vq && vq.poly;
+        if (!q || q.ask == null || q.bid == null) return null;
+        const same = !vq.side || vq.side === side;
+        const ask = same ? Number(q.ask) : 100 - Number(q.bid);
+        if (!(ask > 1 && ask < 99)) return null;
+        const cost = ask + 6.95 * (ask / 100) * (1 - ask / 100);
+        let line = q.line == null ? null : Number(q.line);
+        if (line != null && !same && key !== 'total') line = -line;
+        return { cost, am: centsAm(cost), line };
+    }
     function sideBtn(g, row, s, stale) {
         const mine = betsOn(g, row.mt, s.side);
         const fire = fireSide(g, row.key) === s.side;
@@ -443,7 +460,20 @@
         } else {
             if (s.price == null) cls += ' none';
             if (fire) cls += ' fire';
-            inner = '<span class="bl">' + (fire ? '🔥 ' : '') + esc(sideName(g, row.mt, s)) + '</span><span class="pr">' + (stale ? 'tap · enter price' : am(s.price)) + '</span>';
+            let px2 = '';
+            if (fire && !stale) {
+                const pt = polyTake(g, row.key, s.side);
+                if (pt && pt.am) {
+                    const b105c = s.price != null ? (Number(s.price) < 0 ? -Number(s.price) / (-Number(s.price) + 100) : 100 / (Number(s.price) + 100)) * 100 : null;
+                    const sameLine = row.mt === 'ml' || pt.line == null || s.line == null || Math.abs(pt.line - Number(s.line)) < 0.01;
+                    const lnTxt = sameLine ? '' : ' @ ' + (row.mt === 'total' ? pt.line : sgn(pt.line));
+                    const polyWins = sameLine && b105c != null && pt.cost < b105c - 0.05;
+                    const b105Wins = sameLine && b105c != null && pt.cost > b105c + 0.05;
+                    px2 = '<span class="px2">' + (b105Wins ? '<span class="win">Bet105 ' + am(s.price) + '</span>' : 'Bet105 ' + am(s.price))
+                        + ' · ' + (polyWins ? '<span class="win">Poly ' + pt.am + lnTxt + '</span>' : 'Poly ' + pt.am + lnTxt) + '</span>';
+                }
+            }
+            inner = '<span class="bl">' + (fire ? '🔥 ' : '') + esc(sideName(g, row.mt, s)) + '</span><span class="pr">' + (stale ? 'tap · enter price' : am(s.price)) + '</span>' + px2;
         }
         const key = g._gi + '|' + row.mt + '|' + s.side;
         if (_busy[key]) cls += ' busy';
