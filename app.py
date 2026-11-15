@@ -36589,6 +36589,20 @@ _STANDING_ZONES = (
      "money on a 10+ dog", {"dog": 10}),
     ("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 5.1, 7.7, 15.0,
      "weeknight money", {"dow": ["Tue", "Wed", "Thu", "Fri"]}),
+    # NBA / NHL, every game (Nov 15 2026, Rob: "Do the same for NBA and NHL"). This season (ESPN
+    # 2027 = Oct 2026 →, DK open → close) checked against our Pinnacle tape since Oct 29:
+    #  · NHL: a team on the 2nd night of a back-to-back vs a rested one → the RESTED team's ML —
+    #    this season 38-21 (+10.6%), the two before +3.2%; when the money went the other way the
+    #    rested team still won (14-6 this season), so it outranks the move.
+    #  · NHL ML: follow the money open → T-30m — ESPN 147-99 (+4.6%), our tape 51-27 (+14%).
+    #  · NHL total: follow a 2¢+ move — ESPN 97-70 (+10.9%), our tape 23-17 (+13%).
+    #  · NBA spread: fade a 2¢+ move (⅔ pt) — ESPN 68-58, our tape 43-28, 1 pt+ 35-21 (it LOST the
+    #    two seasons before: this season's market). NHL ML rest-else-follow, replayed: this season
+    #    163-95 (+10.8%), and positive both seasons before (+2.2%, +1.2%).
+    ("NHL", "ml", ("o", 0), ("s", -0.5), "rest", 0.0, 99.0, 20.0, "the other team played last night"),
+    ("NHL", "ml", ("o", 0), ("s", -0.5), "chase", 1.0, 2.0, 14.0, "follow the money"),
+    ("NHL", "total", ("o", 0), ("s", -0.5), "chase", 2.0, 4.0, 11.0, "follow the money"),
+    ("NBA", "spread", ("o", 0), ("s", -0.5), "fade", 2.0, 3.0, 15.0, "fade the money"),
     # NFL spread, fade the whole move: Polymarket Sep 14 – Oct 6 followers 13-23, Pinnacle
     # Oct 29 → 2-11 (≥2¢ open → T-1h); 34-15 faded across the two.
     ("NFL", "spread", ("o", 0), ("s", -1), "fade", 2.0, 3.0, 35.0, "the whole move since the open"),
@@ -36638,6 +36652,58 @@ def _zone_filter_ok(flt: dict, d: int, home_line, start_ms: int, static: bool = 
     return True
 
 
+_B2B_CACHE: dict = {}
+
+
+def _b2b_map(rows: list, games: list) -> dict:
+    """Pure. rows = schedule rows {event_name 'Away @ Home', event_start}; games = the sheet's
+    games → {event_name: (home played the day before, away played the day before)} on the
+    Eastern calendar."""
+    et = ZoneInfo("America/New_York")
+    days: dict = {}
+    for r in rows or []:
+        ev, st = str(r.get("event_name") or ""), _parse_iso(r.get("event_start")) if r.get("event_start") else None
+        if " @ " not in ev or st is None:
+            continue
+        a, h = ev.split(" @ ", 1)
+        dd = st.astimezone(et).date()
+        for t in (a.strip(), h.strip()):
+            days.setdefault(t, set()).add(dd)
+    out = {}
+    for g in games or []:
+        ev = str(g.get("event_name") or "")
+        st = _parse_iso(g.get("event_start")) if g.get("event_start") else None
+        if " @ " not in ev or st is None:
+            continue
+        a, h = (x.strip() for x in ev.split(" @ ", 1))
+        y = st.astimezone(et).date() - timedelta(days=1)
+        out[ev] = (y in days.get(h, set()), y in days.get(a, set()))
+    return out
+
+
+def _sheet_b2b(sb, sport: str, games: list) -> dict:
+    """Back-to-backs for a sheet's games off the `markets` schedule (10-min cache). Never raises."""
+    try:
+        starts = [d for d in (_parse_iso(g.get("event_start")) for g in games if g.get("event_start")) if d]
+        if not starts:
+            return {}
+        lo, hi = min(starts) - timedelta(hours=40), max(starts) + timedelta(hours=2)
+        ck = (sport, lo.strftime("%Y%m%d%H"), hi.strftime("%Y%m%d%H"))
+        hit = _B2B_CACHE.get(ck)
+        if hit and _time.monotonic() - hit[0] < 600:
+            rows = hit[1]
+        else:
+            rows = (sb.table("markets").select("event_name,event_start").eq("sport", sport)
+                    .gte("event_start", lo.isoformat()).lt("event_start", hi.isoformat())
+                    .limit(1000).execute().data or [])
+            _B2B_CACHE.clear()
+            _B2B_CACHE[ck] = (_time.monotonic(), rows)
+        return _b2b_map(rows, games)
+    except Exception as e:
+        app.logger.warning("b2b %s: %s", sport, e)
+        return {}
+
+
 def _zone_rule_on() -> bool:
     return bool(_machine_flag("zone_rule", ZONE_RULE_ENABLED))
 
@@ -36658,7 +36724,7 @@ def _zones_for(sport: str, mt: str) -> list:
 
 
 def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_ms: int,
-               zones=None) -> dict:
+               zones=None, ctx=None) -> dict:
     """Pure. The zones for one market off Pinnacle's series `pin` [(t_ms, number, line)]
     (_steam_numbers' scale, home / over). → the fired zone's read {state play|lean, dir,
     cents (the move), faded_dir, zone, kind, strength, decided_ms, at_h, open_ms, books,
@@ -36680,6 +36746,10 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
         if ta < o or tb > start_ms or tb <= ta:
             continue                                   # the window isn't on this game's clock
         if now_ms < tb:
+            if kind == "rest":
+                bb = (ctx or {}).get("b2b")
+                if not bb or bool(bb[0]) == bool(bb[1]):
+                    continue
             if flt and not _zone_filter_ok(flt, 0, pts[-1][2] if now_ms >= o else None, start_ms, static=True):
                 continue
             a = _steam_at(pts, ta) if now_ms >= ta else None
@@ -36691,6 +36761,17 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
         if not a or not b:
             continue
         mv = (b[1] - a[1]) * slope
+        if kind == "rest":
+            # one team played last night, the other didn't: the rested team (ctx b2b = (home, away))
+            bb = (ctx or {}).get("b2b")
+            if not bb or bool(bb[0]) == bool(bb[1]):
+                continue
+            d = -1 if bb[0] else 1
+            fired.append({"state": "lean", "dir": d, "cents": round(abs(mv), 1), "moved_dir": 0,
+                          "faded_dir": None, "zone": label, "kind": kind, "strength": float(roi),
+                          "decided_ms": int(tb), "at_h": round((tb - o) / H, 1), "open_ms": o,
+                          "books": {"pin": round(abs(mv), 1)}, "agree": ["pin"], "zone_rule": True})
+            continue
         if kind == "quiet":
             # nobody moved it: the favorite at the window's end (a pick'em names no one)
             try:
@@ -36875,6 +36956,7 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
         lad_rows = _move_ladder_rows(sb, sport, jobs, _time.monotonic() + _MOVE_LADDER_BUDGET_S)
     freeze_on = rule_on and _fire_freeze_on()
     frozen = _fire_frozen_load(sb, sport) if freeze_on else None
+    b2b = _sheet_b2b(sb, sport, games) if sport in ("NHL", "NBA") else {}
     for g in games:
         try:
             sd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
@@ -36909,7 +36991,8 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
                     except Exception:
                         pass
                 zone_on = _zone_rule_on()
-                rd = (_zone_read(sport, mt, nums.get("pin") or [], sl, sms, now_ms) if zone_on
+                rd = (_zone_read(sport, mt, nums.get("pin") or [], sl, sms, now_ms,
+                                 ctx={"b2b": b2b.get(g.get("event_name"))}) if zone_on
                       else _move_read(sport, nums, sl, sms, now_ms))
                 if anc is not None:
                     rd["anchor"] = anc

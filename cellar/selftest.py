@@ -9265,6 +9265,22 @@ def test_zone_rule() -> None:
     check("college day: fade the money (lean)", rd["state"] == "lean" and rd["dir"] == -1 and rd["kind"] == "fade", str(rd))
     rd = _app._zone_read("NCAAF", "spread", _pts(dst, 7.0, 7.2), 2.6, dst, dst - int(0.4 * H), zones=NZ)
     check("college: nobody moved it → the favorite", rd["state"] == "lean" and rd["dir"] == 1 and rd["kind"] == "quiet", str(rd))
+    # NHL back-to-back: the rested team, and it outranks following the money the other way
+    sched = [{"event_name": "Calgary Flames @ Seattle Kraken", "event_start": "2026-11-21T03:00:00Z"},
+             {"event_name": "Boston Bruins @ Toronto Maple Leafs", "event_start": "2026-11-21T00:00:00Z"}]
+    tonight = [{"event_name": "Calgary Flames @ Vancouver Canucks", "event_start": "2026-11-22T03:00:00Z"}]
+    bm = _app._b2b_map(sched, tonight)
+    check("b2b: the road team played last night (Eastern calendar)",
+          bm.get("Calgary Flames @ Vancouver Canucks") == (False, True), str(bm))
+    HZ = [z for z in _app._STANDING_ZONES if z[0] == "NHL" and z[1] == "ml"]
+    hst = int(_dt.datetime(2026, 11, 22, 3, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000)
+    mv_away = [(hst - int(30 * H), 55.0, 0.0), (hst - int(2 * H), 52.0, 0.0)]   # money on Calgary
+    rd = _app._zone_read("NHL", "ml", mv_away, 1.0, hst, hst - int(0.4 * H), zones=HZ,
+                         ctx={"b2b": (False, True)})
+    check("NHL: the rested home team over the money on the tired road team",
+          rd["state"] == "lean" and rd["dir"] == 1 and rd["kind"] == "rest", str(rd))
+    rd = _app._zone_read("NHL", "ml", mv_away, 1.0, hst, hst - int(0.4 * H), zones=HZ, ctx={"b2b": (False, False)})
+    check("NHL: no back-to-back → follow the money", rd["dir"] == -1 and rd["kind"] == "chase", str(rd))
     check("standing zones ride beside the weekly review's list",
           any(len(z) > 9 for z in _app._STANDING_ZONES) and "standing_zones" in open(_app.__file__).read())
 
