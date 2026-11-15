@@ -9281,6 +9281,14 @@ def test_zone_rule() -> None:
           rd["state"] == "lean" and rd["dir"] == 1 and rd["kind"] == "rest", str(rd))
     rd = _app._zone_read("NHL", "ml", mv_away, 1.0, hst, hst - int(0.4 * H), zones=HZ, ctx={"b2b": (False, False)})
     check("NHL: no back-to-back → follow the money", rd["dir"] == -1 and rd["kind"] == "chase", str(rd))
+    FZ = [z for z in _app._STANDING_ZONES if z[0] == "NFL"]
+    one = int(_dt.datetime(2026, 11, 22, 18, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000)    # 1 PM ET
+    four = int(_dt.datetime(2026, 11, 22, 21, 25, tzinfo=_dt.timezone.utc).timestamp() * 1000)  # 4:25 PM ET
+    mvh = lambda st: [(st - int(100 * H), 3.0, -3.0), (st - int(5 * H), 4.0, -4.0)]               # 1 pt to home
+    rd = _app._zone_read("NFL", "spread", mvh(one), 3.0, one, one - int(0.4 * H), zones=FZ)
+    check("NFL 1 PM: fade the money", rd["dir"] == -1 and rd["kind"] == "fade", str(rd))
+    rd = _app._zone_read("NFL", "spread", mvh(four), 3.0, four, four - int(0.4 * H), zones=FZ)
+    check("NFL 4 PM: follow the money", rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
     check("standing zones ride beside the weekly review's list",
           any(len(z) > 9 for z in _app._STANDING_ZONES) and "standing_zones" in open(_app.__file__).read())
 

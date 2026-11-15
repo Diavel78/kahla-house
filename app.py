@@ -36603,9 +36603,15 @@ _STANDING_ZONES = (
     ("NHL", "ml", ("o", 0), ("s", -0.5), "chase", 1.0, 2.0, 14.0, "follow the money"),
     ("NHL", "total", ("o", 0), ("s", -0.5), "chase", 2.0, 4.0, 11.0, "follow the money"),
     ("NBA", "spread", ("o", 0), ("s", -0.5), "fade", 2.0, 3.0, 15.0, "fade the money"),
-    # NFL spread, fade the whole move: Polymarket Sep 14 – Oct 6 followers 13-23, Pinnacle
-    # Oct 29 → 2-11 (≥2¢ open → T-1h); 34-15 faded across the two.
-    ("NFL", "spread", ("o", 0), ("s", -1), "fade", 2.0, 3.0, 35.0, "the whole move since the open"),
+    # NFL, every game (same day, Rob: "And the NFL"), ESPN/DK open → close, positive all three
+    # seasons replayed (2024 131-108, 2025 141-123, 2026 74-55 +10%): a 1 PM ET game or prime
+    # time = FADE a ½-point+ move (our Polymarket + Pinnacle tapes faded the whole move 34-15),
+    # a 4 PM game = FOLLOW a 1-point+ move, nobody moved it = the favorite.
+    ("NFL", "spread", ("o", 0), ("s", -0.5), "fade", 1.5, 3.0, 12.0,
+     "1 PM / prime time: fade the money", {"et": [[0, 15], [19, 24]]}),
+    ("NFL", "spread", ("o", 0), ("s", -0.5), "chase", 3.0, 6.0, 12.0,
+     "4 PM game: follow the money", {"et": [[15, 19]]}),
+    ("NFL", "spread", ("o", 0), ("s", -0.5), "quiet", 1.5, 99.0, 5.0, "nobody moved it: the favorite"),
 )
 _ZONE_LOG: dict = {}
 
@@ -36623,6 +36629,14 @@ def _zone_filter_ok(flt: dict, d: int, home_line, start_ms: int, static: bool = 
             return False
         night = k.hour + k.minute / 60.0 >= 18.5
         if (flt["slot"] == "night") != night:
+            return False
+    if flt.get("et"):
+        try:
+            k = datetime.fromtimestamp(start_ms / 1000, ZoneInfo("America/New_York"))
+        except (OverflowError, OSError, ValueError):
+            return False
+        hh = k.hour + k.minute / 60.0
+        if not any(float(a) <= hh < float(b) for a, b in flt["et"]):
             return False
     if flt.get("dow"):
         try:
