@@ -493,7 +493,62 @@
         const nLive = _games.filter(started).length;
         const nMine = allMine().filter(b => (b.sport || '').toUpperCase() === _sport || !b.sport).length;
         const c = [['up', 'Upcoming'], ['live', (nLive ? '<span class="dot"></span>' : '') + 'Live ' + nLive], ['mine', 'My bets ' + nMine]];
-        document.getElementById('chips').innerHTML = c.map(([k, t]) => '<button class="fchip' + (_view === k ? ' on' : '') + '" onclick="setView(\'' + k + '\')">' + t + '</button>').join('');
+        document.getElementById('chips').innerHTML = c.map(([k, t]) => '<button class="fchip' + (_view === k ? ' on' : '') + '" onclick="setView(\'' + k + '\')">' + t + '</button>').join('')
+            + '<button class="fchip" onclick="copyPicks(false)">📋 Copy picks</button><button class="fchip" onclick="copyPicks(true)">✅ Settled picks</button>';
+    }
+    // COPY PICKS (back Nov 14 2026, Rob: "I need my copy picks back"): this tab's sport, today's
+    // AZ slate, Bet105 + Poly. 📋 = every open bet, pre-game or in play; ✅ = the graded ones
+    // with the record. The search box narrows both.
+    function pickLabel(b) {
+        const t = (b.event_name || '').split(' @ '), mt = b.market_type;
+        const tm = shortTeam(b.side === 'home' ? t[1] : t[0], b.sport);
+        if (mt === 'total') return (b.side === 'over' ? 'Over ' : 'Under ') + Number(b.line);
+        if (mt === 'moneyline' || mt === 'ml') return tm + ' ML';
+        return tm + ' ' + (b.line != null ? (Number(b.line) > 0 ? '+' : '') + Number(b.line) : '');
+    }
+    async function copyText(txt) {
+        let ok = false;
+        try { await navigator.clipboard.writeText(txt); ok = true; } catch (e) {}
+        if (!ok) {
+            const ta = document.createElement('textarea');
+            ta.value = txt; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, txt.length);
+            try { ok = document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta);
+        }
+        return ok;
+    }
+    async function copyPicks(settled) {
+        const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
+        const words = (document.getElementById('q').value || '').toLowerCase().split(/\s+/).filter(Boolean);
+        const RES = { won: ['win', '✅'], lost: ['loss', '❌'], push: ['push', '➖'] };
+        const bets = allMine().filter(b => (b.sport || '').toUpperCase() === _sport && dayOf(b.event_start) === today
+                && (settled ? !!RES[b.status] : b.status === 'pending')
+                && (!words.length || words.every(w => ((b.event_name || '') + ' ' + pickLabel(b)).toLowerCase().indexOf(w) >= 0)))
+            .sort((x, y) => (Date.parse(x.event_start) || 0) - (Date.parse(y.event_start) || 0) || String(x.event_name).localeCompare(String(y.event_name)));
+        const nm = _sport === 'NCAAF' ? 'College' : _sport;
+        if (!bets.length) { toast('No ' + (settled ? 'settled ' : 'open ') + nm + ' bets today' + (words.length ? ' match the search' : ''), true); return; }
+        const day = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'short', month: 'short', day: 'numeric' });
+        const out = [(settled ? 'Settled picks · ' : 'My picks · ') + nm + ' · ' + day], rec = { win: 0, loss: 0, push: 0 };
+        const keys = [], by = {};
+        bets.forEach(b => { const k = b.event_name + '|' + (Date.parse(b.event_start) || ''); if (!by[k]) { by[k] = []; keys.push(k); } by[k].push(b); });
+        keys.forEach(k => {
+            const list = by[k], b0 = list[0], t = (b0.event_name || '').split(' @ ').map(n => shortTeam(n, b0.sport));
+            const f = list.map(b => b.final).find(x => x && x.away != null);
+            const g = list.map(b => b.game).find(x => x && x.away != null);
+            let tag = clock(b0.event_start);
+            if (f) tag = 'FINAL ' + f.away + '-' + f.home;
+            else if (list.some(isLive)) tag = 'LIVE' + (g ? ' ' + g.away + '-' + g.home : '');
+            out.push(t[0] + ' @ ' + t[1] + ' · ' + tag);
+            list.forEach(b => {
+                const r = RES[b.status]; if (r) rec[r[0]]++;
+                out.push('  ' + pickLabel(b) + (b.price != null ? ' ' + am(b.price) : '') + (r ? ' ' + r[1] : ''));
+            });
+        });
+        const n = rec.win + rec.loss;
+        if (settled && n + rec.push) out.push('\nRecord: ' + rec.win + '-' + rec.loss + (rec.push ? '-' + rec.push : '') + (n ? ' (' + Math.round(100 * rec.win / n) + '%)' : ''));
+        const ok = await copyText(out.join('\n'));
+        toast(ok ? 'Copied ' + (settled ? 'settled ' : '') + nm + ' picks · ' + bets.length + ' bet' + (bets.length === 1 ? '' : 's') : 'Copy failed', !ok);
     }
     function render() {
         renderChips();
