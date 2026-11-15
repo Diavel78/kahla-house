@@ -192,7 +192,7 @@
                 <span><i style="background:#4FB3FF"></i>Poly bid</span>
                 <span><i style="background:#7BE3A6"></i>Kalshi bid</span>
             </div>
-            <div class="ch-note">One line, every book: tap a line above and every book is priced at it, in cents for the side you pick (cents = the chance it wins). Each line is that book's bid. Solid = that book lists the line. Dashed = it doesn't, so its price is carried from its nearest lines by how far it sits from Pinnacle on those lines. Pinnacle fair = Pinnacle's price with the vig taken out, off its own alternate lines; dashed = Pinnacle doesn't list the line yet, so its nearest line is carried there at the same cents-a-point the 🔥 uses. Recording began Oct 29 2026: Pinnacle every minute; Poly and Kalshi every 30 min far out, 10 min inside a day, 3 min inside 3 hours.</div>
+            <div class="ch-note">One line, every book: tap a line above and every book is priced at it, in American odds for the side you pick. Each line is that book's bid. Solid = that book lists the line. Dashed = it doesn't, so its price is carried from its nearest lines by how far it sits from Pinnacle on those lines. Pinnacle fair = Pinnacle's price with the vig taken out, off its own alternate lines; dashed = Pinnacle doesn't list the line yet, so its nearest line is carried there at the same cents-a-point the 🔥 uses. Recording began Oct 29 2026: Pinnacle every minute; Poly and Kalshi every 30 min far out, 10 min inside a day, 3 min inside 3 hours.</div>
         </div>
 <div class="ov" id="ov" onclick="closeSheet()"></div>
 <div class="sheet" id="sheet"></div>
@@ -438,7 +438,7 @@
             const b = mine[mine.length - 1];
             cls += ' mine';
             const v = mine.map(x => x._venue === 'BET105' ? '$' + (x.stake || 5) : 'Poly').join(' + ');
-            const wp = b.now && b.now.prob != null && isLive(b) ? ' · ' + Math.round(b.now.prob * 100) + '%' : '';
+            const wp = b.now && b.now.prob != null && isLive(b) ? ' · now ' + (centsAm(b.now.prob * 100) || '—') : '';
             inner = '<span class="bs">✓ BET · ' + esc(v) + '</span><span class="bl">' + esc(sideName(g, row.mt, { side: s.side, line: b.line != null ? Number(b.line) : s.line })) + '</span><span class="pr">' + am(b.price) + wp + '</span>';
         } else {
             if (s.price == null) cls += ' none';
@@ -480,7 +480,7 @@
         if (b.status === 'won') right = '<span class="pos">✅ ' + money(b.pnl_usd) + '</span>';
         else if (b.status === 'lost') right = '<span class="neg">❌ ' + money(b.pnl_usd) + '</span>';
         else if (b.status === 'push') right = '➖ push';
-        else if (isLive(b)) right = (b.now ? Math.round(b.now.prob * 100) + '%' : 'no live price')
+        else if (isLive(b)) right = (b.now ? 'now ' + (centsAm(b.now.prob * 100) || '—') : 'no live price')
             + (b.ev_usd != null ? '<small>worth ' + money(b.ev_usd) + (b.now && b.now.src ? ' · ' + (b.now.src === 'poly' ? 'Poly' : 'Pin')
             + (b.now.poly_line != null && b.line != null && Math.abs(Number(b.now.poly_line) - Number(b.line)) > 0.01 ? ' @ ' + b.now.poly_line : '') : '') + '</small>' : '');
         else right = b._venue === 'BET105' ? '$' + (b.stake || 5) + '<small>to win $' + (b.win_usd != null ? Number(b.win_usd).toFixed(2) : '—') + '</small>' : (b.held ? Number(b.held).toFixed(0) + ' held' : '');
@@ -714,7 +714,9 @@
         const a = c >= 50 ? -100 * c / (100 - c) : 100 * (100 - c) / c;
         return (a > 0 ? '+' : '') + Math.round(a);
     }
-    function c1(x) { return x == null ? '—' : (Math.round(Number(x) * 10) / 10) + '¢'; }
+    // AMERICAN ODDS (Rob, Nov 15 2026: "the prediction era is ending… Back to American odds"):
+    // the chart still plots the chance, every number on it reads as a price
+    function c1(x) { return x == null ? '—' : (centsAm(Number(x)) || '—'); }
     function chartLineTxt(mt, side, ln) {
         if (ln == null || mt === 'ml') return '';
         return mt === 'total' ? (side === 'over' ? 'O ' : 'U ') + Number(ln) : sgn(ln, 1);
@@ -805,7 +807,7 @@
         const span = hi - lo, step = span > 40 ? 10 : span > 20 ? 5 : span > 10 ? 2 : 1;
         for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
             svg += '<line x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="#2A3242" stroke-dasharray="2 4"/>'
-                 + '<text x="' + (W - mr + 6) + '" y="' + (Y(v) + 4) + '" fill="#98A2B3" font-size="11">' + v + '¢ ' + centsAm(v) + '</text>';
+                 + '<text x="' + (W - mr + 6) + '" y="' + (Y(v) + 4) + '" fill="#98A2B3" font-size="11">' + centsAm(v) + '</text>';
         }
         // time axis
         const dt = tEnd - tStart, nt = 4;
@@ -860,7 +862,7 @@
         tags.forEach(tg => {
             let y = Y(tg.v); if (y < lastY + 16) y = lastY + 16; lastY = y;
             svg += '<rect x="' + (W - mr + 2) + '" y="' + (y - 8) + '" width="' + (mr - 4) + '" height="16" rx="3" fill="' + tg.col + '"/>'
-                 + '<text x="' + (W - mr + 6) + '" y="' + (y + 4) + '" fill="' + tg.fg + '" font-size="11" font-weight="700">' + c1(tg.v) + ' ' + centsAm(tg.v) + '</text>';
+                 + '<text x="' + (W - mr + 6) + '" y="' + (y + 4) + '" fill="' + tg.fg + '" font-size="11" font-weight="700">' + c1(tg.v) + '</text>';
         });
         const hx = c.hover != null ? Math.min(tEnd, Math.max(tStart, c.hover)) : null;
         if (hx != null) svg += '<line x1="' + X(hx) + '" x2="' + X(hx) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#F3F5F9" opacity=".5"/>';
@@ -883,11 +885,11 @@
         const sideNm = c.mt === 'total' ? '' : shortTeam(c.g[c.side]) + ' ';
         rd.innerHTML = S.ladder
             ? '<b>' + esc(hx != null ? when : 'Now') + '</b> · every book at <b>' + esc(sideNm + chartLineTxt(c.mt, c.side, S.anchor)) + '</b>'
-              + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + (fair != null ? ' (' + centsAm(fair) + ')' : '') + fTxt + '</span>'
+              + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + fTxt + '</span>'
               + '<br><span style="color:#4FB3FF">Poly ' + c1(pb) + ' / ' + c1(pa) + pTxt + '</span>'
               + '<br><span style="color:#7BE3A6">Kalshi ' + c1(kb) + ' / ' + c1(ka) + kTxt + '</span>'
             : '<b>' + esc(hx != null ? when : 'Now') + '</b>' + (plin != null && c.mt !== 'ml' ? ' · venue line ' + esc(chartLineTxt(c.mt, c.side, plin)) : '')
-            + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + (fair != null ? ' (' + centsAm(fair) + ')' : '') + '</span>'
+            + '<br><span style="color:#E6C36A">Pinnacle fair ' + c1(fair) + '</span>'
             + (pl != null && c.mt !== 'ml' ? ' · PIN ' + esc(chartLineTxt(c.mt, c.side, pl)) : '') + (pp != null ? ' ' + am(pp) : '')
             + '<br><span style="color:#4FB3FF">Poly ' + c1(pb) + ' / ' + c1(pa) + '</span> · <span style="color:#7BE3A6">Kalshi' + kTxt + ' ' + c1(kb) + ' / ' + c1(ka) + '</span>';
         c.lay = { W: W, ml: ml, mr: mr, tStart: tStart, tEnd: tEnd };
