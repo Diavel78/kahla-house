@@ -1,0 +1,33 @@
+name: "College basketball — data dump"
+
+# Nov 15 2026: every D1 men's game (final + ESPN core-odds open/close) printed into the log
+# for offline research (the sandbox reads the log). Read-only: no secrets, no DB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "ESPN season years (Y = the Nov Y-1 .. Apr Y season)"
+        required: false
+        default: "2025,2026,2027"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - uses: actions/cache@v4
+        with:
+          path: kahla-scanner/.cbb_cache
+          key: cbb-cache-v1-${{ github.run_id }}
+          restore-keys: cbb-cache-v1-
+      - name: Dump
+        run: python -m scripts.cbb_dump --seasons "${{ inputs.seasons }}" --cache .cbb_cache
