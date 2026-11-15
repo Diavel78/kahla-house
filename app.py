@@ -18308,6 +18308,26 @@ def _b105_poly_rung(mt: str, side, line):
     return x - 0.5          # spread, the side's own line: −17 → −17.5, +17 → +16.5
 
 
+def _b105_pick_rung(entries: list, mt: str, side, want: float):
+    """Pure. The Polymarket rung to value a Bet105 bet at: `want` exactly, else the nearest
+    line WORSE for the side within a point (spread / under: lower, over: higher), else the
+    nearest better one within a point. None when nothing is that close."""
+    best = None
+    for e in entries:
+        try:
+            x = float(e.get("line"))
+        except (TypeError, ValueError):
+            continue
+        d = x - want
+        if abs(d) > 1.0 + 1e-9:
+            continue
+        worse = (d > 0) if (mt == "total" and side == "over") else (d < 0)
+        rank = (0 if abs(d) < 0.01 else 1 if worse else 2, abs(d))
+        if best is None or rank < best[0]:
+            best = (rank, e)
+    return best[1] if best else None
+
+
 def _b105_poly_now(b: dict, away: str, home: str, ctx: dict) -> dict | None:
     """A Bet105 bet's live value off POLYMARKET's book (Nov 14 2026, Rob: "Does the live
     now pull value of my bet105 bets against current Polymarket odds?" — Pinnacle prices
@@ -18326,7 +18346,11 @@ def _b105_poly_now(b: dict, away: str, home: str, ctx: dict) -> dict | None:
             return None
         line = b.get("line")
         want = _b105_poly_rung(mt, b.get("side"), line)
-        e = pmm_markets.best_line_for(pmm, mt, b.get("side"), want)
+        if mt == "ml" or want is None:
+            e = pmm_markets.best_line_for(pmm, mt, b.get("side"), want)
+        else:
+            e = _b105_pick_rung([x for x in (pmm.get(mt) or []) if x.get("side") == b.get("side")],
+                                mt, b.get("side"), want)
         if not e:
             return None
         el = e.get("line")

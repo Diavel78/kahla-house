@@ -4760,6 +4760,15 @@ def test_b105_poly_rung():
     check("b105 poly rung total under 56", r("total", "under", 56) == 55.5)
     check("b105 poly rung total under 55.5", r("total", "under", 55.5) == 55.5)
     check("b105 poly rung ml home None", r("ml", "home", None) is None)
+    pk = app._b105_pick_rung
+    L = [{"line": x} for x in (-19.5, -17.5, -16.5)]
+    check("b105 rung: -18.5 missing -> the worse -19.5", pk(L, "spread", "home", -18.5)["line"] == -19.5)
+    check("b105 rung: exact wins", pk(L, "spread", "home", -17.5)["line"] == -17.5)
+    T = [{"line": x} for x in (55.5, 57.5)]
+    check("b105 rung: over 56.5 missing -> 57.5", pk(T, "total", "over", 56.5)["line"] == 57.5)
+    check("b105 rung: under 56.5 missing -> 55.5", pk(T, "total", "under", 56.5)["line"] == 55.5)
+    check("b105 rung: only a better one -> it", pk([{"line": -17.5}], "spread", "home", -18.5)["line"] == -17.5)
+    check("b105 rung: nothing within a point -> None", pk([{"line": -21.5}], "spread", "home", -18.5) is None)
 
 
 def test_bet105_tracker() -> None:
