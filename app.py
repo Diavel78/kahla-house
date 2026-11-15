@@ -37121,6 +37121,130 @@ def _move_series_points(rows: list, start_ms: int, max_w: float = 4.0) -> dict |
     return out
 
 
+_PTS_MARKS = ([("o", h) for h in (0, 0.25, 0.5, 1, 2, 3, 6, 12, 24)]
+              + [("s", h) for h in (-48, -24, -12, -6, -3, -2, -1, -0.5, -0.25, -0.0833, 0)])
+
+
+def _pm_checkpoints(rows: list, mt: str, slope: float, start_ms: int, max_w: float = 4.0) -> dict | None:
+    """Pure. One game-market's pm_snapshots rows (oldest first; ml: home side; spread: home
+    side, line = home's own line; total: over side) → {mark: [number, line, cents]} at
+    _PTS_MARKS. number is on one scale per market: ml = home cents; spread = implied home
+    margin (−line + (c − 50) / slope); total = line + (c − 50) / slope, off the rung priced
+    nearest 50 at that moment. The open = the first row ≤ max_w wide. None without one."""
+    H = 3600e3
+    pts = []
+    for r in rows or []:
+        d = _parse_iso(r.get("captured_at")) if r.get("captured_at") else None
+        if d is None:
+            continue
+        t = int(d.timestamp() * 1000)
+        if t >= start_ms:
+            break
+        b, a = r.get("bid_c"), r.get("ask_c")
+        try:
+            if b is not None and a is not None and (float(a) - float(b) > max_w or float(a) < float(b)):
+                continue
+            pts.append((t, None if mt == "ml" else float(r.get("line")), float(r.get("cents"))))
+        except (TypeError, ValueError):
+            continue
+    if not pts:
+        return None
+    o = pts[0][0]
+    out = {"open_ms": o}
+    for a_, h in _PTS_MARKS:
+        t = (o if a_ == "o" else start_ms) + int(h * H)
+        if t < o or t > start_ms:
+            continue
+        cur = {}
+        for p in pts:
+            if p[0] > t:
+                break
+            cur[p[1]] = p[2]
+        if not cur:
+            continue
+        if mt == "ml":
+            c = cur[None]
+            out[f"{a_}{h:g}"] = [round(c, 2), None, round(c, 2)]
+            continue
+        ln, c = min(cur.items(), key=lambda kv: abs(kv[1] - 50.0))
+        num = (-ln + (c - 50.0) / slope) if mt == "spread" else (ln + (c - 50.0) / slope)
+        out[f"{a_}{h:g}"] = [round(num, 3), ln, round(c, 2)]
+    return out
+
+
+@app.route("/api/move-scan-pts")
+def api_move_scan_pts():
+    """THE FOOTBALL WINDOW STUDY ON THE OLD POLYMARKET TAPE (Nov 15 2026, Rob: "run the
+    football one"). Shared-secret, read-only, chunked (?sport=&day=&days=&skip=&n=): every
+    finished game's Polymarket ML / spread / total checkpoints (_pm_checkpoints) + final."""
+    key = request.args.get("key", "")
+    want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
+    if not want or key != want:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    sb = get_supabase()
+    sport = (request.args.get("sport") or "NCAAF").upper()
+    az = ZoneInfo("America/Phoenix")
+    try:
+        d0 = datetime.strptime(request.args.get("day") or "", "%Y-%m-%d").replace(tzinfo=az)
+    except ValueError:
+        return jsonify({"ok": False, "error": "day=YYYY-MM-DD"}), 400
+    d1 = d0 + timedelta(days=max(1, min(7, int(request.args.get("days") or 1))))
+    skip = max(0, int(request.args.get("skip") or 0))
+    n_max = max(1, min(60, int(request.args.get("n") or 15)))
+    t0 = _time.monotonic()
+    try:
+        mk = _sb_paged(lambda: (sb.table("markets").select("id,event_name,event_start,sport")
+                                .eq("sport", sport).gte("event_start", d0.isoformat())
+                                .lt("event_start", d1.isoformat()).order("event_start").order("id")), 5)
+        gr = _sb_paged(lambda: (sb.table("game_results").select("event_start,home,away,home_score,away_score")
+                                .eq("sport", sport).gte("event_start", (d0 - timedelta(hours=12)).isoformat())
+                                .lt("event_start", (d1 + timedelta(hours=12)).isoformat())), 5)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"read: {e}"[:200]}), 502
+    finals: dict = {}
+    for g in gr:
+        finals.setdefault((_pair_team_key(g.get("away")), _pair_team_key(g.get("home"))), []).append(g)
+    todo = []
+    for m in mk:
+        aw, _, hm = str(m.get("event_name") or "").split(" · ")[0].partition(" @ ")
+        sd = _parse_iso(m.get("event_start")) if m.get("event_start") else None
+        if not hm or sd is None:
+            continue
+        for g in finals.get((_pair_team_key(aw), _pair_team_key(hm)), []):
+            gd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
+            if gd is not None and abs((gd - sd).total_seconds()) <= 6 * 3600:
+                todo.append((m, g, sd))
+                break
+    games, done = [], 0
+    spec = (("ml", "home"), ("spread", "home"), ("total", "over"))
+    for m, g, sd in todo[skip:skip + n_max]:
+        if _time.monotonic() - t0 > 48:
+            break
+        done += 1
+        sms = int(sd.timestamp() * 1000)
+        one = {"g": m.get("event_name"), "start": m.get("event_start"),
+               "final": {"home": g.get("home_score"), "away": g.get("away_score")}}
+        for mt, side in spec:
+            try:
+                q = lambda: (sb.table("pm_snapshots").select("captured_at,cents,bid_c,ask_c,line")
+                             .eq("market_id", m["id"]).eq("source", "pmm").eq("market_type", mt)
+                             .eq("side", side).lt("captured_at", sd.isoformat())
+                             .gte("cents", 20).lte("cents", 80).order("captured_at").order("id"))
+                rows = _sb_paged(q, 25)
+            except Exception as e:
+                one[mt] = {"err": str(e)[:60]}
+                continue
+            sl = 1.0 if mt == "ml" else (_STEAM_SLOPE_SCAN.get((sport, mt)) or 2.6)
+            cp = _pm_checkpoints(rows, mt, sl, sms)
+            if cp:
+                cp["slope"] = sl
+                one[mt] = cp
+        games.append(one)
+    return jsonify({"ok": True, "sport": sport, "from": d0.date().isoformat(), "matched": len(todo),
+                    "skip": skip, "done": done, "next": (skip + done if skip + done < len(todo) else None),
+                    "games": games, "ms": int((_time.monotonic() - t0) * 1000)})
+
+
 @app.route("/api/move-thresh-scan")
 def api_move_thresh_scan():
     """THE 🔥 AT A SMALLER MOVE (Nov 15 2026, Rob: "Can you run an analysis on the first .7
