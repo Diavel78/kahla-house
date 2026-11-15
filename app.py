@@ -18217,6 +18217,58 @@ def api_b105_lines():
     return jsonify({"ok": True, "lines": out, "at": now.isoformat()})
 
 
+def _b105_group(mt) -> str:
+    return "total" if str(mt or "") == "total" else "side"
+
+
+def _b105_drop_poly_dups(sb, rows: dict) -> int:
+    """ONE BET PER MARKET (Rob, Nov 15 2026: "where I'm clicking the bet on the app, then you
+    see I bet it on polymarket, remove the bet105 record, I never bet it twice"): a Bet105
+    record whose game + market (spread / ML / puck are one market, the total another) also
+    holds a Polymarket sheet or app bet is DELETED — the Polymarket bet is the real one.
+    A sold / dust (void) Polymarket pick doesn't count. Mutates `rows`. Never raises."""
+    try:
+        mids = sorted({str(r.get("market_id")) for r in rows.values() if r.get("market_id")})
+        if not mids:
+            return 0
+        names = sorted({str(r.get("event_name")) for r in rows.values() if r.get("event_name")})
+        cols = "id,market_id,event_name,event_start,market_type,status,entry_book,signal_blob"
+        poly = (sb.table("bot_picks").select(cols).in_("market_id", mids)
+                .neq("entry_book", "BET105").limit(1000).execute().data or [])
+        if names:      # a duplicate markets row for the same game: match the name + start too
+            poly += (sb.table("bot_picks").select(cols).in_("event_name", names)
+                     .neq("entry_book", "BET105").limit(1000).execute().data or [])
+        have, by_name = set(), []
+        for p in poly:
+            bl = p.get("signal_blob") if isinstance(p.get("signal_blob"), dict) else {}
+            if not (bl.get("bet_sheet") or bl.get("app_adopted")) or p.get("status") == "void":
+                continue
+            grp = _b105_group(p.get("market_type"))
+            have.add((str(p.get("market_id")), grp))
+            by_name.append((str(p.get("event_name")), _parse_iso(p.get("event_start") or ""), grp))
+
+        def _dup(r):
+            grp = _b105_group(r.get("market_type"))
+            if (str(r.get("market_id")), grp) in have:
+                return True
+            st = _parse_iso(r.get("event_start") or "")
+            return any(n == str(r.get("event_name")) and g_ == grp and st and t
+                       and abs((t - st).total_seconds()) <= 12 * 3600 for n, t, g_ in by_name)
+        drop = [r for r in rows.values() if _dup(r)]
+        for r in drop:
+            sb.table("bot_picks").delete().eq("id", r["id"]).eq("entry_book", "BET105").execute()
+            rows.pop(r["id"], None)
+            _probe_log({"kind": "b105_poly_dup", "deleted": r["id"], "event": r.get("event_name"),
+                        "market_type": r.get("market_type"), "side": r.get("side"),
+                        "line": r.get("entry_line"), "price": r.get("entry_price")})
+        if drop:
+            _ZBET_CACHE.clear()
+        return len(drop)
+    except Exception as e:
+        app.logger.warning("b105 poly dups: %s", e)
+        return 0
+
+
 def _b105_mine(sb, uid: str, now, poly: bool = False, budget=(7, 5)) -> list:
     """Today's (AZ) Bet105 bets + every pending one, with the live read:
     ESPN score/clock, Pinnacle's fair at the bet's own line (the win %), the
@@ -18231,6 +18283,7 @@ def _b105_mine(sb, uid: str, now, poly: bool = False, budget=(7, 5)) -> list:
                       .eq("status", "pending")):
         for r in (q().order("event_start").limit(500).execute().data or []):
             rows[r["id"]] = r
+    _b105_drop_poly_dups(sb, rows)
     espn: dict = {}
     slates: dict = {}
     poly_ctx: dict = {}
