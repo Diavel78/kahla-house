@@ -4753,13 +4753,13 @@ def test_hand_leash_fair() -> None:
 def test_b105_poly_rung():
     import app
     r = app._b105_poly_rung
-    check("b105 poly rung r("spread", "home", -17)", r("spread", "home", -17) == -17.5)
-    check("b105 poly rung r("spread", "away", 17)", r("spread", "away", 17) == 16.5)
-    check("b105 poly rung r("spread", "away", -1.5)", r("spread", "away", -1.5) == -1.5)
-    check("b105 poly rung r("total", "over", 56)", r("total", "over", 56) == 56.5)
-    check("b105 poly rung r("total", "under", 56)", r("total", "under", 56) == 55.5)
-    check("b105 poly rung r("total", "under", 55.5)", r("total", "under", 55.5) == 55.5)
-    check("b105 poly rung r("ml", "home", None)", r("ml", "home", None) is None)
+    check("b105 poly rung spread home -17", r("spread", "home", -17) == -17.5)
+    check("b105 poly rung spread away 17", r("spread", "away", 17) == 16.5)
+    check("b105 poly rung spread away -1.5", r("spread", "away", -1.5) == -1.5)
+    check("b105 poly rung total over 56", r("total", "over", 56) == 56.5)
+    check("b105 poly rung total under 56", r("total", "under", 56) == 55.5)
+    check("b105 poly rung total under 55.5", r("total", "under", 55.5) == 55.5)
+    check("b105 poly rung ml home None", r("ml", "home", None) is None)
 
 
 def test_bet105_tracker() -> None:
