@@ -9289,6 +9289,15 @@ def test_zone_rule() -> None:
     check("NFL 1 PM: fade the money", rd["dir"] == -1 and rd["kind"] == "fade", str(rd))
     rd = _app._zone_read("NFL", "spread", mvh(four), 3.0, four, four - int(0.4 * H), zones=FZ)
     check("NFL 4 PM: follow the money", rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
+    live = {"state": "lean", "dir": -1, "zone": "last hour", "kind": "chase", "cents": 2.0, "decided_ms": 9}
+    atb = {"state": "play", "dir": 1, "zone": "daytime", "kind": "fade", "cents": 3.0, "decided_ms": 5}
+    lk = _app._zone_bet_lock(live, atb, 7)
+    check("bet lock: the 🔥 as it stood at the bet, the later signal kept beside it",
+          lk["dir"] == 1 and lk["bet_lock"] and lk["later"]["dir"] == -1, str(lk))
+    lk = _app._zone_bet_lock(live, {"state": "watching"}, 7)
+    check("bet lock: bet before any 🔥 → the live read", lk["dir"] == -1 and lk["bet_before_fire"], str(lk))
+    src = open(_app.__file__).read()
+    check("zones: no stored 🔥 under the zone rule — live until a bet", "LIVE UNTIL YOU BET" in src)
     check("standing zones ride beside the weekly review's list",
           any(len(z) > 9 for z in _app._STANDING_ZONES) and "standing_zones" in open(_app.__file__).read())
 

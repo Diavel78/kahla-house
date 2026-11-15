@@ -44,3 +44,7 @@ The college night-follow / day-fade zones are THIS season's regime: dispatch
 `cfb-dump.yml`, parse the log (`DUMP-BEGIN`…`DUMP-END`, gzip+base64), and report the last
 4 weeks' night-follow and day-fade records at the close. If either has turned (losing 4
 weeks running), tell Rob — don't change it yourself.
+
+SIGNALS THAT CAME AND WENT: `lookup_cache` rows `zsig|SPORT|mt|start|event` hold every distinct
+🔥 a market showed (zone, side, first seen) and the one Rob's bet locked (`bet_lock`). Grade both:
+the locked 🔥 vs the later signal when they differ — that is the review Rob asked for.

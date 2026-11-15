@@ -36670,6 +36670,116 @@ def _zone_filter_ok(flt: dict, d: int, home_line, start_ms: int, static: bool = 
 
 
 _B2B_CACHE: dict = {}
+_ZBET_CACHE: dict = {}
+_ZSIG_KNOWN: dict = {}
+
+
+def _sheet_bets_at(sb, sport: str, games: list) -> dict:
+    """{(market_id, zone key ml|spread|total): first bet time (aware dt)} — any logged bet on the
+    market (Bet105, a sheet bet, an adopted app bet), 60s cache. The 🔥 locks to the read AS OF
+    that time (Rob, Nov 15 2026: "Fire can change until I bet it… Once I've logged a bet, fire
+    stays"). An NHL puck-line bet locks the ML 🔥 (the puck carries the ML's verdict). Never raises."""
+    ids = sorted({str(g.get("market_id")) for g in games if g.get("market_id")})
+    if not ids:
+        return {}
+    ck = (sport, hash(tuple(ids)))
+    hit = _ZBET_CACHE.get(ck)
+    if hit and _time.monotonic() - hit[0] < 60:
+        return hit[1]
+    out = {}
+    try:
+        rows = []
+        for i in range(0, len(ids), 150):
+            rows += (sb.table("bot_picks").select("market_id,market_type,picked_at,signal_blob")
+                     .in_("market_id", ids[i:i + 150]).limit(2000).execute().data or [])
+        for r in rows:
+            b = r.get("signal_blob") if isinstance(r.get("signal_blob"), dict) else {}
+            if not (b.get("bet105") or b.get("bet_sheet") or b.get("manual_web_bet") or b.get("app_adopted")):
+                continue
+            mt = {"moneyline": "ml"}.get(r.get("market_type"), r.get("market_type"))
+            if sport == "NHL" and mt == "spread":
+                mt = "ml"
+            t = _parse_iso(r.get("picked_at")) if r.get("picked_at") else None
+            if not t or mt not in ("ml", "spread", "total"):
+                continue
+            k = (str(r.get("market_id")), mt)
+            if k not in out or t < out[k]:
+                out[k] = t
+    except Exception as e:
+        app.logger.warning("zone bets %s: %s", sport, e)
+        return {}
+    _ZBET_CACHE.clear()
+    _ZBET_CACHE[ck] = (_time.monotonic(), out)
+    return out
+
+
+def _zone_bet_lock(live: dict, at_bet: dict, bet_ms: int) -> dict:
+    """Pure. The read to show once a bet is logged: the 🔥 as it stood at the bet (locked), with
+    a later DIFFERENT signal kept beside it (`later`) for the Sunday review. No 🔥 when the bet
+    went in → the live read, flagged `bet_before_fire`."""
+    fired = lambda r: isinstance(r, dict) and r.get("state") in ("play", "lean")
+    if not fired(at_bet):
+        out = dict(live or {})
+        out["bet_before_fire"] = True
+        return out
+    out = dict(at_bet)
+    out["bet_lock"] = True
+    out["bet_ms"] = int(bet_ms)
+    if fired(live) and (live.get("dir") != at_bet.get("dir") or live.get("zone") != at_bet.get("zone")):
+        out["later"] = {k: live.get(k) for k in ("dir", "zone", "kind", "cents", "state", "decided_ms")}
+    return out
+
+
+def _zone_signals_load(sb, sport: str) -> dict:
+    """{(event, mt): the stored zsig payload} for a sport. Never raises."""
+    try:
+        rows = _sb_paged(lambda: (sb.table("lookup_cache").select("key,payload")
+                                  .like("key", f"zsig|{sport}|%").order("key")), 20)
+    except Exception as e:
+        app.logger.warning("zone signals load %s: %s", sport, e)
+        return {}
+    out = {}
+    for r in rows or []:
+        parts = str(r.get("key") or "").split("|", 4)
+        if len(parts) == 5 and isinstance(r.get("payload"), dict):
+            out[(parts[4], parts[2])] = r["payload"]
+    return out
+
+
+def _zone_signals_note(sb, sport: str, ev: str, mt: str, start, rd: dict) -> None:
+    """Keep every distinct 🔥 a market showed (zone + side + when first seen) in lookup_cache
+    `zsig|SPORT|mt|start16|event`, kept forever — the Sunday review's record of the signals
+    that came and went, and the one a bet locked. Writes only on a change. Never raises."""
+    try:
+        cur = rd.get("later") if rd.get("bet_lock") else None
+        sigs = [x for x in (rd, cur) if isinstance(x, dict) and x.get("state") in ("play", "lean")]
+        if not sigs:
+            return
+        st = start if isinstance(start, datetime) else _parse_iso(start)
+        key = "zsig|%s|%s|%s|%s" % (sport, mt, st.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M"), ev)
+        known = _ZSIG_KNOWN.get(key)
+        if known is None:
+            r = (sb.table("lookup_cache").select("payload").eq("key", key).limit(1).execute().data or [])
+            known = (r[0].get("payload") if r and isinstance(r[0].get("payload"), dict) else {}) or {}
+        seen = {(x.get("zone"), x.get("dir")) for x in known.get("signals") or []}
+        new = [x for x in sigs if (x.get("zone"), x.get("dir")) not in seen]
+        lock_new = bool(rd.get("bet_lock")) and not known.get("bet_lock")
+        if not new and not lock_new:
+            _ZSIG_KNOWN[key] = known
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        known = dict(known)
+        known["signals"] = list(known.get("signals") or []) + [
+            {"zone": x.get("zone"), "kind": x.get("kind"), "dir": x.get("dir"), "state": x.get("state"),
+             "cents": x.get("cents"), "decided_ms": x.get("decided_ms"), "seen_at": now_iso} for x in new]
+        if rd.get("bet_lock"):
+            known["bet_lock"] = {"zone": rd.get("zone"), "dir": rd.get("dir"), "bet_ms": rd.get("bet_ms")}
+        known.update({"sport": sport, "mt": mt, "event": ev})
+        sb.table("lookup_cache").upsert({"key": key, "payload": known,
+                                         "fetched_at": "2099-01-01T00:00:00+00:00"}).execute()
+        _ZSIG_KNOWN[key] = known
+    except Exception as e:
+        app.logger.warning("zone signals %s %s: %s", sport, ev, e)
 
 
 def _b2b_map(rows: list, games: list) -> dict:
@@ -36974,6 +37084,8 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
     freeze_on = rule_on and _fire_freeze_on()
     frozen = _fire_frozen_load(sb, sport) if freeze_on else None
     b2b = _sheet_b2b(sb, sport, games) if sport in ("NHL", "NBA") else {}
+    bets_at = _sheet_bets_at(sb, sport, games) if _zone_rule_on() else {}
+    zsig = _zone_signals_load(sb, sport) if (_zone_rule_on() and not tape) else {}
     for g in games:
         try:
             sd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
@@ -37013,11 +37125,37 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
                       else _move_read(sport, nums, sl, sms, now_ms))
                 if anc is not None:
                     rd["anchor"] = anc
-                if freeze_on:
+                if zone_on:
+                    # LIVE UNTIL YOU BET (Rob, Nov 15 2026): no stored 🔥 — the read moves with the
+                    # zones until a bet is logged on the market, then it is the read AS OF the bet
+                    ev = g.get("event_name")
+                    partial = anc is not None and (ev, mt, anc) not in lad_rows
+                    bt = bets_at.get((str(g.get("market_id")), mt))
+                    if not tape:
+                        # the week record's older finals read no tape: the stored signals —
+                        # the one a bet locked, else the last 🔥 the market showed
+                        zs = zsig.get((ev, mt)) or {}
+                        sg = [x for x in zs.get("signals") or [] if isinstance(x, dict)]
+                        lk = zs.get("bet_lock") if isinstance(zs.get("bet_lock"), dict) else None
+                        pick = next((x for x in sg if lk and x.get("zone") == lk.get("zone")
+                                     and x.get("dir") == lk.get("dir")), None) or (sg[-1] if sg else None)
+                        if pick:
+                            rd = {**pick, "zone_rule": True, "from_store": True, "bet_lock": bool(lk)}
+                    elif bt is not None:
+                        bms = int(bt.timestamp() * 1000)
+                        at_bet = _zone_read(sport, mt, nums.get("pin") or [], sl, sms, min(bms, now_ms),
+                                            ctx={"b2b": b2b.get(ev)})
+                        rd = _zone_bet_lock(rd, at_bet, bms)
+                    elif partial and rd.get("state") in ("play", "lean"):
+                        rd = {"state": "reading", "open_ms": rd.get("open_ms"),
+                              "why": "ladder tape not read this load — the 🔥 waits for a full read"}
+                    if not partial and rd.get("state") in ("play", "lean") and tape:
+                        _zone_signals_note(sb, sport, ev, mt, sd, rd)
+                elif freeze_on:
                     ev = g.get("event_name")
                     partial = anc is not None and (ev, mt, anc) not in lad_rows
                     fz = (frozen or {}).get((ev, mt))
-                    rd, store = (_zone_settle(rd, fz, partial) if zone_on else _move_settle(rd, fz, partial))
+                    rd, store = _move_settle(rd, fz, partial)
                     if store and frozen is not None:
                         _fire_freeze(sb, sport, ev, mt, rd, sd, replace=bool(rd.get("replaced")))
                 if key == "ml" and sport in _FIRE_ML_SPREAD_SPORTS:
