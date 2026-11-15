@@ -18245,6 +18245,23 @@ def _b105_pmm_lookup(sport, away, home, event_start, ctx: dict):
     return pm
 
 
+def _b105_poly_rung(mt: str, side, line):
+    """Pure. The Polymarket rung a Bet105 bet is valued at: its own line when it is a half
+    point, else the half point WORSE for its side (Rob, Nov 14 2026: "if I have -17, show
+    the odds for -17.5, if I have +17, show odds for +16.5") — over 56 → 56.5, under 56 → 55.5."""
+    if mt == "ml" or line is None:
+        return None
+    try:
+        x = float(line)
+    except (TypeError, ValueError):
+        return None
+    if abs(x - round(x)) > 0.01:
+        return x
+    if mt == "total":
+        return x + 0.5 if side == "over" else x - 0.5
+    return x - 0.5          # spread, the side's own line: −17 → −17.5, +17 → +16.5
+
+
 def _b105_poly_now(b: dict, away: str, home: str, ctx: dict) -> dict | None:
     """A Bet105 bet's live value off POLYMARKET's book (Nov 14 2026, Rob: "Does the live
     now pull value of my bet105 bets against current Polymarket odds?" — Pinnacle prices
@@ -18262,11 +18279,12 @@ def _b105_poly_now(b: dict, away: str, home: str, ctx: dict) -> dict | None:
         if not pmm or client is None:
             return None
         line = b.get("line")
-        e = pmm_markets.best_line_for(pmm, mt, b.get("side"), float(line) if line is not None else None)
+        want = _b105_poly_rung(mt, b.get("side"), line)
+        e = pmm_markets.best_line_for(pmm, mt, b.get("side"), want)
         if not e:
             return None
         el = e.get("line")
-        if mt != "ml" and line is not None and el is not None and abs(float(el) - float(line)) > 1.0:
+        if mt != "ml" and want is not None and el is not None and abs(float(el) - float(want)) > 1.0:
             return None
         p = _live_book_mid(client, e.get("slug"), bool(e.get("synthetic"))) if e.get("slug") else None
         if p is None:
