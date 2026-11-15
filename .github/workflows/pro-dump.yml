@@ -1,0 +1,53 @@
+name: "NBA / NHL — data dump"
+
+# Nov 15 2026: finals + DK open/close for offline research (the sandbox reads the log).
+# Read-only: no secrets, no DB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sport:
+        description: "NBA or NHL"
+        required: false
+        default: "NBA"
+      seasons:
+        description: "ESPN season years (Y = the Y-1..Y season)"
+        required: false
+        default: "2025,2026,2027"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests numpy httpx
+      - uses: actions/cache@v4
+        if: ${{ inputs.sport == 'NBA' }}
+        with:
+          path: kahla-scanner/.nba_cache
+          key: nba-cache-v1-${{ github.run_id }}
+          restore-keys: nba-cache-v1-
+      - uses: actions/cache@v4
+        if: ${{ inputs.sport == 'NHL' }}
+        with:
+          path: kahla-scanner/.nhl_cache
+          key: nhl-cache-v1-${{ github.run_id }}
+          restore-keys: nhl-cache-v1-
+      - name: Fetch ESPN history (resumable)
+        run: |
+          if [ "${{ inputs.sport }}" = "NBA" ]; then
+            python -m scripts.nba_fetch --seasons "${{ inputs.seasons }}" --out .nba_cache
+          else
+            python -m scripts.nhl_fetch --seasons "${{ inputs.seasons }}" --out .nhl_cache
+          fi
+      - name: Dump
+        run: |
+          if [ "${{ inputs.sport }}" = "NBA" ]; then C=.nba_cache; else C=.nhl_cache; fi
+          python -m scripts.pro_dump --sport "${{ inputs.sport }}" --cache "$C" --seasons "${{ inputs.seasons }}"
