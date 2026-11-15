@@ -621,7 +621,8 @@
             const t = g.event_start ? Date.parse(g.event_start) : 0;
             if (!t || t <= now || (g.grade && g.grade.final)) return;
             const en = g.away + ' @ ' + g.home, mv = g.move || {};
-            if (bet[en] || bet[g.event_name] || Object.values(mv).some(x => x && (x.bet_lock || x.bet_before_fire))) return;
+            // your bet list is the truth — a cached server lock outlives a deleted bet (Rob, Nov 15 2026)
+            if (bet[en] || bet[g.event_name]) return;
             ['spread', 'total', 'ml'].forEach(k => {
                 const x = mv[k]; if (!x) return;
                 if ((x.state === 'play' || x.state === 'lean') && x.dir) {
@@ -732,7 +733,7 @@
             toast(x.d.error || ('failed ' + x.status), true); render();
         }
     }
-    function goFire(sp, en) { _scrollTo = en; _view = 'up'; document.getElementById('q').value = ''; setSport(sp); }
+    function goFire(sp, en) { _scrollTo = en; _view = 'up'; document.getElementById('q').value = ''; setSport(sp); localStorage.setItem('b105_sport', 'FIRE'); }   // a refresh comes back to 🔥
     function render() {
         if (_sport === 'FIRE') {
             document.getElementById('chips').innerHTML = '';
@@ -1201,7 +1202,7 @@
     async function delBet(id) {
         if (!confirm('Delete this bet?')) return;
         const x = await postJSON('/api/bet105/edit', { id, delete: true });
-        if (x.d.ok) { closeSheet(); toast('Deleted'); _b105 = _b105.filter(b => b.id !== id); render(); renderMoney(); loadB105(); } else toast(x.d.error || 'delete failed', true);
+        if (x.d.ok) { closeSheet(); toast('Deleted'); _b105 = _b105.filter(b => b.id !== id); try { localStorage.setItem('b105_mine', JSON.stringify({ at: Date.now(), bets: _b105 })); } catch (e) {} _fireN = null; renderTabs(); render(); renderMoney(); loadB105(); } else toast(x.d.error || 'delete failed', true);
     }
 
     firebase.auth().onAuthStateChanged(async user => {

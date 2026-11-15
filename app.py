@@ -18017,6 +18017,7 @@ def api_b105_bet():
         pid = (ins.data or [{}])[0].get("id")
     except Exception as e:
         return jsonify({"ok": False, "error": f"save failed: {e}"[:200]}), 500
+    _ZBET_CACHE.clear()                     # the 🔥 locks to this bet on the next read
     return jsonify({"ok": True, "id": pid, "label": label, "price": price, "line": line, "src": src,
                     "win_usd": _b105_win_usd(price)})
 
@@ -18038,6 +18039,7 @@ def api_b105_edit():
         return jsonify({"ok": False, "error": "not a Bet105 bet"}), 404
     if d.get("delete"):
         sb.table("bot_picks").delete().eq("id", pid).execute()
+        _ZBET_CACHE.clear()                       # a deleted bet unlocks its 🔥 on the next read
         return jsonify({"ok": True, "deleted": True})
     up, blob = {}, dict(r.get("signal_blob") or {})
     try:
@@ -36676,7 +36678,7 @@ _ZSIG_KNOWN: dict = {}
 
 def _sheet_bets_at(sb, sport: str, games: list) -> dict:
     """{(market_id, zone key ml|spread|total): first bet time (aware dt)} — any logged bet on the
-    market (Bet105, a sheet bet, an adopted app bet), 60s cache. The 🔥 locks to the read AS OF
+    market (Bet105, a sheet bet, an adopted app bet), 20s cache (cleared on a Bet105 tap/delete). The 🔥 locks to the read AS OF
     that time (Rob, Nov 15 2026: "Fire can change until I bet it… Once I've logged a bet, fire
     stays"). An NHL puck-line bet locks the ML 🔥 (the puck carries the ML's verdict). Never raises."""
     ids = sorted({str(g.get("market_id")) for g in games if g.get("market_id")})
@@ -36684,7 +36686,7 @@ def _sheet_bets_at(sb, sport: str, games: list) -> dict:
         return {}
     ck = (sport, hash(tuple(ids)))
     hit = _ZBET_CACHE.get(ck)
-    if hit and _time.monotonic() - hit[0] < 60:
+    if hit and _time.monotonic() - hit[0] < 20:
         return hit[1]
     out = {}
     try:
