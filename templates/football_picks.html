@@ -809,7 +809,6 @@
                     const tw = x.decided_ms ? new Date(x.decided_ms).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' }) : '';
                     parts.push('🔥 ' + lab[k] + ' <b>' + esc(side(k, x.dir)) + '</b> ' + x.state.toUpperCase()
                         + (x.bet_lock ? ' <span title="locked when you logged the bet">🔒</span>' : '')
-                        + (x.later && x.later.dir ? ' <span class="mvq" title="the signal since your bet">(now 🔥 ' + esc(side(k, x.later.dir)) + ')</span>' : '')
                         + (x.kind === 'fade' && x.faded_dir ? ' <span class="smk" title="the money went this way in the zone — we fade it">💨 fading ' + esc(side(k, x.faded_dir)) + '</span>' : '')
                         + ' <span class="mvq">(' + esc(x.zone || '') + (x.cents != null ? ', Pin ' + x.cents + '¢' : '') + (tw ? ', ' + tw : '') + ')</span>');
                 } else if (x.state === 'watching' && (x.zones || []).length && (!g._st || g._st === 'up')) {
