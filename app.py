@@ -37181,7 +37181,9 @@ def api_move_scan_pts():
     want = (os.environ.get("FILLS_CRON_SECRET") or "").strip()
     if not want or key != want:
         return jsonify({"ok": False, "error": "forbidden"}), 403
-    sb = get_supabase()
+    sb = get_supabase_mirror() if request.args.get("mirror") else get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "no database"}), 503
     sport = (request.args.get("sport") or "NCAAF").upper()
     az = ZoneInfo("America/Phoenix")
     try:
