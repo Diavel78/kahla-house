@@ -1,0 +1,46 @@
+name: "Football totals — model vs the opener"
+
+# Rob, Nov 15 2026: "Get going, I want totals". Our football total vs ESPN's opening total,
+# walk-forward, plus follow/fade the total's move by start slot. Read-only: no secrets, no DB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sport:
+        description: "NFL or NCAAF"
+        required: false
+        default: "NFL"
+      seasons:
+        description: "seasons (blank = NFL 2022-26, NCAAF 2023-26)"
+        required: false
+        default: ""
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: kahla-scanner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - uses: actions/cache@v4
+        if: inputs.sport == 'NFL'
+        with:
+          path: kahla-scanner/.nfl_cache
+          key: nfl-cache-v1-${{ github.run_id }}
+          restore-keys: nfl-cache-v1-
+      - uses: actions/cache@v4
+        if: inputs.sport != 'NFL'
+        with:
+          path: kahla-scanner/.cfb_cache
+          key: cfb-cache-v1-${{ github.run_id }}
+          restore-keys: cfb-cache-v1-
+      - name: Totals vs the open
+        run: |
+          if [ -n "${{ inputs.seasons }}" ]; then S="--seasons ${{ inputs.seasons }}"; else S=""; fi
+          python -m scripts.football_totals_open --sport "${{ inputs.sport }}" $S
