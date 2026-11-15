@@ -798,7 +798,7 @@
         const lab = { ml: 'ML', spread: _sport === 'MLB' ? 'Run line' : 'Spread', total: 'Total' };
         const side = (k, d) => k === 'total' ? (d > 0 ? 'Over' : 'Under') : shortTeam(d > 0 ? g.home : g.away);
         const parts = [];
-        let waiting = false, old = 0, n = 0;
+        let waiting = false, old = 0, n = 0, expMs = null;
         for (const k of ['spread', 'total', 'ml']) {
             const x = m[k]; if (!x) continue;
             n++;
@@ -811,8 +811,8 @@
                         + (x.kind === 'fade' && x.faded_dir ? ' <span class="smk" title="the money went this way in the zone — we fade it">💨 fading ' + esc(side(k, x.faded_dir)) + '</span>' : '')
                         + ' <span class="mvq">(' + esc(x.zone || '') + (x.cents != null ? ', Pin ' + x.cents + '¢' : '') + (tw ? ', ' + tw : '') + ')</span>');
                 } else if (x.state === 'watching' && (x.zones || []).length && (!g._st || g._st === 'up')) {
-                    const z = x.zones[0], t = ms => new Date(ms).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' });
-                    parts.push('<span class="mvq" title="the 🔥 for this market comes only from this zone">⏳ ' + lab[k] + ': ' + esc(z.zone) + ' ' + t(z.from_ms) + '–' + t(z.to_ms) + '</span>');
+                    // Rob, Nov 15 2026: "Don't need all the words, just 🔥 expected at (show the time)"
+                    for (const z of x.zones) if (z.to_ms > Date.now() && (expMs == null || z.to_ms < expMs)) expMs = z.to_ms;
                 }
                 continue;
             }
@@ -844,6 +844,7 @@
                 waiting = true;
             } else if (x.state === 'old_open') old++;
         }
+        if (expMs != null) parts.push('<span class="mvq">🔥 expected at ' + new Date(expMs).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' }) + '</span>');
         if (!parts.length) {
             if (g._st && g._st !== 'up') return '';      // a started / final game waits on nothing
             if (waiting) return '<span class="mvl mvw">🔥 waiting on the books\' open</span>';
