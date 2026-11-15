@@ -37903,6 +37903,9 @@ def _mcp_board(sport=None, hours=36) -> dict:
                         "started": st <= now, "final": (gr.get("final") or None),
                         "tv": g.get("tv"), "market_line": g.get("line"), "pinnacle": g.get("pin"),
                         "model": g.get("model"), "picks": picks,
+                        "fire": {k: {x: v.get(x) for x in ("state", "dir", "kind", "zone", "cents", "faded_dir", "frozen", "zones")
+                                     if v.get(x) is not None}
+                                 for k, v in (g.get("move") or {}).items() if isinstance(v, dict)} or None,   # the 🔥 read per market (dir +1 home/over)
                         "steam_since_open": g.get("steam"),   # dir +1 home/over, −1 away/under; cents = the move in cents at one line (moves = the same in points)
                         "venue_quotes_on_pick_side": venue or None,
                         "venue_age_min": (round(g["venue"]["age_s"] / 60) if isinstance(g.get("venue"), dict)
