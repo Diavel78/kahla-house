@@ -66,7 +66,7 @@ def walk(games, odds, first_season, half_life):
                 continue
             hfa = 0.0 if g["neutral"] else HFA
             m = (h["off"] + (a["def"] - lg)) - (a["off"] + (h["def"] - lg)) + hfa
-            out.append({"season": season, "week": week, "proj": m,
+            out.append({"id": g["id"], "season": season, "week": week, "proj": m,
                         "gp": min(cnt[str(g["home"])], cnt[str(g["away"])]),
                         "open": float(o["sp_home"]), "close": float(c["sp_home"]),
                         "px_h": c.get("sp_home_odds"), "px_a": c.get("sp_away_odds"),
