@@ -369,7 +369,7 @@
         const ev = live.reduce((a, b) => a + (Number(b.ev_usd) || 0), 0);
         const bet = live.reduce((a, b) => a + (worthOf(b) != null ? betCost(b) : 0), 0);
         set('sLive', live.length ? dollars(bet + ev) : '—', ev > 0 ? 'pos' : ev < 0 ? 'neg' : '');
-        document.getElementById('sLiveN').textContent = live.length ? live.length + ' in play · bet ' + dollars(bet) : 'nothing in play';
+        document.getElementById('sLiveN').textContent = live.length ? live.length + ' bets · in ' + dollars(bet).replace('.00', '') : 'nothing in play';
         set('sOpen', _b105In ? String(_b105.filter(b => b.status === 'pending').length) : '…');
     }
 
