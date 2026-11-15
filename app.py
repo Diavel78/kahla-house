@@ -36814,6 +36814,12 @@ _STANDING_ZONES = (
      "3+ points onto the favorite: fade it", {"dog": 0.5}),
     ("NCAAB", "spread", ("o", 0), ("s", -0.5), "chase", 2.9, 99.0, 6.0,
      "money on the dog: follow", {"dog": 0.5}),
+    # College totals: no move rule wins (open → close is a coin flip every season) and a pace ×
+    # efficiency model loses to the open (MAE 13.05 vs 12.77). The one spot that held all three
+    # seasons at the close: FRIDAY UNDERS 271-231 / 283-230 / 63-51 (+4% combined). A spot, not a
+    # move — min_c 99 = it fires whatever the line did.
+    ("NCAAB", "total", ("o", 0), ("s", -0.5), "quiet", 99.0, 99.0, 4.0,
+     "Friday: the under", {"dow": ["Fri"], "pick": "under"}),
 )
 _ZONE_LOG: dict = {}
 
@@ -37113,6 +37119,8 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
             d = 1 if hl < 0 else -1
             if flt.get("pick") == "dog":
                 d = -d                                  # college hoops: nobody moved it = the dog
+            elif flt.get("pick") in ("under", "over"):
+                d = -1 if flt["pick"] == "under" else 1  # a standing total spot (college Friday unders)
             fired.append({"state": "lean", "dir": d, "cents": round(abs(mv), 1), "moved_dir": 0,
                           "faded_dir": None, "zone": label, "kind": kind, "strength": float(roi),
                           "decided_ms": int(tb), "at_h": round((tb - o) / H, 1), "open_ms": o,

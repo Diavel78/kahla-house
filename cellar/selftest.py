@@ -9300,6 +9300,13 @@ def test_zone_rule() -> None:
     check("NCAAB: money on the dog → follow", rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
     rd = _app._zone_read("NCAAB", "spread", cb(3.0, 4.5, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
     check("NCAAB: 1-3 pts onto the favorite fires nothing", rd["state"] not in ("play", "lean"), str(rd))
+    TZ = [z for z in CZ if z[1] == "total"]
+    fri = int(_dt.datetime(2026, 11, 21, 0, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000)   # Fri 7 PM ET
+    ct = lambda st, a, b: [(st - int(20 * H), a, 145.5), (st - int(2 * H), b, 145.5)]
+    rd = _app._zone_read("NCAAB", "total", ct(fri, 145.0, 148.0), 2.4, fri, fri - int(0.4 * H), zones=TZ)
+    check("NCAAB Friday: the under, whatever the total did", rd["dir"] == -1 and rd["kind"] == "quiet", str(rd))
+    rd = _app._zone_read("NCAAB", "total", ct(one, 145.0, 145.0), 2.4, one, one - int(0.4 * H), zones=TZ)
+    check("NCAAB Sunday: no total fire", rd["state"] not in ("play", "lean"), str(rd))
     live = {"state": "lean", "dir": -1, "zone": "last hour", "kind": "chase", "cents": 2.0, "decided_ms": 9}
     atb = {"state": "play", "dir": 1, "zone": "daytime", "kind": "fade", "cents": 3.0, "decided_ms": 5}
     lk = _app._zone_bet_lock(live, atb, 7)
