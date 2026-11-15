@@ -37192,6 +37192,20 @@ def api_move_scan_pts():
     skip = max(0, int(request.args.get("skip") or 0))
     n_max = max(1, min(60, int(request.args.get("n") or 15)))
     t0 = _time.monotonic()
+    if request.args.get("probe"):
+        # is the old tape there? first / last rows overall and for this window
+        pr = {}
+        try:
+            for k, desc in (("first", False), ("last", True)):
+                r = (sb.table("pm_snapshots").select("captured_at,market_id,market_type,source,side,line,cents")
+                     .order("captured_at", desc=desc).limit(1).execute().data) or []
+                pr[k] = r[0] if r else None
+            r = (sb.table("pm_snapshots").select("captured_at,market_id,market_type,source,side,line,cents")
+                 .gte("captured_at", d0.isoformat()).lt("captured_at", d1.isoformat()).limit(5).execute().data) or []
+            pr["window_sample"] = r
+        except Exception as e:
+            pr["err"] = str(e)[:200]
+        return jsonify({"ok": True, "probe": pr})
     try:
         mk = _sb_paged(lambda: (sb.table("markets").select("id,event_name,event_start,sport")
                                 .eq("sport", sport).gte("event_start", d0.isoformat())
