@@ -234,6 +234,11 @@
     function am(x) { if (x == null || x === '') return '—'; const n = Math.round(Number(x)); return (n > 0 ? '+' : '') + n; }
     function sgn(x) { const n = Number(x); return (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n); }
     function money(x) { if (x == null) return '—'; return (x >= 0 ? '+$' : '−$') + Math.abs(x).toFixed(2); }
+    function dollars(x) { return x == null ? '—' : '$' + Number(x).toFixed(2); }
+    // WORTH = THE WHOLE BET, NOT THE GAIN (Rob, Nov 15 2026: "If I bet $5 and it's worth plus 18,
+    // then show 5.18"): what the bet is worth now = what went in + the expected gain at the live price.
+    function betCost(b) { return b._venue === 'BET105' ? Number(b.stake || 5) : (b.cost != null ? Number(b.cost) : null); }
+    function worthOf(b) { const c = betCost(b); return b.ev_usd == null || c == null ? null : Math.round((c + Number(b.ev_usd)) * 100) / 100; }
     function clock(iso) { return iso ? new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', minute: '2-digit' }) : ''; }
     function dayOf(iso) { return iso ? new Date(iso).toLocaleDateString('en-US', { timeZone: 'America/Phoenix' }) : ''; }
     function whenTxt(iso) {
@@ -305,6 +310,7 @@
                     return { id: 'p' + b.id, sport: b.sport, event_name: b.event_name, event_start: b.event_start,
                              market_type: b.market_type, side: b.side, line: b.line, label: b.label, price,
                              status: b.status, pnl_usd: b.pnl_usd, held: b.held,
+                             cost: b.price_c != null && b.held != null ? Math.round(Number(b.held) * Number(b.price_c)) / 100 : null,
                              final: (b.result_score && b.result_score.away != null) ? b.result_score : null,
                              now: p != null ? { prob: p } : null,
                              ev_usd: live && p != null && b.price_c != null ? Math.round(Number(b.held) * (p - Number(b.price_c) / 100) * 100) / 100 : null,
@@ -361,8 +367,9 @@
         document.getElementById('sRec').textContent = w + '–' + l;
         const live = allMine().filter(isLive);
         const ev = live.reduce((a, b) => a + (Number(b.ev_usd) || 0), 0);
-        set('sLive', live.length ? money(ev) : '—', ev > 0 ? 'pos' : ev < 0 ? 'neg' : '');
-        document.getElementById('sLiveN').textContent = live.length ? live.length + ' in play' : 'nothing in play';
+        const bet = live.reduce((a, b) => a + (worthOf(b) != null ? betCost(b) : 0), 0);
+        set('sLive', live.length ? dollars(bet + ev) : '—', ev > 0 ? 'pos' : ev < 0 ? 'neg' : '');
+        document.getElementById('sLiveN').textContent = live.length ? live.length + ' in play · bet ' + dollars(bet) : 'nothing in play';
         set('sOpen', _b105In ? String(_b105.filter(b => b.status === 'pending').length) : '…');
     }
 
@@ -539,7 +546,7 @@
         else if (b.status === 'lost') right = '<span class="neg">❌ ' + money(b.pnl_usd) + '</span>';
         else if (b.status === 'push') right = '➖ push';
         else if (isLive(b)) right = (b.now ? 'now ' + (centsAm(b.now.prob * 100) || '—') : 'no live price')
-            + (b.ev_usd != null ? '<small>worth ' + money(b.ev_usd) + (b.now && b.now.src ? ' · ' + (b.now.last ? 'last ' + clock(new Date(b.now.last).toISOString()) + ' · ' : '') + (b.now.src === 'poly' ? 'Poly' : b.now.src === 'score' ? 'from the score' : 'Pin')
+            + (worthOf(b) != null ? '<small>worth ' + dollars(worthOf(b)) + ' · bet ' + dollars(betCost(b)) + (b.now && b.now.src ? ' · ' + (b.now.last ? 'last ' + clock(new Date(b.now.last).toISOString()) + ' · ' : '') + (b.now.src === 'poly' ? 'Poly' : b.now.src === 'score' ? 'from the score' : 'Pin')
             + (b.now.poly_line != null && b.line != null && Math.abs(Number(b.now.poly_line) - Number(b.line)) > 0.01 ? ' @ ' + b.now.poly_line : '') : '') + '</small>' : '');
         else right = b._venue === 'BET105' ? '$' + (b.stake || 5) + '<small>to win $' + (b.win_usd != null ? Number(b.win_usd).toFixed(2) : '—') + '</small>' : (b.held ? Number(b.held).toFixed(0) + ' held' : '');
         if (b.game && b.game.away != null) d = shortTeam(parts[0], b.sport) + ' ' + b.game.away + ' – ' + b.game.home + ' ' + shortTeam(parts[1], b.sport) + (b.game.status ? ' · ' + b.game.status : '');
@@ -1250,11 +1257,11 @@
                    : all.filter(b => b._venue === 'BET105' && b.status === 'pending');
         list.sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
         const title = kind === 'settled' ? 'Settled today' : kind === 'live' ? 'Live now' : 'Open bets';
-        let usd = 0;
-        list.forEach(b => { usd += Number(kind === 'live' ? b.ev_usd : b.pnl_usd) || 0; });
+        let usd = 0, inn = 0;
+        list.forEach(b => { usd += Number(kind === 'live' ? b.ev_usd : b.pnl_usd) || 0; if (kind === 'live' && worthOf(b) != null) inn += betCost(b); });
         let h = '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><h3>' + title + ' · ' + list.length + '</h3>'
               + '<button class="btn" style="flex:none;padding:8px 14px" onclick="closeSheet()">Close</button></div>';
-        if (kind !== 'open') h += '<div class="sub">' + (kind === 'live' ? 'worth now ' : 'total ') + '<b class="' + (usd > 0 ? 'pos' : usd < 0 ? 'neg' : '') + '">' + money(usd) + '</b></div>';
+        if (kind !== 'open') h += '<div class="sub">' + (kind === 'live' ? 'worth now ' : 'total ') + '<b class="' + (usd > 0 ? 'pos' : usd < 0 ? 'neg' : '') + '">' + (kind === 'live' ? dollars(inn + usd) + '</b> · bet ' + dollars(inn) : money(usd) + '</b>') + '</div>';
         const by = {};
         list.forEach(b => { const s = (b.sport || '').toUpperCase() || 'OTHER'; (by[s] = by[s] || []).push(b); });
         Object.keys(by).forEach(s => { h += '<div class="sp-h">' + esc(s === 'NCAAF' ? 'COLLEGE' : s) + ' · ' + by[s].length + '</div>' + by[s].map(betRow).join(''); });
