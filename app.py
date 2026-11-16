@@ -6571,6 +6571,7 @@ def api_bet_sheets_picks():
                 if nn is not None and abs(float(nn.get("net") or 0)) >= 1.0:
                     held[sl] = nn
             pa["held_ge1"] = len(held)
+            pa["held"] = {sl: {"net": n_.get("net"), "avg": n_.get("avg_price")} for sl, n_ in list(held.items())[:60]}
             fp = _sb_paged(lambda: sb.table("bot_picks").select("id,signal_blob,event_start")
                            .eq("status", "pending").filter("signal_blob->>filled", "eq", "true"),
                            max_pages=5) or []
