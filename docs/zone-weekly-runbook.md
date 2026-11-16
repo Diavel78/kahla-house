@@ -17,7 +17,7 @@ in app.py); `machine_flags zone_rule` turns the rule on/off.
 ## Steps (run serially — site_curl.sh reads back the newest workflow run)
 S=kahla-scanner/scripts/site_curl.sh
 
-1. **Save the week.** For each sport in NBA NHL NFL NCAAF:
+1. **Save the week.** For each sport in NBA NHL NFL NCAAF NCAAB:
    `off=0; loop: $S api/move-thresh-scan "sport=$SP&days=9&off=$off&n=25&pts=1&save=1&quiet=1" out.json`
    — read `games_total`, `saved`, `skip`; `off += 25` until `off >= games_total`.
    This writes each finished game-market's checkpoints to `lookup_cache` rows `zcp|…`
@@ -55,3 +55,15 @@ BLENDS: `zsig` signals with `kind: blend` are markets where no zone fired but 2+
 (each ≥40% of its threshold) pointed the same way, summing to a full threshold. Not on the card.
 Grade them weekly; first read (Pinnacle tape Oct 29 – Nov 14): NHL 17-15, NBA 4-0, college 1-2.
 Recommend promoting a sport's blend to the card only when it's beating the close over 50+ games.
+
+COLLEGE BASKETBALL (Rob, Nov 16 2026: "Don't forget college basketball for next week, need to
+dial it in"): saved and graded weekly with the rest from Nov 22 2026 (first history: Nov 14-15).
+Its 🔥 today is ONLY the standing every-game rules (`_STANDING_ZONES` NCAAB: nobody moved it =
+the dog, 3+ onto the favorite = fade it, money on the dog = follow; Friday unders). Each week:
+(a) report the zone_review tables for NCAAB — at ~150+ games a market a measured zone can
+qualify on its own; until then say how far off it is; (b) grade the standing NCAAB rules from
+`zsig|NCAAB|…` (`/api/zone-data?sig=1&sport=NCAAB`) against finals (the pick-sheet API's
+`final`), split by rule and by dog size (first day, Nov 15: short dogs +1.5 to +4.5 won, every
+dog +14.5 or more lost) — and recommend a size cap or a rule change to Rob when a split has
+40+ games behind it; never change the standing zones yourself.
+
