@@ -9295,13 +9295,27 @@ def test_zone_rule() -> None:
     rd = _app._zone_read("NCAAF", "spread", _pts(dst, 7.0, 7.2), 2.6, dst, dst - int(0.4 * H), zones=NZ)
     check("college: nobody moved it → the favorite", rd["state"] == "lean" and rd["dir"] == 1 and rd["kind"] == "quiet", str(rd))
     TZ = [z for z in _app._STANDING_ZONES if z[0] == "NCAAF" and z[1] == "total"]
-    tp = lambda st, a, b: [(st - int(100 * H), a, 55.0), (st - int(10 * H), b, 55.0)]
+    tp = lambda st, a, b: [(st - int(100 * H), a, 61.0), (st - int(10 * H), b, 61.0)]
     rd = _app._zone_read("NCAAF", "total", tp(nst, 0.0, 2.0), 2.5, nst, nst - int(0.4 * H), zones=TZ)
     check("college total, night: follow a 2-pt move up (play)", rd["state"] == "play" and rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
     rd = _app._zone_read("NCAAF", "total", tp(dst, 0.0, -1.5), 2.5, dst, dst - int(0.4 * H), zones=TZ)
     check("college total, day: follow a 1.5-pt move down (lean)", rd["state"] == "lean" and rd["dir"] == -1, str(rd))
     rd = _app._zone_read("NCAAF", "total", tp(nst, 0.0, 1.0), 2.5, nst, nst - int(0.4 * H), zones=TZ)
     check("college total: under 1.5 pts fires nothing", rd["state"] not in ("play", "lean"), str(rd))
+    DZ = [z for z in _app._STANDING_ZONES if z[0] in ("NCAAF", "NFL") and z[1] == "total"]
+    tpl = lambda st, a, b, ln: [(st - int(100 * H), a, ln), (st - int(10 * H), b, ln)]
+    rd = _app._zone_read("NCAAF", "total", tpl(dst, 0.0, 0.2, 55.0), 2.5, dst, dst - int(0.4 * H), zones=DZ)
+    check("college day total 55: the over", rd["state"] == "lean" and rd["dir"] == 1, str(rd))
+    rd = _app._zone_read("NCAAF", "total", tpl(dst, 0.0, 0.2, 61.0), 2.5, dst, dst - int(0.4 * H), zones=DZ)
+    check("college day total 61: no band spot", rd["state"] not in ("play", "lean"), str(rd))
+    fsun = int(_dt.datetime(2026, 11, 22, 21, 25, tzinfo=_dt.timezone.utc).timestamp() * 1000)   # 4:25 PM ET
+    osun = int(_dt.datetime(2026, 11, 22, 18, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000)    # 1 PM ET
+    rd = _app._zone_read("NFL", "total", tpl(fsun, 0.0, 0.0, 44.5), 3.2, fsun, fsun - int(0.4 * H), zones=DZ)
+    check("NFL 4 PM total: the over", rd["state"] == "lean" and rd["dir"] == 1, str(rd))
+    rd = _app._zone_read("NFL", "total", tpl(osun, 0.0, 0.0, 38.5), 3.2, osun, osun - int(0.4 * H), zones=DZ)
+    check("NFL 1 PM total 38.5: the under", rd["state"] == "lean" and rd["dir"] == -1, str(rd))
+    rd = _app._zone_read("NFL", "total", tpl(osun, 0.0, 0.0, 44.5), 3.2, osun, osun - int(0.4 * H), zones=DZ)
+    check("NFL 1 PM total 44.5: nothing", rd["state"] not in ("play", "lean"), str(rd))
     # NHL back-to-back: the rested team, and it outranks following the money the other way
     sched = [{"event_name": "Calgary Flames @ Seattle Kraken", "event_start": "2026-11-21T03:00:00Z"},
              {"event_name": "Boston Bruins @ Toronto Maple Leafs", "event_start": "2026-11-21T00:00:00Z"}]

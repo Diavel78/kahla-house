@@ -36837,6 +36837,18 @@ _STANDING_ZONES = (
      "night game: follow the total's move", {"slot": "night"}),
     ("NCAAF", "total", ("o", 0), ("s", -0.5), "chase", 3.7, 99.0, 2.9,
      "day game: follow the total's move", {"slot": "day"}),
+    # STANDING TOTAL SPOTS (Nov 16 2026, Rob: "Get me fucking bets on them"; football_totals_open.py's
+    # spot grid, ESPN/DK close, every season 2023-26 at or above .500): LEANs only.
+    #  · college DAY game closing 52-57.5: the over 280-233 (54.6%), every season 52%+ — beats the
+    #    day follow rule when they disagree.
+    #  · NFL 4 PM game: the over 113-87 (56.5%) — 2023 14-13, 2024 38-28, 2025 40-31, 2026 21-15.
+    #  · NFL 1 PM game closing under 40: the under 44-31 (58.7%), every season.
+    ("NCAAF", "total", ("o", 0), ("s", -0.5), "quiet", 99.0, 99.0, 4.0,
+     "day game, total 52-57½: the over", {"slot": "day", "tot": [52, 58], "pick": "over"}),
+    ("NFL", "total", ("o", 0), ("s", -0.5), "quiet", 99.0, 99.0, 8.0,
+     "4 PM game: the over", {"et": [[15, 19]], "pick": "over"}),
+    ("NFL", "total", ("o", 0), ("s", -0.5), "quiet", 99.0, 99.0, 10.0,
+     "1 PM game, total under 40: the under", {"et": [[0, 15]], "tot": [0, 40], "pick": "under"}),
     # NBA / NHL, every game (Nov 15 2026, Rob: "Do the same for NBA and NHL"). This season (ESPN
     # 2027 = Oct 2026 →, DK open → close) checked against our Pinnacle tape since Oct 29:
     #  · NHL: a team on the 2nd night of a back-to-back vs a rested one → the RESTED team's ML —
@@ -36919,6 +36931,11 @@ def _zone_filter_ok(flt: dict, d: int, home_line, start_ms: int, static: bool = 
         hl = float(home_line) if home_line is not None else None
     except (TypeError, ValueError):
         hl = None
+    if flt.get("tot") and not (static and hl is None):
+        # a total band (Nov 16 2026): the market's total at the window's end sits in [lo, hi)
+        lo, hi = flt["tot"]
+        if hl is None or not (float(lo) <= hl < float(hi)):
+            return False
     if static:
         if flt.get("dog") is not None and (hl is None or abs(hl) < float(flt["dog"]) - 3):
             return False
