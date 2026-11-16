@@ -5954,6 +5954,23 @@ def api_bet_sheets_picks():
                                     "picks": pk_.get(k, [])} for k, v in sorted(by_.items(), key=lambda x: str(x[1].get("first")))]
         except Exception as e:
             out["today_trades_err"] = f"{type(e).__name__}: {e}"[:300]
+    if request.args.get("repoint"):
+        # ?repoint=<pick>:<ref pick>:<side> — puts a booked app bet on the SAME game row as another
+        # pick (the venue titled Baylor @ Texas as "Texas vs Baylor", so the booking minted a mirrored
+        # game and the Bet105 duplicate never matched). Data only; no order is touched.
+        try:
+            sb_ = get_supabase()
+            pid_, ref_, side_ = (request.args.get("repoint") or "").split(":")
+            ref = (sb_.table("bot_picks").select("market_id,event_name,event_start,sport")
+                   .eq("id", int(ref_)).limit(1).execute().data or [None])[0]
+            if ref and side_ in ("home", "away", "over", "under"):
+                sb_.table("bot_picks").update({"market_id": ref["market_id"], "event_name": ref["event_name"],
+                                               "event_start": ref["event_start"], "side": side_}).eq("id", int(pid_)).execute()
+                out["repoint"] = {"id": int(pid_), **ref, "side": side_}
+            else:
+                out["repoint"] = {"error": "bad ref or side"}
+        except Exception as e:
+            out["repoint_err"] = str(e)[:200]
     if request.args.get("book_settled"):
         # ?book_settled=1[&apply=1] — Polymarket app bets that SETTLED before the box ever booked
         # them (Nov 15 2026: every college hoops app bet — the box didn't know cbb slugs). Books each
