@@ -1,8 +1,11 @@
 # The weekly zone review — runbook
 
 Rob, Nov 15 2026: *"Every Sunday at 11 pm, you will analyze the last week, add it to the
-database for all sports, and make any zone changes needed."* A scheduled task opens a fresh
-Claude session every Sunday ~10:40 PM Arizona that follows this file. Read CLAUDE.md's
+database for all sports, and make any zone changes needed."* A scheduled task wakes the
+Claude session that holds this repo every Sunday ~10:40 PM Arizona and it follows this file
+(a fresh session with no repo attached stopped at step 1 on Nov 15 2026 — the task is bound
+to a session with the repo now). `site_curl.sh` is REST-only: `gh workflow run` / `gh run`
+use GraphQL, which Claude sandboxes block. Read CLAUDE.md's
 🔥 ZONES paragraph (app.py, `_ZONES`) first.
 
 ## What the zones are
