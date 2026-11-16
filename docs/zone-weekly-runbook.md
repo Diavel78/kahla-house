@@ -24,7 +24,7 @@ S=kahla-scanner/scripts/site_curl.sh
    (kept forever — the line tape itself is pruned at 60 days). A `skip.save_err` = stop and report.
 2. **Dump the whole history.** `$S api/zone-data "off=$off&n=300" dump_$off.json` until `next` is null.
    The first dump also carries `zones_live` (what is live now) and `zone_rule`.
-3. **Grade.** `python3 kahla-scanner/scripts/zone_review.py /tmp/zr dump_*.json` → `/tmp/zr.md`
+3. **Grade.** Save the dump's `zones_live` to `live.json`, then `python3 kahla-scanner/scripts/zone_review.py /tmp/zr --live live.json dump_*.json` (a live zone stays while |r| ≥ 0.10 — never drop a zone that is still winning on a hair of correlation) → `/tmp/zr.md`
    (every window × sport × market, the qualifying zones) and `/tmp/zr.zones.json` (the proposal).
    The selection rule is in the script's docstring; do not hand-pick around it.
 4. **Decide.** Compare the proposal with `zones_live`. Apply the proposal when it differs, unless:

@@ -12,12 +12,14 @@ THE RULE (deterministic — the weekly session runs it, reads it, and applies it
   * kind = chase when r > 0, fade when r < 0
   * at each threshold (1, 1.5, 2, 3¢): the record of betting the zone's side at Pinnacle's
     price at the window's end (vig in), ROI, and z = (wins − losses) / sqrt(bets)
-  * a zone QUALIFIES when |r| ≥ 0.15 over ≥ 60 games, and at its threshold ≥ 20 bets,
+  * a zone QUALIFIES when |r| ≥ 0.15 over ≥ 60 games (a zone ALREADY LIVE — same sport, market,
+    window and kind — needs only |r| ≥ 0.10: Rob, Nov 16 2026, after the review dropped the NHL total
+    morning zone at 19-10 +27% for r 0.14: "Why are we dropping a profitable zone????"), and at its threshold ≥ 20 bets,
     ROI ≥ +10% and z ≥ 1.5, and the next threshold down points the same way (ROI > 0)
   * min_c = the qualifying threshold with the best z; play_c = the next threshold up when its
     ROI is higher on ≥ 10 bets, else min_c + 1; strength = ROI at min_c
   * at most 2 zones per sport/market, never two overlapping windows (best z first)
-Usage: zone_review.py OUT_PREFIX dump1.json [dump2.json ...]
+Usage: zone_review.py OUT_PREFIX [--live zones_live.json] dump1.json [dump2.json ...]
 """
 import json
 import math
@@ -113,9 +115,15 @@ def overlap(w1, w2, rows):
 
 def main():
     out = sys.argv[1]
+    files = sys.argv[2:]
+    live = set()
+    if files[:1] == ["--live"]:
+        for zz in json.load(open(files[1])) or []:
+            live.add((zz[0], zz[1], zz[2][0], float(zz[2][1]), zz[3][0], float(zz[3][1]), zz[4]))
+        files = files[2:]
     rows = []
     seen = set()
-    for f in sys.argv[2:]:
+    for f in files:
         for r in (json.load(open(f)).get("rows") or []):
             k = (r.get("sport"), r.get("ev"), r.get("start"), r.get("mt"))
             if k in seen or not r.get("cp"):
@@ -140,7 +148,8 @@ def main():
                 bs = {t: bets(sam, t, kind) for t in THS}
                 rep.append(f"| {LABEL[w]} | {r_:+.2f} | {n} | {kind} | " +
                            " | ".join(f"{bs[t]['w']}-{bs[t]['l']} {bs[t]['roi']:+.0f}%" for t in THS) + " |")
-                if abs(r_) < 0.15 or n < 60:
+                is_live = (sp, mt, w[0], float(w[1]), w[2], float(w[3]), kind) in live
+                if abs(r_) < (0.10 if is_live else 0.15) or n < 60:
                     continue
                 best = None
                 for i, t in enumerate(THS):
