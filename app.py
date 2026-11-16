@@ -17921,6 +17921,26 @@ def _bet_sheet_market_id(sb, sport: str, away: str, home: str, event_start: str)
     return mid
 
 
+_BS_GENERIC_WORDS = {"state", "st", "university", "univ", "college", "of", "the", "at", "u"}
+
+
+def _bs_words(name) -> list:
+    """Accent-folded lowercase words of a team name ('San José St.' → ['san', 'jose', 'st'])."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode().lower()
+    return re.findall(r"[a-z0-9&]+", t)
+
+
+def _bs_team_in(team, side_name) -> bool:
+    """Every distinctive word of `team` is a word of `side_name` (pure, selftested)."""
+    tw = _bs_words(team)
+    if not tw:
+        return False
+    key = [w for w in tw if w not in _BS_GENERIC_WORDS] or tw
+    sw = set(_bs_words(side_name))
+    return all(w in sw for w in key)
+
+
 def _bet_sheet_market_id_read(sb, sport: str, away: str, home: str, event_start: str):
     name = f"{away} @ {home}"
     try:
@@ -17952,13 +17972,21 @@ def _bet_sheet_market_id_read(sb, sport: str, away: str, home: str, event_start:
     exact = [r for r in rows if r.get("event_name") == name]
     if exact:
         return exact[0]["id"]
-    a_tok = (away or "").split()[-1].lower()
-    h_tok = (home or "").split()[-1].lower()
-    fuzzy = [r for r in rows
-             if a_tok in (r.get("event_name") or "").lower().split(" @ ")[0]
-             and h_tok in (r.get("event_name") or "").lower().split(" @ ")[-1]]
+    # FUZZY = EVERY DISTINCTIVE WORD OF EACH TEAM (Nov 15 2026: "Alabama State vs San Jose State"
+    # matched only the LAST word of each name — "state" / "state" — and booked the bet on New
+    # Mexico State @ San Diego State five hours earlier). A side matches when every word of our
+    # team name other than the generic ones is a word of that side; an all-generic name needs all.
+    fuzzy = [r for r in rows if _bs_team_in(away, (r.get("event_name") or "").split(" @ ")[0])
+             and _bs_team_in(home, (r.get("event_name") or "").split(" @ ")[-1])]
     if fuzzy:
         return fuzzy[0]["id"]
+    # abbreviated names ('NM State'): the old last-word match, but ONLY when it names one game
+    a_tok, h_tok = (_bs_words(away) or [""])[-1], (_bs_words(home) or [""])[-1]
+    loose = {r.get("event_name") for r in rows
+             if a_tok and a_tok in _bs_words((r.get("event_name") or "").split(" @ ")[0])
+             and h_tok and h_tok in _bs_words((r.get("event_name") or "").split(" @ ")[-1])}
+    if len(loose) == 1:
+        return next(r["id"] for r in rows if r.get("event_name") in loose)
     try:
         ins = sb.table("markets").insert({
             "sport": sport, "event_name": name, "event_start": dt.isoformat(),

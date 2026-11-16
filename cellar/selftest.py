@@ -2794,6 +2794,10 @@ def test_slug_side_line() -> None:
     assert _app._slug_sport("asc-cfb-neb-ind-2026-10-04-neg-9pt5") == "NCAAF"
     assert _app._slug_sport("aec-nfl-tb-sea-2026-10-05") == "NFL"
     assert _app._slug_sport("asc-cbb-coast-wisc-2026-11-15-pos-28pt5") == "NCAAB"
+    ti = _app._bs_team_in
+    assert ti("Alabama State", "Alabama State Hornets") and ti("San Jose State", "San José State Spartans")
+    assert not ti("Alabama State", "New Mexico State Aggies") and not ti("San Jose State", "San Diego State Aztecs")
+    assert ti("Temple", "Temple Owls") and ti("NM State", "New Mexico State Aggies") is False
     assert e("asc-cbb-coast-wisc-2026-11-15-pos-28pt5") == "cbb-coast-wisc-2026-11-15"
     print("  PASS  app-adoption slug side/line")
 
