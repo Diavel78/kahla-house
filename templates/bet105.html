@@ -264,7 +264,7 @@
 
     const SPORTS = [['NCAAF', 'College'], ['NFL', 'NFL'], ['NHL', 'NHL'], ['NBA', 'NBA'], ['NCAAB', 'CBB'], ['MLB', 'MLB']];
     let _sport = localStorage.getItem('b105_sport') || 'NCAAF';
-    let _view = 'up';                       // up | live | mine
+    let _view = 'up';                       // up | fire | live | mine
     let _games = [], _lines = [], _b105 = [], _poly = [], _busy = {}, _b105In = false;
 
     function renderTabs() {
@@ -436,6 +436,9 @@
         render();
     }
     function started(g) { return g.event_start && new Date(g.event_start).getTime() <= Date.now(); }
+    // THE 🔥 CHIP (Rob, Nov 16 2026: "give me a fire selection, between upcoming and live, on each
+    // sport"): this sport's upcoming games where any market shows a 🔥 PLAY / LEAN
+    function hasFire(g) { return ['spread', 'total', 'ml'].some(k => fireSide(g, k)); }
     function fireSide(g, key) {
         const st = (g.move || {})[key === 'puck' ? 'ml' : key];
         if (!st || !st.dir || !(st.state === 'play' || st.state === 'lean')) return null;
@@ -561,7 +564,8 @@
     function renderChips() {
         const nLive = _games.filter(started).length;
         const nMine = allMine().filter(b => (b.sport || '').toUpperCase() === _sport || !b.sport).length;
-        const c = [['up', 'Upcoming'], ['live', (nLive ? '<span class="dot"></span>' : '') + 'Live ' + nLive], ['mine', 'My bets ' + nMine]];
+        const nFire = _games.filter(g => !started(g) && hasFire(g)).length;
+        const c = [['up', 'Upcoming'], ['fire', '🔥 ' + nFire], ['live', (nLive ? '<span class="dot"></span>' : '') + 'Live ' + nLive], ['mine', 'My bets ' + nMine]];
         document.getElementById('chips').innerHTML = c.map(([k, t]) => '<button class="fchip' + (_view === k ? ' on' : '') + '" onclick="setView(\'' + k + '\')">' + t + '</button>').join('')
             + '<button class="fchip" onclick="copyPicks(false)">📋 Copy picks</button><button class="fchip" onclick="copyPicks(true)">✅ Settled picks</button>';
     }
@@ -834,15 +838,15 @@
             grp.forEach(([t, list]) => { if (list.length) h += '<div class="day-hdr">' + t + ' · ' + list.length + '</div>' + list.map(betRow).join(''); });
             if (!h) h = '<div class="empty">No ' + _sport + ' bets today.</div>';
         } else {
-            const list = _games.filter(g => (_view === 'live' ? started(g) : !started(g)) && hit(g.away + ' ' + g.home));
+            const list = _games.filter(g => (_view === 'live' ? started(g) : !started(g)) && (_view !== 'fire' || hasFire(g)) && hit(g.away + ' ' + g.home));
             let day = '';
             list.forEach(g => {
                 const dd = new Date(g.event_start).toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'long', month: 'short', day: 'numeric' });
-                if (dd !== day && _view === 'up') { day = dd; h += '<div class="day-hdr">' + dd + '</div>'; }
+                if (dd !== day && _view !== 'live') { day = dd; h += '<div class="day-hdr">' + dd + '</div>'; }
                 h += gameCard(g);
             });
             if (!h && _loading) h = '<div class="empty">loading ' + _sport + ' games…</div>';
-            if (!h) h = '<div class="empty">' + (_view === 'live' ? 'No ' + _sport + ' games in progress.' : 'No upcoming ' + _sport + ' games on the sheet.') + '</div>';
+            if (!h) h = '<div class="empty">' + (_view === 'live' ? 'No ' + _sport + ' games in progress.' : _view === 'fire' ? 'No 🔥 on upcoming ' + _sport + ' games yet.' : 'No upcoming ' + _sport + ' games on the sheet.') + '</div>';
         }
         document.getElementById('main').innerHTML = h;
         if (_scrollTo) {
