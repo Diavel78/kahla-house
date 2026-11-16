@@ -326,6 +326,41 @@ def move_rules(rows_all, sport, seasons):
         print(f"  {'all' if y is None else y}: overs {rec(rs)}")
 
 
+def spots(rows_all, sport, seasons):
+    """Every simple cut of the totals, OVER record at the close per season (an under spot
+    reads as a low over %). ROI is the over's at the close price; the under's is roughly
+    the mirror. Machine-readable lines start with SPOT|."""
+    bands = ((0, 40), (40, 44), (44, 48), (48, 52), (52, 99)) if sport == "NFL" else \
+            ((0, 45), (45, 52), (52, 58), (58, 64), (64, 999))
+    def mv(r):
+        return r["close"] - r["open"]
+    cuts = {"all": lambda r: True,
+            "quiet": lambda r: abs(mv(r)) < 0.5,
+            "up_0.5": lambda r: 0.5 <= mv(r) < 1.5, "up_1.5": lambda r: 1.5 <= mv(r) < 3, "up_3": lambda r: mv(r) >= 3,
+            "dn_0.5": lambda r: -1.5 < mv(r) <= -0.5, "dn_1.5": lambda r: -3 < mv(r) <= -1.5, "dn_3": lambda r: mv(r) <= -3}
+    for lo, hi in bands:
+        cuts[f"band_{lo}_{hi}"] = (lambda lo, hi: lambda r: lo <= r["close"] < hi)(lo, hi)
+    slots = sorted({r["slot"] for r in rows_all}) + sorted({"dow_" + r["dow"] for r in rows_all if r.get("dow")})
+    print(f"\n==== {sport} TOTALS SPOTS (over record at the close, per season) ====")
+    for sl in [None] + slots:
+        for nm, f in cuts.items():
+            line = [f"SPOT|{sport}|{sl or 'any'}|{nm}"]
+            for y in seasons + [None]:
+                rs = []
+                for r in rows_all:
+                    if r["open"] is None or r["close"] is None or (y is not None and r["season"] != y):
+                        continue
+                    if sl and not (r["slot"] == sl or "dow_" + (r.get("dow") or "") == sl):
+                        continue
+                    if not f(r):
+                        continue
+                    rs.append((ou(r["actual"], r["close"]), r["c_over"]))
+                w = sum(1 for x, _ in rs if x == 1)
+                l = sum(1 for x, _ in rs if x == -1)
+                line.append(f"{'all' if y is None else y}:{w}-{l}")
+            print("|".join(line))
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     ap = argparse.ArgumentParser()
@@ -364,8 +399,10 @@ def main():
         o, c = od.get("open") or {}, od.get("close") or {}
         allrows.append({"season": g["season"], "actual": g["hs"] + g["as"], "open": o.get("total"),
                         "close": c.get("total"), "c_over": c.get("over"), "c_under": c.get("under"),
-                        "slot": slot_of(sport, g["date"])})
+                        "slot": slot_of(sport, g["date"]),
+                        "dow": _dt(g["date"]).astimezone(ET).strftime("%a")})
     move_rules(allrows, sport, seasons)
+    spots(allrows, sport, seasons)
 
 
 if __name__ == "__main__":
