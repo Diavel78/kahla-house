@@ -5954,6 +5954,82 @@ def api_bet_sheets_picks():
                                     "picks": pk_.get(k, [])} for k, v in sorted(by_.items(), key=lambda x: str(x[1].get("first")))]
         except Exception as e:
             out["today_trades_err"] = f"{type(e).__name__}: {e}"[:300]
+    if request.args.get("book_settled"):
+        # ?book_settled=1[&apply=1] — Polymarket app bets that SETTLED before the box ever booked
+        # them (Nov 15 2026: every college hoops app bet — the box didn't know cbb slugs). Books each
+        # from the venue's own fills + resolution so it counts as the Polymarket bet; the Bet105
+        # copy on the same game + market is then dropped by the duplicate rule.
+        try:
+            sb_ = get_supabase()
+            now_ = datetime.now(timezone.utc)
+            az0_ = now_.astimezone(ZoneInfo("America/Phoenix")).replace(hour=0, minute=0, second=0, microsecond=0)
+            since_ = (az0_ - timedelta(hours=int(request.args.get("hours") or 0))).astimezone(timezone.utc).isoformat()
+            acts_ = _sb_paged(lambda: sb_.table("poly_activities").select("at,type,slug,payload")
+                              .in_("type", ["ACTIVITY_TYPE_TRADE", "ACTIVITY_TYPE_POSITION_RESOLUTION"])
+                              .gte("at", since_), max_pages=5) or []
+            g_: dict = {}
+            for a_ in acts_:
+                sl_ = a_.get("slug")
+                if not sl_:
+                    continue
+                e_ = g_.setdefault(sl_, {"qty": 0.0, "cost": 0.0, "manual": False, "res": None, "intent": None})
+                pl_ = a_.get("payload") or {}
+                if a_.get("type") == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+                    e_["res"] = pl_.get("positionResolution") or {}
+                    continue
+                t_ = pl_.get("trade") or {}
+                mo_ = (t_.get("aggressor") if t_.get("isAggressor") else t_.get("passive")) or {}
+                if "BUY" not in str(mo_.get("intent") or ""):
+                    continue
+                e_["qty"] += float(t_.get("qtyDecimal") or t_.get("qty") or 0)
+                e_["cost"] += float(_safe_float(t_.get("cost")) or 0)
+                e_["intent"] = mo_.get("intent")
+                if mo_.get("manualOrderIndicator") == "MANUAL_ORDER_INDICATOR_MANUAL":
+                    e_["manual"] = True
+            cand_ = {k: v for k, v in g_.items() if v["manual"] and v["res"] and v["qty"] >= 1}
+            have_ = set()
+            if cand_:
+                for r_ in (sb_.table("bot_picks").select("id,signal_blob->>pmm_slug")
+                           .in_("signal_blob->>pmm_slug", list(cand_)).limit(500).execute().data or []):
+                    have_.add(r_.get("pmm_slug"))
+            cl_ = get_client()
+            owner_ = next(iter(_admin_uids() or []), None)
+            res_ = []
+            for sl_, v in cand_.items():
+                if sl_ in have_:
+                    continue
+                syn_ = "SHORT" in str(v["intent"] or "")
+                avg_ = v["cost"] / v["qty"]                     # our side's price
+                pseudo = {"slug": sl_, "intent": "BUY_SHORT" if syn_ else "BUY_LONG",
+                          "price_yes": (1.0 - avg_) if syn_ else avg_, "qty": round(v["qty"], 2), "leaves": 0.0,
+                          "id": None, "title": "", "event_slug": None, "created": "", "_filled": True}
+                row_ = _hand_app_pick_row(sb_, cl_, owner_, pseudo, now_)
+                ent_ = {"slug": sl_, "qty": round(v["qty"], 2), "price_c": round(avg_ * 100, 1)}
+                if not row_:
+                    ent_["skip"] = "unresolved"
+                    res_.append(ent_)
+                    continue
+                side_ = str(v["res"].get("side") or "").replace("POSITION_RESOLUTION_SIDE_", "")
+                won_ = (side_ in ("NO", "SHORT")) if syn_ else (side_ in ("YES", "LONG"))
+                st_ = "push" if side_ == "NEUTRAL" else ("won" if won_ else "lost")
+                usd_ = 0.0 if st_ == "push" else round((v["qty"] - v["cost"]) if won_ else -v["cost"], 2)
+                row_.update({"status": st_, "settled_at": now_.isoformat(),
+                             "pnl_units": _b105_units(st_, row_.get("entry_price")),
+                             "result_score": {"graded_by": "venue", "slug": sl_, "usd": usd_, "booked_late": True}})
+                row_["signal_blob"]["booked_settled"] = now_.isoformat()
+                ent_.update({"label": row_["signal_blob"].get("label"), "event": row_.get("event_name"),
+                             "start": row_.get("event_start"), "market_id": row_.get("market_id"),
+                             "status": st_, "usd": usd_})
+                if request.args.get("apply"):
+                    try:
+                        ins_ = sb_.table("bot_picks").insert(row_).execute()
+                        ent_["pick_id"] = (ins_.data or [{}])[0].get("id")
+                    except Exception as e:
+                        ent_["err"] = str(e)[:160]
+                res_.append(ent_)
+            out["book_settled"] = res_
+        except Exception as e:
+            out["book_settled_err"] = f"{type(e).__name__}: {e}"[:300]
     if request.args.get("b105_mine"):
         # ?b105_mine=1 — the page's own Bet105 feed for the admin (live value: Poly / Pinnacle)
         try:
