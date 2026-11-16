@@ -5916,6 +5916,44 @@ def api_bet_sheets_picks():
                                 "now": _b105_poly_now(b_, aw_, hm_, ctx_)}
         except Exception as e_:
             out["b105_poly_err"] = repr(e_)[:300]
+    if request.args.get("today_trades"):
+        # ?today_trades=1 — read-only: today's (AZ) Polymarket fills per slug (buys/sells, MANUAL or
+        # not) beside the bets booked on the slug: which app bets never made it onto the page.
+        try:
+            sb_ = get_supabase()
+            now_ = datetime.now(timezone.utc)
+            az0_ = now_.astimezone(ZoneInfo("America/Phoenix")).replace(hour=0, minute=0, second=0, microsecond=0)
+            acts_ = _sb_paged(lambda: sb_.table("poly_activities").select("at,type,slug,payload")
+                              .in_("type", ["ACTIVITY_TYPE_TRADE", "ACTIVITY_TYPE_POSITION_RESOLUTION"])
+                              .gte("at", az0_.astimezone(timezone.utc).isoformat()), max_pages=5) or []
+            by_ = {}
+            for a_ in acts_:
+                sl_ = a_.get("slug") or "?"
+                e_ = by_.setdefault(sl_, {"buy": 0.0, "sell": 0.0, "manual": False, "resolved": False, "first": a_.get("at")})
+                if a_.get("type") == "ACTIVITY_TYPE_POSITION_RESOLUTION":
+                    e_["resolved"] = True
+                    continue
+                t_ = (a_.get("payload") or {}).get("trade") or {}
+                mo_ = (t_.get("aggressor") if t_.get("isAggressor") else t_.get("passive")) or {}
+                q_ = float(t_.get("qtyDecimal") or t_.get("qty") or 0)
+                if "BUY" in str(mo_.get("intent") or ""):
+                    e_["buy"] += q_
+                else:
+                    e_["sell"] += q_
+                if mo_.get("manualOrderIndicator") == "MANUAL_ORDER_INDICATOR_MANUAL":
+                    e_["manual"] = True
+                e_["intent"] = mo_.get("intent")
+                e_["first"] = min(str(e_["first"] or ""), str(a_.get("at") or "")) or e_["first"]
+            sls_ = [k for k in by_ if k != "?"]
+            pk_ = {}
+            if sls_:
+                for r_ in (sb_.table("bot_picks").select("id,status,signal_blob->>pmm_slug,signal_blob->>label")
+                           .in_("signal_blob->>pmm_slug", sls_).limit(500).execute().data or []):
+                    pk_.setdefault(r_.get("pmm_slug"), []).append({"id": r_["id"], "status": r_.get("status"), "label": r_.get("label")})
+            out["today_trades"] = [{"slug": k, **v, "buy": round(v["buy"], 2), "sell": round(v["sell"], 2),
+                                    "picks": pk_.get(k, [])} for k, v in sorted(by_.items(), key=lambda x: str(x[1].get("first")))]
+        except Exception as e:
+            out["today_trades_err"] = f"{type(e).__name__}: {e}"[:300]
     if request.args.get("b105_mine"):
         # ?b105_mine=1 — the page's own Bet105 feed for the admin (live value: Poly / Pinnacle)
         try:
