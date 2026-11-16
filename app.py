@@ -13563,7 +13563,8 @@ _AUTOLOG_INDEX_LOCK = threading.Lock()     # one slug-index builder at a time
 _AUTOLOG_UNMATCHED: dict = {}              # slug -> monotonic ts of last miss
 _AUTOLOG_UNMATCHED_S = 1800.0              # a stray retries every 30 min
 _SLUG_SPORT_TOKENS = (("-mlb-", "MLB"), ("-nfl-", "NFL"), ("-cfb-", "NCAAF"),
-                      ("-nba-", "NBA"), ("-nhl-", "NHL"), ("-ufc-", "UFC"))
+                      ("-nba-", "NBA"), ("-nhl-", "NHL"), ("-ufc-", "UFC"),
+                      ("-cbb-", "NCAAB"))      # college hoops (Nov 15 2026: an app bet sat unbooked)
 
 
 # AUTOLOG WALL CLOCK (Sep 12 2026): the unknown-slug section does a venue

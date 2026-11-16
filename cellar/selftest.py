@@ -2793,6 +2793,8 @@ def test_slug_side_line() -> None:
     assert e("astatc-nfl-den-sf-2026-10-04-recyd-chrmcc-gte30") is None
     assert _app._slug_sport("asc-cfb-neb-ind-2026-10-04-neg-9pt5") == "NCAAF"
     assert _app._slug_sport("aec-nfl-tb-sea-2026-10-05") == "NFL"
+    assert _app._slug_sport("asc-cbb-coast-wisc-2026-11-15-pos-28pt5") == "NCAAB"
+    assert e("asc-cbb-coast-wisc-2026-11-15-pos-28pt5") == "cbb-coast-wisc-2026-11-15"
     print("  PASS  app-adoption slug side/line")
 
 

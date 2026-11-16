@@ -186,7 +186,7 @@
         <div class="money">
             <div class="tile tap" onclick="openList('settled')"><span class="k">Today ›</span><span class="v" id="sToday">—</span><span class="s" id="sRec"></span></div>
             <div class="tile tap" onclick="openList('live')"><span class="k">Live ›</span><span class="v" id="sLive">—</span><span class="s" id="sLiveN"></span></div>
-            <div class="tile tap" onclick="openList('open')"><span class="k">Open ›</span><span class="v" id="sOpen">—</span><span class="s">at Bet105</span></div>
+            <div class="tile tap" onclick="openList('open')"><span class="k">Open ›</span><span class="v" id="sOpen">—</span><span class="s" id="sOpenS">Bet105 + Poly</span></div>
         </div>
         <div class="tabs" id="tabs"></div>
         <div class="chips" id="chips"></div>
@@ -370,7 +370,10 @@
         const bet = live.reduce((a, b) => a + (worthOf(b) != null ? betCost(b) : 0), 0);
         set('sLive', live.length ? money(ev) : '—', ev > 0 ? 'pos' : ev < 0 ? 'neg' : '');   // the tile = projected net
         document.getElementById('sLiveN').textContent = live.length ? live.length + ' in play' : 'nothing in play';
-        set('sOpen', _b105In ? String(_b105.filter(b => b.status === 'pending').length) : '…');
+        // OPEN = every bet still open, Bet105 AND Polymarket (Rob, Nov 15 2026: "if it's on polymarket, count that")
+        const openB = _b105.filter(b => b.status === 'pending').length, openP = _poly.filter(b => b.status === 'pending').length;
+        set('sOpen', _b105In ? String(openB + openP) : '…');
+        document.getElementById('sOpenS').textContent = openP ? openB + ' Bet105 · ' + openP + ' Poly' : 'Bet105 + Poly';
     }
 
     // ---- the sheet ----
@@ -1254,7 +1257,7 @@
         const all = allMine();
         const list = kind === 'settled' ? all.filter(b => ['won', 'lost', 'push'].indexOf(b.status) >= 0 && dayOf(b.event_start) === today)
                    : kind === 'live' ? all.filter(isLive)
-                   : all.filter(b => b._venue === 'BET105' && b.status === 'pending');
+                   : all.filter(b => b.status === 'pending');
         list.sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
         const title = kind === 'settled' ? 'Settled today' : kind === 'live' ? 'Live now' : 'Open bets';
         let usd = 0, inn = 0;
