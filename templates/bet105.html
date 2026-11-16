@@ -268,7 +268,7 @@
     let _games = [], _lines = [], _b105 = [], _poly = [], _busy = {}, _b105In = false;
 
     function renderTabs() {
-        if (_fireN == null) _fireN = fireItems().filter(it => it.fired).length;
+        _fireN = fireCount();
         document.getElementById('tabs').innerHTML = SPORTS.map(([s, nm]) =>
             '<button class="tab' + (s === _sport ? ' on' : '') + '" onclick="setSport(\'' + s + '\')" aria-label="' + nm + '">'
             + '<img src="/league-logo/' + s + '.png" alt="" onerror="this.parentNode.classList.add(\'nolg\')"><span class="tl">' + nm + '</span></button>').join('')
@@ -357,6 +357,7 @@
         loadB105(); loadPoly(); loadB105Live();
     }
     function renderMoney() {
+        renderTabs();
         const all = allMine();
         const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
         const settled = all.filter(b => ['won', 'lost', 'push'].indexOf(b.status) >= 0 && dayOf(b.event_start) === today);
@@ -422,6 +423,7 @@
             useGames(d.games, sport);
             if (sig() !== s0) _lines = [];
             try { localStorage.setItem('b105_games_' + sport, JSON.stringify({ at: Date.now(), games: d.games || [] })); } catch (e) {}
+            _fire[sport] = d.games || [];
         }
         render();
         if (!_lines.length) loadLines();
@@ -643,6 +645,15 @@
         if (_fire[sp]) return _fire[sp];
         try { const c = JSON.parse(localStorage.getItem('b105_games_' + sp) || 'null'); return c && c.games ? c.games : []; } catch (e) { return []; }
     }
+    // THE 🔥 BADGE IS LIVE (Rob, Nov 16 2026: "shows like 16 when I open the page, and then I click it
+    // and it's zero"): it was counted once at page open, off the saved sheets and BEFORE your bets
+    // loaded, so every 🔥 you'd bet still counted. Now: games (not markets) with a 🔥 you haven't
+    // bet, blank until your bets are in, redrawn whenever bets or sheets land; the sheets refresh
+    // in the background every 3 minutes, so the tab opens on fresh data.
+    function fireCount() {
+        if (!_b105In) return null;
+        return new Set(fireItems().filter(it => it.fired).map(it => it.sp + '|' + it.g.event_name)).size;
+    }
     function fireItems() {
         // A BET TAKES ITS OWN MARKET OFF THE TAB, NOT THE GAME (Rob, Nov 15 2026: "The spread, the
         // money line, and the total all have different fire zones") — an Under bet never hides
@@ -682,13 +693,12 @@
                 if (d && d.ok) {
                     _fire[sp] = d.games || [];
                     try { localStorage.setItem('b105_games_' + sp, JSON.stringify({ at: Date.now(), games: d.games || [] })); } catch (e) {}
-                    if (_sport === 'FIRE') render();
+                    if (_sport === 'FIRE') render(); else renderTabs();
                 }
             } catch (e) {}
         }));
         _fireLoading = false; _fireAt = Date.now();
-        if (_sport === 'FIRE') render();
-        loadFireLines();
+        if (_sport === 'FIRE') { render(); loadFireLines(); } else renderTabs();
     }
     // THE 🔥 TAB PRICES OFF PINNACLE NOW, NOT THE SHEET (Rob, Nov 15 2026: Celtics −13.5 read
     // −102 / −110 off the sheet's last build while Bet105 had +100 / −113): the same live read
@@ -774,7 +784,7 @@
         const items = fireItems().filter(it => hit(it.g.away + ' ' + it.g.home + ' ' + FIRE_NM[it.sp]));
         items.forEach((it, i) => { it._i = i; });
         _fireList = items;
-        _fireN = items.filter(it => it.fired).length;
+        _fireN = fireCount();
         const group = (list, key) => {
             const order = [], by = {};
             list.forEach(it => { const id = it.sp + '|' + it.g.event_name; if (!by[id]) { by[id] = []; order.push(id); } by[id].push(it); });
@@ -1313,13 +1323,14 @@
         renderTabs();
         loadMine();
         loadGames();
+        if (_sport !== 'FIRE') loadFire();                  // the 🔥 badge's sheets, in the background
         setInterval(() => { if (!document.hidden) loadB105(); }, 20 * 1000);
         setInterval(() => { if (!document.hidden) loadB105Live(); }, 20 * 1000);
         setInterval(() => { if (!document.hidden) loadPoly(); }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadLines(); }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadGames(); }, 10 * 60 * 1000);
         // the 🔥 tab: the minutes count down every minute, every sheet re-read every 3
-        setInterval(() => { if (document.hidden || _sport !== 'FIRE') return; if (Date.now() - _fireAt > 3 * 60e3) loadFire(); else { loadFireLines(); render(); } }, 60 * 1000);
+        setInterval(() => { if (document.hidden) return; if (Date.now() - _fireAt > 3 * 60e3) loadFire(); else if (_sport === 'FIRE') { loadFireLines(); render(); } }, 60 * 1000);
     });
 </script>
 </body>
