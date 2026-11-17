@@ -15,12 +15,27 @@ import re
 import time
 
 START_URLS = ("https://www.bet105.ag/", "https://bet105.ag/")
+LOGIN_URL = "https://app.bet105.ag/login"
+ACCOUNT_PATHS = ("/my-bets", "/bets", "/account", "/account/bets", "/history", "/wagers", "/open-bets")
 PAGE_WORDS = re.compile(r"open\s*bets|pending|my\s*bets|wagers?|bet\s*history|history|account|statement|figures",
                         re.I)
 LOGIN_WORDS = re.compile(r"log\s*in|sign\s*in|login|enter", re.I)
 MAX_JSON = 80
 MAX_BODY = 6000
 MAX_TEXT = 6000
+
+
+def _type_into(page, loc, text: str) -> None:
+    """Click the box and type like a person — fill() refuses a field still animating in."""
+    try:
+        loc.click(timeout=10000, force=True)
+    except Exception:
+        pass
+    try:
+        loc.fill("", timeout=3000)
+    except Exception:
+        pass
+    page.keyboard.type(text, delay=60)
 
 
 def _snap(page, label: str) -> dict:
@@ -117,7 +132,9 @@ def probe(user: str, password: str, headless: bool = True, timeout_s: float = 15
             try:
                 ct = (r.headers or {}).get("content-type", "")
                 u = r.url
-                if "json" not in ct and not re.search(r"/api/|\.ashx|\.asmx|service|wager|bet", u, re.I):
+                if "app.bet105.ag" not in u:
+                    return
+                if "json" not in ct and not re.search(r"/api/|__bff|wager|bet", u, re.I):
                     return
                 if re.search(r"\.(png|jpe?g|gif|svg|woff2?|css|js)(\?|$)", u, re.I):
                     return
@@ -134,50 +151,67 @@ def probe(user: str, password: str, headless: bool = True, timeout_s: float = 15
                 pass
         page.on("response", _on_resp)
 
-        for u in START_URLS:
-            try:
-                page.goto(u, wait_until="domcontentloaded")
-                break
-            except Exception as e:
-                res["steps"].append({"label": "goto_fail", "url": u, "err": str(e)[:160]})
-        page.wait_for_timeout(6000)                   # a Cloudflare check clears itself in a real browser
-        res["steps"].append(_snap(page, "landing"))
-
-        # the login form: the password box, and the text box before it
-        pw_box = page.query_selector("input[type=password]")
-        if pw_box is None:
-            for b in page.query_selector_all("a,button"):
-                try:
-                    if LOGIN_WORDS.search((b.inner_text() or "")[:30]):
-                        b.click()
-                        page.wait_for_timeout(4000)
-                        break
-                except Exception:
-                    continue
-            pw_box = page.query_selector("input[type=password]")
-            res["steps"].append(_snap(page, "after_login_click"))
-        if pw_box is None:
-            res["error"] = "no password field found"
-            return res
-        user_box = None
-        for el in page.query_selector_all("input"):
-            try:
-                t = (el.get_attribute("type") or "text").lower()
-                if t in ("text", "email", "tel", "number") and el.is_visible():
-                    user_box = el
-                    break
-            except Exception:
-                continue
-        if user_box is None:
+        # THE LOGIN PAGE DIRECTLY (Nov 16 2026, first real run: the landing page's Log In opened a
+        # React modal on app.bet105.ag whose fields were still animating in, and fill() timed out;
+        # the form also carries a Cloudflare Turnstile check that must pass before submit)
+        try:
+            page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        except Exception as e:
+            res["steps"].append({"label": "goto_fail", "url": LOGIN_URL, "err": str(e)[:160]})
+        page.wait_for_timeout(6000)
+        res["steps"].append(_snap(page, "login_page"))
+        try:
+            ub = page.get_by_placeholder(re.compile("username", re.I)).first
+            ub.wait_for(state="visible", timeout=20000)
+        except Exception:
+            ub = None
+        if ub is None:
             res["error"] = "no username field found"
             return res
-        user_box.fill(user)
-        pw_box.fill(password)
-        pw_box.press("Enter")
-        page.wait_for_timeout(9000)
+        pb = page.locator("input[type=password]").first
+        _type_into(page, ub, user)
+        _type_into(page, pb, password)
+        # the Turnstile token: a real Chrome usually earns it on its own within seconds
+        tok = ""
+        for _ in range(30):
+            try:
+                tok = page.eval_on_selector("input[name=cf-turnstile-response]", "e => e.value") or ""
+            except Exception:
+                tok = ""
+            if tok:
+                break
+            page.wait_for_timeout(1000)
+        res["turnstile"] = bool(tok)
+        submitted = False
+        try:
+            btns = page.locator("button", has_text=re.compile(r"^\s*log\s*in\s*$", re.I))
+            n = btns.count()
+            if n:
+                btns.nth(n - 1).click(timeout=8000)          # the form's own button sits last
+                submitted = True
+        except Exception as e:
+            res["submit_err"] = str(e)[:160]
+        if not submitted:
+            try:
+                pb.press("Enter")
+            except Exception:
+                pass
+        page.wait_for_timeout(10000)
         res["steps"].append(_snap(page, "after_login"))
         txt = (res["steps"][-1].get("text") or "").lower()
-        res["logged_in"] = page.query_selector("input[type=password]") is None or "logout" in txt or "log out" in txt
+        res["logged_in"] = (page.locator("input[type=password]").count() == 0
+                            or "logout" in txt or "log out" in txt or "balance" in txt)
+
+        # the account pages by URL first (guesses are cheap; a 404 page is still a record)
+        for path in ACCOUNT_PATHS:
+            if time.time() - t0 > timeout_s:
+                break
+            try:
+                page.goto("https://app.bet105.ag" + path, wait_until="domcontentloaded")
+                page.wait_for_timeout(5000)
+                res["steps"].append(_snap(page, f"url:{path}"))
+            except Exception as e:
+                res["steps"].append({"label": f"url_fail:{path}", "err": str(e)[:160]})
 
         # every link / button that reads like the bets pages, once each
         seen = set()

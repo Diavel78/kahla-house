@@ -29235,6 +29235,43 @@ def api_b105_link():
                     "user": (u[:2] + "•••" + u[-1:]) if len(u) > 3 else ("•••" if u else None), "at": row.get("at")})
 
 
+def _bet105_save(res: dict) -> None:
+    """A probe result ALWAYS lands (Nov 16 2026, the first real run vanished): Postgres jsonb refuses
+    NUL characters and a page dump can be huge, and _probe_log swallows the error. Strip NULs, cap
+    every text, write the full record, and on failure write the summary + page texts alone."""
+    import json as _j
+    raw = _j.dumps(res, default=str).replace("\\u0000", "")
+    full = _j.loads(raw)
+    for st in full.get("steps") or []:
+        if isinstance(st.get("text"), str):
+            st["text"] = st["text"][:4000]
+        if isinstance(st.get("links"), list):
+            st["links"] = st["links"][:80]
+    for j in full.get("json") or []:
+        if isinstance(j.get("body"), str):
+            j["body"] = j["body"][:3000]
+    sb = get_supabase()
+    for attempt in (full, {k: full.get(k) for k in ("kind", "ok", "error", "logged_in", "browser", "ms",
+                                                    "launch_tries", "headless")}
+                     | {"steps": [{k: st.get(k) for k in ("label", "url", "title", "text", "inputs", "buttons")}
+                                  for st in (full.get("steps") or [])],
+                        "json_urls": [[j.get("status"), j.get("url")] for j in (full.get("json") or [])],
+                        "trimmed": True}):
+        try:
+            sb.table("exec_probe_runs").insert({"params": {"kind": "bet105_probe", "ctx": "cellar"},
+                                                "result": attempt}).execute()
+            return
+        except Exception as e:
+            app.logger.warning("bet105 probe save failed: %s", str(e)[:200])
+    try:
+        sb.table("exec_probe_runs").insert({"params": {"kind": "bet105_probe", "ctx": "cellar"},
+                                            "result": {"kind": "bet105_probe", "ok": False,
+                                                       "error": "result could not be saved",
+                                                       "logged_in": full.get("logged_in"), "ms": full.get("ms")}}).execute()
+    except Exception:
+        pass
+
+
 def _bet105_probe_tick(sb) -> dict | None:
     """One-shot, flag-driven, box only: log into Bet105 and record the account pages."""
     global _B105_PROBE_THREAD
@@ -29257,13 +29294,14 @@ def _bet105_probe_tick(sb) -> dict | None:
     headless = not (isinstance(cfg, dict) and cfg.get("headed"))
 
     def _run():
+        _probe_log({"kind": "bet105_probe_start", "headless": headless})
         try:
             import bet105_sync as _b
             res = _b.probe(row["user"], row["password"], headless=headless)
         except Exception as e:
             res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
         res["kind"] = "bet105_probe"
-        _probe_log(res)
+        _bet105_save(res)
     _B105_PROBE_THREAD = threading.Thread(target=_run, name="bet105-probe", daemon=True)
     _B105_PROBE_THREAD.start()
     return {"started": True, "headless": headless}
