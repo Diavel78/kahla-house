@@ -243,6 +243,12 @@ def _signed_headers(path: str, params: Optional[dict] = None) -> dict:
 _BODY_MODE: Optional[str] = None   # "header" | "json" — detected on the first private POST
 
 
+# THE BOX IS A DASHBOARD (Nov 16 2026): app.py sets WRITE_GUARD; while it returns a reason no order
+# is placed or cancelled. Read calls (POSTs to /orders/active, /positions, /mytrades …) pass.
+WRITE_GUARD = None
+_WRITE_RE = __import__("re").compile(r"/order(/|$)")       # /order, /order/batch, /order/cancel — never /orders/active
+
+
 def _private(method: str, path: str, params: Optional[dict] = None,
              query: Optional[dict] = None, mode: Optional[str] = None) -> Any:
     """Private call. `params` always ride in the signed X-GEMINI-PAYLOAD (the generic
@@ -251,6 +257,10 @@ def _private(method: str, path: str, params: Optional[dict] = None,
     detected once on a non-mutating POST (orders/active) and remembered — a mutating call
     is never retried in another mode. GET params ride as the query string too."""
     global _BODY_MODE
+    if WRITE_GUARD is not None and _WRITE_RE.search(path):
+        why = WRITE_GUARD(f"gemini {path}")
+        if why:
+            raise RuntimeError(why)
     m = mode or _BODY_MODE or "header"
     h = _signed_headers(path, params)
     q = dict(query or {})

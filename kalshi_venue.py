@@ -1159,6 +1159,12 @@ def _sign(pem: str, msg: str) -> str:
     return base64.b64encode(sig).decode()
 
 
+# THE BOX IS A DASHBOARD (Rob, Nov 16 2026: "You don't bet for me anymore… you don't make and cancel
+# or place or move bets"). app.py sets WRITE_GUARD; it returns a reason while every venue write is
+# blocked. Reads (GET) always pass.
+WRITE_GUARD = None
+
+
 def signed_request(method: str, path: str, body: dict | None = None, params: dict | None = None,
                    timeout: float = 12.0) -> dict:
     """One signed call. Returns {ok, status, data|error, base, body_sent, tries}.
@@ -1175,6 +1181,10 @@ def signed_request(method: str, path: str, body: dict | None = None, params: dic
     if not (kid and pem):
         return {"ok": False, "configured": False, "error": f"no creds ({src})"}
     method = method.upper()
+    if method != "GET" and WRITE_GUARD is not None:
+        why = WRITE_GUARD(f"kalshi {method} {path}")
+        if why:
+            return {"ok": False, "status": 0, "blocked": True, "error": why}
     tries: list = []
     for base in BASES:
         ts = str(int(time.time() * 1000))

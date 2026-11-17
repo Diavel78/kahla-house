@@ -3420,6 +3420,39 @@ import collections as _collections_vw
 _VENUE_WRITE_MS = {k: _collections_vw.deque(maxlen=300) for k in ("create", "cancel", "modify")}
 
 
+# ⛔ THE BOX IS A DASHBOARD (Rob, Nov 16 2026: "You don't bet for me anymore, remember???… you're a
+# dashboard now… you don't make and cancel or place or move bets"). `machine_flags
+# box_dashboard_only` (code default TRUE) blocks EVERY venue write at the wire — Polymarket orders.*
+# (this proxy), Kalshi signed writes, Gemini order calls — whatever lane or route asks. Reads,
+# grading, adoption of app bets onto the page and every display keep running. Set the flag false
+# only when Rob says the box places bets again. Stamped once a minute per kind (`dashboard_block`).
+_DASH_BLOCK_LAST: dict = {}
+
+
+def _dashboard_write_block(what: str):
+    if os.environ.get("KAHLA_SELFTEST") == "1" and not os.environ.get("KAHLA_SELFTEST_DASH"):
+        return None
+    if not _machine_flag("box_dashboard_only", True):
+        return None
+    k = str(what).split(" ")[0]
+    if _time.time() - _DASH_BLOCK_LAST.get(k, 0) > 60:
+        _DASH_BLOCK_LAST[k] = _time.time()
+        try:
+            _probe_log({"kind": "dashboard_block", "what": str(what)[:120]})
+        except Exception:
+            pass
+    return "dashboard only: the box places, cancels and moves no bets (machine_flags box_dashboard_only)"
+
+
+def _wire_dashboard_guard() -> None:
+    import importlib
+    for _m in ("kalshi_venue", "gemini_pm"):
+        try:
+            importlib.import_module(_m).WRITE_GUARD = _dashboard_write_block
+        except Exception:
+            pass
+
+
 class _SerialOrders:
     """orders.* proxy: writes serialized under _VENUE_WRITE_LOCK, reads
     forwarded untouched."""
@@ -3434,6 +3467,9 @@ class _SerialOrders:
             return fn
 
         def _serial(*a, **k):
+            why = _dashboard_write_block(f"polymarket orders.{name}")
+            if why:
+                raise RuntimeError(why)
             t0 = _time.monotonic()
             with _VENUE_WRITE_LOCK:
                 _VENUE_WRITE_STATS["wait_s"] += _time.monotonic() - t0
@@ -67787,6 +67823,9 @@ def handicapper_analytics_page():
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+_wire_dashboard_guard()
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
