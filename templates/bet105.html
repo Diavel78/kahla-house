@@ -179,7 +179,7 @@
 <div id="app" style="display:none">
     <div class="topbar">
         <div class="nav"><a href="/">Home</a><a href="/pick-sheets">Pick Sheets</a><a class="on" href="/bet-sheets">Bet Sheets</a><a href="/dashboard">Dashboard</a></div>
-        <button class="logout" onclick="doLogout()">Log out</button>
+        <span><button class="logout" onclick="openLink()" style="margin-right:6px">Link Bet105</button><button class="logout" onclick="doLogout()">Log out</button></span>
     </div>
     <div class="wrap">
         <div class="hd1"><h1>Bet Sheets<span class="b105">BET105</span></h1><span class="hd-date" id="today"></span></div>
@@ -1325,6 +1325,29 @@
         const sh = document.getElementById('sheet');
         sh.innerHTML = h; sh.scrollTop = 0;
         document.getElementById('ov').style.display = 'block'; sh.style.display = 'block';
+    }
+    // LINK BET105 (Nov 16 2026, Rob: "so you REALLY track my bets"): the login goes to the box's own
+    // database and is never shown again; the box logs in from your house and READS your bets
+    async function openLink() {
+        let st = null;
+        try { const r = await authFetch('/api/bet105/link'); st = r && r.ok ? await r.json() : null; } catch (e) {}
+        const linked = st && st.linked;
+        const h = '<div style="display:flex;justify-content:space-between;align-items:center"><h3>Link Bet105</h3>'
+            + '<button class="btn" style="flex:none;padding:8px 14px" onclick="closeSheet()">Close</button></div>'
+            + '<div class="sub">' + (linked ? 'Linked as ' + esc(st.user || '') + '. Enter it again to replace it.' : 'The box logs in from your house and only READS your bets — it never places or changes one.') + '</div>'
+            + '<input id="lkU" class="search" placeholder="Bet105 username" autocomplete="username" style="margin-top:12px">'
+            + '<input id="lkP" class="search" type="password" placeholder="Bet105 password" autocomplete="current-password" style="margin-top:8px">'
+            + '<button class="btn" style="margin-top:12px;width:100%" onclick="saveLink()">Save + test login</button>';
+        const sh = document.getElementById('sheet');
+        sh.innerHTML = h; sh.scrollTop = 0;
+        document.getElementById('ov').style.display = 'block'; sh.style.display = 'block';
+    }
+    async function saveLink() {
+        const u = (document.getElementById('lkU').value || '').trim(), pw = document.getElementById('lkP').value || '';
+        if (!u || !pw) { toast('Username and password both', true); return; }
+        const x = await postJSON('/api/bet105/link', { user: u, password: pw });
+        document.getElementById('lkP').value = '';
+        if (x.d.ok) { closeSheet(); toast('Saved — the box tests the login within a minute'); } else toast(x.d.error || 'save failed', true);
     }
     function closeSheet() { document.getElementById('ov').style.display = 'none'; document.getElementById('sheet').style.display = 'none'; }
     async function saveEdit(id) {

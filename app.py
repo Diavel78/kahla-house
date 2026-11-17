@@ -29194,6 +29194,81 @@ def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg
                        ticker, r["id"], price_c, det.get("hi_q"), det.get("cur_q"), det.get("drop_pct"), gone)
 
 
+# ---------------------------------------------------------------------------
+# BET105 ACCOUNT LINK (Nov 16 2026, Rob: "how do I link my bet105 account into my dashboard… so you
+# REALLY track my bets… build it onto the box"). Bet105 has no API and Cloudflare refuses our cloud
+# servers, so the BOX (home internet, a real Chromium — bet105_sync.py) logs in as Rob and READS
+# his bets. Never places or changes anything. The login lives in the box's own database
+# (parlay_state 'bet105_login'), written only by this admin route; it is never returned or logged.
+# Phase 1 = a one-shot probe (machine_flags bet105_probe) that records what the account pages look
+# like (stamp exec_probe_runs bet105_probe) so the reader is built against the real pages.
+# ---------------------------------------------------------------------------
+_B105_PROBE_THREAD = None
+
+
+@app.route("/api/bet105/link", methods=["GET", "POST"])
+@admin_required
+def api_b105_link():
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    now = datetime.now(timezone.utc)
+    if request.method == "POST":
+        d = request.get_json(silent=True) or {}
+        user = str(d.get("user") or "").strip()
+        pw = str(d.get("password") or "")
+        if d.get("unlink"):
+            _parlay_state_put(sb, "bet105_login", {"user": None, "password": None, "at": now.isoformat()}, now)
+            return jsonify({"ok": True, "linked": False})
+        if not user or not pw:
+            return jsonify({"ok": False, "error": "username and password both needed"}), 400
+        _parlay_state_put(sb, "bet105_login", {"user": user, "password": pw, "at": now.isoformat()}, now)
+        try:
+            sb.table("machine_flags").upsert({"key": "bet105_probe", "value": True,
+                                              "updated_at": now.isoformat()}, on_conflict="key").execute()
+        except Exception:
+            pass
+        return jsonify({"ok": True, "linked": True, "probe": "queued — the box logs in within a minute"})
+    row = (_parlay_state_get(sb, "bet105_login") or {}).get("v") or {}
+    u = row.get("user") or ""
+    return jsonify({"ok": True, "linked": bool(u and row.get("password")),
+                    "user": (u[:2] + "•••" + u[-1:]) if len(u) > 3 else ("•••" if u else None), "at": row.get("at")})
+
+
+def _bet105_probe_tick(sb) -> dict | None:
+    """One-shot, flag-driven, box only: log into Bet105 and record the account pages."""
+    global _B105_PROBE_THREAD
+    cfg = _machine_flag_val("bet105_probe", None)
+    if not cfg:
+        return None
+    if _B105_PROBE_THREAD is not None and _B105_PROBE_THREAD.is_alive():
+        return {"gate": "running"}
+    try:
+        sb.table("machine_flags").upsert({"key": "bet105_probe", "value": False,
+                                          "updated_at": datetime.now(timezone.utc).isoformat()},
+                                         on_conflict="key").execute()
+        _MFLAGS_CACHE["map"]["bet105_probe"] = False
+    except Exception as e:
+        return {"gate": f"flag clear failed: {e}"[:120]}
+    row = (_parlay_state_get(sb, "bet105_login") or {}).get("v") or {}
+    if not (row.get("user") and row.get("password")):
+        _probe_log({"kind": "bet105_probe", "ok": False, "error": "not linked"})
+        return {"gate": "not linked"}
+    headless = not (isinstance(cfg, dict) and cfg.get("headed"))
+
+    def _run():
+        try:
+            import bet105_sync as _b
+            res = _b.probe(row["user"], row["password"], headless=headless)
+        except Exception as e:
+            res = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
+        res["kind"] = "bet105_probe"
+        _probe_log(res)
+    _B105_PROBE_THREAD = threading.Thread(target=_run, name="bet105-probe", daemon=True)
+    _B105_PROBE_THREAD.start()
+    return {"started": True, "headless": headless}
+
+
 def _kalshi_probe_tick(sb) -> dict | None:
     """THE KALSHI PROOF, FIRED FROM A FLAG (Oct 18 2026, Rob: "I'll put money
     in Kalshi if you can prove this thing works"). The sandbox cannot reach
@@ -29535,6 +29610,8 @@ def _hand_orders_tick(sb, now, worker: str = "box", max_n: int = 150) -> dict:
     try:
         stats["kalshi_probe"] = _kalshi_probe_tick(sb)      # one-shot, flag-driven, box IP
         stats["gemini_probe"] = _gemini_probe_tick(sb)      # one-shot, flag-driven, box IP
+        if worker == "box":                                 # playwright lives on the box only
+            stats["bet105_probe"] = _bet105_probe_tick(sb)  # one-shot, flag-driven, box IP (reads only)
     except Exception as e:
         stats["kalshi_probe"] = {"err": f"{type(e).__name__}: {e}"[:120]}
     if worker == "box":
