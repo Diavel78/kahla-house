@@ -478,6 +478,18 @@
         const en = g.away + ' @ ' + g.home, bet = betKeys();
         return ['spread', 'total', 'ml'].some(k => fireSide(g, k) && !bet[en + '|' + grp(k)] && !bet[g.event_name + '|' + grp(k)]);
     }
+    // HOCKEY'S CHALK RULE ON THE 🔥 TAB (Nov 17 2026, Rob on "ML Mammoth LEAN Bet105 −316": "you
+    // mean -1.5???"): an NHL ML 🔥 on a favorite at −140 or shorter is the favorite's −1.5 puck line
+    // (the sheet's `_sheet_puck_carry`); a dog's ML stays the bet
+    const CHALK_ML = -140;
+    function nhlChalk(sp, g, side) {
+        if (sp !== 'NHL' || (side !== 'home' && side !== 'away')) return false;
+        if (g.ml && g.ml.chalky && g.ml.side === side) return true;
+        const live = _fireLines[sp + '|' + g.event_name] || {}, SH = Object.assign({}, g.line || {}, g.pin || {});
+        const k = side === 'home' ? 'ml_home' : 'ml_away';
+        const px = live[k] != null ? live[k] : SH[k];
+        return px != null && Number(px) <= CHALK_ML;
+    }
     function fireSide(g, key) {
         const st = (g.move || {})[key === 'puck' ? 'ml' : key];
         if (!st || !st.dir || !(st.state === 'play' || st.state === 'lean')) return null;
@@ -577,7 +589,11 @@
         if (mv) h += '<div class="gsub" style="margin-top:-4px">' + mv + '</div>';
         m.rows.forEach(row => {
             const fs = (g.move || {})[row.key === 'puck' ? 'ml' : row.key];
-            const fv = fs && (fs.state === 'play' || fs.state === 'lean') ? fs.state : null;
+            let fv = fs && (fs.state === 'play' || fs.state === 'lean') ? fs.state : null;
+            if (fv && _sport === 'NHL' && (row.key === 'puck' || row.key === 'ml')) {    // the 🔥 sits on the bet: −1.5 when the ML is chalk
+                const ch = nhlChalk('NHL', g, fs.dir > 0 ? 'home' : 'away');
+                if ((row.key === 'puck') !== ch) fv = null;
+            }
             h += '<div class="mk"><div class="mk-l">' + row.lb + (fv ? ' <span class="pill ' + fv + '">🔥 ' + fv.toUpperCase() + '</span>' : '') + '</div>'
                + '<div class="two">' + row.sides.map(s => sideBtn(g, row, s, stale)).join('') + '</div></div>';
         });
@@ -698,7 +714,8 @@
             ['spread', 'total', 'ml'].forEach(k => {
                 const x = mv[k]; if (!x || bet[en + '|' + grp(k)] || bet[g.event_name + '|' + grp(k)]) return;
                 if ((x.state === 'play' || x.state === 'lean') && x.dir) {
-                    out.push({ sp, g, k, x, t, fired: true });
+                    const kk = k === 'ml' && nhlChalk(sp, g, x.dir > 0 ? 'home' : 'away') ? 'puck' : k;
+                    out.push({ sp, g, k: kk, x, t, fired: true });
                 } else if (x.state === 'watching') {
                     let e = null;
                     (x.zones || []).forEach(z => { if (z.to_ms > now && z.to_ms < t && (e == null || z.to_ms < e)) e = z.to_ms; });   // every window still to close; the page splits next hour / next up
@@ -741,7 +758,7 @@
     }
     function fireLine(it) {
         const g = it.g, k = it.k, sp = it.sp, x = it.x;
-        const lab = { spread: sp === 'MLB' ? 'Run line' : 'Spread', total: 'Total', ml: 'ML' }[k];
+        const lab = { spread: sp === 'MLB' ? 'Run line' : 'Spread', total: 'Total', ml: 'ML', puck: 'Puck line' }[k];
         if (!it.fired) {
             const mins = Math.max(1, Math.round((it.at - Date.now()) / 60000));
             return '<div class="fxl"><span class="fxe">' + lab + ' · 🔥 expected ' + clock(new Date(it.at).toISOString()) + ' <span class="fxp">(' + (mins >= 60 ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm' : mins + 'm') + ')</span></span></div>';
@@ -756,11 +773,18 @@
             name = shortTeam(side === 'home' ? g.home : g.away, sp);
             if (k === 'spread') { const sh = P.spread_home != null ? Number(P.spread_home) : null; line = sh == null ? null : (side === 'home' ? sh : -sh);
                 price = side === 'home' ? P.spread_home_odds : P.spread_away_odds; if (line != null) name += ' ' + sgn(line); }
+            else if (k === 'puck') {                         // the favorite's −1.5; Pinnacle's price only when its main puck line is that
+                line = -1.5; name += ' -1.5';
+                const sh = P.spread_home != null ? Number(P.spread_home) : null;
+                const own = sh == null ? null : (side === 'home' ? sh : -sh);
+                price = own != null && Math.abs(own + 1.5) < 0.01 ? (side === 'home' ? P.spread_home_odds : P.spread_away_odds) : null;
+            }
             else price = side === 'home' ? P.ml_home : P.ml_away;
         }
         let px = price != null ? 'Bet105 ' + am(price) : (live === undefined ? 'Bet105 …' : '');
-        const lad = k !== 'ml' && line != null && live && live.poly_ladder && live.poly_ladder[k];
-        const pts = lad ? fireLadder(lad, k, side, Number(line)) : null;
+        const lk = k === 'puck' ? 'spread' : k;
+        const lad = k !== 'ml' && line != null && live && live.poly_ladder && live.poly_ladder[lk];
+        const pts = lad ? fireLadder(lad, lk, side, Number(line)) : null;
         const pt = pts ? null : polyTake(g, k, side);
         if (pts && pts.length) {
             const b105c = price != null ? (Number(price) < 0 ? -Number(price) / (-Number(price) + 100) : 100 / (Number(price) + 100)) * 100 : null;
@@ -844,10 +868,10 @@
         const tk = betKeys(), gk = mt === 'total' ? 'total' : 'side';
         if (tk[g.away + ' @ ' + g.home + '|' + gk] || tk[g.event_name + '|' + gk]) { toast('Already bet — ' + (b.name || 'this market'), true); render(); return; }
         markTapped(g.away + ' @ ' + g.home, mt); markTapped(g.event_name, mt);
-        if (b.price == null) { toast('No Pinnacle price on this one — open the game', true); return; }
+        if (b.price == null && mt !== 'puck') { toast('No Pinnacle price on this one — open the game', true); return; }
         _fireBusy = true;
         const temp = { id: 'tmp' + Date.now(), _tmp: true, sport: it.sp, event_name: g.away + ' @ ' + g.home, event_start: g.event_start,
-                       market_type: mt === 'ml' ? 'moneyline' : mt, side: b.side, line: b.line, price: b.price, stake: 5, status: 'pending', label: b.name };
+                       market_type: mt === 'ml' ? 'moneyline' : mt === 'puck' ? 'spread' : mt, side: b.side, line: b.line, price: b.price, stake: 5, status: 'pending', label: b.name };
         _b105.push(temp); render();
         const x = await postJSON('/api/bet105/bet', { sport: it.sp, away: g.away, home: g.home, event_start: g.event_start,
             market_id: g.market_id, market_type: mt, side: b.side, line: b.line, price: b.price, cid: cid() });
