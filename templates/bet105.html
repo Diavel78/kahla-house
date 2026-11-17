@@ -271,8 +271,22 @@
     // unfilled; the server deleted each Bet105 tap as a duplicate of it, and the 🔥 came straight
     // back because only FILLED Polymarket lots counted as bets here. Tapped four times.)
     let _polyOpen = (() => { try { return JSON.parse(localStorage.getItem('b105_polyopen') || '[]') || []; } catch (e) { return []; } })();
+    // A TAP IS REMEMBERED ON THE PHONE FOR 12 HOURS (Rob, Nov 16 2026: "you can't get a button to
+    // function (easiest shit on the Internet)"): once you tap a 🔥 its market is bet, whatever the
+    // server later does with the record (the duplicate rule deletes a Bet105 tap the moment a
+    // Polymarket bet on the same market exists) — so the 🔥 can never come back to be tapped twice.
+    let _tapped = (() => { try { return JSON.parse(localStorage.getItem('b105_tapped') || '{}') || {}; } catch (e) { return {}; } })();
+    function markTapped(en, mt) {
+        const grp = (mt === 'total' ? 'total' : 'side');
+        _tapped[en + '|' + grp] = Date.now();
+        const cut = Date.now() - 12 * 3600e3;
+        Object.keys(_tapped).forEach(k => { if (_tapped[k] < cut) delete _tapped[k]; });
+        try { localStorage.setItem('b105_tapped', JSON.stringify(_tapped)); } catch (e) {}
+    }
     function betKeys() {
         const grp = mt => (mt === 'total' ? 'total' : 'side'), bet = {};
+        const cut = Date.now() - 12 * 3600e3;
+        Object.keys(_tapped).forEach(k => { if (_tapped[k] >= cut) bet[k] = 1; });
         allMine().concat(_polyOpen).forEach(b => {
             const mt = b.market_type === 'moneyline' ? 'ml' : b.market_type;
             bet[b.event_name + '|' + grp(mt)] = 1;
@@ -827,6 +841,9 @@
     async function fireBet(i) {
         const it = _fireList[i]; if (!it || !it.bet || _fireBusy) return;
         const g = it.g, b = it.bet, mt = it.k;
+        const tk = betKeys(), gk = mt === 'total' ? 'total' : 'side';
+        if (tk[g.away + ' @ ' + g.home + '|' + gk] || tk[g.event_name + '|' + gk]) { toast('Already bet — ' + (b.name || 'this market'), true); render(); return; }
+        markTapped(g.away + ' @ ' + g.home, mt); markTapped(g.event_name, mt);
         if (b.price == null) { toast('No Pinnacle price on this one — open the game', true); return; }
         _fireBusy = true;
         const temp = { id: 'tmp' + Date.now(), _tmp: true, sport: it.sp, event_name: g.away + ' @ ' + g.home, event_start: g.event_start,
@@ -843,6 +860,9 @@
             loadB105();
         } else {
             _b105 = _b105.filter(z => z !== temp);
+            const gk_ = mt === 'total' ? 'total' : 'side';            // not logged: the button is live again
+            delete _tapped[g.away + ' @ ' + g.home + '|' + gk_]; delete _tapped[g.event_name + '|' + gk_];
+            try { localStorage.setItem('b105_tapped', JSON.stringify(_tapped)); } catch (e) {}
             toast(x.d.error || ('failed ' + x.status), true); render();
         }
     }
