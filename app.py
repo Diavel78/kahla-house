@@ -6083,6 +6083,18 @@ def api_bet_sheets_picks():
             out["book_settled"] = res_
         except Exception as e:
             out["book_settled_err"] = f"{type(e).__name__}: {e}"[:300]
+    if request.args.get("b105_unlink"):
+        # ?b105_unlink=1 — wipes the saved Bet105 login (Nov 16 2026, Rob: "just keep logging by
+        # clicking on my dashboard" — the account link is shelved; the password must not sit in the DB)
+        try:
+            sb_ = get_supabase()
+            _parlay_state_put(sb_, "bet105_login", {"user": None, "password": None,
+                                                    "at": datetime.now(timezone.utc).isoformat(), "unlinked": True},
+                              datetime.now(timezone.utc))
+            row_ = (_parlay_state_get(sb_, "bet105_login") or {}).get("v") or {}
+            out["b105_unlink"] = {"cleared": not row_.get("password") and not row_.get("user")}
+        except Exception as e:
+            out["b105_unlink_err"] = str(e)[:200]
     if request.args.get("b105_mine"):
         # ?b105_mine=1 — the page's own Bet105 feed for the admin (live value: Poly / Pinnacle)
         try:
@@ -29202,6 +29214,10 @@ def _hand_move_kalshi(sb, r: dict, blob: dict, now, now_ts: float, st: dict, cfg
 # (parlay_state 'bet105_login'), written only by this admin route; it is never returned or logged.
 # Phase 1 = a one-shot probe (machine_flags bet105_probe) that records what the account pages look
 # like (stamp exec_probe_runs bet105_probe) so the reader is built against the real pages.
+# ⛔ SHELVED (Nov 16 2026): Bet105's login carries a Cloudflare Turnstile human check a hidden
+# browser never passes, and we do not dodge bot checks. Rob: "just keep logging by clicking on my
+# dashboard". The Link button is gone and the saved login was wiped (?b105_unlink=1); the route and
+# the probe stay for an official Bet105 export / partner access, should one exist.
 # ---------------------------------------------------------------------------
 _B105_PROBE_THREAD = None
 
