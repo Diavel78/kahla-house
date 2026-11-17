@@ -59,6 +59,38 @@ def _snap(page, label: str) -> dict:
     return out
 
 
+def _launch(pw, headless: bool, res: dict):
+    """A browser the box actually has. New Playwright builds want a separate 'headless shell'
+    download for headless=True (Nov 16 2026: not installed on the box — the first probe died
+    there), so try, in order: the full Playwright Chromium in new-headless mode, the Mac's own
+    Google Chrome, any Chromium already in the Playwright cache, then the plain default."""
+    import glob
+    import os
+    tries = []
+    for kw in ({"channel": "chromium"}, {"channel": "chrome"}):
+        try:
+            b = pw.chromium.launch(headless=headless, **kw)
+            res["browser"] = kw
+            return b
+        except Exception as e:
+            tries.append(f"{kw}: {str(e).splitlines()[0][:120]}")
+    pats = [os.path.expanduser("~/Library/Caches/ms-playwright/chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium"),
+            os.path.expanduser("~/Library/Caches/ms-playwright/chromium-*/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium"]
+    for pat in pats:
+        for exe in sorted(glob.glob(pat), reverse=True):
+            try:
+                b = pw.chromium.launch(headless=headless, executable_path=exe,
+                                       args=["--headless=new"] if headless else [])
+                res["browser"] = {"exe": exe}
+                return b
+            except Exception as e:
+                tries.append(f"{exe}: {str(e).splitlines()[0][:120]}")
+    res["launch_tries"] = tries
+    return pw.chromium.launch(headless=headless)
+
+
 def probe(user: str, password: str, headless: bool = True, timeout_s: float = 150.0) -> dict:
     """Log in and record the account pages. Returns a dict safe to store (no password)."""
     t0 = time.time()
@@ -71,7 +103,7 @@ def probe(user: str, password: str, headless: bool = True, timeout_s: float = 15
     pw = sync_playwright().start()
     browser = None
     try:
-        browser = pw.chromium.launch(headless=headless)
+        browser = _launch(pw, headless, res)
         ctx = browser.new_context(
             user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                         "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
