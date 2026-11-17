@@ -266,6 +266,19 @@
     let _sport = localStorage.getItem('b105_sport') || 'NCAAF';
     let _view = 'up';                       // up | fire | live | mine
     let _games = [], _lines = [], _b105 = [], _poly = [], _busy = {}, _b105In = false;
+    // EVERY open Polymarket bet, RESTING INCLUDED — what the 🔥 counts as already bet (Rob, Nov 16 2026:
+    // "How many times you want me to click the button???" — Columbia +12 was on Polymarket resting
+    // unfilled; the server deleted each Bet105 tap as a duplicate of it, and the 🔥 came straight
+    // back because only FILLED Polymarket lots counted as bets here. Tapped four times.)
+    let _polyOpen = (() => { try { return JSON.parse(localStorage.getItem('b105_polyopen') || '[]') || []; } catch (e) { return []; } })();
+    function betKeys() {
+        const grp = mt => (mt === 'total' ? 'total' : 'side'), bet = {};
+        allMine().concat(_polyOpen).forEach(b => {
+            const mt = b.market_type === 'moneyline' ? 'ml' : b.market_type;
+            bet[b.event_name + '|' + grp(mt)] = 1;
+        });
+        return bet;
+    }
 
     function renderTabs() {
         _fireN = fireCount();
@@ -296,6 +309,9 @@
         const r = await authFetch('/api/bet-sheets/mine').catch(() => null);
         const d2 = r && r.ok ? await r.json().catch(() => null) : null;
         if (d2 && d2.ok) {
+            _polyOpen = (d2.bets || []).filter(b => b.status === 'pending')
+                .map(b => ({ event_name: b.event_name, market_type: b.market_type }));
+            try { localStorage.setItem('b105_polyopen', JSON.stringify(_polyOpen)); } catch (e) {}
             // only what you actually hold (or that settled from a fill) — resting/cancelled orders are not bets
             _poly = (d2.bets || []).filter(b => (b.status === 'pending' && Number(b.held || 0) >= 1)
                                               || ['won', 'lost', 'push'].indexOf(b.status) >= 0)
@@ -445,9 +461,8 @@
     // its group — spread / ML / puck are one, the total another (the 🔥 tab's rule)
     function unbetFire(g) {
         const grp = mt => (mt === 'total' ? 'total' : 'side');
-        const en = g.away + ' @ ' + g.home, held = {};
-        allMine().forEach(b => { if (b.event_name === en || b.event_name === g.event_name) held[grp(b.market_type === 'moneyline' ? 'ml' : b.market_type)] = 1; });
-        return ['spread', 'total', 'ml'].some(k => fireSide(g, k) && !held[grp(k)]);
+        const en = g.away + ' @ ' + g.home, bet = betKeys();
+        return ['spread', 'total', 'ml'].some(k => fireSide(g, k) && !bet[en + '|' + grp(k)] && !bet[g.event_name + '|' + grp(k)]);
     }
     function fireSide(g, key) {
         const st = (g.move || {})[key === 'puck' ? 'ml' : key];
@@ -658,14 +673,10 @@
         // A BET TAKES ITS OWN MARKET OFF THE TAB, NOT THE GAME (Rob, Nov 15 2026: "The spread, the
         // money line, and the total all have different fire zones") — an Under bet never hides
         // the spread's 🔥. Your bet list is the truth, never the server's cached lock.
-        const now = Date.now(), soon = now + 3600e3, out = [], bet = {};
+        const now = Date.now(), soon = now + 3600e3, out = [], bet = betKeys();
         // SPREAD AND ML ARE ONE BET (Rob, Nov 15 2026: "I will NEVER bet a spread and a ML, on any
         // sport. If I click one of them, they both should go away") — the puck/run line included
         const grp = mt => (mt === 'total' ? 'total' : 'side');
-        allMine().forEach(b => {
-            const mt = b.market_type === 'moneyline' ? 'ml' : b.market_type;
-            bet[b.event_name + '|' + grp(mt)] = 1;
-        });
         FIRE_SPORTS.forEach(sp => fireCache(sp).forEach(g => {
             const t = g.event_start ? Date.parse(g.event_start) : 0;
             if (!t || t <= now || (g.grade && g.grade.final)) return;
