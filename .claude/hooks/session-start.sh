@@ -27,6 +27,14 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
 
+# Append a line to $CLAUDE_ENV_FILE only if it isn't already there. The hook
+# runs on every start/resume/compaction; a plain `>>` grew the file until
+# bash could no longer spawn (past the OS 128KB argument limit).
+env_line() {
+  touch "$CLAUDE_ENV_FILE"
+  grep -qxF -- "$1" "$CLAUDE_ENV_FILE" || printf '%s\n' "$1" >> "$CLAUDE_ENV_FILE"
+}
+
 # Install only kahla-scanner Python deps. The Flask app runs on Vercel —
 # it doesn't execute in this sandbox, so its requirements.txt is skipped
 # to avoid PyJWT-vs-system-Python conflicts (firebase-admin pulls in a
@@ -46,8 +54,8 @@ pip install -q --user -r "$CLAUDE_PROJECT_DIR/kahla-scanner/requirements.txt"
 #     CLI flow, mirroring the website's "Pick" button. Without it the
 #     CLI falls back to cached snapshots (still works, just less fresh).
 if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_SERVICE_KEY:-}" ]; then
-  echo "export SUPABASE_URL=\"${SUPABASE_URL}\""           >> "$CLAUDE_ENV_FILE"
-  echo "export SUPABASE_SERVICE_KEY=\"${SUPABASE_SERVICE_KEY}\"" >> "$CLAUDE_ENV_FILE"
+  env_line "export SUPABASE_URL=\"${SUPABASE_URL}\""
+  env_line "export SUPABASE_SERVICE_KEY=\"${SUPABASE_SERVICE_KEY}\""
   echo "[session-start] Supabase creds plumbed through" >&2
 else
   echo "[session-start] WARN: SUPABASE_URL / SUPABASE_SERVICE_KEY not set." >&2
@@ -62,10 +70,10 @@ fi
 # scripts/run_sql.sh (Management API: POST /v1/projects/{ref}/database/query).
 # Requires the env's network allowlist to include api.supabase.com.
 if [ -n "${SUPABASE_ACCESS_TOKEN:-}" ]; then
-  echo "export SUPABASE_ACCESS_TOKEN=\"${SUPABASE_ACCESS_TOKEN}\"" >> "$CLAUDE_ENV_FILE"
+  env_line "export SUPABASE_ACCESS_TOKEN=\"${SUPABASE_ACCESS_TOKEN}\""
 fi
 if [ -n "${SUPABASE_PROJECT_REF:-}" ]; then
-  echo "export SUPABASE_PROJECT_REF=\"${SUPABASE_PROJECT_REF}\"" >> "$CLAUDE_ENV_FILE"
+  env_line "export SUPABASE_PROJECT_REF=\"${SUPABASE_PROJECT_REF}\""
 fi
 if [ -n "${SUPABASE_ACCESS_TOKEN:-}" ] && [ -n "${SUPABASE_PROJECT_REF:-}" ]; then
   echo "[session-start] Supabase Management API creds plumbed (run_sql.sh enabled)" >&2
@@ -74,7 +82,7 @@ else
 fi
 
 if [ -n "${ODDS_API_KEY:-}" ]; then
-  echo "export ODDS_API_KEY=\"${ODDS_API_KEY}\"" >> "$CLAUDE_ENV_FILE"
+  env_line "export ODDS_API_KEY=\"${ODDS_API_KEY}\""
   echo "[session-start] ODDS_API_KEY plumbed through (in-chat live odds enabled)" >&2
 else
   echo "[session-start] note: ODDS_API_KEY not set — in-chat handicapper will use cached odds only." >&2
@@ -83,4 +91,4 @@ fi
 # Also write PYTHONPATH so `python -m scripts.handicapper` works from any
 # CWD — the kahla-scanner subproject expects to be invoked from inside
 # its own dir, but adding it to PYTHONPATH lets us run from anywhere.
-echo "export PYTHONPATH=\"\${PYTHONPATH:+\$PYTHONPATH:}$CLAUDE_PROJECT_DIR/kahla-scanner\"" >> "$CLAUDE_ENV_FILE"
+env_line "export PYTHONPATH=\"\${PYTHONPATH:+\$PYTHONPATH:}$CLAUDE_PROJECT_DIR/kahla-scanner\""
