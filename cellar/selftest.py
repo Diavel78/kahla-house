@@ -9387,6 +9387,15 @@ def test_zone_rule() -> None:
     check("poly leads: under 1¢ fires nothing", rd.get("state") not in ("play", "lean"), str(rd))
     rd = _app._zone_read("NCAAF", "spread", pin_s, 3.0, one, one - int(0.5 * H), zones=PZ)
     check("poly leads: no Polymarket tape fires nothing", rd.get("state") not in ("play", "lean"), str(rd))
+    FZ2 = [z for z in _app._STANDING_ZONES if z[4] == "poly_ml_fade"]
+    sp_s = [(one - int(20 * H), 3.0, -6.0), (one - int(2 * H), 3.0, -6.0)]
+    rd = _app._zone_read("NCAAB", "spread", sp_s, 3.0, one, one - int(0.4 * H), zones=FZ2,
+                         ctx={"ml_pin": [(one - int(3 * H), 70.0, None)], "ml_poly": [(one - int(3 * H), 72.0, None)]})
+    check("fade Poly's ML: Poly 2¢ higher on the home ML → the away spread, LEAN",
+          rd.get("dir") == -1 and rd.get("kind") == "poly_ml_fade" and rd.get("state") == "lean", str(rd))
+    rd = _app._zone_read("NCAAB", "spread", sp_s, 3.0, one, one - int(0.4 * H), zones=FZ2,
+                         ctx={"ml_pin": [(one - int(3 * H), 70.0, None)], "ml_poly": [(one - int(3 * H), 70.5, None)]})
+    check("fade Poly's ML: under 1¢ fires nothing", rd.get("state") not in ("play", "lean"), str(rd))
     check("NCAAB: no spread dog rules (Nov 19 2026)",
           not any(z[1] == "spread" and (z[9] if len(z) > 9 else {}).get("pick") == "dog" for z in CZ), str(CZ))
     rd = _app._zone_read("NCAAB", "spread", cb(3.0, 3.0, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
