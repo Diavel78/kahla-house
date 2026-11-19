@@ -2717,16 +2717,17 @@ def api_football_picks():
     # the games and lines in ~1.5s; the 🔥/💨 tape reads (15-20s cold on a college Saturday)
     # are left to the full call the page makes right after.
     fast = bool(request.args.get("fast"))
-    if not fast:
-        _sheet_attach_steam(sb, sport, games)    # the books' move since the open (Nov 1 2026)
+    if not fast and _fire_board_load(sb, sport, datetime.now(timezone.utc)) is None:
+        _sheet_attach_steam(sb, sport, games)    # the books' move since the open (Nov 1 2026); the fire board carries it otherwise
     _lap("steam")
     _now = datetime.now(timezone.utc)
     for g in games:
         _sheet_attach_price(sport, g, _now)     # THE PRICE RULE: venue bid vs Pinnacle fair decides (Oct 27 2026)
-    if not fast:
+    _board_ok = _fire_board_load(sb, sport, _now) is not None    # the box's fire board is fresh: the 🔥 costs one read
+    if not fast or _board_ok:
         _sheet_attach_move(sb, sport, games, _now)  # THE MOVE RULE: Pinnacle's first move picks the side (Nov 1 2026)
     _lap("move")
-    if not fast:
+    if not fast or _board_ok:
         _sheet_attach_fire(sport, games, _now)      # 🔥 = the first move is the button, 💨 agrees or not (Nov 1 2026)
     week_games = list(games)
     if old_rows and not fast:
@@ -22841,20 +22842,162 @@ _FIRE_TRACK_THREAD = None
 _FIRE_TRACK_LAST: dict = {}
 
 
+# THE FIRE BOARD (Nov 19 2026, Rob: "All you're doing is running a website… If the model fires,
+# I want a notification… I want it put in the fire tab. It's not that fucking hard"). The page
+# used to re-derive every 🔥 on every load — a week of chart rows read through the tunnel
+# against a time budget, so a slow load showed no fire for a market that had one. Now the box
+# works every 🔥 out once (this tracker, off its own database, no budget pressure), publishes
+# the result per sport in lookup_cache `fire_board|SPORT`, and the website only READS it.
+# The page computes for itself only when the board is older than _FIRE_BOARD_MAX_AGE_S.
+_FIRE_BOARD_MAX_AGE_S = 900
+_FIRE_BOARD_CACHE: dict = {}        # sport -> (monotonic, payload | None)
+
+
+def _fire_board_publish(sb, sport: str, games: list, now) -> int:
+    """Write one sport's board: {event_name: {move, steam}} for every upcoming game. → games."""
+    out = {}
+    for g in games:
+        mv = g.get("move")
+        if not g.get("event_name") or not isinstance(mv, dict):
+            continue
+        out[g["event_name"]] = {
+            "move": {k: {x: y for x, y in v.items() if x != "model_side"} for k, v in mv.items() if isinstance(v, dict)},
+            "steam": g.get("steam") if isinstance(g.get("steam"), dict) else None}
+    sb.table("lookup_cache").upsert({"key": "fire_board|" + sport, "fetched_at": now.isoformat(),
+                                     "payload": {"at": now.isoformat(), "sport": sport, "games": out}}).execute()
+    return len(out)
+
+
+def _fire_board_fresh(payload, now) -> bool:
+    """Pure. Is a stored board young enough for the page to trust?"""
+    at = _parse_iso((payload or {}).get("at") or "") if isinstance(payload, dict) else None
+    return bool(at and 0 <= (now - at).total_seconds() <= _FIRE_BOARD_MAX_AGE_S
+                and isinstance(payload.get("games"), dict))
+
+
+def _fire_board_load(sb, sport: str, now):
+    """The box's board for a sport when the WEBSITE asks and it is fresh, else None (the page
+    then reads the tape itself). The box never reads its own board. 45s in-process cache."""
+    if _CELLAR_SIDE == "cellar" or not _machine_flag("fire_board", True):
+        return None
+    hit = _FIRE_BOARD_CACHE.get(sport)
+    if hit and _time.monotonic() - hit[0] < 45:
+        p = hit[1]
+    else:
+        try:
+            r = (sb.table("lookup_cache").select("payload").eq("key", "fire_board|" + sport)
+                 .limit(1).execute().data or [])
+            p = r[0].get("payload") if r else None
+        except Exception as e:
+            app.logger.warning("fire board %s: %s", sport, e)
+            p = None
+        _FIRE_BOARD_CACHE[sport] = (_time.monotonic(), p)
+    return p["games"] if _fire_board_fresh(p, now) else None
+
+
+def _fire_alert_label(sport: str, g: dict, key: str, rd: dict) -> str:
+    """Pure. One line of the 🔥 message: sport · game · the bet · PLAY/LEAN · the zone."""
+    d = rd.get("dir") or 0
+    pk = g.get(key) if isinstance(g.get(key), dict) else {}
+    ln = pk.get("line")
+    away, home = g.get("away") or "", g.get("home") or ""
+    if key == "total":
+        bet = ("Over" if d > 0 else "Under") + ((" %g" % float(ln)) if ln is not None else "")
+    else:
+        team = home if d > 0 else away
+        if key == "ml" or ln is None:
+            bet = team + " ML"
+        else:
+            bet = "%s %+g" % (team, float(ln))
+    return "%s · %s @ %s · %s · %s · %s" % (sport, away, home, bet, str(rd.get("state") or "").upper(),
+                                           rd.get("zone") or "")
+
+
+def _fire_alert_due(rd: dict, known: dict, since_iso: str) -> bool:
+    """Pure. Does this 🔥 still owe Rob a message? A play/lean on a market he has not bet,
+    first seen after the alerts were switched on, not messaged yet."""
+    if not isinstance(rd, dict) or rd.get("state") not in ("play", "lean") or not rd.get("dir") or rd.get("bet_lock"):
+        return False
+    sig = next((x for x in (known or {}).get("signals") or []
+                if x.get("zone") == rd.get("zone") and x.get("dir") == rd.get("dir")), None)
+    if not sig or str(sig.get("seen_at") or "") < str(since_iso or ""):
+        return False
+    return [rd.get("zone"), rd.get("dir")] not in ((known or {}).get("alerted") or [])
+
+
+def _fire_alert_tick(sb, by_sport: dict, now) -> dict:
+    """ONE Telegram for every new 🔥 this pass (flag `fire_alert`). Held 10 PM-7 AM Arizona and
+    sent together at 7. A market Rob already bet (or its spread/ML twin) never pings."""
+    st = {"due": 0, "sent": 0}
+    if not _machine_flag("fire_alert", True):
+        return st
+    if not 7 <= now.astimezone(ZoneInfo("America/Phoenix")).hour < 22:
+        st["quiet"] = True
+        return st
+    r = sb.table("lookup_cache").select("payload").eq("key", "fire_alert_since").limit(1).execute().data or []
+    since = ((r[0].get("payload") or {}).get("at") if r else None)
+    if not since:
+        since = now.isoformat()
+        sb.table("lookup_cache").upsert({"key": "fire_alert_since", "payload": {"at": since},
+                                         "fetched_at": "2099-01-01T00:00:00+00:00"}).execute()
+    lines, marks = [], []
+    grp = lambda k: "total" if k == "total" else "side"
+    for sp, gs in by_sport.items():
+        bets = _sheet_bets_at(sb, sp, gs)
+        zs = _zone_signals_load(sb, sp)
+        for g in gs:
+            sd = _parse_iso(g.get("event_start") or "")
+            if not sd or sd <= now:
+                continue
+            bet_grp = {grp(k) for (mid, k) in bets if mid == str(g.get("market_id"))}
+            for key, rd in (g.get("move") or {}).items():
+                if key not in ("ml", "spread", "total") or grp(key) in bet_grp:
+                    continue
+                known = zs.get((g.get("event_name"), key)) or {}
+                if _fire_alert_due(rd, known, since):
+                    lines.append(_fire_alert_label(sp, g, key, rd))
+                    marks.append((sp, key, sd, g.get("event_name"), known, [rd.get("zone"), rd.get("dir")]))
+    st["due"] = len(lines)
+    if not lines:
+        return st
+    head = "🔥 %d new" % len(lines) if len(lines) > 1 else "🔥 new"
+    body = lines[:25] + (["… and %d more on the 🔥 tab" % (len(lines) - 25)] if len(lines) > 25 else [])
+    if not _tg_send_now(head + "\n" + "\n".join(body)):
+        st["err"] = "send failed"
+        return st
+    for sp, key, sd, ev, known, mk in marks:
+        k = "zsig|%s|%s|%s|%s" % (sp, key, sd.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M"), ev)
+        known = dict(known)
+        known["alerted"] = list(known.get("alerted") or []) + [mk]
+        sb.table("lookup_cache").upsert({"key": k, "payload": known,
+                                         "fetched_at": "2099-01-01T00:00:00+00:00"}).execute()
+        _ZSIG_KNOWN[k] = known
+    st["sent"] = len(lines)
+    return st
+
+
 def _fire_track_once(sb, now) -> dict:
     import copy as _copy
     st = {"at": now.isoformat(), "sports": {}}
     rows = [(sp, r, _copy.deepcopy(g)) for sp, r, g in (_sheet_touch_rows_cached(sb, now) or [])]
+    by_sport = {}
     for sp in sorted({t[0] for t in rows}):
         gs = [t[2] for t in rows if t[0] == sp]
         try:
+            _sheet_attach_steam(sb, sp, gs)
             _sheet_attach_move(sb, sp, gs, now)
             fires = sum(1 for g in gs for k in ("ml", "spread", "total")
                         if isinstance((g.get("move") or {}).get(k), dict)
                         and g["move"][k].get("state") in ("play", "lean"))
-            st["sports"][sp] = {"games": len(gs), "fires": fires}
+            st["sports"][sp] = {"games": len(gs), "fires": fires,
+                                "board": _fire_board_publish(sb, sp, gs, now)}
+            by_sport[sp] = gs
         except Exception as e:
             st["sports"][sp] = {"err": f"{type(e).__name__}: {e}"[:100]}
+    try:
+        st["alert"] = _fire_alert_tick(sb, by_sport, now)
+    except Exception as e:
+        st["alert"] = {"err": f"{type(e).__name__}: {e}"[:100]}
     return st
 
 
@@ -37495,6 +37638,19 @@ def _zone_signals_load(sb, sport: str) -> dict:
     return out
 
 
+def _zone_stored_read(stored) -> dict:
+    """Pure. A market's read off its stored signals alone: the one a bet locked, else the last
+    🔥 it showed, else pass."""
+    zs = stored if isinstance(stored, dict) else {}
+    sg = [x for x in zs.get("signals") or [] if isinstance(x, dict) and x.get("state") in ("play", "lean")]
+    lk = zs.get("bet_lock") if isinstance(zs.get("bet_lock"), dict) else None
+    pick = next((x for x in sg if lk and x.get("zone") == lk.get("zone") and x.get("dir") == lk.get("dir")),
+                None) or (sg[-1] if sg else None)
+    if pick:
+        return {**pick, "zone_rule": True, "from_store": True, "bet_lock": bool(lk)}
+    return {"state": "pass", "why": "no 🔥 on record"}
+
+
 def _zone_partial_read(rd: dict, stored) -> dict:
     """Pure. The read for a market whose ladder tape missed this load: the last 🔥 the fire
     tracker stored off a full read (`from_store`), else — when the line tape alone says 🔥 —
@@ -37876,7 +38032,9 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
         lo, hi = min(starts) - timedelta(hours=1), max(starts) + timedelta(hours=1)
         ck = (sport, lo.isoformat()[:13], hi.isoformat()[:13])
         hit = _MOVE_CACHE.get(ck)
-        if not tape:
+        # THE WEBSITE READS THE BOX'S FIRE BOARD (Nov 19 2026): fresh board = no tape read here
+        board = _fire_board_load(sb, sport, now) if (tape and _zone_rule_on()) else None
+        if not tape or board is not None:
             by = {}
         elif hit and _time.monotonic() - hit[0] < 120:
             by = hit[1]
@@ -37920,7 +38078,7 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
     # box slow during the 7 AM sheet runs, every market that missed read `reading`): a market
     # whose ladder missed this load shows the last 🔥 the box's fire tracker stored for it.
     _missed = any((ev, mt, anc) not in lad_rows for ev, mt, anc, _f in jobs)
-    zsig = _zone_signals_load(sb, sport) if (_zone_rule_on() and (not tape or _missed)) else {}
+    zsig = _zone_signals_load(sb, sport) if (_zone_rule_on() and (not tape or _missed or board is not None)) else {}
     for g in games:
         try:
             sd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
@@ -37933,71 +38091,80 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
             ml_nums = (_steam_numbers(sport, "ml", rs, wide=_MOVE_VENUE_WIDE_C)
                        if (sport, "ml") in _STEAM_SLOPE_SCAN else {})
             for key, mt in keys:
-                sl = _STEAM_SLOPE_SCAN[(sport, mt)]
-                nums = _steam_numbers(sport, mt, rs, wide=_MOVE_VENUE_WIDE_C)
-                anc = _move_anchor(rs, mt) if mt in ("spread", "total") else None
-                lr = lad_rows.get((g.get("event_name"), mt, anc)) if anc is not None else None
-                if lr:
-                    sg = -1 if mt == "total" else 1
-                    nums = _move_merge_nums(nums, _move_nums_ladder(lr, anc, sl, sign=sg))
-                    # 💨 off the same ladder (its 6¢ width rule), so the smoke and the fire see one tape
-                    try:
-                        sc = _steam_card(_move_merge_nums(_steam_numbers(sport, mt, rs),
-                                                          _move_nums_ladder(lr, anc, sl, sign=sg, wide=6.0)),
-                                         min(now_ms, sms))
-                        st = g.get("steam") if isinstance(g.get("steam"), dict) else {}
-                        if sc:
-                            sc["cents"] = {b: round(m * sl, 1) for b, m in sc["moves"].items()}
-                            st[mt] = sc
-                        else:
-                            st.pop(mt, None)
-                        if st:
-                            g["steam"] = st
-                        else:
-                            g.pop("steam", None)
-                    except Exception:
-                        pass
-                zone_on = _zone_rule_on()
-                rd = (_zone_read(sport, mt, nums.get("pin") or [], sl, sms, now_ms,
-                                 ctx={"b2b": b2b.get(g.get("event_name")), "poly": nums.get("poly"),
-                                      "ml_pin": ml_nums.get("pin"), "ml_poly": ml_nums.get("poly")}) if zone_on
-                      else _move_read(sport, nums, sl, sms, now_ms))
-                if anc is not None:
-                    rd["anchor"] = anc
-                if zone_on:
-                    # LIVE UNTIL YOU BET (Rob, Nov 15 2026): no stored 🔥 — the read moves with the
-                    # zones until a bet is logged on the market, then it is the read AS OF the bet
-                    ev = g.get("event_name")
-                    partial = anc is not None and (ev, mt, anc) not in lad_rows
-                    bt = bets_at.get((str(g.get("market_id")), mt))
-                    if not tape:
-                        # the week record's older finals read no tape: the stored signals —
-                        # the one a bet locked, else the last 🔥 the market showed
-                        zs = zsig.get((ev, mt)) or {}
-                        sg = [x for x in zs.get("signals") or [] if isinstance(x, dict)]
-                        lk = zs.get("bet_lock") if isinstance(zs.get("bet_lock"), dict) else None
-                        pick = next((x for x in sg if lk and x.get("zone") == lk.get("zone")
-                                     and x.get("dir") == lk.get("dir")), None) or (sg[-1] if sg else None)
-                        if pick:
-                            rd = {**pick, "zone_rule": True, "from_store": True, "bet_lock": bool(lk)}
-                    elif bt is not None:
-                        bms = int(bt.timestamp() * 1000)
-                        at_bet = _zone_read(sport, mt, nums.get("pin") or [], sl, sms, min(bms, now_ms),
-                                            ctx={"b2b": b2b.get(ev), "poly": nums.get("poly"),
-                                                 "ml_pin": ml_nums.get("pin"), "ml_poly": ml_nums.get("poly")})
-                        rd = _zone_bet_lock(rd, at_bet, bms)
-                    elif partial:
-                        rd = _zone_partial_read(rd, zsig.get((ev, mt)))
-                    if not partial and tape and (rd.get("state") in ("play", "lean") or rd.get("blend")):
-                        _zone_signals_note(sb, sport, ev, mt, sd, rd)
-                elif freeze_on:
-                    ev = g.get("event_name")
-                    partial = anc is not None and (ev, mt, anc) not in lad_rows
-                    fz = (frozen or {}).get((ev, mt))
-                    rd, store = _move_settle(rd, fz, partial)
-                    if store and frozen is not None:
-                        _fire_freeze(sb, sport, ev, mt, rd, sd, replace=bool(rd.get("replaced")))
-                if key == "ml" and sport in _FIRE_ML_SPREAD_SPORTS:
+                rd = None
+                if board is not None:
+                    # on the board → the box's read; off it (started / final) → the stored 🔥
+                    brd = ((board.get(g.get("event_name")) or {}).get("move") or {}).get(key)
+                    if isinstance(brd, dict):
+                        rd = dict(brd)
+                    else:
+                        rd = _zone_stored_read(zsig.get((g.get("event_name"), mt)))
+                if rd is None:
+                    sl = _STEAM_SLOPE_SCAN[(sport, mt)]
+                    nums = _steam_numbers(sport, mt, rs, wide=_MOVE_VENUE_WIDE_C)
+                    anc = _move_anchor(rs, mt) if mt in ("spread", "total") else None
+                    lr = lad_rows.get((g.get("event_name"), mt, anc)) if anc is not None else None
+                    if lr:
+                        sg = -1 if mt == "total" else 1
+                        nums = _move_merge_nums(nums, _move_nums_ladder(lr, anc, sl, sign=sg))
+                        # 💨 off the same ladder (its 6¢ width rule), so the smoke and the fire see one tape
+                        try:
+                            sc = _steam_card(_move_merge_nums(_steam_numbers(sport, mt, rs),
+                                                              _move_nums_ladder(lr, anc, sl, sign=sg, wide=6.0)),
+                                             min(now_ms, sms))
+                            st = g.get("steam") if isinstance(g.get("steam"), dict) else {}
+                            if sc:
+                                sc["cents"] = {b: round(m * sl, 1) for b, m in sc["moves"].items()}
+                                st[mt] = sc
+                            else:
+                                st.pop(mt, None)
+                            if st:
+                                g["steam"] = st
+                            else:
+                                g.pop("steam", None)
+                        except Exception:
+                            pass
+                    zone_on = _zone_rule_on()
+                    rd = (_zone_read(sport, mt, nums.get("pin") or [], sl, sms, now_ms,
+                                     ctx={"b2b": b2b.get(g.get("event_name")), "poly": nums.get("poly"),
+                                          "ml_pin": ml_nums.get("pin"), "ml_poly": ml_nums.get("poly")}) if zone_on
+                          else _move_read(sport, nums, sl, sms, now_ms))
+                    if anc is not None:
+                        rd["anchor"] = anc
+                    if zone_on:
+                        # LIVE UNTIL YOU BET (Rob, Nov 15 2026): no stored 🔥 — the read moves with the
+                        # zones until a bet is logged on the market, then it is the read AS OF the bet
+                        ev = g.get("event_name")
+                        partial = anc is not None and (ev, mt, anc) not in lad_rows
+                        bt = bets_at.get((str(g.get("market_id")), mt))
+                        if not tape:
+                            # the week record's older finals read no tape: the stored signals —
+                            # the one a bet locked, else the last 🔥 the market showed
+                            zs = zsig.get((ev, mt)) or {}
+                            sg = [x for x in zs.get("signals") or [] if isinstance(x, dict)]
+                            lk = zs.get("bet_lock") if isinstance(zs.get("bet_lock"), dict) else None
+                            pick = next((x for x in sg if lk and x.get("zone") == lk.get("zone")
+                                         and x.get("dir") == lk.get("dir")), None) or (sg[-1] if sg else None)
+                            if pick:
+                                rd = {**pick, "zone_rule": True, "from_store": True, "bet_lock": bool(lk)}
+                        elif bt is not None:
+                            bms = int(bt.timestamp() * 1000)
+                            at_bet = _zone_read(sport, mt, nums.get("pin") or [], sl, sms, min(bms, now_ms),
+                                                ctx={"b2b": b2b.get(ev), "poly": nums.get("poly"),
+                                                     "ml_pin": ml_nums.get("pin"), "ml_poly": ml_nums.get("poly")})
+                            rd = _zone_bet_lock(rd, at_bet, bms)
+                        elif partial:
+                            rd = _zone_partial_read(rd, zsig.get((ev, mt)))
+                        if not partial and tape and (rd.get("state") in ("play", "lean") or rd.get("blend")):
+                            _zone_signals_note(sb, sport, ev, mt, sd, rd)
+                    elif freeze_on:
+                        ev = g.get("event_name")
+                        partial = anc is not None and (ev, mt, anc) not in lad_rows
+                        fz = (frozen or {}).get((ev, mt))
+                        rd, store = _move_settle(rd, fz, partial)
+                        if store and frozen is not None:
+                            _fire_freeze(sb, sport, ev, mt, rd, sd, replace=bool(rd.get("replaced")))
+                if key == "ml" and sport in _FIRE_ML_SPREAD_SPORTS and rd.get("state") != "off_rule":
                     spl = _fire_ml_spread(g)
                     if spl is None or abs(spl) > _FIRE_ML_MAX_SPREAD + 1e-9:
                         rd = {"state": "off_rule", "spread_home": spl,
@@ -38043,6 +38210,10 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
                 _sheet_puck_carry(sport, g)
             if mv_all:
                 g["move"] = mv_all
+            if board is not None:
+                bst = (board.get(g.get("event_name")) or {}).get("steam")
+                if isinstance(bst, dict) and bst:
+                    g["steam"] = json.loads(json.dumps(bst))
         except Exception as e:
             app.logger.warning("move attach %s %s: %s", sport, g.get("event_name"), e)
 

@@ -4033,6 +4033,34 @@ def test_bet_sheet_live_section() -> None:
           and _zp({"state": "lean", "dir": -1}, _st)["from_store"] is True
           and _zp({"state": "play", "dir": 1}, None)["state"] == "reading"
           and _zp({"state": "watching", "zones": []}, {})["state"] == "watching")
+    # THE FIRE BOARD + THE 🔥 MESSAGE (Nov 19 2026): the website reads what the box worked out
+    from datetime import datetime, timezone
+    _nowb = datetime(2026, 11, 19, 16, 0, tzinfo=timezone.utc)
+    check("the fire board is trusted for 15 minutes, never a stale or empty one",
+          _app._fire_board_fresh({"at": "2026-11-19T15:50:00+00:00", "games": {}}, _nowb)
+          and not _app._fire_board_fresh({"at": "2026-11-19T15:40:00+00:00", "games": {}}, _nowb)
+          and not _app._fire_board_fresh({"at": "2026-11-19T15:59:00+00:00"}, _nowb)
+          and not _app._fire_board_fresh(None, _nowb))
+    _kn = {"signals": [{"zone": "z", "dir": 1, "state": "play", "seen_at": "2026-11-19T15:00:00+00:00"}]}
+    _rdf = {"state": "play", "dir": 1, "zone": "z"}
+    check("a new 🔥 owes one message: not an old one, not a bet one, not one already sent",
+          _app._fire_alert_due(_rdf, _kn, "2026-11-19T14:00:00+00:00")
+          and not _app._fire_alert_due(_rdf, _kn, "2026-11-19T15:30:00+00:00")
+          and not _app._fire_alert_due({**_rdf, "bet_lock": True}, _kn, "2026-11-19T14:00:00+00:00")
+          and not _app._fire_alert_due(_rdf, {**_kn, "alerted": [["z", 1]]}, "2026-11-19T14:00:00+00:00")
+          and not _app._fire_alert_due({"state": "watching"}, _kn, "2026-11-19T14:00:00+00:00")
+          and not _app._fire_alert_due(_rdf, {}, "2026-11-19T14:00:00+00:00"))
+    _gf = {"away": "BYU", "home": "Kansas", "total": {"line": 48.0}, "spread": {"line": -3.5}}
+    check("the 🔥 message names the bet",
+          "Over 48 · PLAY" in _app._fire_alert_label("NCAAF", _gf, "total", _rdf)
+          and "Kansas -3.5" in _app._fire_alert_label("NCAAF", _gf, "spread", _rdf)
+          and "BYU ML" in _app._fire_alert_label("NCAAF", _gf, "ml", {**_rdf, "dir": -1}))
+    check("a market off the board reads its stored 🔥 (the bet-locked one first), else pass",
+          _app._zone_stored_read({"signals": [{"state": "play", "dir": 1, "zone": "a"},
+                                               {"state": "lean", "dir": -1, "zone": "b"}],
+                                  "bet_lock": {"zone": "a", "dir": 1}})["zone"] == "a"
+          and _app._zone_stored_read({"signals": [{"state": "blend", "dir": 1}]})["state"] == "pass"
+          and _app._zone_stored_read(None)["state"] == "pass")
     # THE DUET CONNECTOR (Oct 31 2026, Rob: "It will NOT be betting for me"):
     # read-only by construction — no tool reaches an order, cancel, flag or write
     _mcp_src = "".join(inspect.getsource(f) for f in (
@@ -9273,7 +9301,7 @@ def _test_fire_side_body(_app) -> None:
     check("fire: an off-rule football ML gets no button, not even off 💨", g["ml"]["fire"] is None, str(g["ml"]))
     _src = open(_os.path.join(_rt, "app.py"), encoding="utf-8").read()
     check("ml gate: the move attach puts a football ML past ±2.5 off the rule",
-          'if key == "ml" and sport in _FIRE_ML_SPREAD_SPORTS:' in _src and '"state": "off_rule"' in _src)
+          'if key == "ml" and sport in _FIRE_ML_SPREAD_SPORTS' in _src and '"state": "off_rule"' in _src)
     # NBA TOO (Nov 2 2026, Pelicans @ Grizzlies: a +188 NO ML LEAN off 💨, no header, beside a 5.5 spread)
     check("ml gate: NBA's ML is on the pick'em rule, hockey's is not",
           "NBA" in _app._FIRE_ML_SPREAD_SPORTS and "NHL" not in _app._FIRE_ML_SPREAD_SPORTS)
