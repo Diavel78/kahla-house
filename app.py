@@ -37495,6 +37495,20 @@ def _zone_signals_load(sb, sport: str) -> dict:
     return out
 
 
+def _zone_partial_read(rd: dict, stored) -> dict:
+    """Pure. The read for a market whose ladder tape missed this load: the last 🔥 the fire
+    tracker stored off a full read (`from_store`), else — when the line tape alone says 🔥 —
+    `reading` (a half read never names a side by itself), else the read as it is."""
+    sg = [x for x in ((stored or {}).get("signals") or [])
+          if isinstance(x, dict) and x.get("state") in ("play", "lean") and x.get("dir")]
+    if sg:
+        return {**sg[-1], "zone_rule": True, "from_store": True, "open_ms": rd.get("open_ms")}
+    if rd.get("state") in ("play", "lean"):
+        return {"state": "reading", "open_ms": rd.get("open_ms"),
+                "why": "ladder tape not read this load — the 🔥 waits for a full read"}
+    return rd
+
+
 def _zone_signals_note(sb, sport: str, ev: str, mt: str, start, rd: dict) -> None:
     """Keep every distinct 🔥 a market showed (zone + side + when first seen) in lookup_cache
     `zsig|SPORT|mt|start16|event`, kept forever — the Sunday review's record of the signals
@@ -37901,7 +37915,12 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
     frozen = _fire_frozen_load(sb, sport) if freeze_on else None
     b2b = _sheet_b2b(sb, sport, games) if sport in ("NHL", "NBA") else {}
     bets_at = _sheet_bets_at(sb, sport, games) if _zone_rule_on() else {}
-    zsig = _zone_signals_load(sb, sport) if (_zone_rule_on() and not tape) else {}
+    # A 🔥 THE PAGE COULD NOT RE-READ IS STILL A 🔥 (Nov 19 2026, ten college totals that fired
+    # Sunday night sat hidden until 8 AM Thursday: 140 ladder reads against an 8s budget, the
+    # box slow during the 7 AM sheet runs, every market that missed read `reading`): a market
+    # whose ladder missed this load shows the last 🔥 the box's fire tracker stored for it.
+    _missed = any((ev, mt, anc) not in lad_rows for ev, mt, anc, _f in jobs)
+    zsig = _zone_signals_load(sb, sport) if (_zone_rule_on() and (not tape or _missed)) else {}
     for g in games:
         try:
             sd = _parse_iso(g.get("event_start")) if g.get("event_start") else None
@@ -37967,9 +37986,8 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
                                             ctx={"b2b": b2b.get(ev), "poly": nums.get("poly"),
                                                  "ml_pin": ml_nums.get("pin"), "ml_poly": ml_nums.get("poly")})
                         rd = _zone_bet_lock(rd, at_bet, bms)
-                    elif partial and rd.get("state") in ("play", "lean"):
-                        rd = {"state": "reading", "open_ms": rd.get("open_ms"),
-                              "why": "ladder tape not read this load — the 🔥 waits for a full read"}
+                    elif partial:
+                        rd = _zone_partial_read(rd, zsig.get((ev, mt)))
                     if not partial and tape and (rd.get("state") in ("play", "lean") or rd.get("blend")):
                         _zone_signals_note(sb, sport, ev, mt, sd, rd)
                 elif freeze_on:

@@ -4023,6 +4023,16 @@ def test_bet_sheet_live_section() -> None:
           and _g("total", "over", 44.5, 20, 24) == "loss" and _g("total", "under", 44.5, 20, 24) == "win"
           and _g("moneyline", "away", None, 3, 2) == "win" and _g("moneyline", "home", None, 3, 2) == "loss"
           and _g("total", "over", None, 1, 2) is None and _g("spread", "home", -1.5, None, 2) is None)
+    # a 🔥 whose ladder missed this load shows the stored one, never hides (Nov 19 2026)
+    _zp = _app._zone_partial_read
+    _st = {"signals": [{"state": "play", "dir": 1, "zone": "z", "kind": "fade"},
+                       {"state": "blend", "dir": -1, "zone": "b"}]}
+    check("a missed ladder read shows the stored 🔥; with none stored a half read stays `reading`",
+          _zp({"state": "watching", "open_ms": 5}, _st)["state"] == "play"
+          and _zp({"state": "lean", "dir": -1}, _st)["dir"] == 1
+          and _zp({"state": "lean", "dir": -1}, _st)["from_store"] is True
+          and _zp({"state": "play", "dir": 1}, None)["state"] == "reading"
+          and _zp({"state": "watching", "zones": []}, {})["state"] == "watching")
     # THE DUET CONNECTOR (Oct 31 2026, Rob: "It will NOT be betting for me"):
     # read-only by construction — no tool reaches an order, cancel, flag or write
     _mcp_src = "".join(inspect.getsource(f) for f in (
