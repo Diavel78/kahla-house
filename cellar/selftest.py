@@ -9348,14 +9348,9 @@ def test_zone_rule() -> None:
     check("NFL 4 PM: follow the money", rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
     CZ = [z for z in _app._STANDING_ZONES if z[0] == "NCAAB"]
     cb = lambda a, b, ln: [(one - int(20 * H), a, ln), (one - int(2 * H), b, ln)]
+    check("NCAAB: no spread dog rules (Nov 19 2026)", not any(z[1] == "spread" for z in CZ), str(CZ))
     rd = _app._zone_read("NCAAB", "spread", cb(3.0, 3.0, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
-    check("NCAAB: nobody moved it → the dog", rd["dir"] == -1 and rd["kind"] == "quiet", str(rd))
-    rd = _app._zone_read("NCAAB", "spread", cb(3.0, 6.5, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
-    check("NCAAB: 3+ pts onto the favorite → fade it", rd["dir"] == -1 and rd["kind"] == "fade", str(rd))
-    rd = _app._zone_read("NCAAB", "spread", cb(3.0, 4.5, 5.0), 3.0, one, one - int(0.4 * H), zones=CZ)
-    check("NCAAB: money on the dog → follow", rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
-    rd = _app._zone_read("NCAAB", "spread", cb(3.0, 4.5, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
-    check("NCAAB: 1-3 pts onto the favorite fires nothing", rd["state"] not in ("play", "lean"), str(rd))
+    check("NCAAB: nobody moved it fires nothing now", rd["state"] not in ("play", "lean"), str(rd))
     TZ = [z for z in CZ if z[1] == "total"]
     fri = int(_dt.datetime(2026, 11, 21, 0, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000)   # Fri 7 PM ET
     ct = lambda st, a, b: [(st - int(20 * H), a, 145.5), (st - int(2 * H), b, 145.5)]

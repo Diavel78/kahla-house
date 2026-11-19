@@ -37316,12 +37316,11 @@ _STANDING_ZONES = (
     # 3+ pts onto the favorite → fade it, the dog 60-42 (+12%; 5+ pts 18-5); 1+ pt onto the dog →
     # follow 90-72 (+6%). A 1-3 pt move onto the favorite fires nothing. Early-season regime —
     # re-check as conference play starts (January).
-    ("NCAAB", "spread", ("o", 0), ("s", -0.5), "quiet", 2.9, 99.0, 14.0,
-     "nobody moved it: the dog", {"pick": "dog"}),
-    ("NCAAB", "spread", ("o", 0), ("s", -0.5), "fade", 8.9, 14.9, 12.0,
-     "3+ points onto the favorite: fade it", {"dog": 0.5}),
-    ("NCAAB", "spread", ("o", 0), ("s", -0.5), "chase", 2.9, 99.0, 6.0,
-     "money on the dog: follow", {"dog": 0.5}),
+    # ⛔ THE NCAAB SPREAD DOG RULES ARE GONE (Nov 19 2026, Rob: "College basketball is a joke now, just
+    # bet every dog isn't a model"): replayed on our Pinnacle tape Nov 15-18, every dog went 72-74 at the
+    # close, follow-the-money 21-29, nobody-moved 35-32 — the early-season dog edge was gone and the three
+    # rules were only ever "bet the dog". docs/zone-reviews/2026-11-19.md. NCAAB spreads have no 🔥 until
+    # a MEASURED zone (zone_review) earns one.
     # College totals: no move rule wins (open → close is a coin flip every season) and a pace ×
     # efficiency model loses to the open (MAE 13.05 vs 12.77). The one spot that held all three
     # seasons at the close: FRIDAY UNDERS 271-231 / 283-230 / 63-51 (+4% combined). A spot, not a
