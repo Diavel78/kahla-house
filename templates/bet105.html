@@ -266,6 +266,7 @@
     let _sport = localStorage.getItem('b105_sport') || 'NCAAF';
     let _view = 'up';                       // up | fire | live | mine
     let _games = [], _lines = [], _b105 = [], _poly = [], _busy = {}, _b105In = false;
+    let _polyDay = null;   // today's Polymarket legs off the venue (/api/bet105/poly-day)
     // EVERY open Polymarket bet, RESTING INCLUDED — what the 🔥 counts as already bet (Rob, Nov 16 2026:
     // "How many times you want me to click the button???" — Columbia +12 was on Polymarket resting
     // unfilled; the server deleted each Bet105 tap as a duplicate of it, and the 🔥 came straight
@@ -309,6 +310,26 @@
     function allMine() {
         const poly = _poly.map(b => ({ ...b, _venue: 'POLY' }));
         return _b105.map(b => ({ ...b, _venue: 'BET105' })).concat(poly);
+    }
+    // TODAY COUNTS POLYMARKET OFF THE VENUE (Rob, Nov 19 2026: "my sells and app bets I never
+    // logged"): every resolution + sell leg the venue booked today; a slug with no pick is
+    // tagged "not logged". Falls back to the pick-based Poly rows until the endpoint answers.
+    async function loadPolyDay() {
+        const r = await authFetch('/api/bet105/poly-day').catch(() => null);
+        const d = r && r.ok ? await r.json().catch(() => null) : null;
+        if (d && d.ok) { _polyDay = d; renderMoney(); }
+    }
+    function settledToday() {
+        const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
+        const b105 = _b105.filter(b => ['won', 'lost', 'push'].indexOf(b.status) >= 0 && dayOf(b.event_start) === today)
+            .map(b => ({ ...b, _venue: 'BET105' }));
+        if (!_polyDay) return b105.concat(_poly.filter(b => ['won', 'lost', 'push'].indexOf(b.status) >= 0 && dayOf(b.event_start) === today)
+            .map(b => ({ ...b, _venue: 'POLY' })));
+        const poly = (_polyDay.legs || []).map((L, i) => ({
+            id: 'v' + i, _venue: 'POLY', sport: L.sport, event_name: L.event_name || '', event_start: L.event_start,
+            label: L.label, pnl_usd: L.pnl, _unlogged: !L.pick_id,
+            status: L.kind === 'sell' ? 'sold' : L.neutral ? 'push' : L.won ? 'won' : 'lost' }));
+        return b105.concat(poly);
     }
     function isLive(b) { return b.status === 'pending' && b.game && b.game.state && b.game.state !== 'pre'; }
     async function loadB105() {
@@ -384,18 +405,19 @@
             if (p && p.bets && Date.now() - p.at < 12 * 3600e3) _poly = p.bets;
         } catch (e) {}
         renderMoney(); render();
-        loadB105(); loadPoly(); loadB105Live();
+        loadB105(); loadPoly(); loadPolyDay(); loadB105Live();
     }
     function renderMoney() {
         renderTabs();
         const all = allMine();
         const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
-        const settled = all.filter(b => ['won', 'lost', 'push'].indexOf(b.status) >= 0 && dayOf(b.event_start) === today);
+        const settled = settledToday();
         const usd = settled.reduce((a, b) => a + (Number(b.pnl_usd) || 0), 0);
         const w = settled.filter(b => b.status === 'won').length, l = settled.filter(b => b.status === 'lost').length;
+        const nSold = settled.filter(b => b.status === 'sold').length;
         const set = (id, v, cls) => { const el = document.getElementById(id); el.textContent = v; if (cls !== undefined) el.className = 'v ' + cls; };
         set('sToday', money(usd), usd > 0 ? 'pos' : usd < 0 ? 'neg' : '');
-        document.getElementById('sRec').textContent = w + '–' + l;
+        document.getElementById('sRec').textContent = w + '–' + l + (nSold ? ' · ' + nSold + ' sold' : '');
         const live = allMine().filter(isLive);
         const ev = live.reduce((a, b) => a + (Number(b.ev_usd) || 0), 0);
         const bet = live.reduce((a, b) => a + (worthOf(b) != null ? betCost(b) : 0), 0);
@@ -606,6 +628,7 @@
         if (b.status === 'won') right = '<span class="pos">✅ ' + money(b.pnl_usd) + '</span>';
         else if (b.status === 'lost') right = '<span class="neg">❌ ' + money(b.pnl_usd) + '</span>';
         else if (b.status === 'push') right = '➖ push';
+        else if (b.status === 'sold') right = '<span class="' + (Number(b.pnl_usd) > 0 ? 'pos' : Number(b.pnl_usd) < 0 ? 'neg' : '') + '">💵 ' + money(b.pnl_usd) + '</span><small>sold</small>';
         else if (isLive(b)) right = (b.now ? 'now ' + (centsAm(b.now.prob * 100) || '—') : 'no live price')
             + (worthOf(b) != null ? '<small>worth ' + dollars(worthOf(b)) + ' · bet ' + dollars(betCost(b)) + (b.now && b.now.src ? ' · ' + (b.now.last ? 'last ' + clock(new Date(b.now.last).toISOString()) + ' · ' : '') + (b.now.src === 'poly' ? 'Poly' : b.now.src === 'score' ? 'from the score' : 'Pin')
             + (b.now.poly_line != null && b.line != null && Math.abs(Number(b.now.poly_line) - Number(b.line)) > 0.01 ? ' @ ' + b.now.poly_line : '') : '') + '</small>' : '');
@@ -614,7 +637,7 @@
         else if (b.final) d = game + ' · final ' + b.final.away + '–' + b.final.home;
         const click = b._venue === 'BET105' ? ' onclick="openEdit(' + b.id + ')"' : '';
         return '<div class="xb ' + (b.status || '') + '"' + click + '><div class="xt"><span class="xl">' + esc(b.label || '') + ' <span style="font-family:var(--mono);color:var(--text2);font-weight:600">' + am(b.price) + '</span>'
-             + '<span class="venue ' + (b._venue === 'BET105' ? 'b105">BET105' : 'poly">POLY') + '</span></span><span class="xd">' + esc(d) + '</span></div><div class="xr">' + right + '</div></div>';
+             + '<span class="venue ' + (b._venue === 'BET105' ? 'b105">BET105' : 'poly">POLY') + '</span>' + (b._unlogged ? '<span class="venue" style="opacity:.75">not logged</span>' : '') + '</span><span class="xd">' + esc(d) + '</span></div><div class="xr">' + right + '</div></div>';
     }
     function renderChips() {
         const nLive = _games.filter(started).length;
@@ -1332,7 +1355,7 @@
     function openList(kind) {
         const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix' });
         const all = allMine();
-        const list = kind === 'settled' ? all.filter(b => ['won', 'lost', 'push'].indexOf(b.status) >= 0 && dayOf(b.event_start) === today)
+        const list = kind === 'settled' ? settledToday()
                    : kind === 'live' ? all.filter(isLive)
                    : all.filter(b => b.status === 'pending');
         list.sort((a, b) => (a.event_start || '').localeCompare(b.event_start || ''));
@@ -1349,12 +1372,16 @@
                 const v = b._venue === 'BET105' ? 'Bet105' : 'Poly', x = bk[v] = bk[v] || { usd: 0, w: 0, l: 0, p: 0, n: 0 };
                 x.usd += Number(kind === 'live' ? b.ev_usd : b.pnl_usd) || 0; x.n++;
                 if (b.status === 'won') x.w++; else if (b.status === 'lost') x.l++; else if (b.status === 'push') x.p++;
+                else if (b.status === 'sold') x.s = (x.s || 0) + 1;
+                if (b._unlogged) { x.un = (x.un || 0) + 1; x.unUsd = (x.unUsd || 0) + (Number(b.pnl_usd) || 0); }
             });
             h += '<div class="sub" style="margin-top:2px">' + ['Bet105', 'Poly'].filter(v => bk[v]).map(v => {
                 const x = bk[v];
                 return v + ' <b class="' + (x.usd > 0 ? 'pos' : x.usd < 0 ? 'neg' : '') + '">' + money(x.usd) + '</b>'
-                     + (kind === 'settled' ? ' (' + x.w + '-' + x.l + (x.p ? '-' + x.p : '') + ')' : ' (' + x.n + ')');
+                     + (kind === 'settled' ? ' (' + x.w + '-' + x.l + (x.p ? '-' + x.p : '') + (x.s ? ' · ' + x.s + ' sold' : '') + ')' : ' (' + x.n + ')');
             }).join(' · ') + '</div>';
+            if (kind === 'settled' && bk.Poly && bk.Poly.un)
+                h += '<div class="sub" style="margin-top:2px;color:var(--text3)">Poly includes ' + bk.Poly.un + ' not logged (' + money(bk.Poly.unUsd) + ')</div>';
         }
         const by = {};
         list.forEach(b => { const s = (b.sport || '').toUpperCase() || 'OTHER'; (by[s] = by[s] || []).push(b); });
@@ -1418,7 +1445,7 @@
         if (_sport !== 'FIRE') loadFire();                  // the 🔥 badge's sheets, in the background
         setInterval(() => { if (!document.hidden) loadB105(); }, 20 * 1000);
         setInterval(() => { if (!document.hidden) loadB105Live(); }, 20 * 1000);
-        setInterval(() => { if (!document.hidden) loadPoly(); }, 60 * 1000);
+        setInterval(() => { if (!document.hidden) { loadPoly(); loadPolyDay(); } }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadLines(); }, 60 * 1000);
         setInterval(() => { if (!document.hidden) loadGames(); }, 10 * 60 * 1000);
         // the 🔥 tab: the minutes count down every minute, every sheet re-read every 3

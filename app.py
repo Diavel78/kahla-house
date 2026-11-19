@@ -18876,6 +18876,109 @@ def api_b105_mine():
                     "pending": sum(1 for b in bets if b["status"] == "pending"), "at": now.isoformat()})
 
 
+_POLY_DAY_CACHE: dict = {"at": 0.0, "data": None}
+
+
+def _poly_slug_label(slug: str) -> str:
+    """A readable label for a Polymarket slug nobody logged (`aec-nba-lal-det-2026-11-19`
+    → 'LAL @ DET ML', `asc-nfl-buf-mia-…-neg-3pt5` → 'BUF @ MIA −3.5',
+    `tsc-nhl-pit-phi-…-6pt5` → 'PIT @ PHI total 6.5'). Props fall back to the slug."""
+    m = re.match(r"^(aec|asc|tsc)-([a-z]+)-([a-z0-9]+)-([a-z0-9]+)-\d{4}-\d{2}-\d{2}(?:-(.*))?$", slug or "")
+    if not m:
+        return slug or ""
+    fam, _sp, a, h, tail = m.groups()
+    game = a.upper() + " @ " + h.upper()
+    ln = None
+    t = re.search(r"(pos|neg)?-?(\d+)(?:pt(\d+))?$", tail or "")
+    if t and tail:
+        ln = float(t.group(2) + ("." + t.group(3) if t.group(3) else ""))
+    if fam == "aec":
+        return game + " ML"
+    if fam == "asc" and ln is not None:
+        sign = "−" if (t.group(1) == "neg") else "+"
+        return f"{game} {a.upper()} {sign}{ln:g}"
+    if fam == "tsc" and ln is not None:
+        return f"{game} total {ln:g}"
+    return game
+
+
+def _poly_day(sb) -> dict:
+    """TODAY'S POLYMARKET OFF THE VENUE (Nov 19 2026, Rob: "Today counts Polymarket off
+    the venue — my sells and app bets I never logged"): every Arizona-today resolution
+    and sell leg `_venue_day_map` books, each matched to a bot_picks row on its slug for
+    a label; a slug with no pick is "not logged"."""
+    az = ZoneInfo("America/Phoenix")
+    today = str(datetime.now(timezone.utc).astimezone(az).date())
+    bys: dict = {}
+    _venue_day_map(sb, days=2, by_slug=bys)
+    legs_raw = [(sl, e) for sl, evs in bys.items() for e in evs
+                if e.get("k") in ("res", "sell") and e.get("day") == today]
+    slugs = sorted({sl for sl, _ in legs_raw})
+    picks: dict = {}
+    if slugs:
+        since = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+        try:
+            rows = _sb_paged(lambda: sb.table("bot_picks").select(
+                "id,sport,event_name,event_start,status,signal_blob,query_text")
+                .not_.is_("signal_blob->>pmm_slug", "null")
+                .gte("event_start", since).order("id"), max_pages=10) or []
+        except Exception:
+            rows = []
+        want = set(slugs)
+        for r in rows:
+            sl = (r.get("signal_blob") or {}).get("pmm_slug")
+            if sl in want and (sl not in picks or r.get("status") != "void"):
+                picks[sl] = r
+    legs, out = [], {"usd": 0.0, "w": 0, "l": 0, "p": 0, "sold_n": 0, "sold_usd": 0.0,
+                     "unlogged_n": 0, "unlogged_usd": 0.0}
+    for sl, e in legs_raw:
+        pk = picks.get(sl)
+        pnl = float(e.get("pnl") or 0.0)
+        b = (pk or {}).get("signal_blob") or {}
+        leg = {"slug": sl, "kind": e["k"], "pnl": round(pnl, 2), "won": e.get("won"),
+               "neutral": bool(e.get("neutral")), "pick_id": (pk or {}).get("id"),
+               "sport": (pk or {}).get("sport") or _slug_sport(sl),
+               "event_name": (pk or {}).get("event_name"), "event_start": (pk or {}).get("event_start"),
+               "label": (b.get("label") or (pk or {}).get("query_text")) if pk else _poly_slug_label(sl)}
+        legs.append(leg)
+        out["usd"] += pnl
+        if e["k"] == "sell":
+            out["sold_n"] += 1
+            out["sold_usd"] += pnl
+        elif leg["neutral"]:
+            out["p"] += 1
+        elif e.get("won"):
+            out["w"] += 1
+        else:
+            out["l"] += 1
+        if not pk:
+            out["unlogged_n"] += 1
+            out["unlogged_usd"] += pnl
+    for k in ("usd", "sold_usd", "unlogged_usd"):
+        out[k] = round(out[k], 2)
+    legs.sort(key=lambda x: (x.get("event_start") or "", x["slug"]))
+    out.update({"ok": True, "day": today, "legs": legs})
+    return out
+
+
+@app.route("/api/bet105/poly-day")
+@admin_required
+def api_b105_poly_day():
+    sb = get_supabase()
+    if sb is None:
+        return jsonify({"ok": False, "error": "database unavailable"}), 503
+    c = _POLY_DAY_CACHE
+    if c["data"] and _time.time() - c["at"] < 60:
+        return jsonify(c["data"])
+    try:
+        d = _poly_day(sb)
+    except Exception as e:
+        app.logger.warning("bet105 poly-day: %s", e)
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}), 500
+    c.update(at=_time.time(), data=d)
+    return jsonify(d)
+
+
 @app.route("/api/bet105/live")
 @admin_required
 def api_b105_live():
