@@ -59,8 +59,8 @@ Recommend promoting a sport's blend to the card only when it's beating the close
 COLLEGE BASKETBALL (Rob, Nov 16 2026: "Don't forget college basketball for next week, need to
 dial it in"): saved and graded weekly with the rest from Nov 22 2026 (first history: Nov 14-15).
 The standing spread dog rules were CUT Nov 19 2026 (dogs 72-74 at the close; "bet every dog isn't a
-model"); only Friday unders stands. Each week: report the zone_review tables for NCAAB — three windows
-qualified on paper Nov 19 on four days of data (spread last hour chase, totals 1-6h after open chase,
-totals 6-3h before chase); propose them to Rob once a second week agrees. Grade Friday unders from
+model"); only Friday unders stands. The three measured NCAAB zones went LIVE Nov 19 2026 on four days of data (Rob: "An ROI that's
+positive is a bet we make"): spread last hour chase, totals 1-6h after open chase, totals 6-3h before
+chase. Grade them every week like the rest; the keep rule applies as written. Grade Friday unders from
 `zsig|NCAAB|…`. Never change the standing zones yourself.
 
