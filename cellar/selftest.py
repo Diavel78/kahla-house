@@ -9373,16 +9373,24 @@ def test_zone_rule() -> None:
     check("NFL 4 PM: follow the money", rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
     CZ = [z for z in _app._STANDING_ZONES if z[0] == "NCAAB"]
     cb = lambda a, b, ln: [(one - int(20 * H), a, ln), (one - int(2 * H), b, ln)]
-    check("NCAAB: no spread dog rules (Nov 19 2026)", not any(z[1] == "spread" for z in CZ), str(CZ))
+    check("NCAAB: no spread dog rules (Nov 19 2026)",
+          not any(z[1] == "spread" and (z[9] if len(z) > 9 else {}).get("pick") == "dog" for z in CZ), str(CZ))
     rd = _app._zone_read("NCAAB", "spread", cb(3.0, 3.0, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
-    check("NCAAB: nobody moved it fires nothing now", rd["state"] not in ("play", "lean"), str(rd))
+    check("NCAAB: nobody moved it → the road team (home fav)", rd["dir"] == -1 and rd["kind"] == "quiet", str(rd))
+    rd = _app._zone_read("NCAAB", "spread", cb(3.0, 3.0, 6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
+    check("NCAAB: nobody moved it → the road team (road fav)", rd["dir"] == -1, str(rd))
+    rd = _app._zone_read("NCAAB", "spread", cb(3.0, 6.5, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
+    check("NCAAB: a moved spread fires nothing", rd["state"] not in ("play", "lean"), str(rd))
     TZ = [z for z in CZ if z[1] == "total"]
     fri = int(_dt.datetime(2026, 11, 21, 0, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000)   # Fri 7 PM ET
     ct = lambda st, a, b: [(st - int(20 * H), a, 145.5), (st - int(2 * H), b, 145.5)]
-    rd = _app._zone_read("NCAAB", "total", ct(fri, 145.0, 148.0), 2.4, fri, fri - int(0.4 * H), zones=TZ)
-    check("NCAAB Friday: the under, whatever the total did", rd["dir"] == -1 and rd["kind"] == "quiet", str(rd))
+    fri_d = int(_dt.datetime(2026, 11, 20, 18, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000)  # Fri 1 PM ET
+    rd = _app._zone_read("NCAAB", "total", ct(fri_d, 145.0, 148.0), 2.4, fri_d, fri_d - int(0.4 * H), zones=TZ)
+    check("NCAAB Friday day game: the under, whatever the total did", rd["dir"] == -1 and rd["kind"] == "quiet", str(rd))
+    rd = _app._zone_read("NCAAB", "total", ct(fri, 145.0, 145.0), 2.4, fri, fri - int(0.4 * H), zones=TZ)
+    check("NCAAB Friday night: the night over outranks Friday unders", rd["dir"] == 1, str(rd))
     rd = _app._zone_read("NCAAB", "total", ct(one, 145.0, 145.0), 2.4, one, one - int(0.4 * H), zones=TZ)
-    check("NCAAB Sunday: no total fire", rd["state"] not in ("play", "lean"), str(rd))
+    check("NCAAB Sunday day game: no total fire", rd["state"] not in ("play", "lean"), str(rd))
     live = {"state": "lean", "dir": -1, "zone": "last hour", "kind": "chase", "cents": 2.0, "decided_ms": 9}
     atb = {"state": "play", "dir": 1, "zone": "daytime", "kind": "fade", "cents": 3.0, "decided_ms": 5}
     lk = _app._zone_bet_lock(live, atb, 7)

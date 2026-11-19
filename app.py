@@ -37331,6 +37331,17 @@ _STANDING_ZONES = (
     # close, follow-the-money 21-29, nobody-moved 35-32 — the early-season dog edge was gone and the three
     # rules were only ever "bet the dog". docs/zone-reviews/2026-11-19.md. NCAAB spreads have no 🔥 until
     # a MEASURED zone (zone_review) earns one.
+    # COLLEGE HOOPS NICHES (Nov 19 2026, Rob: "Focus your efforts on edges and betting zones, find
+    # niches"; every slice of the Pinnacle tape Nov 15-18, 146 games, graded at the T-30m close):
+    #  · NIGHT OVERS (6:30 PM ET+): 67-41, +18% ROI — every total band and every move direction
+    #    positive; day overs 15-18. Strength 18 beats Friday unders, so a Friday night shows the over.
+    #  · NOBODY MOVED THE SPREAD (<1 pt) → THE ROAD TEAM: 44-23, +26% (road dogs 32-20, road
+    #    favorites over home dogs 12-3). A move either way kills it (road 36-41 when the line moved).
+    # A measured zone that fires on the same market outranks both (higher strength).
+    ("NCAAB", "spread", ("o", 0), ("s", -0.5), "quiet", 2.9, 99.0, 26.0,
+     "nobody moved it: the road team", {"pick": "road"}),
+    ("NCAAB", "total", ("o", 0), ("s", -0.5), "quiet", 99.0, 99.0, 18.0,
+     "night game: the over", {"slot": "night", "pick": "over"}),
     # College totals: no move rule wins (open → close is a coin flip every season) and a pace ×
     # efficiency model loses to the open (MAE 13.05 vs 12.77). The one spot that held all three
     # seasons at the close: FRIDAY UNDERS 271-231 / 283-230 / 63-51 (+4% combined). A spot, not a
@@ -37641,6 +37652,8 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
             d = 1 if hl < 0 else -1
             if flt.get("pick") == "dog":
                 d = -d                                  # college hoops: nobody moved it = the dog
+            elif flt.get("pick") == "road":
+                d = -1                                  # college hoops: nobody moved it = the road team
             elif flt.get("pick") in ("under", "over"):
                 d = -1 if flt["pick"] == "under" else 1  # a standing total spot (college Friday unders)
             fired.append({"state": "lean", "dir": d, "cents": round(abs(mv), 1), "moved_dir": 0,
