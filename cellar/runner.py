@@ -459,8 +459,13 @@ class Runner:
                     self.sb.table("exec_probe_runs").insert(
                         {"params": {"kind": "box_kick"}, "result": res}).execute()
 
+                def _kick_beat(hb):
+                    self.sb.table("lookup_cache").upsert({
+                        "key": "box_kick_hb|" + hb["proc"], "payload": hb,
+                        "fetched_at": "2099-01-01T00:00:00+00:00"}).execute()
+
                 KickWatch(_read_kick_flag, _stamp_kick, self.stop.set, self.stop,
-                          getattr(self, "_boot_sha", "")).start()
+                          getattr(self, "_boot_sha", ""), beat=_kick_beat).start()
             except Exception as e:
                 log.error("self-kick watcher failed to start: %s", e)
 

@@ -58,6 +58,46 @@ FLAG = "box_kick"
 # deadlocked for its whole 25-minute selftest timeout — the child test waited on
 # the lock its parent held).
 LOCK_PATH = os.path.join(tempfile.gettempdir(), "kahla-box-kick.lock")
+# THE WATCHER NEVER HANGS (Nov 19 2026: a kick got no answer and no stamp — the box sat on Nov 16
+# code for three days; Rob: "fix the damn box"). Every database call the watcher makes runs under a
+# deadline, the kick lock is taken with a deadline, and the watcher writes a heartbeat every
+# BEAT_S so /api/cellar/kick?status=1 shows a dead or wedged watcher instead of silence.
+DB_TIMEOUT_S = 30.0
+LOCK_WAIT_S = 1800.0
+BEAT_S = 300.0
+
+
+def bounded(fn: Callable, timeout: float = DB_TIMEOUT_S):
+    """Run fn() in a throwaway daemon thread; raise TimeoutError if it hasn't answered in
+    `timeout` (a hung HTTP read through the tunnel would otherwise freeze the watcher forever)."""
+    box: dict = {}
+
+    def run():
+        try:
+            box["v"] = fn()
+        except BaseException as e:          # noqa: BLE001 — handed back to the caller
+            box["e"] = e
+    t = threading.Thread(target=run, name="cellar-selfkick-call", daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(f"no answer in {timeout:.0f}s")
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
+def _lock(lock_f, wait_s: float) -> bool:
+    """Take the kick lock, giving up after wait_s (a wedged holder must not freeze every kick)."""
+    end = time.time() + wait_s
+    while True:
+        try:
+            fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.time() >= end:
+                return False
+            time.sleep(2.0)
 
 
 def proc_name() -> str:
@@ -155,7 +195,9 @@ def run_kick(nonce: str, boot_sha: str, stamp: Callable[[dict], None]) -> dict:
     t0 = time.time()
     lock_f = open(LOCK_PATH, "w")
     try:
-        fcntl.flock(lock_f, fcntl.LOCK_EX)
+        if not _lock(lock_f, LOCK_WAIT_S):
+            out.update(ok=False, restart=False, why="lock_timeout")
+            return out
         rc, msg = _git("fetch", "-q", "origin", "main")
         out["steps"].append({"fetch": rc, "msg": msg[-300:]})
         if rc != 0:
@@ -207,7 +249,7 @@ def run_kick(nonce: str, boot_sha: str, stamp: Callable[[dict], None]) -> dict:
             pass
         out["s"] = round(time.time() - t0, 1)
         try:
-            stamp(out)
+            bounded(lambda: stamp(out))
         except Exception as e:
             log.warning("box kick stamp failed: %s", e)
 
@@ -217,10 +259,14 @@ class KickWatch:
     `on_restart()` stops the daemon."""
 
     def __init__(self, read_flag: Callable[[], object], stamp: Callable[[dict], None],
-                 on_restart: Callable[[], None], stop: threading.Event, boot_sha: str):
+                 on_restart: Callable[[], None], stop: threading.Event, boot_sha: str,
+                 beat: Optional[Callable[[dict], None]] = None):
         self.read_flag, self.stamp, self.on_restart = read_flag, stamp, on_restart
         self.stop, self.boot_sha = stop, boot_sha or ""
         self.proc = proc_name()
+        self.beat = beat
+        self._beat_at = 0.0
+        self._last_err: Optional[str] = None
 
     def start(self) -> None:
         threading.Thread(target=self._loop, name="cellar-selfkick", daemon=True).start()
@@ -231,11 +277,25 @@ class KickWatch:
         while not self.stop.wait(POLL_S):
             try:
                 self.check()
+                self._last_err = None
             except Exception as e:
+                self._last_err = f"{type(e).__name__}: {e}"[:200]
                 log.warning("self-kick check: %s", e)
+            self._heartbeat()
+
+    def _heartbeat(self) -> None:
+        if self.beat is None or time.time() - self._beat_at < BEAT_S:
+            return
+        self._beat_at = time.time()
+        hb = {"proc": self.proc, "at": datetime.now(timezone.utc).isoformat(),
+              "boot_sha": self.boot_sha[:12], "done_nonce": _read_done(self.proc), "err": self._last_err}
+        try:
+            bounded(lambda: self.beat(hb))
+        except Exception as e:
+            log.warning("self-kick heartbeat: %s", e)
 
     def check(self) -> Optional[dict]:
-        nonce = wants(self.read_flag(), self.proc, _read_done(self.proc))
+        nonce = wants(bounded(self.read_flag), self.proc, _read_done(self.proc))
         if not nonce:
             return None
         _write_done(self.proc, nonce)          # before anything runs: never a loop

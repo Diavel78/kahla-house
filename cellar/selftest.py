@@ -7408,6 +7408,16 @@ def test_hand_live_watch() -> None:
     check("the budgeted walk rotates", "_HAND_CHASE_CURSOR" in src)
 
 
+def _raises(fn, exc) -> bool:
+    try:
+        fn()
+    except exc:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def test_self_kick() -> None:
     """THE SELF-KICK (Nov 13 2026): the site sets box_kick {nonce, procs}; the
     named daemon fetches main, selftests it in a throwaway worktree, merges
@@ -7428,6 +7438,21 @@ def test_self_kick() -> None:
     check("plan: behind → pull + restart", _k.plan("aaa", "bbb", "aaa") == {"pull": True, "restart": True, "why": "behind"})
     check("plan: pulled by the other daemon → restart only", _k.plan("bbb", "bbb", "aaa")["why"] == "pulled_not_running")
     check("plan: current → nothing", _k.plan("bbb", "bbb", "bbb") == {"pull": False, "restart": False, "why": "current"})
+    import time as _tm
+    t0 = _tm.time()
+    try:
+        _k.bounded(lambda: _tm.sleep(5), timeout=0.3)
+        hung = False
+    except TimeoutError:
+        hung = True
+    check("a hung database read can't freeze the watcher (bounded call times out)", hung and _tm.time() - t0 < 2)
+    check("bounded passes answers and errors through",
+          _k.bounded(lambda: 7) == 7 and _raises(lambda: _k.bounded(lambda: 1 / 0), ZeroDivisionError))
+    beats = []
+    import threading as _thr
+    kw = _k.KickWatch(lambda: None, lambda r: None, lambda: None, _thr.Event(), "abc", beat=beats.append)
+    kw._heartbeat(); kw._heartbeat()
+    check("the watcher beats once per BEAT_S, with its boot sha", len(beats) == 1 and beats[0]["boot_sha"] == "abc")
     # the git path, end to end, on throwaway repos (no network)
     root = _tf.mkdtemp(prefix="kick-test-")
     g = lambda *a, cwd=root: _sp.run(["git", *a], cwd=cwd, capture_output=True, text=True)

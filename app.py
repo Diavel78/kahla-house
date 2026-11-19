@@ -7021,9 +7021,19 @@ def api_cellar_kick():
                      .order("at", desc=True).limit(4).execute().data) or []
             flag = (sb.table("machine_flags").select("value,updated_at").eq("key", "box_kick")
                     .limit(1).execute().data or [{}])[0]
+            # each daemon's kick-watcher heartbeat (every 5 min; Nov 19 2026) — a missing or old
+            # beat means the watcher is dead or wedged and only a hand restart will reach it
+            hbs = (sb.table("lookup_cache").select("payload").like("key", "box_kick_hb|%")
+                   .limit(10).execute().data) or []
+            watch = {}
+            for h_ in hbs:
+                p_ = h_.get("payload") or {}
+                at_ = _parse_iso(p_.get("at") or "") if p_.get("at") else None
+                watch[p_.get("proc") or "?"] = {**p_, "age_s": (int((datetime.now(timezone.utc) - at_).total_seconds())
+                                                               if at_ else None)}
         except Exception as e:
             return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}), 500
-        return jsonify({"ok": True, "flag": flag, "kicks": rows,
+        return jsonify({"ok": True, "flag": flag, "kicks": rows, "watchers": watch,
                         "boots": [{"at": b_.get("at"), "proc": (b_.get("result") or {}).get("proc"),
                                    "sha": str((b_.get("result") or {}).get("sha") or "")[:12]} for b_ in boots],
                         "site_sha": (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "")[:12]})
