@@ -37272,6 +37272,11 @@ _STANDING_ZONES = (
      "money on a 10+ dog", {"dog": 10}),
     ("NCAAF", "spread", ("o", 0), ("s", -0.5), "chase", 5.1, 7.7, 15.0,
      "weeknight money", {"dow": ["Tue", "Wed", "Thu", "Fri"]}),
+    # POLYMARKET LEADS (Nov 19 2026, Rob: "when poly is better… the prediction site knows something"):
+    # an hour before the start, Polymarket's spread vs Pinnacle's (one scale, our line tape since Oct 29,
+    # graded at Pinnacle's T-1h line + price) — a 1¢+ gap → Polymarket's side 59-33 (+25%), 2¢+ 28-14
+    # (+30%). College football spreads only: NBA and college hoop spreads run the other way.
+    ("NCAAF", "spread", ("o", 0), ("s", -1), "poly_lead", 1.0, 2.0, 25.0, "Polymarket leads Pinnacle: its side"),
     # COLLEGE TOTALS (Nov 15 2026, Rob: "I want totals"; scripts/football_totals_open.py, ESPN/DK
     # open → close, graded at the close): follow a 1½-point+ move — 2026 240-194 (+6.0%), NIGHT
     # 115-86 (+9.5%), day 125-108 (+2.9%, so LEAN). Same regime as the night spread rule: it LOST
@@ -37626,6 +37631,26 @@ def _zone_read(sport: str, mt: str, pin: list, slope: float, start_ms: int, now_
             waiting.append({"zone": label, "kind": kind, "from_ms": ta, "to_ms": tb,
                             "so_far_c": round((b[1] - a[1]) * slope, 2) if a and b else None})
             continue
+        if kind == "poly_lead":
+            # POLYMARKET LEADS PINNACLE (Nov 19 2026, Rob: "I think one is leading"): at the window's
+            # end, Polymarket's number vs Pinnacle's on one scale; a gap of min_c+ → Polymarket's side
+            pb = _steam_at(pts, tb)
+            qb = _steam_at([q for q in ((ctx or {}).get("poly") or []) if q[0] < start_ms], tb)
+            if not pb or not qb:
+                continue
+            gap = (qb[1] - pb[1]) * slope
+            if abs(gap) < float(min_c):
+                continue
+            d = 1 if gap > 0 else -1
+            if flt and not _zone_filter_ok(flt, d, pb[2], start_ms):
+                continue
+            fired.append({"state": "play" if abs(gap) >= float(play_c) else "lean", "dir": d,
+                          "cents": round(abs(gap), 1), "moved_dir": 0, "faded_dir": None,
+                          "zone": label, "kind": kind, "strength": float(roi), "decided_ms": int(tb),
+                          "at_h": round((tb - o) / H, 1), "open_ms": o,
+                          "books": {"pin": round(pb[1], 2), "poly": round(qb[1], 2)},
+                          "agree": ["poly"], "zone_rule": True})
+            continue
         a, b = _steam_at(pts, ta), _steam_at(pts, tb)
         if not a or not b:
             continue
@@ -37884,7 +37909,7 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
                         pass
                 zone_on = _zone_rule_on()
                 rd = (_zone_read(sport, mt, nums.get("pin") or [], sl, sms, now_ms,
-                                 ctx={"b2b": b2b.get(g.get("event_name"))}) if zone_on
+                                 ctx={"b2b": b2b.get(g.get("event_name")), "poly": nums.get("poly")}) if zone_on
                       else _move_read(sport, nums, sl, sms, now_ms))
                 if anc is not None:
                     rd["anchor"] = anc
@@ -37907,7 +37932,7 @@ def _sheet_attach_move(sb, sport: str, games: list, now=None, tape: bool = True)
                     elif bt is not None:
                         bms = int(bt.timestamp() * 1000)
                         at_bet = _zone_read(sport, mt, nums.get("pin") or [], sl, sms, min(bms, now_ms),
-                                            ctx={"b2b": b2b.get(ev)})
+                                            ctx={"b2b": b2b.get(ev), "poly": nums.get("poly")})
                         rd = _zone_bet_lock(rd, at_bet, bms)
                     elif partial and rd.get("state") in ("play", "lean"):
                         rd = {"state": "reading", "open_ms": rd.get("open_ms"),

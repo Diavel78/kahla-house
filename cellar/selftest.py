@@ -9373,6 +9373,20 @@ def test_zone_rule() -> None:
     check("NFL 4 PM: follow the money", rd["dir"] == 1 and rd["kind"] == "chase", str(rd))
     CZ = [z for z in _app._STANDING_ZONES if z[0] == "NCAAB"]
     cb = lambda a, b, ln: [(one - int(20 * H), a, ln), (one - int(2 * H), b, ln)]
+    PZ = [z for z in _app._STANDING_ZONES if z[4] == "poly_lead"]
+    pin_s = [(one - int(20 * H), 3.0, -3.0), (one - int(2 * H), 3.0, -3.0)]
+    poly_up = [(one - int(3 * H), 3.6, -3.0)]                   # Polymarket 0.6 pt × 3¢ = 1.8¢ toward home
+    rd = _app._zone_read("NCAAF", "spread", pin_s, 3.0, one, one - int(0.5 * H), zones=PZ, ctx={"poly": poly_up})
+    check("poly leads: a 1¢+ gap at T-1h → Polymarket's side (LEAN under 2¢)",
+          rd.get("dir") == 1 and rd.get("kind") == "poly_lead" and rd.get("state") == "lean", str(rd))
+    rd = _app._zone_read("NCAAF", "spread", pin_s, 3.0, one, one - int(0.5 * H), zones=PZ,
+                         ctx={"poly": [(one - int(3 * H), 2.0, -3.0)]})
+    check("poly leads: a 3¢ gap the other way → the away side, PLAY", rd.get("dir") == -1 and rd.get("state") == "play", str(rd))
+    rd = _app._zone_read("NCAAF", "spread", pin_s, 3.0, one, one - int(0.5 * H), zones=PZ,
+                         ctx={"poly": [(one - int(3 * H), 3.1, -3.0)]})
+    check("poly leads: under 1¢ fires nothing", rd.get("state") not in ("play", "lean"), str(rd))
+    rd = _app._zone_read("NCAAF", "spread", pin_s, 3.0, one, one - int(0.5 * H), zones=PZ)
+    check("poly leads: no Polymarket tape fires nothing", rd.get("state") not in ("play", "lean"), str(rd))
     check("NCAAB: no spread dog rules (Nov 19 2026)",
           not any(z[1] == "spread" and (z[9] if len(z) > 9 else {}).get("pick") == "dog" for z in CZ), str(CZ))
     rd = _app._zone_read("NCAAB", "spread", cb(3.0, 3.0, -6.0), 3.0, one, one - int(0.4 * H), zones=CZ)
