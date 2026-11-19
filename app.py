@@ -22929,7 +22929,7 @@ def _fire_alert_tick(sb, by_sport: dict, now) -> dict:
     """ONE Telegram for every new 🔥 this pass (flag `fire_alert`). Held 10 PM-7 AM Arizona and
     sent together at 7. A market Rob already bet (or its spread/ML twin) never pings."""
     st = {"due": 0, "sent": 0}
-    if not _machine_flag("fire_alert", True):
+    if not _machine_flag("fire_alert", False):      # OFF (Rob, Nov 19 2026: "I don't want a Telegram ping… just put it on the damn website")
         return st
     if not 7 <= now.astimezone(ZoneInfo("America/Phoenix")).hour < 22:
         st["quiet"] = True
