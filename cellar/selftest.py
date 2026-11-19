@@ -4026,12 +4026,25 @@ def test_bet_sheet_live_section() -> None:
     # THE DUET CONNECTOR (Oct 31 2026, Rob: "It will NOT be betting for me"):
     # read-only by construction — no tool reaches an order, cancel, flag or write
     _mcp_src = "".join(inspect.getsource(f) for f in (
-        _app._mcp_board, _app._mcp_bets, _app._mcp_moves, _app._mcp_chart, _app._mcp_injuries,
+        _app._mcp_board, _app._mcp_bets, _app._mcp_b105_row, _app._mcp_poly_row, _app._mcp_moves, _app._mcp_chart, _app._mcp_injuries,
         _app._mcp_find_event, _app._mcp_call, _app._mcp_handle, _app.mcp_endpoint, _app._mcp_view))
     check("the Duet connector never writes, orders or cancels",
           all(x not in _mcp_src for x in ("orders.", "_cancel", "cancel(", "_manual_order_place", ".insert(",
                                           ".update({", ".upsert(", ".delete(", "_hand_orders_enqueue",
                                           "machine_flag", "_kalshi_order", "/api/cellar/flag")))
+    _br = _app._mcp_b105_row({"sport": "NCAAB", "event_name": "A @ B", "market_type": "total", "side": "over",
+                              "line": 150.5, "price": -108, "stake": 5.0, "win_usd": 4.63, "status": "pending",
+                              "game": {"state": "in", "away": 30, "home": 28}, "now": {"prob": 0.61}})
+    check("…a Bet105 bet reads as his, with its book, side and live read",
+          _br["venue"] == "BET105" and _br["status"] == "in play" and _br["side"] == "over"
+          and _br["win_pct_now"] == 61.0 and _br["score"]["away"] == 30
+          and _app._mcp_b105_row({"status": "won", "pnl_usd": 4.63})["status"] == "won")
+    check("…a Polymarket leg says sold / won / lost and whether it was logged",
+          _app._mcp_poly_row({"kind": "sell", "pnl": 1.2, "slug": "x"})["status"] == "sold"
+          and _app._mcp_poly_row({"kind": "res", "won": True, "pick_id": 9})["logged"] is True
+          and _app._mcp_poly_row({"kind": "res", "won": False})["status"] == "lost")
+    check("…the bets feed never runs the Bet105 duplicate delete",
+          "drop_dups=False" in inspect.getsource(_app._mcp_bets))
     check("…its tools are the five readers, all marked read-only",
           [t["name"] for t in _app._MCP_TOOLS] == ["get_board", "get_my_bets", "get_line_moves", "get_chart", "get_injuries"]
           and all(t["annotations"]["readOnlyHint"] for t in _app._MCP_TOOLS))

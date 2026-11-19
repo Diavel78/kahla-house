@@ -18491,7 +18491,7 @@ def _b105_drop_poly_dups(sb, rows: dict) -> int:
         return 0
 
 
-def _b105_mine(sb, uid: str, now, poly: bool = False, budget=(7, 5)) -> list:
+def _b105_mine(sb, uid: str, now, poly: bool = False, budget=(7, 5), drop_dups: bool = True) -> list:
     """Today's (AZ) Bet105 bets + every pending one, with the live read:
     ESPN score/clock, Pinnacle's fair at the bet's own line (the win %), the
     dollars, and a grade the moment ESPN calls the game final."""
@@ -18505,7 +18505,8 @@ def _b105_mine(sb, uid: str, now, poly: bool = False, budget=(7, 5)) -> list:
                       .eq("status", "pending")):
         for r in (q().order("event_start").limit(500).execute().data or []):
             rows[r["id"]] = r
-    _b105_drop_poly_dups(sb, rows)
+    if drop_dups:
+        _b105_drop_poly_dups(sb, rows)
     espn: dict = {}
     slates: dict = {}
     poly_ctx: dict = {}
@@ -39103,11 +39104,55 @@ def _mcp_board(sport=None, hours=36) -> dict:
                     "venue quotes are the bid/ask on the pick's side in cents"}
 
 
+def _mcp_b105_row(b: dict) -> dict:
+    """One Bet105 tracker bet in the connector's shape (pure)."""
+    gm = b.get("game") if isinstance(b.get("game"), dict) else {}
+    nw = b.get("now") if isinstance(b.get("now"), dict) else {}
+    st = b.get("status")
+    if st == "pending":
+        st = "in play" if gm else "open"
+    return {"sport": b.get("sport"), "game": b.get("event_name"), "start_az": _mcp_az(b.get("event_start")),
+            "bet": b.get("label") or f"{b.get('market_type')} {b.get('side')} {b.get('line')}",
+            "market": b.get("market_type"), "side": b.get("side"), "line": b.get("line"),
+            "venue": "BET105", "price_american": b.get("price"), "stake_usd": b.get("stake"),
+            "to_win_usd": b.get("win_usd"), "status": st, "placed_live": bool(b.get("placed_live")) or None,
+            "score": ({"away": gm.get("away"), "home": gm.get("home"), "state": gm.get("state")} if gm else None),
+            "win_pct_now": (round(float(nw["prob"]) * 100.0, 1) if nw.get("prob") is not None else None),
+            "pnl_usd": b.get("pnl_usd")}
+
+
+def _mcp_poly_row(leg: dict) -> dict:
+    """One Polymarket leg the venue settled or Rob sold today (pure)."""
+    return {"sport": leg.get("sport"), "game": leg.get("event_name"), "start_az": _mcp_az(leg.get("event_start")),
+            "bet": leg.get("label") or leg.get("slug"), "venue": "POLYMARKET",
+            "status": ("sold" if leg.get("kind") == "sell" else "push" if leg.get("neutral")
+                       else "won" if leg.get("won") else "lost"),
+            "logged": bool(leg.get("pick_id")), "pnl_usd": leg.get("pnl")}
+
+
 def _mcp_bets() -> dict:
-    d = _mcp_view(api_bet_sheets_mine, "/api/bet-sheets/mine")
-    if not d.get("ok", True) and not d.get("bets"):
-        return {"error": d.get("error") or "bets unreadable"}
-    out = []
+    """EVERY BOOK ROB BETS (Nov 19 2026 — the feed read only the old exchange bet
+    sheet and came back empty once he moved to Bet105; Duet could not tell which 🔥
+    he already held): the Bet105 tracker, the exchange bet sheet (app bets the box
+    adopted included), and what Polymarket itself settled or sold today. A source
+    that fails is named in `errors`, never an empty list that reads as 'no bets'."""
+    out, errs = [], {}
+    sb = get_supabase()
+    now = datetime.now(timezone.utc)
+    try:
+        uids = [_kalshi_owner_uid()] if _kalshi_owner_uid() else sorted(_admin_uids())
+        for uid in uids:
+            for b in _b105_mine(sb, uid, now, drop_dups=False):
+                out.append(_mcp_b105_row(b))
+    except Exception as e:
+        errs["bet105"] = f"{type(e).__name__}: {e}"[:160]
+    try:
+        d = _mcp_view(api_bet_sheets_mine, "/api/bet-sheets/mine")
+        if not d.get("ok", True) and not d.get("bets"):
+            errs["bet_sheet"] = d.get("error") or "unreadable"
+    except Exception as e:
+        d = {}
+        errs["bet_sheet"] = f"{type(e).__name__}: {e}"[:160]
     for b in d.get("bets") or []:
         o = b.get("order") if isinstance(b.get("order"), dict) else {}
         held = float(b.get("held") or 0)
@@ -39119,13 +39164,28 @@ def _mcp_bets() -> dict:
         rs = b.get("result_score") if isinstance(b.get("result_score"), dict) else {}
         out.append({"sport": b.get("sport"), "game": b.get("event_name"), "start_az": _mcp_az(b.get("event_start")),
                     "bet": b.get("label") or f"{b.get('market_type')} {b.get('side')} {b.get('line')}",
-                    "venue": b.get("venue"), "price_c": b.get("price_c"), "contracts": b.get("contracts"),
+                    "market": b.get("market_type"), "side": b.get("side"), "line": b.get("line"),
+                    "venue": b.get("venue") or "POLYMARKET", "price_c": b.get("price_c"), "contracts": b.get("contracts"),
                     "filled": round(held, 2), "status": st, "outbid": bool(b.get("outbid")) or None,
                     "pnl_usd": b.get("pnl_usd"),
                     "final": ({"away": rs.get("away"), "home": rs.get("home")}
                               if rs.get("away") is not None and rs.get("home") is not None else None)})
+    poly_today = None
+    try:
+        pd = _poly_day(sb)
+        poly_today = {k: pd.get(k) for k in ("usd", "w", "l", "p", "sold_n", "sold_usd", "unlogged_n", "unlogged_usd")}
+        poly_today["settled_or_sold"] = [_mcp_poly_row(x) for x in pd.get("legs") or []]
+    except Exception as e:
+        errs["polymarket_today"] = f"{type(e).__name__}: {e}"[:160]
     out.sort(key=lambda x: str(x.get("start_az") or ""))
-    return {"bets": out, "n": len(out), "note": "today's bets (Arizona day) plus anything still pending"}
+    return {"bets": out, "n": len(out),
+            "by_venue": {v: sum(1 for x in out if x.get("venue") == v) for v in sorted({str(x.get("venue")) for x in out})},
+            "polymarket_today": poly_today, "errors": errs or None,
+            "note": "today's bets (Arizona day) plus anything still pending, every book: BET105 = bets he "
+                    "logged by tap (American price, dollars risked); POLYMARKET/KALSHI = exchange bets "
+                    "(cents, contracts). A spread and a moneyline on one game are ONE market to him — "
+                    "holding either means that game's side is bet. `errors` names a source that could not "
+                    "be read; an unread source is unknown, not empty."}
 
 
 def _mcp_pin_fair(ph, pa):
@@ -39325,9 +39385,10 @@ _MCP_TOOLS = [
          "sport": {"type": "string", "enum": list(_SHEET_SPORTS), "description": "omit for every sport"},
          "hours": {"type": "number", "description": "hours ahead to include (default 36)"}}}},
     {"name": "get_my_bets",
-     "description": "Rob's bets: today's (Arizona day) plus anything still pending — the bet, venue, price in "
-                    "cents, contracts, how much filled, status (resting / filled / won / lost / push / sold), "
-                    "dollars once settled.",
+     "description": "Rob's bets on every book: today's (Arizona day) plus anything still pending — his Bet105 "
+                    "bets (American price, dollars risked, live score and win %), his Polymarket / Kalshi "
+                    "bets (cents, contracts, filled, resting / filled / won / lost / push / sold), and what "
+                    "Polymarket settled or sold today. Check it before calling a fire unbet.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "get_line_moves",
      "description": "The biggest line moves over the last `hours`, from the chart data: Pinnacle's main line "
