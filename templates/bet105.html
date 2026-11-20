@@ -788,7 +788,9 @@
         }
         const live = _fireLines[sp + '|' + g.event_name];
         const SH = Object.assign({}, g.line || {}, g.pin || {});
-        const P = live ? Object.assign({}, live) : { spread_home: SH.spread_home, total: SH.total };   // no live read yet: the line, never a stale price
+        // no live read yet, or Pinnacle's read missed the game: the sheet's line, never a stale price
+        const hasLive = live && (live.total != null || live.spread_home != null || live.ml_home != null);
+        const P = hasLive ? Object.assign({}, live) : { spread_home: SH.spread_home, total: SH.total };
         const side = k === 'total' ? (x.dir > 0 ? 'over' : 'under') : (x.dir > 0 ? 'home' : 'away');
         let line = null, price = null, name;
         if (k === 'total') { line = P.total; price = side === 'over' ? P.over_odds : P.under_odds; name = (side === 'over' ? 'O ' : 'U ') + (line != null ? line : ''); }

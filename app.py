@@ -18141,6 +18141,10 @@ def _b105_quote(sb, sport: str, it: dict, now, slates: dict) -> dict | None:
             q = _pin_quote_from_events(evs, {"market_type": it["mt"], "side": it["side"], "away": it.get("away"),
                                              "home": it.get("home"), "event_start": it.get("event_start"),
                                              "line": it.get("line")}, age)
+            if not q and str(sport or "").upper() in ("NCAAF", "NFL"):      # a start a day off Pinnacle's
+                q = _pin_quote_from_events(evs, {"market_type": it["mt"], "side": it["side"], "away": it.get("away"),
+                                                 "home": it.get("home"), "event_start": None,
+                                                 "line": it.get("line")}, age)
         except Exception:
             q = None
         if q:
@@ -18402,6 +18406,11 @@ def api_b105_lines():
                 continue
             try:
                 blk = _pin_block_from_events(evs, gm.get("away"), gm.get("home"), gm.get("event_start"))
+                # A FOOTBALL TEAM PLAYS ONCE A WEEK (Nov 20 2026, New Mexico @ Wyoming: Pinnacle
+                # had the game a day off our start, the 12h window dropped it, and the 🔥 line
+                # showed "Total O" with no number and no Bet105 price): match by name alone.
+                if blk is None and sport in ("NCAAF", "NFL"):
+                    blk = _pin_block_from_events(evs, gm.get("away"), gm.get("home"), None)
             except Exception:
                 blk = None
             if blk:
